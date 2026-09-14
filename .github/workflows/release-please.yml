@@ -1,0 +1,69 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+# Serialize runs so the open→auto-merge→re-fire cycle can't race itself.
+# Without this, concurrent runs (e.g. several pushes to main in quick
+# succession, or the re-fire overlapping the run that spawned it) collide on
+# the PR merge — GitHub rejects the loser with "Base branch was modified".
+# cancel-in-progress: false so a queued re-fire waits for, not cancels, the
+# run that produced the merge commit it needs to tag.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Auto-merge Release PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # release-please opens Release PRs on `release-please--*` head
+          # branches. Filter by head branch (set atomically at create time),
+          # not the eventually-consistent `autorelease: pending` label.
+          prs=$(gh pr list -R "$REPO" --state open --json number,headRefName \
+                  -q '.[] | select(.headRefName | startswith("release-please--")) | .number')
+          if [ -z "$prs" ]; then
+            echo "No Release PRs to merge."
+          else
+            for pr in $prs; do
+              echo "Merging Release PR #$pr"
+              gh pr merge "$pr" --squash --auto -R "$REPO" \
+                || gh pr merge "$pr" --squash -R "$REPO"
+            done
+            # GITHUB_TOKEN-driven merge pushes don't cascade into other
+            # workflow runs, so the action's tag/release phase would never
+            # fire on the merge commit. Re-fire via workflow_dispatch (which
+            # IS allowed from GITHUB_TOKEN); the next run cuts the tag.
+            echo "Re-firing workflow to cut release tag"
+            gh workflow run release-please.yml -R "$REPO"
+          fi
+
+      - name: Trigger downstream publish
+        if: ${{ steps.rp.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Convention: repos that publish artifacts on release provide a
+          # workflow_dispatch-triggered release-publish.yml. GITHUB_TOKEN-cut
+          # releases don't cascade, so fire it explicitly. No-op where the
+          # repo has no such workflow (WW, stein-home).
+          gh workflow run release-publish.yml -R "$REPO" || true
