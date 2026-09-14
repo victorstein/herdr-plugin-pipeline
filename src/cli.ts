@@ -7,6 +7,7 @@ import {
 } from './lib/ledger'
 import { enterRunPhase } from './lib/machine'
 import { renderPrompt } from './lib/render'
+import { sessionKey } from './lib/session'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
@@ -128,3 +129,77 @@ export async function cmdRewind(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; pass reset to 1`)
 }
+
+// ——— argv dispatcher ———
+
+function flag(argv: string[], name: string): string | null {
+  const i = argv.indexOf(`--${name}`)
+  return i === -1 ? null : (argv[i + 1] ?? null)
+}
+
+function listFlag(argv: string[], name: string): string[] {
+  const raw = flag(argv, name)
+  return raw ? raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0) : []
+}
+
+async function repoContext(): Promise<{ repoKey: string; repoRoot: string } | null> {
+  const proc = Bun.spawn(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' })
+  const root = (await new Response(proc.stdout).text()).trim()
+  await proc.exited
+  if (root.length === 0) return null
+  return { repoKey: root, repoRoot: root }
+}
+
+async function dispatch(argv: string[]): Promise<number> {
+  const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
+    ?? join(process.env.HOME ?? '', '.local/state/herdr/plugins/stein.pipeline')
+  const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? join(import.meta.dir, '..')
+  const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
+  const [command, ...rest] = argv
+
+  const repo = await repoContext()
+  if (!repo && command !== 'status') {
+    console.error('hpipe: not inside a git repository')
+    return 1
+  }
+
+  let out: CmdResult
+  switch (command) {
+    case 'start':
+      out = await cmdStart(ctx, {
+        title: rest.join(' ').trim(),
+        repoKey: repo!.repoKey, repoRoot: repo!.repoRoot,
+        socketPath: process.env.HERDR_SOCKET_PATH ?? '',
+        paneId: process.env.HERDR_PANE_ID ?? '',
+        workspaceId: process.env.HERDR_WORKSPACE_ID ?? '',
+      })
+      break
+
+    case 'task':
+      out = await cmdTask(ctx, {
+        branch: flag(rest, 'branch') ?? '',
+        issue: Number(flag(rest, 'issue') ?? '0'),
+        surface: flag(rest, 'surface') ?? '',
+        text: flag(rest, 'text') ?? '',
+        dependsOn: listFlag(rest, 'depends-on'),
+        files: listFlag(rest, 'files'),
+        keepWorktree: rest.includes('--keep-worktree'),
+      })
+      break
+
+    case 'rewind':
+      out = await cmdRewind(ctx, {
+        runId: rest[0] ?? '', phase: rest[1] ?? '', taskId: flag(rest, 'task'),
+      })
+      break
+
+    default:
+      console.error('usage: hpipe <start|task|status|drain|rewind|resume|abort|forget> …')
+      return 1
+  }
+
+  console.log(out.text)
+  return out.ok ? 0 : 1
+}
+
+if (import.meta.main) process.exit(await dispatch(process.argv.slice(2)))
