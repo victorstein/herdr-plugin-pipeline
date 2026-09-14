@@ -1,25 +1,31 @@
 # herdr-plugin-pipeline — design
 
 **Date:** 2026-09-13
-**Status:** Design v3 — revised after two adversarial reviews (`reviews/2026-09-13-design-adversarial-1.md`, `-2.md`, both `VERDICT: BLOCKER`)
+**Status:** Design v4 — cleared at the third adversarial pass (`reviews/2026-09-13-design-adversarial-{1,2,3}.md`; `BLOCKER`, `BLOCKER`, **`CLEAR`**)
 **Plugin id:** `stein.pipeline`
 **Target:** herdr 0.9.0+
 **Runtime:** Bun + TypeScript, no build step
 
-> **v3 changes.** Review 2 audited review 1's fixes and found 17 genuinely fixed, **6 cosmetic, 6
-> displaced** — one consistent pattern: *v2 fixed defects at the run level and left the identical
-> defect at the task level.* Edge-triggered predicates were given to runs and withheld from tasks, so
-> the livelock survived in eight rows. A `gh` field was verified for `pr checks` and an unverified one
-> written into `pr view` a row above it. The settle check kept its name and changed its subject,
-> dropping the agent-status guard it was meant to add — and v2's phase table dropped the agent-idle
-> condition entirely, so the supervisor would have advanced on a file alone while the orchestrator was
-> still mid-turn.
+> **Review history.** Three adversarial passes. Round 1 found 7 BLOCKERs; round 2 found 5 more *and*
+> audited round 1's fixes as 17 genuine / 6 cosmetic / 6 displaced; round 3 returned **`VERDICT: CLEAR`**
+> (0 BLOCKER, 10 MAJOR, 11 MINOR) with round 2's fixes auditing 14 genuine / 2 cosmetic / 5 displaced.
+> All 21 round-3 findings are applied here.
 >
-> Four v2 claims are withdrawn as **false, each disproved live**: the startup hook can open the
-> supervisor pane on a cold start (it cannot — `no_active_workspace`); a dead supervisor "dies visibly
-> in a pane" (the pane *vanishes*); queue rotation loses nothing (a post-rename append lands in the
-> rotated file and is unrecoverable after unlink); and "single herdr server" (two are running, with 13
-> named sessions on disk — so runs, registries, and the supervisor are now **scoped per session**).
+> One failure mode recurred in every round: **fixing an instance instead of the class.** Edge-triggered
+> predicates were given to runs and withheld from tasks; `MAX_PASSES` likewise; a `gh` field was
+> verified for `pr checks` and an unverified sibling written into `pr view`; a settle check kept its
+> name and changed its subject. v4's remaining corrections were mostly *universal claims the document's
+> own tables contradicted* — "every orchestrator-owned predicate is actor-idle and artifact-fresh" was
+> false for three of ten rows, and `merge`/`close` were pure level predicates, so `hpipe rewind` could
+> not have rescued the two rows it was offered as the escape for.
+>
+> Claims withdrawn across the rounds, each disproved live: that `herdr agent start` opens a pane (it
+> adopts one, so v1's orphan-pane reaper solved nothing); that an in-hook `sleep` was safe (herdr caps
+> plugin commands at 32 concurrent and **drops** the overflow); that a startup hook can open the
+> supervisor pane on a cold start (`no_active_workspace`); that a dead supervisor "dies visibly in a
+> pane" (the pane vanishes); that queue rotation loses nothing (a post-rename append is unrecoverable);
+> that this is a single-server machine (two servers, 13 sessions); and that `exec $SHELL` leaves a
+> readable pane (a no-op when `SHELL` is unset, which herdr never injects).
 
 ## Problem
 
@@ -50,8 +56,9 @@ fleet pane by pane.
 - **Replacing `CLAUDE.md`.** Repo-specific architecture and conventions stay there.
 - **Fixing `nicaraguan-laws/CLAUDE.md` or `~/.claude/skills/herdr`**, both carrying the stale
   `agent start` signature. Flagged, out of scope, tracked separately.
-- **Cross-machine coordination.** Multiple local sessions are supported (see §Sessions); `--remote`
-  is not — see the `--remote` row in §Failure modes.
+- **Driving a remote session from a local shell.** Multiple local sessions are supported (see
+  §Sessions). A `--remote` session runs the plugin entirely on the remote host and is self-consistent;
+  see the `--remote` row in §Failure modes.
 
 ## Roles
 
@@ -97,9 +104,10 @@ it leaves a visible corpse. It does not: a plugin pane is destroyed when its com
 (`pane_not_found` after `kill`, verified). Two consequences, both designed for:
 
 - The manifest command wraps the process so a death leaves a readable pane rather than none:
-  `sh -c 'bun run src/supervisor/main.ts; echo "[pipeline] supervisor exited — run hpipe status"; exec $SHELL'`.
-  The singleton-guard path prints `another supervisor is live (pid N, session S)` before dropping to
-  the shell.
+  `sh -c 'bun run src/supervisor/main.ts; echo "[pipeline] supervisor exited — run hpipe status"; exec "${SHELL:-/bin/sh}"'`.
+  `main.ts` owns the message, because only it knows the exit reason: the singleton-guard path prints
+  `another supervisor is live (pid N, session S)` and exits `3`, and the wrapper suppresses its own
+  "supervisor exited" line on that code — otherwise a declined duplicate claims a supervisor died.
 - **`hpipe status` is the death detector, not the pane.**
 
 ### Startup reconciliation
@@ -119,11 +127,20 @@ The startup hook therefore reconciles:
 
 1. `workspace list`; if none carries `PIPELINE_WORKSPACE_LABEL`, `workspace create --label <label>
    --no-focus` — and close the stray root pane it creates.
-2. `pane list --workspace <id>`; close every pane labelled as the supervisor whose pid is not the live
-   one in `supervisor.<session>.pid`. **This is the one piece of v1's deleted reaper the architecture
+2. `pane list --workspace <id>`; for each, close every pane labelled as the supervisor whose
+   `shell_pid` from `herdr pane process-info --pane <id>` is not the `pane_pid` recorded in
+   `supervisor.<session>.pid`. **This is the one piece of v1's deleted reaper the architecture
    actually needs** — for ghosts, not for worktrees.
-3. Only then `plugin pane open --workspace <id> --placement tab --no-focus`, **checking the response
-   body for an `error` key** rather than trusting the exit code.
+3. Only then
+   `plugin pane open --plugin "$HERDR_PLUGIN_ID" --entrypoint supervisor --workspace <id> --placement tab --no-focus`,
+   **checking the response body for an `error` key** rather than trusting the exit code.
+
+On a **cold start** the pipeline workspace is necessarily focused — `--no-focus` is honoured only when
+another workspace already exists (measured: `focused: true` on an empty session, `false` on a warm
+restart) — so the hook focuses away after opening the supervisor pane. Workspace **labels are not
+unique** (two can carry `pipeline` simultaneously; the user can rename any workspace), so the hook
+records `workspace.<session>.id` and matches on the recorded id first, falling back to the label and
+reporting ambiguity through `hpipe status`.
 
 ### Sessions
 
@@ -140,8 +157,17 @@ Everything is therefore session-scoped:
 - `orchestrators.json` is keyed `<session>/<repo_key>`.
 - The pid file is `supervisor.<session>.pid`; one supervisor **per running server**.
 - The supervisor skips any run whose `session` is not its own.
-- `hpipe` stamps `HERDR_SESSION` on every write — verified present in pane shells alongside
-  `HERDR_PANE_ID` and `HERDR_SOCKET_PATH`.
+- Every component derives its key through one helper, because **`HERDR_SESSION` is injected for
+  *named* sessions only and is unset in the default session** (measured), and `plugins.mdx` does not
+  document it at all:
+
+  ```
+  sessionKey() = HERDR_SESSION            (if set and non-empty)
+               | <name> from HERDR_SOCKET_PATH matching …/sessions/<name>/herdr.sock
+               | "default"
+  ```
+
+  `HERDR_SOCKET_PATH` is present in every measured context and encodes the session unambiguously.
 
 ### Verified herdr facts
 
@@ -170,6 +196,10 @@ Re-derived from `herdr 0.9.0` and independently re-verified in review 2. Prose i
 | `workspace.metadata_updated` is **rejected as an unknown event name at link time** | live link warning | Never declare it |
 | Tokens are not restored after a server restart; ≤32 keys, ≤16/report, values ≤80 chars; plugin `source` must be `plugin:<HERDR_PLUGIN_ID>` | socket-api.mdx; verified | Display only; supervisor reapplies |
 | `WorkspaceInfo.worktree` carries `repo_key`, `repo_root`, `checkout_path`, `is_linked_worktree` | schema | Parent resolution by repo provenance |
+| `HERDR_SESSION` is injected for **named sessions only** — unset in the default session, and not listed in `plugins.mdx`'s enumerated variables | measured across startup, event and pane contexts | Derive the key from `HERDR_SOCKET_PATH`; see `sessionKey()` |
+| `pane list` / `pane get` carry **no pid**; `pane process-info --pane <id>` returns `shell_pid` and `foreground_processes[].pid` | live | The only pid source, one call per pane |
+| `workspace create --no-focus` still yields `focused: true` on a cold start; workspace **labels are not unique** | live | Reconcile records the workspace id and focuses away |
+| `exec $SHELL` is a silent no-op when `SHELL` is unset, and `SHELL` is not injected by herdr | `env -u SHELL sh -c 'exec $SHELL; echo AFTER'` prints nothing | `exec "${SHELL:-/bin/sh}"` |
 | APFS `st_mtime_ns` is nanosecond-granular; no clock skew locally | verified | mtime comparison is sound — settled, do not re-litigate |
 
 `min_herdr_version = "0.9.0"` because `agent start`'s `--kind`/`--pane` signature is the 0.9.0 shape
@@ -243,7 +273,7 @@ command = ["bun", "run", "src/actions/supervisor.ts"]
 id = "supervisor"
 title = "Pipeline supervisor"
 placement = "tab"
-command = ["sh", "-c", "bun run src/supervisor/main.ts; echo '[pipeline] supervisor exited — run hpipe status'; exec $SHELL"]
+command = ["sh", "-c", "bun run src/supervisor/main.ts; echo '[pipeline] supervisor exited — run hpipe status'; exec "${SHELL:-/bin/sh}""]
 ```
 
 ## State
@@ -253,13 +283,27 @@ command = ["sh", "-c", "bun run src/supervisor/main.ts; echo '[pipeline] supervi
 ```
 orchestrators.json            "<session>/<repo_key>" -> { pane_id, workspace_id, socket_path, claimed_at }
 runs/<session>/<run_id>.json
-queue/<ts>-<pid>-<rand>.json  one file per event
-supervisor.<session>.pid      { pid, started_at_ms, boot_id, session, socket_path, pane_id }
+queue/<ts>-<seq>-<pid>.json   one file per event, lexicographically sortable
+supervisor.<session>.pid      { pid, pane_pid, started_at_ms, session, socket_path, pane_id }
+workspace.<session>.id        the reconciled pipeline workspace
 ```
 
 **The queue is one file per event, not an appended log.** A hook writes `<name>.json.tmp` then
-renames it to `<name>.json`; the supervisor globs `queue/*.json`, reads, and unlinks each processed
-file. A partially written event is still `.tmp` and invisible.
+renames it to `<name>.json`; the supervisor globs `queue/*.json`, **sorts lexicographically**, reads,
+and unlinks each processed file. A partially written event is still `.tmp` and invisible.
+
+The name is `<ts>-<seq>-<pid>.json` with `ts` a zero-padded fixed-width epoch-ms and `seq` a
+zero-padded per-process monotonic counter, because **glob order is readdir order and orders nothing**:
+measured, eight events emitted in a known order landed in the same millisecond, readdir matched
+neither emission nor lexicographic order, and an unpadded pid sorts `9` after `88888`. Ordering is
+semantic here — a worker that goes `working → idle → working` inside one tick writes two events, and
+processing them backwards leaves `agent_status` inverted, which both the `execute` trigger and
+`TASK_STALL_MINUTES` then read.
+
+**Drain is at-least-once:** the ledger entry is written and fsynced **before** the unlink, so a crash
+between them replays an event that dedup already makes harmless. The startup hook deletes
+`queue/*.json.tmp` older than an hour — a hook killed between `open` and `rename` leaves one forever
+otherwise.
 
 v2's rotate-then-read was proved lossy: `rename(2)` moves the directory entry, not an open file
 description, so a hook holding an `O_APPEND` fd writes into the *rotated* file — and into a deleted
@@ -288,7 +332,7 @@ the atomic-rename rule already stated for every other write.
     "keep_worktree": false,
     "workspace_id": "w7", "pane_id": "w7:p1",
     "agent_status": "working",
-    "phase": "execute", "pass": 1,
+    "phase": "execute", "pass": 1, "escalated_from": null,
     "phase_entered_at": 1789000090000, "head_sha_at_entry": "9f3c…",
     "pr": null, "ci": null,
     "text": "…full task text, supplied via `hpipe task`…"
@@ -332,8 +376,9 @@ for the ten orchestrator-owned rows below.
 
 ## Phase machine
 
-Fourteen rows; **ten are orchestrator-owned**. Every orchestrator-owned predicate is
-`actor pane idle|done` **and** `artifact fresh`. v2 dropped the agent condition from the table, which
+Fifteen rows; **ten are orchestrator-owned**. Every orchestrator-owned predicate **whose completion
+signal is an artifact** is `actor pane idle|done` **and** `artifact fresh`; `dispatch`, `merge` and
+`close` complete on external state instead and are gated at delivery only. v2 dropped the agent condition from the table, which
 would have fired `spec-review` one second after the `Write` tool call landed the spec file — while the
 orchestrator was still explaining it to the human. That is the normal path, not an edge case.
 
@@ -344,21 +389,22 @@ orchestrator was still explaining it to the human. That is the normal path, not 
 | `plan` | orchestrator | actor idle **and** plan file fresh | `plan-review` | — |
 | `plan-review` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → `dispatch` | else `plan`, `pass`+1 |
 | `dispatch` | orchestrator | ≥1 task registered **and** ≥1 worktree adopted | `execute` | — |
-| **t** `queued` | supervisor | `depends_on` all `done`, no in-flight `files` overlap | task `execute`; supervisor delivers the worker prompt | cycle → rejected at registration |
+| **t** `queued` | supervisor | `depends_on` all `done`, no in-flight `files` overlap | task `execute`; supervisor **prompts the orchestrator to dispatch it, carrying the rendered worker prompt** | cycle → rejected at registration; a `failed`/`orphaned` dependency → `blocked-on-failure`, surfaced |
 | **t** `execute` | worker | worker idle/done **and** PR exists **and** `headRefOid != head_sha_at_entry` | task `task-review-spec` | pane exited or agent released → task `failed` |
-| **t** `task-review-spec` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → `task-review-quality` | else task `execute`, `pass`+1 |
-| **t** `task-review-quality` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → task `ci` | else task `execute`, `pass`+1 |
+| **t** `task-review-spec` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → `task-review-quality` | else task `execute`, `pass`+1; at `MAX_PASSES` → task `escalated` |
+| **t** `task-review-quality` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → task `ci` | else task `execute`, `pass`+1; at `MAX_PASSES` → task `escalated` |
 | **t** `ci` | supervisor | `gh pr checks` bucket terminal **and** changed | `pass` → task `merge` | `fail` → task `execute` with the failing check |
 | **t** `merge` | orchestrator | `gh pr view --json state` is `MERGED` | task `close` | — |
 | **t** `close` | orchestrator | `gh issue view --json closed` is true | task `teardown` | — |
 | **t** `teardown` | supervisor | `worktree remove --workspace <ws> --force` succeeded | task `done`; unblocks `queued`; last → run `branch-review` | removal fails → task `orphaned`; `keep_worktree` → skip to `done` |
 | `branch-review` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → `done` | else `branch-review`, `pass`+1 |
+| `escalated` (run or task) | human | `hpipe rewind` resets `pass` | back to `escalated_from` | — |
 
 Two review phases per task, per `CLAUDE.md:46`.
 
 **Delivery is gated too.** Before any `herdr agent prompt`, the supervisor re-reads the actor with
-`agent get <pane>` and requires `idle`/`done` both at predicate evaluation and again `SETTLE_MS`
-later; a momentary misclassification will have flipped back to `working` or `blocked` by then. This
+`agent get <pane>` and requires `idle`/`done` both at predicate evaluation and again
+`ACTOR_SETTLE_MS` later; a momentary misclassification will have flipped back to `working` or `blocked` by then. This
 is round 1's guard, which v2 silently replaced with a file check under the same config key.
 
 ### Ordering and collisions
@@ -367,7 +413,10 @@ is round 1's guard, which v2 silently replaced with a file check under the same 
 declares an overlapping `files` prefix.
 
 **`hpipe task` withholds the rendered worker prompt until the gate opens** — it prints `task_id: t1`
-and `queued: waiting on t0`, and the supervisor delivers the prompt when the task leaves `queued`.
+and `queued: waiting on t0`, and when the task leaves `queued` the supervisor **prompts the
+orchestrator** to dispatch it, carrying the rendered worker prompt. The recipient is the orchestrator,
+not the worker: a `queued` task has no worker pane yet (`pane_id` arrives from `pane.agent_detected`,
+which fires only after `agent start`), so delivering to the worker would deliver to nothing.
 In v2 the CLI printed the prompt at registration, so the orchestrator would dispatch immediately and
 the gate was advisory. Registration rejects a `--depends-on` cycle (Kahn's algorithm, naming the
 cycle).
@@ -388,16 +437,21 @@ render a plausible dead path silently.
 
 ### Predicates are edges, not levels — at both levels
 
-Every predicate compares against the **relevant record's** `phase_entered_at` (run for run phases,
-task for task phases):
+Every predicate **that has an edge available** compares against the **relevant record's**
+`phase_entered_at` (run for run phases, task for task phases):
 
-- **file** — `mtime > phase_entered_at`, plus a stability re-read. Stated honestly: this guards
+- **file** — `mtime > phase_entered_at`, plus a `FILE_SETTLE_MS` stability re-read. Stated honestly: this guards
   against reading a file mid-`write(2)`; **it does not prove the artifact is finished.** The real
   completeness signal for a review artifact is that the `VERDICT:` trailer is the **last non-empty
   line**, which a mid-write file will not have.
 - **PR** — `headRefOid` must differ from `head_sha_at_entry`. `updatedAt` moves on any comment or
   label change and is not a work-happened signal.
 - **CI** — a bucket *change*, not merely a terminal bucket.
+- **GitHub state** — `mergedAt` / `closedAt` must postdate `phase_entered_at`. Without this, `merge`
+  and `close` are pure level predicates (once a PR is `MERGED` it is `MERGED` forever), so
+  `hpipe rewind <run> merge --task t1` would re-advance on the very next tick — the escape hatch for
+  those rows would not work on those rows. Both fields verified present on `gh pr view --json` /
+  `gh issue view --json`.
 
 ### Limits of inference
 
@@ -405,7 +459,7 @@ Claude Code's state authority is the screen manifest, and an unmatched prompt fa
 (`agents.mdx:60`). An agent can be reported idle while working.
 
 **The invariant, stated honestly:** the plugin never advances on a stale artifact, never on one still
-being written, never without the actor pane reading idle twice `SETTLE_MS` apart, and never invents a
+being written, never without the actor pane reading idle twice `ACTOR_SETTLE_MS` apart, and never invents a
 verdict. It can still be early if an agent writes a complete artifact and keeps going. That residual
 risk is accepted; the orchestrator is a live agent that can see it, and `hpipe rewind` is the escape.
 
@@ -424,15 +478,23 @@ MAJORS: 3
 
 **`BLOCKER` means: any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or
 needs a judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline.**
-That is `CLAUDE.md:28-30` verbatim, including its qualifier.
+
+The counts are informational and the `VERDICT:` line is authoritative, because only the reviewing
+agent can apply that qualifier — a count cannot carry it. A `CLEAR` trailer still carries `MAJORS: n`,
+and the next phase's prompt names the verdict file so the open MAJORs get fixed inline.
+That is `CLAUDE.md:28-30`, reading its qualifier as attaching to MAJOR. (The source reads
+"no BLOCKER/MAJOR that reverses a decision…", where the qualifier attaches to both jointly; treating
+BLOCKERs as unqualified is an interpretation, not a transcription.)
 
 v2 flattened it to "any MAJOR", which crossed with `MAX_PASSES` made **escalation the default
 outcome** — an adversarial review finds a MAJOR on almost any first draft, so a run would escalate at
 the spec gate before dispatching a single task, contradicting `CLAUDE.md:36-37`. This document's own
 history is the worked example: under v2's rule, v2 would have escalated.
 
-`escalated` is a real phase, recording `escalated_from`. `hpipe rewind` resets `pass` to 0 for the
-phase it rewinds to, so a human who answers an escalation is not immediately re-escalated.
+`escalated` is a real phase **at both levels**, recording `escalated_from` on the run or the task. A
+task that exhausts `MAX_PASSES` escalates alone and is surfaced to the orchestrator; the run continues
+with its remaining tasks. `hpipe rewind [--task <id>]` resets `pass` to 0 for the phase it rewinds to,
+so a human who answers an escalation is not immediately re-escalated.
 
 ### Stalls
 
@@ -463,6 +525,12 @@ message per orchestrator** from `prompts/digest.md`:
 
 <rendered prompt for the phase just entered>
 ```
+
+**The supervisor advances at most one orchestrator-owned phase per orchestrator per tick**, leaving
+the rest for the next tick. Every orchestrator-owned row gates on the same single pane reading idle, so
+without this rule several tasks enter different phases in one tick and the digest — which carries one
+rendered prompt — has no defined winner. Event lines still coalesce; only the rendered prompt is
+one-at-a-time.
 
 Delivery retries with backoff across ticks on `agent_blocked` or a missing pane, up to
 `PROMPT_RETRY_MAX`, then holds and reports in `status`.
@@ -514,7 +582,7 @@ command, so it reads the output. Injection is only for waking an agent not curre
 | Aborted by mistake | `hpipe resume <run>` |
 | Supervisor wedged or dead | `hpipe status` names the state; the `supervisor` action reopens it; delete `supervisor.<session>.pid` if reported stale |
 | Plugin misbehaving | `herdr plugin disable stein.pipeline` — hooks stop; worktrees and agents untouched |
-| Out permanently | `herdr plugin unlink stein.pipeline`; worktrees, branches, PRs and issues are plain git/GitHub objects |
+| Out permanently | `herdr plugin unlink stein.pipeline`; worktrees, branches, PRs and issues are plain git/GitHub objects. `unlink` leaves `~/.local/bin/hpipe` dangling — remove it by hand, or run with `HPIPE_LINK=0`; `hpipe status` reports the orphan |
 
 Nothing the plugin owns is load-bearing for the *work*.
 
@@ -527,7 +595,8 @@ Nothing the plugin owns is load-bearing for the *work*.
 | `MAX_PASSES` | `2` | Review passes before escalating |
 | `STALL_MINUTES` | `15` | Artifact-phase stall probe |
 | `TASK_STALL_MINUTES` | `45` | `execute` per-task liveness |
-| `SETTLE_MS` | `750` | File-stability and actor-idle re-read gap |
+| `FILE_SETTLE_MS` | `750` | Artifact stability re-read gap |
+| `ACTOR_SETTLE_MS` | `750` | Actor-idle confirmation gap; runs **off the tick's critical path** so a tick with several deliveries does not overrun `TICK_MS` |
 | `CI_POLL_SECONDS` | `30` | CI poll interval |
 | `PROMPT_RETRY_MAX` | `5` | Delivery retries before holding |
 | `BLOCKED_TAIL_LINES` | `8` | Pane tail inlined for a blocked worker |
@@ -542,14 +611,14 @@ Nothing the plugin owns is load-bearing for the *work*.
 | --- | --- |
 | Server restart | Supervisor process killed; its pane returns as a mislabelled shell; the startup hook closes the ghost and reopens. Badges lost and reapplied; ledger and queue survive |
 | Supervisor dies | Wrapped command leaves a readable pane; `hpipe status` is the detector; `supervisor` action reopens |
-| Stale pid after reuse | Liveness requires pid **and** process start time **and** session to match; mismatch means stale — reclaim |
+| Stale pid after reuse | Liveness requires `pid` **and** its process start time (`ps -p <pid> -o lstart=`) **and** `session` to match; mismatch means stale — reclaim. `pid` is the supervisor; `pane_pid` is the `sh` wrapper herdr reports as the pane's `shell_pid`, read by the supervisor as its own `PPID`. `boot_id` is dropped: it has no macOS source (`/proc/sys/kernel/random/boot_id` is Linux-only) and start-time matching already defeats reuse |
 | Two sessions | Runs, registry and pid file are session-scoped; a supervisor skips foreign runs |
-| `--remote` | The server, plugin and pid file live on the remote host while `hpipe` runs locally; the pid is remote and local liveness is meaningless. **Unsupported — `hpipe` refuses when `HERDR_SOCKET_PATH` is not local** |
+| `--remote` | Puts the server, the plugin, the supervisor **and** `hpipe` all on the remote host, so a remote session is internally consistent and needs no handling. What is unsupported is driving a remote session's runs from a local shell — ids and pids belong to one server (`cli-reference.mdx:69`). No check is possible from inside the process (a remote socket path is an ordinary absolute path) and none is needed |
 | 32-command cap | Not reachable by this plugin's own hooks in normal operation; asserted by the smoke test |
 | Orchestrator unresolvable | Events queue; retried each tick; reported by `status` |
 | Orchestrator blocked | `agent_blocked` before input is sent; retried with backoff |
 | Agent idle while working | Freshness + double actor-idle check + trailer-last-line; a complete-then-continue artifact can still advance early → `hpipe rewind` |
-| `queued` deadlock | Cycles rejected at registration; an unsatisfiable gate is reported by `status` |
+| `queued` deadlock | Cycles rejected at registration. A `failed`/`orphaned` dependency moves the dependent to terminal `blocked-on-failure`, surfaced through the digest — it does not wait forever |
 | `gh` unauthenticated | Renders `unknown`; not terminal; nothing advances |
 | Unparseable verdict | Treated as absent; phase holds; stall probe asks |
 | Worker exited / released | Task `failed`, surfaced |
