@@ -7201,6 +7201,111 @@ git commit -m "fix: clear the stray pane after the supervisor opens, not before"
 
 ---
 
+## Task 37: An actor that reports `done` has finished its turn
+
+Found by a live run: **every run stalls at its first phase.**
+
+herdr reports a finished agent as `done` — "idle and not yet seen" — and an orchestrator driven by
+this plugin is never "seen" by a human, so `done` is its *normal* resting state. The design's phase
+table says the gate is `actor pane idle|done`, and `tasks.ts` gets this right for workers
+(`task.agent_status === 'idle' || task.agent_status === 'done'`). The three orchestrator-side checks
+test for `idle` only, so the gate never opens.
+
+Observed live: orchestrator wrote the spec to exactly the expected path, `agent list` reported
+`w2:p1 done`, and the run sat in `spec` indefinitely across repeated probes.
+
+No test caught it because every test injects `actorIdle` as a boolean, so the status→boolean mapping
+— the part that is wrong — is never exercised.
+
+**Files:**
+- Modify: `src/lib/machine.ts`, `src/supervisor/deliver.ts`, `src/supervisor/main.ts`,
+  `src/supervisor/tasks.ts`
+- Modify: `test/deliver.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `test/deliver.test.ts`:
+
+```ts
+import { isAgentReady } from '../src/lib/machine'
+
+test('an agent that finished its turn is ready, whether idle or done', () => {
+  // herdr reports `done` for "idle and not yet seen". An orchestrator driven by
+  // this plugin is never seen by a human, so `done` is its normal resting state
+  // — treating only `idle` as ready stalls every run at its first phase.
+  expect(isAgentReady('idle')).toBe(true)
+  expect(isAgentReady('done')).toBe(true)
+})
+
+test('an agent still working or blocked is not ready', () => {
+  expect(isAgentReady('working')).toBe(false)
+  expect(isAgentReady('blocked')).toBe(false)
+  expect(isAgentReady('unknown')).toBe(false)
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/deliver.test.ts`
+Expected: FAIL — `isAgentReady` is not exported.
+
+- [ ] **Step 3: Implement the shared predicate**
+
+In `src/lib/machine.ts`:
+
+```ts
+/**
+ * An agent has finished its turn. herdr reports `done` for "idle and not yet
+ * seen", which is the normal resting state for an agent this plugin drives —
+ * nothing human ever looks at it — so `done` must count as ready alongside
+ * `idle`. Both the orchestrator and worker paths read this one predicate so the
+ * two cannot drift apart again.
+ */
+export function isAgentReady(status: AgentStatus): boolean {
+  return status === 'idle' || status === 'done'
+}
+```
+
+Import `AgentStatus` from `./types` if it is not already imported there.
+
+- [ ] **Step 4: Use it at all four sites**
+
+`src/supervisor/deliver.ts` — both checks (there are two, one at predicate evaluation and one after
+`ACTOR_SETTLE_MS`):
+
+```ts
+  if (!isAgentReady(await herdr.agentStatus(pane))) {
+```
+
+`src/supervisor/main.ts`:
+
+```ts
+          const actorIdle = run.orchestrator_pane !== null &&
+            isAgentReady(await herdr.agentStatus(run.orchestrator_pane))
+```
+
+`src/supervisor/tasks.ts` — replace the inline comparison so the worker path reads the same predicate:
+
+```ts
+    workerIdle: isAgentReady(task.agent_status),
+```
+
+Import `isAgentReady` from `../lib/machine` in each file.
+
+- [ ] **Step 5: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 210 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src test
+git commit -m "fix: treat a done agent as having finished its turn"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
