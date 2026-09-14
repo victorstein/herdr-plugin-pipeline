@@ -1,9 +1,12 @@
+import { join } from 'node:path'
 import { gateStatus } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, enterTaskPhase } from '../lib/machine'
 import type { VerdictResult } from '../lib/predicates'
+import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
-import type { Run, Task } from '../lib/types'
+import type { Run, Task, TaskPhase } from '../lib/types'
+import { artifactPathFor } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -16,9 +19,57 @@ export interface TaskDeps {
   issueView: (issue: number) => Promise<IssueView | null>
   verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
   removeWorktree: (workspaceId: string) => Promise<boolean>
+  /** Rendered detail of the failing checks, for the ci-red prompt. */
+  ciDetail: (pr: number | null) => Promise<string>
 }
 
 const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', 'merge', 'close'])
+
+/**
+ * The task-level counterpart to deliver.ts's promptForRunPhase. Without it the
+ * state machine advances once an artifact exists but nothing ever asks the
+ * orchestrator to produce one, so every task phase stalls.
+ */
+async function promptForTaskPhase(
+  run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
+): Promise<string> {
+  const common = {
+    run_id: run.run_id,
+    branch: task.branch,
+    issue: String(task.issue),
+    pr: task.pr === null ? 'unknown' : String(task.pr),
+    pass: String(task.pass),
+    verdict_path: join(run.repo_root, artifactPathFor(run, task) ?? ''),
+  }
+
+  switch (task.phase) {
+    case 'task-review-spec':
+      return renderPrompt(deps.pluginRoot, 'task-review-spec', common)
+    case 'task-review-quality':
+      return renderPrompt(deps.pluginRoot, 'task-review-quality', common)
+    case 'merge':
+      return renderPrompt(deps.pluginRoot, 'merge', common)
+    case 'close':
+      return renderPrompt(deps.pluginRoot, 'close', common)
+    case 'execute':
+      // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
+      // review does not, because the review file already says what to fix.
+      return cameFrom === 'ci'
+        ? renderPrompt(deps.pluginRoot, 'ci-red', {
+            ...common, ci_failure: await deps.ciDetail(task.pr),
+          })
+        : ''
+    case 'escalated':
+      return renderPrompt(deps.pluginRoot, 'escalate', {
+        run_id: run.run_id,
+        phase: task.escalated_from ?? cameFrom,
+        pass: String(task.pass),
+        task_flag: ` --task ${task.task_id}`,
+      })
+    default:
+      return ''
+  }
+}
 
 /**
  * Drives every task in a run one step. Returns any prompts the digest should
@@ -59,7 +110,14 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
     if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
 
     const signals = await gatherSignals(run, task, deps)
-    if (signals) advanceTask(run, task, signals)
+    if (!signals) continue
+
+    const cameFrom = task.phase
+    if (!advanceTask(run, task, signals)) continue
+    if (task.phase === cameFrom) continue
+
+    const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
+    if (prompt.length > 0) prompts.push(prompt)
   }
 
   return prompts

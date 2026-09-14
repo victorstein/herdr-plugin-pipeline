@@ -28,6 +28,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   issueView: async () => null,
   verdictFor: async () => null,
   removeWorktree: async () => true,
+  ciDetail: async () => '',
   ...over,
 })
 
@@ -114,4 +115,45 @@ test('teardown removes the worktree and completes the task', async () => {
   expect(removed).toEqual(['w7'])
   expect(run.tasks[0]?.phase).toBe('done')
   expect(run.phase).toBe('branch-review')
+})
+
+test('entering task-review-spec yields the stage-one review prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  const prompts = await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(prompts.join('\n')).toContain('Stage 1 review')
+  expect(prompts.join('\n')).toContain('#1')
+})
+
+test('entering merge yields the merge prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('merge')
+  expect(prompts.join('\n')).toContain('Ready to merge')
+})
+
+test('a red CI yields the ci-red prompt carrying the failure detail', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail' })])
+  const prompts = await advanceTasks(run, deps({
+    ciDetail: async () => '- build (fail) https://example/run/1',
+  }))
+  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(prompts.join('\n')).toContain('CI is red')
+  expect(prompts.join('\n')).toContain('build (fail)')
+})
+
+test('an escalated task yields the escalation prompt naming its task flag', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-quality', pass: 2 })])
+  const prompts = await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'BLOCKER', blockers: 1, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('escalated')
+  expect(prompts.join('\n')).toContain('--task t1')
+})
+
+test('a phase that advances nothing yields no prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'working' })])
+  expect(await advanceTasks(run, deps())).toHaveLength(0)
 })

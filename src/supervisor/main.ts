@@ -112,6 +112,7 @@ async function main(): Promise<void> {
             return parseVerdict(absolute)
           },
           removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+          ciDetail: async (pr) => (pr === null ? '' : gh.prChecksDetail(pr)),
         })
 
         await refreshBadges(run, herdr, pluginId)
