@@ -143,6 +143,9 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
     case 'execute': {
       const pr = task.pr ?? (await deps.prForBranch(task.branch))
       if (pr === null) return base
+      // Persist on discovery, not on the phase transition: otherwise every tick
+      // re-queries gh for a PR we already know about.
+      task.pr = pr
       const view = await deps.prView(pr)
       return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
     }

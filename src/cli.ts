@@ -5,7 +5,7 @@ import { detectCycle, gateStatus } from './lib/gating'
 import {
   activeRunForRepo, listRuns, newRun, saveRun, writeOrchestrator,
 } from './lib/ledger'
-import { enterRunPhase } from './lib/machine'
+import { enterRunPhase, enterTaskPhase } from './lib/machine'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
@@ -93,6 +93,11 @@ export async function cmdTask(ctx: Ctx, input: {
   if (gate.state !== 'ready') {
     return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
+
+  // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
+  // `queued` would make the next tick deliver the same prompt a second time.
+  enterTaskPhase(run, task, 'execute', 'dispatched at registration')
+  await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   return ok(`task_id: ${task.task_id}\n\n${prompt}`)
