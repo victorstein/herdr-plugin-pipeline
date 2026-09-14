@@ -15,15 +15,22 @@ interface RawEvent {
   worktree?: { branch?: string | null; path?: string }
 }
 
-export function toQueuedEvent(kind: EventKind, session: string, rawJson: string): QueuedEvent {
-  const event: QueuedEvent = { kind, session, at: Date.now() }
-
+/** Returns null when the payload carries nothing actionable. */
+export function toQueuedEvent(
+  kind: EventKind, session: string, rawJson: string,
+): QueuedEvent | null {
   let raw: RawEvent
   try {
-    raw = JSON.parse(rawJson) as RawEvent
+    const parsed: unknown = JSON.parse(rawJson)
+    // `JSON.parse("null")` succeeds and returns null, so guarding the parse
+    // alone is not enough — reading a field off it would throw out of a hook.
+    if (parsed === null || typeof parsed !== 'object') return null
+    raw = parsed as RawEvent
   } catch {
-    return event
+    return null
   }
+
+  const event: QueuedEvent = { kind, session, at: Date.now() }
 
   if (raw.pane_id) event.pane_id = raw.pane_id
   if (raw.agent_status) event.agent_status = raw.agent_status
@@ -48,7 +55,15 @@ export function toQueuedEvent(kind: EventKind, session: string, rawJson: string)
 export async function runHook(
   kind: EventKind, queueDir: string, session: string, rawJson: string,
 ): Promise<void> {
-  await enqueue(queueDir, toQueuedEvent(kind, session, rawJson))
+  const event = toQueuedEvent(kind, session, rawJson)
+  if (!event) {
+    // A queue entry with no fields is indistinguishable from a legitimately
+    // sparse event, so the supervisor could not act on it either way. Report
+    // and drop rather than enqueue something unactionable.
+    console.error(`[pipeline] ${kind}: unparseable event payload, dropped`)
+    return
+  }
+  await enqueue(queueDir, event)
 }
 
 /** Entrypoint shared by all five hook scripts. Parses env, enqueues, exits. */

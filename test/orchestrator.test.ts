@@ -34,6 +34,23 @@ test('falls back to the repo primary workspace agent pane', async () => {
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBe('w1:p1')
 })
 
+test('returns null when two agent panes qualify, rather than picking one', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'k', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+    'pane list': { result: { panes: [
+      { pane_id: 'w1:p1', agent_status: 'idle' },
+      { pane_id: 'w1:p2', agent_status: 'working' },
+    ] } },
+  })
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
+})
+
 test('returns null rather than guessing when nothing resolves', async () => {
   const bin = await makeFakeBin(dir, { 'workspace list': { result: { workspaces: [] } } })
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()

@@ -32,13 +32,23 @@ test('marks a release on agent_detected', () => {
   const event = toQueuedEvent('pane.agent_detected', 'personal', JSON.stringify({
     pane_id: 'w7:p1', workspace_id: 'w7', released: true,
   }))
-  expect(event.released).toBe(true)
+  expect(event?.released).toBe(true)
 })
 
-test('returns null-ish safe event for unparseable JSON', () => {
-  const event = toQueuedEvent('pane.exited', 'personal', 'not json')
-  expect(event.kind).toBe('pane.exited')
-  expect(event.pane_id).toBeUndefined()
+test('returns null for unparseable JSON', () => {
+  expect(toQueuedEvent('pane.exited', 'personal', 'not json')).toBeNull()
+})
+
+test('returns null for JSON that parses to a non-object', () => {
+  // JSON.parse("null") succeeds; reading a field off it would throw out of a hook.
+  expect(toQueuedEvent('pane.exited', 'personal', 'null')).toBeNull()
+  expect(toQueuedEvent('pane.exited', 'personal', '42')).toBeNull()
+})
+
+test('an unparseable payload enqueues nothing rather than a phantom entry', async () => {
+  const { runHook } = await import('../src/hooks/_hook')
+  await runHook('pane.exited', dir, 'personal', 'null')
+  expect(await drain(dir)).toHaveLength(0)
 })
 
 test('the enqueued event survives a round trip through the queue', async () => {

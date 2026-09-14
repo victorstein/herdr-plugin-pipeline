@@ -18,6 +18,13 @@ export async function resolveOrchestrator(
   if (!primary) return null
 
   const panes = await herdr.paneList(primary.workspace_id)
-  const agentPane = panes.find((p) => p.agent_status !== undefined && p.agent_status !== 'unknown')
-  return agentPane?.pane_id ?? null
+  const agentPanes = panes.filter(
+    (p) => p.agent_status !== undefined && p.agent_status !== 'unknown',
+  )
+
+  // Ambiguity is not resolved by guessing. Pane list order is not documented as
+  // meaningful, and picking wrong types a long prompt into an unrelated agent.
+  // Explicit `claim` is the disambiguator, so force it.
+  if (agentPanes.length !== 1) return null
+  return agentPanes[0]?.pane_id ?? null
 }
