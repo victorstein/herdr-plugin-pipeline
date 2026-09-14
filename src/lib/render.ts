@@ -1,6 +1,8 @@
 import { join } from 'node:path'
 
-const PLACEHOLDER = /\{\{(\w+)\}\}/g
+// Matches any {{...}} token, not just \w+, so a hyphenated or dotted name
+// fails loudly instead of shipping through to an agent verbatim.
+const PLACEHOLDER = /\{\{([^}]*)\}\}/g
 
 export function render(template: string, vars: Record<string, string>): string {
   return template.replace(PLACEHOLDER, (_match, name: string) => {

@@ -50,9 +50,33 @@ test('parses a BLOCKER trailer with counts', async () => {
   expect(await parseVerdict(p)).toEqual({ verdict: 'BLOCKER', blockers: 2, majors: 5 })
 })
 
-test('uses the LAST verdict line when a review quotes an earlier one', async () => {
-  const p = await writeAged('r.md', 'quoting VERDICT: BLOCKER inline\n\nVERDICT: CLEAR\n', 9_000)
+test('an indented quotation of the contract is not read as a verdict', async () => {
+  // The review prompts document the trailer as an indented block, so a reviewer
+  // narrating the contract writes exactly this. Trimming first made it
+  // indistinguishable from a real verdict and produced a false CLEAR.
+  const p = await writeAged('r.md', [
+    '# Review', 'I found 3 BLOCKER issues.', '',
+    'Per the contract, the trailer format required is:', '',
+    '    VERDICT: CLEAR', '',
+  ].join('\n'), 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('uses the LAST verdict line when an earlier one stands at column 0', async () => {
+  const p = await writeAged(
+    'r.md', 'VERDICT: BLOCKER\nBLOCKERS: 1\n\nsuperseded\n\nVERDICT: CLEAR\n', 9_000,
+  )
   expect((await parseVerdict(p))?.verdict).toBe('CLEAR')
+})
+
+test('rejects CLEAR carrying blocker counts as self-contradictory', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nBLOCKERS: 3\n', 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('accepts CLEAR carrying major counts, which the contract permits', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nMAJORS: 2\n', 9_000)
+  expect(await parseVerdict(p)).toEqual({ verdict: 'CLEAR', blockers: 0, majors: 2 })
 })
 
 test('rejects a trailer that is not the last non-empty line', async () => {

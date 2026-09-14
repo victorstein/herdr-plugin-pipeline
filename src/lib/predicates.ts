@@ -25,9 +25,9 @@ export async function isFresh(path: string, phaseEnteredAt: number): Promise<boo
  * parseVerdict is the real completeness signal for a review.
  */
 export async function isSettled(path: string, settleMs: number): Promise<boolean> {
-  const before = statSync(path)
-  await Bun.sleep(settleMs)
   try {
+    const before = statSync(path)
+    await Bun.sleep(settleMs)
     const after = statSync(path)
     return before.size === after.size && before.mtimeMs === after.mtimeMs
   } catch {
@@ -35,14 +35,21 @@ export async function isSettled(path: string, settleMs: number): Promise<boolean
   }
 }
 
-const VERDICT_LINE = /^VERDICT:\s*(CLEAR|BLOCKER)\s*$/
-const COUNT_LINE = /^(BLOCKERS|MAJORS):\s*(\d+)\s*$/
+// Anchored at column 0 on purpose. The review prompts DOCUMENT the trailer as
+// an indented block, so trimming before matching made a quoted example
+// byte-identical to a real verdict — a reviewer narrating the contract then
+// produced a confident false CLEAR. A real trailer is never indented.
+const VERDICT_LINE = /^VERDICT:[ \t]*(CLEAR|BLOCKER)[ \t]*$/
+const COUNT_LINE = /^(BLOCKERS|MAJORS):[ \t]*(\d+)[ \t]*$/
 
 export async function parseVerdict(path: string): Promise<VerdictResult | null> {
   const file = Bun.file(path)
   if (!(await file.exists())) return null
 
-  const lines = (await file.text()).split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  const lines = (await file.text())
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+    .filter((l) => l.trim().length > 0)
 
   let verdictIndex = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -60,5 +67,10 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
   }
 
   const verdict = VERDICT_LINE.exec(lines[verdictIndex] ?? '')?.[1] as Verdict
+
+  // CLEAR alongside blocker findings is self-contradictory — the contract pairs
+  // counts with BLOCKER. (CLEAR with MAJORS is legal: majors are fixed inline.)
+  if (verdict === 'CLEAR' && counts.blockers > 0) return null
+
   return { verdict, ...counts }
 }

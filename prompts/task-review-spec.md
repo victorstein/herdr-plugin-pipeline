@@ -24,4 +24,4 @@ or
     MAJORS: 0
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
