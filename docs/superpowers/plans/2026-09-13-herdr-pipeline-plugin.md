@@ -6461,6 +6461,205 @@ git commit -m "fix: poll CI across all runs and notice silent tasks"
 
 ---
 
+## Task 33: Run `gh` in the right repo, and stop finished runs starving their successors
+
+The third whole-branch review confirmed Task 32 introduced nothing, but found four defects that only a
+whole-branch view exposes. Two are Critical.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/supervisor/tick.ts`, `src/hooks/_hook.ts`, `src/cli.ts`,
+  `src/actions/drain.ts`, `src/lib/ledger.ts`
+- Modify: `test/tick.test.ts`, `test/queue.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tick.test.ts`:
+
+```ts
+test('a finished run does not starve a later run sharing its orchestrator pane', () => {
+  const finished = mkRun([])
+  finished.phase = 'done'
+  finished.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  // listRuns sorts deterministically, so without a phase filter the finished run
+  // wins the pane forever and its successor is never evaluated.
+  const picked = pickOneAdvance([finished, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})
+
+test('two runs on different panes are both picked', () => {
+  const a = mkRun([]); a.orchestrator_pane = 'w1:p1'
+  const b = mkRun([]); b.orchestrator_pane = 'w2:p1'
+  expect(pickOneAdvance([a, b])).toHaveLength(2)
+})
+```
+
+Append to `test/queue.test.ts`:
+
+```ts
+test('queues in different sessions do not consume each other', async () => {
+  // drain() unlinks as it reads, so a shared queue directory means whichever
+  // supervisor ticks first destroys the other session's events.
+  const a = join(dir, 'queue', 'personal')
+  const b = join(dir, 'queue', 'default')
+  await enqueue(a, ev(1))
+  await enqueue(b, ev(2))
+
+  expect((await drain(a)).map((e) => e.at)).toEqual([1])
+  expect((await drain(b)).map((e) => e.at)).toEqual([2])
+})
+```
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/tick.test.ts test/queue.test.ts`
+Expected: the pane-starvation test fails (`picked[0].phase` is `'done'`). The queue test may already
+pass — `enqueue`/`drain` take a directory, so the bug is in the callers, not the queue module. That is
+fine; it locks the behaviour while Step 5 fixes the call sites.
+
+- [ ] **Step 3: Fix pane starvation (Critical)**
+
+In `src/supervisor/tick.ts`:
+
+```ts
+const FINISHED: ReadonlySet<string> = new Set(['done'])
+
+/**
+ * At most one orchestrator-owned advance per orchestrator per tick. Finished runs
+ * are skipped: their `orchestrator_pane` is never cleared, so without this a
+ * completed run holds its pane forever and the next `hpipe start` in the same
+ * terminal is silently never advanced.
+ */
+export function pickOneAdvance(runs: Run[]): Run[] {
+  const seen = new Set<string>()
+  const picked: Run[] = []
+  for (const run of runs) {
+    if (FINISHED.has(run.phase)) continue
+    const pane = run.orchestrator_pane
+    if (!pane || seen.has(pane)) continue
+    seen.add(pane)
+    picked.push(run)
+  }
+  return picked
+}
+```
+
+- [ ] **Step 4: Give `gh` the run's repo (Critical)**
+
+`main.ts:49` builds one `new Gh(config.GH_BIN)` with no `cwd`, so every `gh` call inherits the
+supervisor's own working directory — the dedicated pipeline workspace, not any repo. `prForBranch`
+therefore never resolves a task's PR, so no task ever leaves `execute` once a worker finishes. The
+`Gh` constructor already takes a `cwd`; nothing in production passed one.
+
+Replace the single instance with a per-repo cache. Near where `herdr` is constructed:
+
+```ts
+  // gh must run inside the run's own checkout: a PR lookup resolves against the
+  // repo of the working directory, and the supervisor's own cwd is the pipeline
+  // workspace, which is not a repo at all.
+  const ghClients = new Map<string, Gh>()
+  const ghFor = (repoRoot: string): Gh => {
+    let client = ghClients.get(repoRoot)
+    if (!client) {
+      client = new Gh(config.GH_BIN, repoRoot)
+      ghClients.set(repoRoot, client)
+    }
+    return client
+  }
+```
+
+Delete `const gh = new Gh(config.GH_BIN)`.
+
+The CI poll already receives the repo root and was discarding it:
+
+```ts
+        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
+```
+
+And inside the per-run body, resolve once and use it everywhere `gh` was used:
+
+```ts
+          const runGh = ghFor(run.repo_root)
+```
+
+so the `advanceTasks` dependency object becomes:
+
+```ts
+            prForBranch: (branch) => runGh.prForBranch(branch),
+            prView: (pr) => runGh.prView(pr),
+            issueView: (issue) => runGh.issueView(issue),
+            ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
+```
+
+- [ ] **Step 5: Session-scope the event queue**
+
+Every other piece of shared state is namespaced by session, but the queue is not — and `drain()`
+unlinks as it reads, so whichever session's supervisor ticks first destroys the other's events.
+
+- `src/hooks/_hook.ts`: `const session = sessionKey()` first, then
+  `await runHook(kind, join(stateDir, 'queue', session), session, process.env.HERDR_PLUGIN_EVENT_JSON ?? '')`
+- `src/supervisor/main.ts`: `const queueDir = join(stateDir, 'queue', session)`
+- `src/cli.ts` `cmdDrain`: `drain(joinPath(ctx.stateDir, 'queue', ctx.session))`
+- `src/actions/drain.ts`: `drain(join(stateDir, 'queue', sessionKey()))` — import `sessionKey`.
+
+Also update the `.tmp` GC in `src/startup.ts` to the session's queue:
+`await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)`.
+
+- [ ] **Step 6: Prompt the orchestrator when the run enters `branch-review`**
+
+`runTeardown` flips the run to `branch-review` with no prompt, and `promptForRunPhase`'s
+`branch-review` case is only reachable on a later self-loop — so on first entry the orchestrator is
+told nothing until a generic stall probe fires 15 minutes later, and that probe names no verdict path
+or format.
+
+In `src/supervisor/deliver.ts`, export the existing renderer so the wiring can reuse it rather than
+duplicating prompt logic:
+
+```ts
+export async function promptForRunPhase(run: Run, config: Config): Promise<string> {
+```
+
+In `src/supervisor/main.ts`, inside the per-run body, capture the phase before the task driver runs
+and render if it changed:
+
+```ts
+          const runPhaseBefore = run.phase
+          const taskPrompts = await advanceTasks(run, { /* …as now… */ })
+
+          if (run.phase !== runPhaseBefore) {
+            const entered = await promptForRunPhase(run, config)
+            if (entered.length > 0) taskPrompts.push(entered)
+          }
+```
+
+Import `promptForRunPhase` alongside the other `./deliver` imports.
+
+- [ ] **Step 7: Remove the dead exports**
+
+`ARTIFACT_TASK_PHASES` (`src/lib/machine.ts`) is referenced nowhere — delete it. `cmdForget`
+(`src/cli.ts`) hand-rolls the workspace→run lookup that `runForWorkspace` (`src/lib/ledger.ts`)
+already provides; use `runForWorkspace` there and keep the helper, or delete the helper and keep the
+inline loop. Pick one and say which in your report.
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 198 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test
+git commit -m "fix: run gh in the run's repo and stop finished runs holding their pane"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
