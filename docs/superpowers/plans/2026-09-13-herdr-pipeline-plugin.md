@@ -6660,6 +6660,239 @@ git commit -m "fix: run gh in the run's repo and stop finished runs holding thei
 
 ---
 
+## Task 34: Close the orchestrator-reclaim loop and the second starvation case
+
+Round 4 confirmed the happy path now completes end to end and that the previous fix introduced
+nothing. Two Importants remain, both cheap.
+
+**Files:**
+- Modify: `src/supervisor/tick.ts`, `src/lib/ledger.ts`, `src/lib/orchestrator.ts`,
+  `src/actions/claim.ts`, `src/lib/status.ts`, `src/cli.ts`, `README.md`
+- Modify: `test/tick.test.ts`, `test/orchestrator.test.ts`, `test/status.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tick.test.ts`:
+
+```ts
+test('an escalated run does not starve a later run sharing its pane', () => {
+  // Same class as the `done` case: escalated never clears orchestrator_pane and
+  // needs a human `hpipe rewind` to leave, so it would hold the pane forever.
+  const stuck = mkRun([])
+  stuck.phase = 'escalated'
+  stuck.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  const picked = pickOneAdvance([stuck, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})
+```
+
+Replace the repo-provenance test in `test/orchestrator.test.ts` so it matches on `repo_root`:
+
+```ts
+test('falls back to the repo primary workspace agent pane', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w9', label: 'wt', worktree: { repo_key: 'opaque-a', repo_root: '/r', is_linked_worktree: true } },
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque-b', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p1', agent_status: 'idle' }] } },
+  })
+  // Matches on repo_root, a filesystem path, because herdr's repo_key is an
+  // opaque herdr identifier while every run record keys off `git rev-parse
+  // --show-toplevel`. Comparing those two would never match.
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', '/r')).toBe('w1:p1')
+})
+```
+
+Append to `test/status.test.ts`:
+
+```ts
+test('reports an orchestrator pane that no longer exists', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w4:p9'
+  const text = formatStatus([run], { state: 'live' }, 'personal', new Set())
+  expect(text).toContain('orchestrator pane w4:p9 is gone')
+  expect(text).toContain('claim')
+})
+
+test('does not warn when the pane is live', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w1:p1'
+  const text = formatStatus([run], { state: 'live' }, 'personal', new Set(['w1:p1']))
+  expect(text).not.toContain('is gone')
+})
+```
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/tick.test.ts test/orchestrator.test.ts test/status.test.ts`
+Expected: the escalated-starvation test fails (`picked[0].phase` is `'escalated'`); the orchestrator
+test fails (resolution returns null, since it still compares `repo_key`); the two status tests fail
+(`formatStatus` takes three arguments).
+
+- [ ] **Step 3: One source of truth for terminal run phases**
+
+`FINISHED` is currently defined twice — `src/lib/ledger.ts` and `src/supervisor/tick.ts` — for two
+different questions, and they were allowed to drift, which is exactly how the second starvation case
+survived. Put both in `src/lib/machine.ts` with names that say what each is for:
+
+```ts
+/** A run in one of these needs no further automatic advancement. */
+export const COMPLETED_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>(['done'])
+
+/**
+ * A run in one of these must not hold an orchestrator pane slot: neither clears
+ * `orchestrator_pane`, and both need a human (`hpipe rewind`/`abort`) to leave,
+ * so either would starve the next run started in that same terminal.
+ */
+export const PANE_RELEASING_RUN_PHASES: ReadonlySet<RunPhase> =
+  new Set<RunPhase>(['done', 'escalated'])
+```
+
+`ledger.ts` imports `COMPLETED_RUN_PHASES` for `activeRunForRepo` (unchanged behaviour — an escalated
+run still blocks a second run on the *same* repo, which is correct). `tick.ts` imports
+`PANE_RELEASING_RUN_PHASES` for `pickOneAdvance`. Delete both local `FINISHED` constants.
+
+- [ ] **Step 4: Resolve orchestrators by repo root, not repo key**
+
+`src/lib/orchestrator.ts`'s provenance branch compares herdr's `worktree.repo_key` against the run's
+`repo_key`, but `cmdStart` sets `repo_key` from `git rev-parse --show-toplevel` while herdr's
+`repo_key` is its own opaque identifier — so that branch could never match. Compare the paths instead:
+
+```ts
+export async function resolveOrchestrator(
+  stateDir: string, herdr: Herdr, session: SessionKey, repoRoot: string,
+): Promise<string | null> {
+  const claimed = await readOrchestrator(stateDir, session, repoRoot)
+  if (claimed) {
+    const panes = await herdr.paneList(claimed.workspace_id)
+    if (panes.some((p) => p.pane_id === claimed.pane_id)) return claimed.pane_id
+  }
+
+  // herdr's repo_key is an opaque herdr identifier; run records key off the git
+  // toplevel path. repo_root is the only value both sides agree on.
+  const workspaces = await herdr.workspaceList()
+  const primary = workspaces.find(
+    (w) => w.worktree?.repo_root === repoRoot && w.worktree.is_linked_worktree === false,
+  )
+  if (!primary) return null
+
+  const panes = await herdr.paneList(primary.workspace_id)
+  const agentPanes = panes.filter(
+    (p) => p.agent_status !== undefined && p.agent_status !== 'unknown',
+  )
+  if (agentPanes.length !== 1) return null
+  return agentPanes[0]?.pane_id ?? null
+}
+```
+
+Rename the parameter at the remaining call sites accordingly. (Run records set `repo_key === repo_root`,
+so passing either is the same string today; the rename documents which one is meant.)
+
+- [ ] **Step 5: Make `claim` actually rebind the run**
+
+`src/actions/claim.ts` currently writes `orchestrators.json` and nothing reads it for delivery
+routing, so the manifest's "Claim this pane as orchestrator" action has no effect on a live run — and
+it is the documented recovery when an orchestrator pane dies or changes id. Make it rebind:
+
+```ts
+import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
+import { sessionKey } from '../lib/session'
+
+const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
+const paneId = process.env.HERDR_PANE_ID
+const workspaceId = process.env.HERDR_WORKSPACE_ID
+if (!stateDir || !paneId || !workspaceId) {
+  console.error('[pipeline] claim must be invoked from inside a pane')
+  process.exit(1)
+}
+
+// Identify the repo the same way `hpipe start` does — the git toplevel — rather
+// than by herdr's opaque repo_key, so the two agree.
+const proc = Bun.spawn(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' })
+const repoRoot = (await new Response(proc.stdout).text()).trim()
+await proc.exited
+if (repoRoot.length === 0) {
+  console.error('[pipeline] claim must be invoked from inside a git repository')
+  process.exit(1)
+}
+
+const session = sessionKey()
+await writeOrchestrator(stateDir, session, repoRoot, {
+  pane_id: paneId,
+  workspace_id: workspaceId,
+  socket_path: process.env.HERDR_SOCKET_PATH ?? '',
+  claimed_at: Date.now(),
+})
+
+const run = await activeRunForRepo(stateDir, session, repoRoot)
+if (run) {
+  run.orchestrator_pane = paneId
+  run.history.push({ at: Date.now(), from: 'claim', to: run.phase, why: `orchestrator rebound to ${paneId}` })
+  await saveRun(stateDir, run)
+  console.log(`[pipeline] ${paneId} now drives ${run.run_id}`)
+} else {
+  console.log(`[pipeline] claimed ${paneId} for ${repoRoot}; no active run yet`)
+}
+```
+
+- [ ] **Step 6: Surface a dead orchestrator pane in `hpipe status`**
+
+`src/lib/status.ts` — add a fourth parameter and the warning:
+
+```ts
+export function formatStatus(
+  runs: Run[], supervisor: StatusSupervisor, session: SessionKey,
+  livePanes: ReadonlySet<string> = new Set(),
+): string {
+```
+
+and inside the per-run block, after the orchestrator line:
+
+```ts
+    if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {
+      lines.push(`  ⚠ orchestrator pane ${run.orchestrator_pane} is gone — run the plugin's`)
+      lines.push(`    "claim" action from the pane that should drive this run`)
+    }
+```
+
+In `src/cli.ts`'s `cmdStatus` and `src/actions/status.ts`, pass the live pane set from
+`new Herdr().paneList()` (all panes, no workspace filter), mapped to `pane_id`. If the herdr call
+fails it returns `[]`, and an empty set disables the check — which is why the guard tests
+`livePanes.size > 0`.
+
+- [ ] **Step 7: Document the recovery**
+
+In `README.md`'s "Getting out" table, add a row:
+
+```
+| Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
+```
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 201 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test README.md
+git commit -m "fix: make claim rebind a run and stop escalated runs holding a pane"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
