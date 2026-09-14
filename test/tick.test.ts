@@ -1,0 +1,100 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import { newRun, saveRun } from '../src/lib/ledger'
+import type { QueuedEvent, Run, Task } from '../src/lib/types'
+
+let dir: string
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'tick-')) })
+afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  depends_on: [], files: [], keep_worktree: false, text: '',
+  workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
+  phase: 'execute', pass: 1, phase_entered_at: 0, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null, ...over,
+})
+
+function mkRun(tasks: Task[]): Run {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'execute'
+  run.tasks = tasks
+  return run
+}
+
+test('an agent_status event updates the matching task', () => {
+  const run = mkRun([mkTask({})])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'idle' },
+  ]
+  const { changed } = applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.agent_status).toBe('idle')
+  expect(changed).toBe(true)
+})
+
+test('events for another session are ignored', () => {
+  const run = mkRun([mkTask({})])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'default', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'idle' },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.agent_status).toBe('working')
+})
+
+test('an orchestrator pane event never wakes anything', () => {
+  const run = mkRun([mkTask({})])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w1:p1', workspace_id: 'w1', agent_status: 'idle' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set(['w1:p1']))
+  expect(wake).toHaveLength(0)
+})
+
+test('a repeated status is deduped', () => {
+  const run = mkRun([mkTask({ agent_status: 'idle' })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'idle' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake).toHaveLength(0)
+})
+
+test('pane.exited marks the task failed when it has no PR', () => {
+  const run = mkRun([mkTask({ pr: null })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('failed')
+})
+
+test('an agent release also fails the task', () => {
+  const run = mkRun([mkTask({})])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', released: true },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('failed')
+})
+
+test('worktree.created binds a workspace to the matching branch', () => {
+  const run = mkRun([mkTask({ workspace_id: null, branch: 'feat/x' })])
+  const events: QueuedEvent[] = [
+    { kind: 'worktree.created', session: 'personal', at: 1, workspace_id: 'w9', branch: 'feat/x', repo_key: 'k', repo_root: '/r', is_linked_worktree: true },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.workspace_id).toBe('w9')
+})
+
+test('pickOneAdvance returns at most one candidate per orchestrator', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'task-review-spec' }),
+    mkTask({ task_id: 't2', phase: 'task-review-quality' }),
+  ])
+  run.orchestrator_pane = 'w1:p1'
+  const picked = pickOneAdvance([run])
+  expect(picked).toHaveLength(1)
+})
