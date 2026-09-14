@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { detectCycle, gateStatus } from './lib/gating'
 import {
@@ -52,6 +53,11 @@ export async function cmdTask(ctx: Ctx, input: {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const run = runs.find((r) => r.phase === 'dispatch' || r.phase === 'execute')
   if (!run) return fail('no run is in the dispatch or execute phase')
+
+  const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
+  if (!existsSync(agentFile)) {
+    return fail(`no agent definition at ${agentFile} — check --surface`)
+  }
 
   const task: Task = {
     task_id: `t${run.tasks.length + 1}`,
