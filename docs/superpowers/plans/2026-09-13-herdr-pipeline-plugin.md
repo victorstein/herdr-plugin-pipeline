@@ -1243,10 +1243,20 @@ test('marks a release on agent_detected', () => {
   expect(event.released).toBe(true)
 })
 
-test('returns null-ish safe event for unparseable JSON', () => {
-  const event = toQueuedEvent('pane.exited', 'personal', 'not json')
-  expect(event.kind).toBe('pane.exited')
-  expect(event.pane_id).toBeUndefined()
+test('returns null for unparseable JSON', () => {
+  expect(toQueuedEvent('pane.exited', 'personal', 'not json')).toBeNull()
+})
+
+test('returns null for JSON that parses to a non-object', () => {
+  // JSON.parse("null") succeeds; reading a field off it would throw out of a hook.
+  expect(toQueuedEvent('pane.exited', 'personal', 'null')).toBeNull()
+  expect(toQueuedEvent('pane.exited', 'personal', '42')).toBeNull()
+})
+
+test('an unparseable payload enqueues nothing rather than a phantom entry', async () => {
+  const { runHook } = await import('../src/hooks/_hook')
+  await runHook('pane.exited', dir, 'personal', 'null')
+  expect(await drain(dir)).toHaveLength(0)
 })
 
 test('the enqueued event survives a round trip through the queue', async () => {
@@ -1283,15 +1293,22 @@ interface RawEvent {
   worktree?: { branch?: string | null; path?: string }
 }
 
-export function toQueuedEvent(kind: EventKind, session: string, rawJson: string): QueuedEvent {
-  const event: QueuedEvent = { kind, session, at: Date.now() }
-
+/** Returns null when the payload carries nothing actionable. */
+export function toQueuedEvent(
+  kind: EventKind, session: string, rawJson: string,
+): QueuedEvent | null {
   let raw: RawEvent
   try {
-    raw = JSON.parse(rawJson) as RawEvent
+    const parsed: unknown = JSON.parse(rawJson)
+    // `JSON.parse("null")` succeeds and returns null, so guarding the parse
+    // alone is not enough — reading a field off it would throw out of a hook.
+    if (parsed === null || typeof parsed !== 'object') return null
+    raw = parsed as RawEvent
   } catch {
-    return event
+    return null
   }
+
+  const event: QueuedEvent = { kind, session, at: Date.now() }
 
   if (raw.pane_id) event.pane_id = raw.pane_id
   if (raw.agent_status) event.agent_status = raw.agent_status
@@ -1316,7 +1333,15 @@ export function toQueuedEvent(kind: EventKind, session: string, rawJson: string)
 export async function runHook(
   kind: EventKind, queueDir: string, session: string, rawJson: string,
 ): Promise<void> {
-  await enqueue(queueDir, toQueuedEvent(kind, session, rawJson))
+  const event = toQueuedEvent(kind, session, rawJson)
+  if (!event) {
+    // A queue entry with no fields is indistinguishable from a legitimately
+    // sparse event, so the supervisor could not act on it either way. Report
+    // and drop rather than enqueue something unactionable.
+    console.error(`[pipeline] ${kind}: unparseable event payload, dropped`)
+    return
+  }
+  await enqueue(queueDir, event)
 }
 
 /** Entrypoint shared by all five hook scripts. Parses env, enqueues, exits. */
@@ -1600,6 +1625,23 @@ test('falls back to the repo primary workspace agent pane', async () => {
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBe('w1:p1')
 })
 
+test('returns null when two agent panes qualify, rather than picking one', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'k', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+    'pane list': { result: { panes: [
+      { pane_id: 'w1:p1', agent_status: 'idle' },
+      { pane_id: 'w1:p2', agent_status: 'working' },
+    ] } },
+  })
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
+})
+
 test('returns null rather than guessing when nothing resolves', async () => {
   const bin = await makeFakeBin(dir, { 'workspace list': { result: { workspaces: [] } } })
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
@@ -1646,8 +1688,15 @@ export async function resolveOrchestrator(
   if (!primary) return null
 
   const panes = await herdr.paneList(primary.workspace_id)
-  const agentPane = panes.find((p) => p.agent_status !== undefined && p.agent_status !== 'unknown')
-  return agentPane?.pane_id ?? null
+  const agentPanes = panes.filter(
+    (p) => p.agent_status !== undefined && p.agent_status !== 'unknown',
+  )
+
+  // Ambiguity is not resolved by guessing. Pane list order is not documented as
+  // meaningful, and picking wrong types a long prompt into an unrelated agent.
+  // Explicit `claim` is the disambiguator, so force it.
+  if (agentPanes.length !== 1) return null
+  return agentPanes[0]?.pane_id ?? null
 }
 ```
 
