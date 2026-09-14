@@ -6893,6 +6893,177 @@ git commit -m "fix: make claim rebind a run and stop escalated runs holding a pa
 
 ---
 
+## Task 35: Let the supervisor re-resolve a stale orchestrator pane
+
+`resolveOrchestrator` is the last component that is fully built and unit-tested but never called from
+production. Task 34 routed around it — `claim` writes `orchestrator_pane` directly, `hpipe status`
+reads `paneList` directly — which closes the practical problem only if a human notices and acts.
+
+Wire it so the supervisor self-heals instead. herdr brings a restored pane back with a new id, so a
+run whose `orchestrator_pane` went stale should recover on the next tick rather than failing delivery
+until `PROMPT_RETRY_MAX` is exhausted and then going quiet.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/lib/orchestrator.ts`
+- Create: `test/rebind.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/rebind.test.ts
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { makeFakeBin } from './helpers/fake-bin'
+import { Herdr } from '../src/lib/herdr'
+import { newRun } from '../src/lib/ledger'
+import { rebindOrchestrator } from '../src/lib/orchestrator'
+import type { Run } from '../src/lib/types'
+
+let dir: string
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'rebind-')) })
+afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+function mkRun(pane: string | null): Run {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: '/r', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = pane
+  return run
+}
+
+test('a live pane is left alone and costs no resolution', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w1:p1', agent_status: 'idle' }] } },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(false)
+  expect(run.orchestrator_pane).toBe('w1:p1')
+})
+
+test('a stale pane is rebound from repo provenance', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list --workspace w1': { result: { panes: [{ pane_id: 'w1:p7', agent_status: 'idle' }] } },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p7', agent_status: 'idle' }] } },
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(true)
+  expect(run.orchestrator_pane).toBe('w1:p7')
+  expect(run.history.at(-1)?.why).toContain('rebound')
+})
+
+test('an unresolvable orchestrator is left untouched rather than cleared', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [] } },
+    'workspace list': { result: { workspaces: [] } },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(false)
+  // Keeping the stale id preserves the diagnostic `hpipe status` prints.
+  expect(run.orchestrator_pane).toBe('w1:p1')
+})
+
+test('a run with no orchestrator at all can acquire one', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list --workspace w1': { result: { panes: [{ pane_id: 'w1:p3', agent_status: 'idle' }] } },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p3', agent_status: 'idle' }] } },
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+  })
+  const run = mkRun(null)
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(true)
+  expect(run.orchestrator_pane).toBe('w1:p3')
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/rebind.test.ts`
+Expected: FAIL — `rebindOrchestrator` is not exported.
+
+- [ ] **Step 3: Implement**
+
+Append to `src/lib/orchestrator.ts`:
+
+```ts
+/**
+ * Re-points a run at a live orchestrator pane when its recorded one has gone.
+ * herdr restores a pane under a new id, so without this a run keeps prompting a
+ * pane that no longer exists until the retry budget runs out, then goes quiet.
+ *
+ * Returns whether the run was changed. A run whose orchestrator cannot be
+ * resolved keeps its stale id on purpose — clearing it would lose the
+ * diagnostic `hpipe status` prints.
+ */
+export async function rebindOrchestrator(
+  stateDir: string, herdr: Herdr, session: SessionKey, run: Run,
+): Promise<boolean> {
+  if (run.orchestrator_pane) {
+    const panes = await herdr.paneList()
+    if (panes.some((p) => p.pane_id === run.orchestrator_pane)) return false
+  }
+
+  const resolved = await resolveOrchestrator(stateDir, herdr, session, run.repo_root)
+  if (!resolved || resolved === run.orchestrator_pane) return false
+
+  const previous = run.orchestrator_pane ?? 'none'
+  run.orchestrator_pane = resolved
+  run.history.push({
+    at: Date.now(), from: previous, to: resolved,
+    why: `orchestrator rebound after ${previous} went away`,
+  })
+  return true
+}
+```
+
+Import `Run` alongside the existing type imports.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/rebind.test.ts`
+Expected: PASS, 4 tests.
+
+- [ ] **Step 5: Wire it into the tick**
+
+In `src/supervisor/main.ts`, inside the per-run `try` block and **before** anything reads
+`run.orchestrator_pane` (so before `evaluateRun`), add:
+
+```ts
+          await rebindOrchestrator(stateDir, herdr, session, run)
+```
+
+Import `rebindOrchestrator` from `../lib/orchestrator`. The existing unconditional `saveRun` later in
+the same block persists any rebinding, so no extra save is needed.
+
+Note this adds one `pane list` call per picked run per tick. That is one herdr socket round trip, not
+a `gh` subprocess, and it replaces a failure mode that currently costs `PROMPT_RETRY_MAX` failed
+prompt deliveries before going silent.
+
+- [ ] **Step 6: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 205 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src test
+git commit -m "feat: re-resolve a run's orchestrator pane when it goes stale"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
