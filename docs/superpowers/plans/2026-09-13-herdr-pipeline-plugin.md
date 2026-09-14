@@ -2166,7 +2166,7 @@ or
     MAJORS: 3
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 7: Write `prompts/dispatch.md`**
@@ -2268,7 +2268,7 @@ or
     MAJORS: 0
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 10: Write `prompts/task-review-quality.md`**
@@ -2301,7 +2301,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 11: Write `prompts/ci-red.md`**
@@ -2378,7 +2378,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 15: Write `prompts/escalate.md`**
