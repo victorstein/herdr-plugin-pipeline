@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { detectCycle, gateStatus } from './lib/gating'
 import {
-  activeRunForRepo, listRuns, newRun, saveRun, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
 } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase } from './lib/machine'
 import { supervisorState } from './lib/pidfile'
@@ -140,7 +140,7 @@ export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
 }
 
 export async function cmdDrain(ctx: Ctx): Promise<CmdResult> {
-  const events = await drain(join(ctx.stateDir, 'queue'))
+  const events = await drain(join(ctx.stateDir, 'queue', ctx.session))
   return ok(events.length === 0 ? 'queue empty' : JSON.stringify(events, null, 2))
 }
 
@@ -175,16 +175,14 @@ export async function cmdResume(ctx: Ctx, input: { runId: string }): Promise<Cmd
 }
 
 export async function cmdForget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {
-  const runs = await listRuns(ctx.stateDir, ctx.session)
-  for (const run of runs) {
-    const task = run.tasks.find((t) => t.workspace_id === input.workspaceId)
-    if (!task) continue
-    task.workspace_id = null
-    task.pane_id = null
-    await saveRun(ctx.stateDir, run)
-    return ok(`unbound ${input.workspaceId} from ${task.task_id}`)
-  }
-  return fail(`no task is bound to ${input.workspaceId}`)
+  const run = await runForWorkspace(ctx.stateDir, ctx.session, input.workspaceId)
+  const task = run?.tasks.find((t) => t.workspace_id === input.workspaceId)
+  if (!run || !task) return fail(`no task is bound to ${input.workspaceId}`)
+
+  task.workspace_id = null
+  task.pane_id = null
+  await saveRun(ctx.stateDir, run)
+  return ok(`unbound ${input.workspaceId} from ${task.task_id}`)
 }
 
 // ——— argv dispatcher ———

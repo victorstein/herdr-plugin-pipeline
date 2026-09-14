@@ -104,7 +104,7 @@ export async function evaluateRun(
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
 }
 
-async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
+export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   const specPath = join(run.repo_root, run.artifacts.spec ?? 'docs/superpowers/specs/design.md')
   const planPath = join(run.repo_root, run.artifacts.plan ?? 'docs/superpowers/plans/plan.md')

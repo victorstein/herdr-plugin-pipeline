@@ -63,3 +63,15 @@ test('gcStaleTmp removes only .tmp files older than the cutoff', async () => {
   expect(await gcStaleTmp(dir, 0)).toBe(1)
   expect(readdirSync(dir)).toEqual(['keep.json'])
 })
+
+test('queues in different sessions do not consume each other', async () => {
+  // drain() unlinks as it reads, so a shared queue directory means whichever
+  // supervisor ticks first destroys the other session's events.
+  const a = join(dir, 'queue', 'personal')
+  const b = join(dir, 'queue', 'default')
+  await enqueue(a, ev(1))
+  await enqueue(b, ev(2))
+
+  expect((await drain(a)).map((e) => e.at)).toEqual([1])
+  expect((await drain(b)).map((e) => e.at)).toEqual([2])
+})

@@ -70,5 +70,6 @@ export async function runHook(
 export async function main(kind: EventKind): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   if (!stateDir) process.exit(0)
-  await runHook(kind, join(stateDir, 'queue'), sessionKey(), process.env.HERDR_PLUGIN_EVENT_JSON ?? '')
+  const session = sessionKey()
+  await runHook(kind, join(stateDir, 'queue', session), session, process.env.HERDR_PLUGIN_EVENT_JSON ?? '')
 }

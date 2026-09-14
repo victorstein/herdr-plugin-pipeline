@@ -92,7 +92,7 @@ async function main(): Promise<void> {
   const config = await loadConfig(configDir)
   const herdr = new Herdr()
 
-  await gcStaleTmp(join(stateDir, 'queue'), ONE_HOUR_MS)
+  await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)
 
   if (config.HPIPE_LINK) {
     await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)

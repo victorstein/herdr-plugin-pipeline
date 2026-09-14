@@ -98,3 +98,25 @@ test('pickOneAdvance returns at most one candidate per orchestrator', () => {
   const picked = pickOneAdvance([run])
   expect(picked).toHaveLength(1)
 })
+
+test('a finished run does not starve a later run sharing its orchestrator pane', () => {
+  const finished = mkRun([])
+  finished.phase = 'done'
+  finished.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  // listRuns sorts deterministically, so without a phase filter the finished run
+  // wins the pane forever and its successor is never evaluated.
+  const picked = pickOneAdvance([finished, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})
+
+test('two runs on different panes are both picked', () => {
+  const a = mkRun([]); a.orchestrator_pane = 'w1:p1'
+  const b = mkRun([]); b.orchestrator_pane = 'w2:p1'
+  expect(pickOneAdvance([a, b])).toHaveLength(2)
+})

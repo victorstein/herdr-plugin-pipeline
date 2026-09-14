@@ -97,8 +97,6 @@ const TASK_REVIEW_PHASES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'task-review-spec', 'task-review-quality',
 ])
 
-export const ARTIFACT_TASK_PHASES = TASK_REVIEW_PHASES
-
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
   switch (task.phase) {
     case 'execute': {

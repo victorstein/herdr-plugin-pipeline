@@ -88,15 +88,19 @@ export function applyEvents(
   return { changed, wake }
 }
 
+const FINISHED: ReadonlySet<string> = new Set(['done'])
+
 /**
- * At most one orchestrator-owned advance per orchestrator per tick. Every
- * orchestrator-owned row gates on the same pane reading idle, so without this
- * several phases enter together and the digest's single prompt slot has no winner.
+ * At most one orchestrator-owned advance per orchestrator per tick. Finished runs
+ * are skipped: their `orchestrator_pane` is never cleared, so without this a
+ * completed run holds its pane forever and the next `hpipe start` in the same
+ * terminal is silently never advanced.
  */
 export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
+    if (FINISHED.has(run.phase)) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)

@@ -7,7 +7,9 @@ import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
 import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
-import { artifactPathFor, type DigestInput, evaluateRun, nextDelivery, refreshBadges, shouldRetry } from './deliver'
+import {
+  artifactPathFor, type DigestInput, evaluateRun, nextDelivery, promptForRunPhase, refreshBadges, shouldRetry,
+} from './deliver'
 import { stallCandidates, taskStallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
@@ -46,10 +48,23 @@ async function main(): Promise<void> {
 
   const config = await loadConfig(configDir)
   const herdr = new Herdr()
-  const gh = new Gh(config.GH_BIN)
+
+  // gh must run inside the run's own checkout: a PR lookup resolves against the
+  // repo of the working directory, and the supervisor's own cwd is the pipeline
+  // workspace, which is not a repo at all.
+  const ghClients = new Map<string, Gh>()
+  const ghFor = (repoRoot: string): Gh => {
+    let client = ghClients.get(repoRoot)
+    if (!client) {
+      client = new Gh(config.GH_BIN, repoRoot)
+      ghClients.set(repoRoot, client)
+    }
+    return client
+  }
+
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   const pluginId = process.env.HERDR_PLUGIN_ID ?? 'stein.pipeline'
-  const queueDir = join(stateDir, 'queue')
+  const queueDir = join(stateDir, 'queue', session)
 
   console.log(`[pipeline] supervisor up — session ${session}, tick ${config.TICK_MS}ms`)
 
@@ -89,24 +104,26 @@ async function main(): Promise<void> {
 
       if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
         lastCiPollMs = Date.now()
-        await ciTransitions(runs, async (pr) => gh.prChecks(pr))
+        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
       }
 
       const digests: DigestInput[] = []
       for (const run of pickOneAdvance(runs)) {
         try {
-          const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, gh, config)
+          const runGh = ghFor(run.repo_root)
+          const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
 
           const actorIdle = run.orchestrator_pane !== null &&
             (await herdr.agentStatus(run.orchestrator_pane)) === 'idle'
 
+          const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
             actorIdle,
             maxPasses: config.MAX_PASSES,
-            prForBranch: (branch) => gh.prForBranch(branch),
-            prView: (pr) => gh.prView(pr),
-            issueView: (issue) => gh.issueView(issue),
+            prForBranch: (branch) => runGh.prForBranch(branch),
+            prView: (pr) => runGh.prView(pr),
+            issueView: (issue) => runGh.issueView(issue),
             verdictFor: async (r, t) => {
               const relative = artifactPathFor(r, t)
               if (!relative) return null
@@ -116,8 +133,13 @@ async function main(): Promise<void> {
               return parseVerdict(absolute)
             },
             removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
-            ciDetail: async (pr) => (pr === null ? '' : gh.prChecksDetail(pr)),
+            ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
           })
+
+          if (run.phase !== runPhaseBefore) {
+            const entered = await promptForRunPhase(run, config)
+            if (entered.length > 0) taskPrompts.push(entered)
+          }
 
           await refreshBadges(run, herdr, pluginId)
           const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
