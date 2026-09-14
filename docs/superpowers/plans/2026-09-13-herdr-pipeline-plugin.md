@@ -3017,21 +3017,34 @@ construction mid-turn running the command.
 ```ts
 // test/cli.test.ts
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
 import { cmdRewind, cmdStart, cmdTask } from '../src/cli'
 
 let dir: string
+let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
 
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cli-')) })
-afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'cli-'))
+  // `hpipe task` rejects a --surface with no matching agent definition, so the
+  // fixture repo must carry real ones.
+  repoDir = mkdtempSync(join(tmpdir(), 'repo-'))
+  mkdirSync(join(repoDir, '.claude', 'agents'), { recursive: true })
+  for (const surface of ['core', 'api']) {
+    writeFileSync(join(repoDir, '.claude', 'agents', `${surface}-dev.md`), `# ${surface}-dev\n`)
+  }
+})
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true })
+  rmSync(repoDir, { recursive: true, force: true })
+})
 
 test('start opens a run and prints the spec prompt', async () => {
   const out = await cmdStart(ctx(), {
-    title: 'chat meter', repoKey: 'k', repoRoot: '/r', socketPath: '/s',
+    title: 'chat meter', repoKey: 'k', repoRoot: repoDir, socketPath: '/s',
     paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(out.ok).toBe(true)
@@ -3041,10 +3054,10 @@ test('start opens a run and prints the spec prompt', async () => {
 
 test('start refuses a second run for the same repo and names the blocker', async () => {
   const first = await cmdStart(ctx(), {
-    title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+    title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
   })
   const second = await cmdStart(ctx(), {
-    title: 'b', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+    title: 'b', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(second.ok).toBe(false)
   expect(second.text).toContain(JSON.parse(first.json ?? '{}').run_id ?? 'run')
@@ -3052,7 +3065,7 @@ test('start refuses a second run for the same repo and names the blocker', async
 
 test('task prints its id and withholds the prompt while gated', async () => {
   const c = ctx()
-  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
   const run = await activeRunForRepo(dir, 'personal', 'k')
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
@@ -3069,7 +3082,7 @@ test('task prints its id and withholds the prompt while gated', async () => {
 
 test('task rejects a dependency cycle', async () => {
   const c = ctx()
-  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
   const run = await activeRunForRepo(dir, 'personal', 'k')
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
@@ -3080,8 +3093,22 @@ test('task rejects a dependency cycle', async () => {
   expect(bad.text).toContain('cycle')
 })
 
+test('task rejects a surface with no agent definition', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  // A typo in --surface would otherwise render a plausible dead path into the
+  // worker prompt and fail only once the worker went looking for it.
+  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'kore', text: 'y', dependsOn: [], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('kore-dev.md')
+})
+
 test('rewind resets the pass count for the phase it rewinds to', async () => {
-  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.phase = 'escalated'
   run.escalated_from = 'spec-review'
   run.pass = 2
