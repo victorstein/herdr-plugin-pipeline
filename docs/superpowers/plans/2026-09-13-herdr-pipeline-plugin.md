@@ -7064,6 +7064,143 @@ git commit -m "feat: re-resolve a run's orchestrator pane when it goes stale"
 
 ---
 
+## Task 36: Don't destroy the workspace while clearing its stray pane
+
+Found by a live run: **the plugin cannot start at all.**
+
+`ensureWorkspace` creates the pipeline workspace and then closes every pane in it. A freshly created
+workspace has exactly one pane, and closing a workspace's last pane destroys the workspace. So the
+workspace is created, its id is recorded, it is immediately destroyed, and the subsequent
+`plugin pane open --workspace <id>` has nothing to open into. Observed live: `workspace.pipelab.id`
+contained `w1` while `workspace list` returned `[]`, and no supervisor pane ever appeared.
+
+The intent (Task 33) was to clear the stray root pane that `workspace create` opens so it does not sit
+beside the supervisor. The ordering was wrong: the supervisor pane does not exist yet at that point,
+so "every pane" and "the stray pane" are the same pane.
+
+**Fix:** `ensureWorkspace` stops closing panes; `main()` clears strays *after* the supervisor pane is
+open, keeping the supervisor and anything else it does not recognise as a stray shell.
+
+**Files:**
+- Modify: `src/startup.ts`, `test/startup.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Replace the `ensureWorkspace` creation test in `test/startup.test.ts` and add the new reaper test:
+
+```ts
+test('creates the pipeline workspace and leaves its pane alone', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': { result: { workspaces: [] } },
+    'workspace create': { result: { workspace: { workspace_id: 'w3', label: 'pipeline' } } },
+    'pane list': { result: { panes: [{ pane_id: 'w3:p1' }] } },
+    'pane close': { result: {} },
+  })
+  expect(await ensureWorkspace(new Herdr(bin), dir, 'personal', 'pipeline')).toBe('w3')
+
+  // Closing a freshly created workspace's only pane destroys the workspace, so
+  // the stray is cleared after the supervisor exists, not here.
+  const calls = await Bun.file(join(dir, 'calls.log')).text()
+  expect(calls).not.toContain('pane close')
+})
+
+test('clearStrayPanes keeps the supervisor and closes the rest', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [
+      { pane_id: 'w3:p1', label: null },
+      { pane_id: 'w3:p2', label: 'Pipeline supervisor' },
+    ] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual(['w3:p1'])
+})
+
+test('clearStrayPanes closes nothing when only the supervisor is present', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w3:p2', label: 'Pipeline supervisor' }] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual([])
+})
+```
+
+Import `clearStrayPanes` alongside the existing imports.
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/startup.test.ts`
+Expected: FAIL — `clearStrayPanes` is not exported, and the creation test sees a `pane close` call.
+
+- [ ] **Step 3: Implement**
+
+In `src/startup.ts`, remove the pane-closing loop from `ensureWorkspace` so it ends:
+
+```ts
+  const created = await herdr.workspaceCreate(label)
+  const id = created.result?.workspace.workspace_id
+  if (!id) {
+    console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
+    return null
+  }
+  await Bun.write(workspaceIdPath(stateDir, session), id)
+  return id
+```
+
+Add the reaper beside `reapGhostPanes`:
+
+```ts
+/**
+ * Clears the shell pane `workspace create` opens alongside the supervisor. It must
+ * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
+ * the workspace, so clearing it at creation time deletes the very workspace the
+ * supervisor was about to open into.
+ */
+export async function clearStrayPanes(herdr: Herdr, workspaceId: string): Promise<string[]> {
+  const panes = await herdr.paneList(workspaceId)
+  if (panes.length <= 1) return []
+
+  const closed: string[] = []
+  for (const pane of panes) {
+    if (pane.label === SUPERVISOR_LABEL) continue
+    await herdr.paneClose(pane.pane_id)
+    closed.push(pane.pane_id)
+  }
+  return closed
+}
+```
+
+In `main()`, move the clearing to after a successful open:
+
+```ts
+  const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
+  if (!opened.ok) {
+    console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
+    return
+  }
+
+  const strays = await clearStrayPanes(herdr, workspaceId)
+  if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/startup.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 207 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src test
+git commit -m "fix: clear the stray pane after the supervisor opens, not before"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
