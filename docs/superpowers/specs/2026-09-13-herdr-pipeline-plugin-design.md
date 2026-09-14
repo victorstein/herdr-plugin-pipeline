@@ -1,44 +1,56 @@
 # herdr-plugin-pipeline — design
 
 **Date:** 2026-09-13
-**Status:** Design v1
+**Status:** Design v2 — revised after adversarial review (`docs/superpowers/reviews/2026-09-13-design-adversarial-1.md`, VERDICT: BLOCKER)
 **Plugin id:** `stein.pipeline`
 **Target:** herdr 0.9.0+
 **Runtime:** Bun + TypeScript, no build step
+
+> **v2 changes.** v1 was built on two false premises and had no liveness owner. `herdr agent start`
+> does not open a pane in 0.9.0 — it adopts an existing one — so v1's orphan-pane reaper solved a
+> problem that does not exist. herdr caps plugin commands at **32 concurrent and drops events over
+> the cap**, so v1's `sleep`-inside-a-hook debounce was itself a cause of dropped events. v1 also
+> excluded the orchestrator pane from the event path to stop it waking itself, which also excluded
+> it from *evaluation* — seven of twelve phases are evaluated on its idle, so the run dead-stopped
+> at `spec`. Every predicate was level-triggered, so every failure branch livelocked.
+>
+> The resolution is one architectural flip: **event hooks become thin append-and-exit writers, and a
+> single always-on supervisor pane owns all evaluation, delivery, and timing.** Every claim in the
+> facts table below has been re-derived from the 0.9.0 binary, not from prose.
 
 ## Problem
 
 The superpowers pipeline — brainstorm → spec → adversarial review → plan → adversarial review →
 subagent execution → final review → finish branch — currently lives as prose in each repo's
 `CLAUDE.md`. `nicaraguan-laws/CLAUDE.md` carries roughly 60 lines of it, including a hand-run
-dispatch loop with two documented footguns and an instruction to background three
-`herdr wait agent-status` calls per worker agent.
+dispatch loop and an instruction to background three `herdr wait agent-status` calls per worker.
 
-That arrangement has four costs:
+Four costs:
 
-1. **The pipeline is re-taught every session.** The whole thing loads into context whether or not
-   the session is running a pipeline.
-2. **It is duplicated per repo.** `nicaraguan-laws` has it; `crosspoint-x4pro` does not, and would
-   need a copy.
-3. **The orchestrator does its own bookkeeping.** Backgrounded waits, manual pane closes, manual
-   issue/PR/worktree correlation — all spent from the context budget of the agent that should be
-   thinking about the work.
-4. **Failures are silent.** Nothing catches a worker whose pane exited without finishing, and CI is
-   gated by hand.
+1. **The pipeline is re-taught every session** — it loads into context whether or not the session is
+   running a pipeline.
+2. **It is duplicated per repo.** `nicaraguan-laws` has it; `crosspoint-x4pro` does not.
+3. **The orchestrator does its own bookkeeping** — backgrounded waits and manual issue/PR/worktree
+   correlation, spent from the context budget of the agent that should be thinking about the work.
+4. **Failures are silent.** Nothing catches a worker whose pane exited without finishing.
+
+A fifth, discovered during review: **that prose is now wrong.** It documents a `herdr agent start`
+signature that 0.9.0 rejects. Prose drifts; a package with tests does not.
 
 ## Goal
 
-A self-contained herdr plugin that owns the pipeline: it holds the run state, decides what happens
-next, supplies the instruction text for each phase just in time, watches CI, and keeps a single
-orchestrator agent fed so the human never walks the fleet pane by pane.
+A self-contained herdr plugin that owns the pipeline: run state, phase sequencing, just-in-time
+instruction text, CI, and teardown — keeping one orchestrator agent fed so the human never walks the
+fleet pane by pane.
 
 ## Non-goals
 
 - **Driving brainstorming.** It is the one human gate and stays one.
 - **Making merge decisions.** The plugin prompts; the orchestrator merges.
 - **Shipping Claude Code skills.** All instruction text lives in this package.
-- **Replacing `CLAUDE.md`.** Repo-specific architecture, conventions, and footguns stay there. Only
-  the *workflow* sections become redundant.
+- **Replacing `CLAUDE.md`.** Repo-specific architecture, conventions, and footguns stay there.
+- **Fixing `nicaraguan-laws/CLAUDE.md` or `~/.claude/skills/herdr`**, both of which carry the stale
+  `agent start` signature. Flagged, deliberately out of scope, tracked separately.
 - **Cross-machine coordination.** Single herdr server, single machine.
 
 ## Roles
@@ -48,76 +60,106 @@ orchestrator agent fed so the human never walks the fleet pane by pane.
 | **Human** | you | Talks to exactly one pane: the orchestrator |
 | **Orchestrator** | a Claude Code agent in a herdr pane, one per repo, long-lived across runs | Writes specs and plans, dispatches adversarial reviews, decomposes tasks, merges, talks to the human. Never edits app code |
 | **Worker** | a Claude Code agent in a worktree workspace, one per issue | Implements one task, opens one PR |
-| **Plugin** | this package | Owns run state, phase sequencing, all prompt text, event transport, CI polling, teardown |
+| **Supervisor** | a plugin-owned pane in its own workspace | The only component with a clock. Drains the queue, evaluates predicates, advances phases, delivers prompts, polls CI, runs teardown |
+| **Plugin hooks** | five one-shot processes | Append raw events to the queue and exit |
 
-## Architecture
+## Execution model
 
-Three layers in one package. Each is independently testable; the plan stages them as milestones
-even though this spec covers all three.
+This section governs everything below it.
 
-- **L1 Transport** — worktree adoption, orphan-pane reaping, agent status events, durable queue,
-  coalesced delivery to the orchestrator, workspace token badges.
-- **L2 Runner** — the per-run phase state machine, completion predicates, prompt templates.
-- **L3 Integration** — CI supervisor pane, PR/CI events into the same queue, merge → close →
-  teardown.
+**herdr spawns one process per event hook and caps plugin commands at 32 concurrent. Over the cap it
+drops the event** — verified live during review, including a dropped `worktree.created`. A hook that
+blocks holds a slot for its whole duration.
 
-### Verified herdr facts this design depends on
+Therefore:
 
-Established against the installed `herdr 0.9.0` binary's API schema (`herdr api schema`) and the
-v0.9.0 docs. Each is load-bearing; re-verify before changing.
+> **A hook parses its event, appends one line to the queue, and exits. It never sleeps, never calls
+> `gh`, never calls `herdr`, never evaluates a predicate, never renders a prompt.** Target: under
+> 50 ms.
 
-| Fact | Consequence |
-| --- | --- |
-| `[[events]] on` accepts dotted names: `worktree.created`, `worktree.removed`, `pane.agent_detected`, `pane.agent_status_changed`, `pane.exited` | These are the plugin's five event hooks |
-| Event hooks receive `HERDR_PLUGIN_EVENT_JSON` plus `HERDR_PLUGIN_CONTEXT_JSON`, `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_BIN_PATH` | No socket client needed; shell out to `$HERDR_BIN_PATH` |
-| **`plugin.action.invoke` accepts no user arguments** — only `action_id`, `plugin_id`, and a fixed `context` object | Anything carrying data must go through the package's own `hpipe` CLI, not an action |
-| `workspace.metadata_updated` does **not** invoke plugin event hooks | The plugin's own token writes cannot cause an event loop |
-| Workspace/pane tokens are **not restored after a server restart**; ≤32 keys per resource, ≤16 per report, values capped at 80 chars; plugin `source` must be `plugin:<HERDR_PLUGIN_ID>` | Tokens are display only. The ledger is the truth, and the startup hook reapplies badges |
-| `WorkspaceInfo.worktree` carries `repo_key`, `repo_root`, `checkout_path`, `is_linked_worktree` | Parent resolution by repo provenance is possible without being told |
-| `herdr agent prompt <target> <text>` submits in one call and rejects with `agent_blocked` if the target is already blocked, **before sending any input** | Safe delivery primitive; a blocked orchestrator cannot be corrupted by a half-typed prompt |
-| `herdr agent start` **always opens a new pane**, orphaning a worktree's root shell | The reaper exists |
-| `plugin.pane.open` accepts an `env` map | The CI supervisor pane is parameterised without a config file |
-| Startup hooks are one-shot, not supervised daemons | Long-running work goes in a plugin *pane*, not a background process |
+All intelligence lives in the **supervisor**, a single long-lived process in a plugin-owned pane:
+
+```
+every TICK_MS (default 1000):
+  rotate + drain queue        →  dedup against ledger, update tasks, refresh badges
+  evaluate due predicates     →  advance phases (edge-triggered, see below)
+  render + deliver prompts    →  herdr agent prompt, with retry/backoff across ticks
+  every CI_POLL_SECONDS       →  gh pr checks for tasks with open PRs
+  check stalls                →  STALL_MINUTES since phase_entered_at with no artifact
+  run teardown                →  for tasks whose issue is confirmed closed
+```
+
+One process with a clock replaces v1's in-hook `sleep`, `flush.lock`, and per-hook retry loop. It
+also gives `STALL_MINUTES` and `PROMPT_RETRY_MAX` somewhere to live — v1 had no component capable of
+implementing either.
+
+**The supervisor is mandatory infrastructure.** If it is not running, nothing advances. It lives in
+its own unfocused workspace (`PIPELINE_WORKSPACE_LABEL`, default `pipeline`), opened unconditionally
+by the startup hook and reopenable with the `ci-pane` action. Singleton-guarded by a PID file with a
+liveness check; a second instance exits immediately.
+
+Consequence accepted deliberately: the plugin now has a component that can die. It dies *visibly*,
+in a pane you can look at, which is why it is a pane and not a detached daemon.
+
+### Verified herdr facts
+
+Re-derived from `herdr 0.9.0` — `herdr api schema`, `--help` output, and live probe-plugin runs
+during review. Prose in any `CLAUDE.md` is **not** a source. Re-verify before changing.
+
+| Fact | Evidence | Consequence |
+| --- | --- | --- |
+| `herdr agent start <NAME> --kind <KIND> --pane <ID>` adopts an **existing pane at a shell prompt**; `AgentStartParams` requires `name`, `kind`, `pane_id` | `agent start --help`; schema | **No orphaned root pane exists.** The reaper is deleted. Dispatch reuses the worktree's root pane |
+| `worktree.created` payload carries `workspace` + `worktree` and **no pane id** | live hook capture | Root pane comes from the `worktree create` CLI response or `pane list --workspace` |
+| Plugin commands cap at **32 concurrent**; over the cap herdr drops the event | live: `maximum concurrent plugin commands reached (32)` | Hooks must not block. See execution model |
+| Event hook context's `focused_pane_id` is whatever is focused **at event time** — during dispatch that is the worker | live: focused `w1:p1`, hook reported `w5:p1` | Focused-pane fallback for orchestrator resolution is **deleted** |
+| `pane.exited` payload is `{type, pane_id, workspace_id}` — **no exit status** | live hook capture | The digest reports "exited", never "exited (status N)" |
+| Claude Code agent state authority is the **screen manifest**; unmatched prompts fall back to `idle` | `agents.mdx:28,50,60` | Inference can fire on an agent that is not done. See "Limits of inference" |
+| `pane.agent_detected` also fires on agent *release* | docs + live | Handler must check the payload, not assume attach |
+| `herdr agent prompt` rejects with `agent_blocked` **before sending input**; otherwise writes "including while the agent is working", and success acknowledges the write, not a turn | `agent prompt --help` | Safe against a blocked target; mid-turn behaviour is an accepted open risk, mitigated below |
+| `gh pr checks --json` fields are `bucket, completedAt, description, event, link, name, startedAt, state, workflow` — **no `conclusion`**; exit code 8 means pending | `gh pr checks --help`, gh 2.96.0 | CI uses `bucket` (`pass`/`fail`/`pending`/`skipping`/`cancel`) and treats exit 8 as pending, not failure |
+| `plugin.action.invoke` accepts no user arguments — only `action_id`, `plugin_id`, a fixed `context` | schema `PluginActionInvokeParams` | Anything carrying data goes through `hpipe`, not an action |
+| `workspace.metadata_updated` is **rejected as an unknown event name at link time** | live link warning | Never declare it. The five names this plugin uses all validate clean |
+| Workspace/pane tokens are not restored after a server restart; ≤32 keys, ≤16 per report, values capped at 80 chars; plugin `source` must be `plugin:<HERDR_PLUGIN_ID>` | socket-api.mdx | Tokens are display only; the ledger is truth; supervisor reapplies badges |
+| `WorkspaceInfo.worktree` carries `repo_key`, `repo_root`, `checkout_path`, `is_linked_worktree` | schema | Parent resolution by repo provenance |
+| `plugin.pane.open` accepts an `env` map | schema `PluginPaneOpenParams` | Supervisor is parameterised without a config file |
+| Startup hooks are one-shot, not supervised daemons | plugins.mdx | The clock lives in a pane |
+
+`min_herdr_version = "0.9.0"` because `agent start`'s `--kind`/`--pane` signature is the 0.9.0 shape
+and the plugin depends on it directly. (v1 justified this by *not knowing* whether older releases
+worked — an argument from ignorance, and it named the wrong reasons.)
 
 ## Package layout
 
 ```
-herdr-plugin.toml          # herdr manifest
+herdr-plugin.toml
 src/
-  hooks/                   # one entrypoint per event
-    worktree-created.ts
-    agent-detected.ts
-    agent-status.ts
-    pane-exited.ts
-    worktree-removed.ts
+  hooks/                   # append-and-exit only
+    worktree-created.ts  agent-detected.ts  agent-status.ts
+    pane-exited.ts       worktree-removed.ts
+  supervisor/
+    main.ts                # tick loop, singleton guard, render
+    ci.ts                  # gh polling
+    teardown.ts
   actions/                 # argument-less, keybinding-able
     status.ts  claim.ts  drain.ts  ci-pane.ts
-  panes/
-    ci-watch.ts            # long-lived supervisor loop
-  startup.ts               # reconcile, reapply badges, replay queue, link hpipe, open ci pane
-  cli.ts                   # `hpipe` — everything that needs arguments
+  startup.ts               # reconcile, reapply badges, link hpipe, open supervisor workspace
+  cli.ts                   # `hpipe`
   lib/
-    herdr.ts               # typed $HERDR_BIN_PATH wrapper
-    store.ts               # atomic JSON read/modify/write
-    ledger.ts              # orchestrators + runs
-    queue.ts               # append, lock, coalesce, flush
-    machine.ts             # phase transitions + completion predicates
-    render.ts              # template rendering
-    badges.ts              # workspace tokens
-    gh.ts                  # typed `gh` wrapper
+    herdr.ts  gh.ts  store.ts  ledger.ts  queue.ts
+    machine.ts  predicates.ts  render.ts  badges.ts
 prompts/
   spec.md  spec-review.md  plan.md  plan-review.md  dispatch.md
-  task.md  task-review.md  ci-red.md  merge.md  close.md  branch-review.md
+  task.md  task-review-spec.md  task-review-quality.md
+  ci-red.md  merge.md  close.md  branch-review.md
   escalate.md  stall-probe.md  digest.md
 test/
-  fixtures/                # captured event JSON, gh JSON, workspace lists
-  *.test.ts                # bun:test
+  fixtures/                # live-captured event JSON, gh JSON, workspace lists
+  *.test.ts
 ```
 
-No `[[build]]`. Bun executes `.ts` directly, so `herdr plugin link` is instant during development
-and a GitHub install needs no toolchain beyond bun. `bun build --compile` to a single binary stays
-available later; it would add a `[[build]]` entry and change manifest commands to the binary path,
-and is explicitly out of scope for v1.
+No `[[build]]`. Bun executes `.ts` directly. `src/cli.ts` carries a `#!/usr/bin/env bun` shebang and
+mode `0755` in git, because the startup hook symlinks it onto `PATH` and a symlink to a non-executable
+file is not runnable.
 
 ## Manifest
 
@@ -172,281 +214,258 @@ command = ["bun", "run", "src/actions/drain.ts"]
 
 [[actions]]
 id = "ci-pane"
-title = "Open the CI watch pane"
+title = "Reopen the supervisor"
 contexts = ["global"]
 command = ["bun", "run", "src/actions/ci-pane.ts"]
 
 [[panes]]
-id = "ci-watch"
-title = "CI watch"
-placement = "split"
-command = ["bun", "run", "src/panes/ci-watch.ts"]
+id = "supervisor"
+title = "Pipeline supervisor"
+placement = "tab"
+command = ["bun", "run", "src/supervisor/main.ts"]
 ```
-
-`min_herdr_version = "0.9.0"` because the design depends on `agent.prompt`'s pre-send
-`agent_blocked` rejection and on `plugin.pane.open`'s `env` map, neither of which is verified on
-earlier releases.
 
 ## State
 
-All state lives in `$HERDR_PLUGIN_STATE_DIR`. Every write is atomic: write to `<file>.tmp`, then
-`rename(2)`. Concurrent hook processes are real — herdr spawns one per event.
+All state in `$HERDR_PLUGIN_STATE_DIR`. Every write is atomic (`<file>.tmp` → `rename(2)`).
 
 ```
-orchestrators.json      repo_key -> { pane_id, workspace_id, claimed_at, source: "claim" | "provenance" }
-runs/<run_id>.json      one pipeline run
-queue.jsonl             append-only pending events
-flush.lock/             mkdir-based mutex for the debounce window
+orchestrators.json   repo_key -> { pane_id, workspace_id, claimed_at }
+runs/<run_id>.json
+queue/               rotated segments; hooks append, supervisor rotates then reads
+supervisor.pid
 ```
+
+The queue is a **directory of rotated segments**, not one truncated file. The supervisor renames the
+active segment aside before reading it, so a hook appending concurrently writes to the new segment
+and nothing is lost. v1's read-then-truncate raced every late appender.
 
 ### Run
 
 ```jsonc
 {
-  "run_id": "nicaraguan-laws-20260913-chat-meter",
-  "repo_key": "…",
-  "repo_root": "/Volumes/stein/Documents/development/personal/nicaraguan-laws",
+  "run_id": "nicaraguan-laws-20260913-chat-meter-a1b2",
+  "repo_key": "…", "repo_root": "/…/nicaraguan-laws",
   "title": "chat meter",
-  "phase": "spec-review",
-  "pass": 1,
-  "orchestrator_pane": "w1:p1",
+  "phase": "spec-review", "pass": 1,
   "phase_entered_at": 1789000000000,
+  "orchestrator_pane": "w1:p1",
   "artifacts": {
     "spec": "docs/superpowers/specs/2026-09-13-chat-meter-design.md",
     "plan": null,
     "verdicts": { "spec-review-1": "docs/superpowers/reviews/…-spec-1.md" }
   },
-  "tasks": [
-    {
-      "task_id": "t1", "branch": "feat/chat-t4-chat-meter", "issue": 210,
-      "workspace_id": "w7", "pane_id": "w7:p1", "root_pane_id": "w7:p0",
-      "status": "working", "pr": null, "ci": null, "phase": "execute",
-      "text": "…full task text, supplied by the orchestrator via `hpipe task`…"
-    }
-  ],
-  "history": [{ "at": 1789000000000, "from": "spec", "to": "spec-review", "why": "artifact present" }]
+  "tasks": [{
+    "task_id": "t1", "branch": "feat/chat-t4-chat-meter", "issue": 210,
+    "surface": "core", "depends_on": [], "files": ["packages/core/src/db/usage.ts"],
+    "workspace_id": "w7", "pane_id": "w7:p1",
+    "agent_status": "working", "phase": "execute",
+    "pr": null, "ci": null,
+    "text": "…full task text, supplied by the orchestrator via `hpipe task`…"
+  }],
+  "history": [{ "at": …, "from": "spec", "to": "spec-review", "why": "artifact 2026-…-design.md mtime > phase_entered_at" }]
 }
 ```
 
-Tasks carry their own `phase` — workers progress independently and in parallel. The run's `phase`
-is the *orchestrator's* phase. During `execute` the run sits still while tasks move.
+`run_id` ends in a random suffix; date + slug alone collide on a same-day retry. A task's
+`agent_status` (herdr's view of the pane) is kept distinct from its `phase` (the pipeline's view) —
+v1 overloaded one field for both.
 
-**One active run per repo.** `hpipe start` refuses to open a second run for a `repo_key` that
-already has one whose phase is not `done`, and says which run is in the way. Without this, adoption
-by repo provenance could not decide which run a new worktree belongs to. `hpipe abort` clears the
-way deliberately.
+**One active run per repo.** `hpipe start` refuses a second run for a `repo_key` whose existing run
+is not `done`, naming the one in the way. Without it, adoption by repo provenance cannot decide
+which run a new worktree belongs to.
 
-**How a task's fields are learned.** `branch` and `root_pane_id` come from the `worktree.created`
-event; `pane_id` from `pane.agent_detected`; `pr` from `gh pr list --head <branch>`; `issue` from
-the closing keyword in that PR's body, or from `hpipe task --issue` if the orchestrator registered
-it up front. `issue` stays `null` until one of those resolves, and the `close` phase is skipped for
-a task that never had one.
-
-The `execute` predicate makes a `gh` call inside an event hook. At this event rate (a handful per
-minute) that is acceptable, but it is the one place the hot path touches the network: a `gh`
-failure there resolves to "unknown", which is not "done", so the task holds rather than advancing
-on bad information.
+**Task field provenance.** `branch` from `worktree.created`; `workspace_id` likewise; `pane_id` from
+`pane.agent_detected`; `surface`, `depends_on`, `files`, `issue`, `text` from `hpipe task`; `pr` from
+`gh pr list --head <branch>`; `ci` from `gh pr checks`. `issue` is **required** — `hpipe task`
+rejects a task without one, because `CLAUDE.md:83` makes an issue per task mandatory and v1 quietly
+made it optional.
 
 ## Orchestrator identity
 
-Resolution order, first match wins:
+1. **Explicit claim** — the `claim` action from inside the orchestrator's pane pins `HERDR_PANE_ID`.
+   `hpipe start` claims implicitly the same way.
+2. **Repo provenance** — the workspace for this `repo_key` with `is_linked_worktree == false`, then
+   its agent pane.
 
-1. **Explicit claim.** `claim` action invoked from inside the orchestrator's pane pins
-   `HERDR_PANE_ID` into `orchestrators.json`. `hpipe start` claims implicitly the same way.
-2. **Repo provenance.** The workspace for this `repo_key` where `worktree.is_linked_worktree` is
-   `false`, then its agent pane from `herdr agent list`.
-3. **Focused pane** from `HERDR_PLUGIN_CONTEXT_JSON` at event time.
+There is no third fallback. v1 fell back to the event's `focused_pane_id`, which during dispatch
+resolves to the *worker's* pane — verified live. If neither step resolves, events stay queued and the
+supervisor retries each tick; `status` reports the unresolved state.
 
-If none resolves, events are queued parentless — `drain` and `status` still work, and the startup
-hook retries resolution. Pinned panes are validated on every use; a vanished pane falls back to
-step 2.
+Two orchestrators on one repo are disambiguated **only** by explicit `claim`. `REPOS_ALLOW` is a repo
+allowlist and cannot distinguish two panes within one repo; v1 claimed it could.
 
-**A pane registered as an orchestrator is excluded from the event path.** Without this the
-orchestrator's own status changes would wake itself in a loop.
+**Waking and evaluation are separate concerns.** The orchestrator pane is excluded from *waking* —
+its own status changes never generate a prompt to itself. It is **not** excluded from *evaluation*:
+its `idle`/`done` transitions are exactly the trigger for seven of the twelve phases. v1 conflated
+the two and dead-stopped at `spec`.
 
 ## Phase machine
 
-The plugin advances a phase only when its **completion predicate** is satisfied, evaluated on
-`pane.agent_status_changed → idle | done` for a pane it knows.
-
-| Phase | Actor | Completion predicate | On success | On failure |
+| Phase | Actor | Completion predicate | Success | Failure |
 | --- | --- | --- | --- | --- |
-| `spec` | orchestrator | spec file exists at the path the prompt named | `spec-review` | — |
-| `spec-review` | orchestrator + adversarial subagent | verdict file exists and parses | `CLEAR` → `plan` | else `spec`, `pass`+1 |
-| `plan` | orchestrator | plan file exists | `plan-review` | — |
-| `plan-review` | as above | verdict file parses | `CLEAR` → `dispatch` | else `plan`, `pass`+1 |
-| `dispatch` | orchestrator | ≥1 `worktree.created` adopted into this run | `execute` | — |
-| `execute` | workers (per task) | task agent `done`/`idle` **and** `gh pr list --head <branch>` returns a PR | task → `task-review` | pane exited without PR → `failed` |
-| `task-review` | orchestrator | verdict file for that task parses | `CLEAR` → task `ci` | else task → `execute`, re-prompt worker |
-| `ci` | CI supervisor pane | `gh pr checks` conclusion is terminal | green → task `merge` | red → task `execute` with the failing check |
-| `merge` | orchestrator | `gh pr view` reports `merged` | task → `close` | — |
-| `close` | orchestrator | `gh issue view` reports `closed` | task → `teardown` | — |
-| `teardown` | **plugin, unattended** | `herdr worktree remove --workspace <ws> --force` succeeded | task `done`; last task → run `branch-review` | removal fails → task `orphaned`, surfaced |
-| `branch-review` | orchestrator | verdict file parses | `CLEAR` → `done` | else `branch-review`, `pass`+1 |
+| `spec` | orchestrator | spec file, fresh | `spec-review` | — |
+| `spec-review` | orchestrator + adversarial subagent | verdict file, fresh, parses | `CLEAR` → `plan` | else `spec`, `pass`+1 |
+| `plan` | orchestrator | plan file, fresh | `plan-review` | — |
+| `plan-review` | as above | verdict file, fresh, parses | `CLEAR` → `dispatch` | else `plan`, `pass`+1 |
+| `dispatch` | orchestrator | ≥1 task registered via `hpipe task` **and** ≥1 worktree adopted | `execute` | — |
+| **task** `queued` | supervisor | all `depends_on` tasks `done`, and no in-flight task shares a `files` entry | task `execute`; prompt orchestrator to dispatch it | — |
+| **task** `execute` | worker | worker `done`/`idle` **and** `gh pr list --head <branch>` returns a PR | task `task-review-spec` | pane exited with no PR → task `failed` |
+| **task** `task-review-spec` | orchestrator | verdict file, fresh, parses | `CLEAR` → `task-review-quality` | else task `execute`, re-prompt worker |
+| **task** `task-review-quality` | orchestrator | verdict file, fresh, parses | `CLEAR` → task `ci` | else task `execute`, re-prompt worker |
+| **task** `ci` | supervisor | `gh pr checks` bucket is terminal | `pass` → task `merge` | `fail` → task `execute` with the failing check |
+| **task** `merge` | orchestrator | `gh pr view` reports `merged` | task `close` | — |
+| **task** `close` | orchestrator | `gh issue view` reports `closed` | task `teardown` | — |
+| **task** `teardown` | supervisor | `worktree remove --workspace <ws> --force` succeeded | task `done`; unblocks `queued` tasks; last task → run `branch-review` | removal fails → task `orphaned`, surfaced |
+| `branch-review` | orchestrator | verdict file, fresh, parses | `CLEAR` → `done` | else `branch-review`, `pass`+1 |
 
-`pass` is capped at 2 per phase (`MAX_PASSES`). Exceeding it does not advance and does not retry —
-it renders `prompts/escalate.md` to the orchestrator, which matches `CLAUDE.md`'s existing rule that
-a genuine BLOCKER is one of only two reasons to reach out mid-pipeline.
+Two review phases per task, not one — `CLAUDE.md:46` mandates spec-compliance then code-quality, and
+v1 collapsed them.
 
-### Why inference is safe here
+**Ordering and collisions.** `queued` is the entry state for every task. A task leaves it only when
+its `depends_on` are `done` and no in-flight task declares an overlapping `files` entry. This
+implements two `CLAUDE.md` rules v1 dropped: *core first* (`core` tasks are depended on by app tasks,
+because apps consume the built `dist`) and *never two agents editing the same files in parallel*.
+`hpipe task` requires `--surface` and accepts `--depends-on` and `--files`.
 
-The plugin cannot judge whether a review cleared, and it must not try. Instead, **because the
-plugin owns the prompt text, it dictates where the answer goes.** Every review prompt it injects
-names an output path and requires a trailer:
+**Surface routing.** `{{surface}}` and `{{agent_file}}` (`.claude/agents/<surface>-dev.md`) are
+rendered into `prompts/task.md`, so each worker is pointed at its scoped agent definition as
+`CLAUDE.md:76` requires.
+
+`pass` caps at `MAX_PASSES` (default 2). Exceeding it renders `prompts/escalate.md` and advances
+nothing.
+
+### Predicates are edges, not levels
+
+Every predicate compares against `phase_entered_at`:
+
+- a **file** predicate requires `mtime > phase_entered_at`, plus a settle check — read twice
+  `SETTLE_MS` apart and require identical size and mtime, so a half-written artifact is not read as
+  complete;
+- a **PR** predicate requires the PR's `createdAt`/`updatedAt` to postdate phase entry;
+- a **CI** predicate requires a bucket change, not merely a terminal bucket.
+
+v1 checked levels. Re-entering `spec` after a BLOCKER found the *old* spec file still present and
+immediately re-advanced, so every failure branch livelocked and burned `MAX_PASSES` in one tick.
+
+### Limits of inference
+
+v1 claimed the design "stalls, never derails". **That claim was false and is withdrawn.** Claude
+Code's state authority in herdr is the screen manifest, and a prompt that matches no rule falls back
+to `idle` (`agents.mdx:60`). An agent can therefore be reported idle while working.
+
+What the freshness and settle rules actually buy: a stale artifact cannot satisfy a re-entered phase,
+and a partially written one cannot satisfy any phase. What they do not buy: immunity to an agent that
+writes a complete artifact and then keeps going. That case advances the phase early, and the
+orchestrator — a live agent, not a script — is the recovery path; it can see the situation and use
+`hpipe rewind`.
+
+The honest statement of the invariant: **the plugin never advances on an artifact that is stale or
+still being written, and never invents a verdict.** It can still be early. That is a real residual
+risk, accepted, with `hpipe rewind` as the escape.
+
+### The verdict contract
+
+Every review prompt names its output path and requires a trailer:
 
 ```
 VERDICT: CLEAR
 ```
 ```
 VERDICT: BLOCKER
-BLOCKERS: 2
+BLOCKERS: 1
+MAJORS: 3
 ```
 
-Accepted values are `CLEAR` and `BLOCKER`. The parser reads the last `VERDICT:` line of the file
-and nothing else — not the pane, not the prose.
+The parser reads the last `VERDICT:` line and the counts. **`BLOCKER` means any BLOCKER *or* MAJOR
+finding** — the prompt says so explicitly. v1's binary CLEAR/BLOCKER discarded the MAJOR rank that
+`CLAUDE.md:38` actually gates on. MINOR findings are fixed inline by the reviewing agent, per the
+same rule; the prompt instructs this.
 
-The governing invariant: **a missing or unparseable artifact means "not done".** The plugin holds
-the phase and stays silent. An orchestrator that went idle to ask the human a question has not
-written the file, so it cannot be falsely advanced. The failure mode is therefore *stalling*, never
-*derailing*.
-
-Stalls are caught by a probe: after `STALL_MINUTES` (default 15) in one phase with at least one
-idle transition and no artifact, the plugin injects `prompts/stall-probe.md` once per phase —
-naming the phase and the expected path, asking whether it is still working or blocked. Once per
-phase, never repeated, so a long human conversation is not nagged.
+This spec's own review is the worked example: the trailer parsed, and `VERDICT: BLOCKER` is why you
+are reading v2.
 
 ## Event transport
 
-Every hook follows the same pipeline:
+Hooks append one JSON line and exit. The supervisor, each tick:
 
-1. Parse `HERDR_PLUGIN_EVENT_JSON`.
-2. Resolve the workspace to a run + task. Unknown workspace, or a registered orchestrator pane →
-   exit 0.
-3. Dedup against the task's stored `status`. Unchanged → exit 0.
-4. Update the ledger; update the `$status` badge.
-5. Append to `queue.jsonl`.
-6. If the transition is wake-worthy, attempt the flush.
+1. Rotates and drains queue segments.
+2. Drops events for unknown workspaces and for orchestrator panes' *waking*, keeping them for
+   evaluation.
+3. Dedups against the ledger's stored `agent_status`.
+4. Updates tasks; refreshes `$status` / `$branch` badges (clamped to herdr's 80-char, 32-key limits).
+5. Evaluates predicates, advances phases, renders one coalesced message per orchestrator.
+6. Delivers with `herdr agent prompt`; on `agent_blocked` or a missing pane, retries next tick with
+   backoff up to `PROMPT_RETRY_MAX`, then holds the events and reports it in `status`.
 
-**Flush.** Try `mkdir flush.lock`. The winner sleeps `DEBOUNCE_MS` (default 2000), then reads and
-truncates the queue, evaluates the state machine for every affected run, renders one message, and
-calls `herdr agent prompt`. Losers exit immediately — their events are already on disk and the
-winner will carry them.
+`blocked`, `done`, `idle`, and `exited` are wake-worthy. `working` updates the ledger and badge only
+(`WAKE_ON`).
 
-**Wake-worthiness.** `blocked`, `done`, `idle`, and `exited` ring the doorbell. `working` updates
-the ledger and the badge but does not — a six-agent fleet would otherwise interrupt the
-orchestrator at every turn boundary. `WAKE_ON` in config controls this.
-
-**Delivery failure.** `agent_blocked` (the orchestrator is itself stuck on a prompt) or a missing
-pane leaves the queue intact and schedules a bounded retry with backoff
-(`PROMPT_RETRY_MAX`, default 5). After that the events stay queued for the startup hook or a manual
-`drain`. Nothing is dropped: the disk queue is the truth and the prompt is only a doorbell.
-
-**Message shape.** One coalesced message per flush, phase transitions first:
+**Message shape:**
 
 ```
-[pipeline] run nicaraguan-laws-20260913-chat-meter → task-review
+[pipeline] run nicaraguan-laws-20260913-chat-meter-a1b2 → task-review-spec
 
 3 events:
 - feat/be-d3-top-laws (#208, w4) done, PR #412 open
 - fix/norma-url-default (#209, w6) blocked
     "Do you want to proceed? ❯ 1. Yes  2. No"
-- feat/chat-t4-chat-meter (#210, w7) exited (status 1), no PR
+- feat/chat-t4-chat-meter (#210, w7) exited, no PR
 
-<rendered prompt for the phase the run just entered>
+<rendered prompt for the phase just entered>
 ```
 
-`blocked` lines inline up to `BLOCKED_TAIL_LINES` (default 8) of
-`herdr pane read <pane> --source visible` so the orchestrator can usually decide without a round
-trip.
+`blocked` lines inline up to `BLOCKED_TAIL_LINES` (default 8) of `herdr pane read --source visible`,
+so the orchestrator can usually answer without a round trip. A `blocked` worker is Claude explicitly
+asking for a decision — intervening is the orchestrator's job, and this is the design's primary
+signal, not an error case.
 
-## Orphan root-pane reaper
+## Supervisor: CI and teardown
 
-`herdr agent start` always opens a new pane, leaving the worktree's root shell orphaned as `p1`.
-On `pane.agent_detected` in an adopted workspace the plugin closes it, but only when **all** hold:
+CI polls `gh pr checks <pr> --json bucket,name,state,link` for tasks with open PRs every
+`CI_POLL_SECONDS` (default 30), treating **exit code 8 as pending**, never as failure, and mapping
+`bucket` — not the nonexistent `conclusion` field v1 specified. `gh` failures render as `unknown`,
+which is not terminal, so nothing advances on a broken `gh`.
 
-- the workspace is in the ledger,
-- it has more than one pane,
-- the candidate is the `root_pane_id` recorded at `worktree.created`,
-- it has no agent,
-- `pane.process_info` reports no foreground process other than the login shell.
-
-Any doubt means leave it. Closing a live pane is worse than leaving a dead one, and this replaces a
-step the human currently performs by hand.
-
-### Teardown re-entrancy
-
-Teardown is the plugin calling `herdr worktree remove`, which emits `worktree.removed`, which is one
-of the plugin's own hooks. That hook must therefore be idempotent: a task already in `done` is a
-no-op, not a second transition. The same hook also handles a worktree the human removed by hand,
-which marks the task `orphaned` rather than `done`.
-
-## CI supervisor
-
-A `[[panes]]` entrypoint (`placement = "split"`) running a visible poll loop, opened by the startup
-hook via `plugin.pane.open` when any run has an open PR. For each task with a PR it polls
-`gh pr checks <pr> --json name,state,conclusion` every `CI_POLL_SECONDS` (default 30) and enqueues
-an event when a PR's aggregate conclusion changes. It renders a simple table so the state is
-legible without asking anyone.
-
-A real herdr pane rather than a background daemon: supervised, restored with the session, and
-visibly dead when it dies. Its output is not parsed by anything — the queue is the interface.
-
-## Prompt templates
-
-`prompts/<phase>.md`, rendered by substituting `{{run_id}}`, `{{title}}`, `{{repo_root}}`,
-`{{spec_path}}`, `{{plan_path}}`, `{{verdict_path}}`, `{{pass}}`, `{{task_text}}`, `{{branch}}`,
-`{{issue}}`, `{{pr}}`, `{{ci_failure}}`. An unresolved placeholder is a hard error, not an empty
-string — a prompt that silently renders `{{spec_path}}` as nothing sends an agent to write a file
-nowhere.
-
-Each template ends with an explicit statement of where its output must go and, for reviews, the
-required `VERDICT:` trailer. Only the current phase is ever injected, which is strictly less
-context than today's `CLAUDE.md` loading the whole pipeline every session.
-
-`prompts/dispatch.md` carries the two dispatch footguns verbatim from `nicaraguan-laws/CLAUDE.md`
-(pass `--workspace`; close the orphaned root pane) — the reaper handles the second automatically,
-but the orchestrator is still told, because a plugin that silently fixes a mistake teaches nothing
-when it is absent.
-
-`prompts/digest.md` is not a phase. It is the wrapper for the coalesced flush message — the
-`[pipeline] …` envelope around the event list and the next phase's prompt.
-
-### Who owns the worker's prompt
-
-The plugin owns every instruction *except* what the task is, which only the orchestrator knows. The
-split is enforced by making the orchestrator register each task rather than compose its own prompt:
-
-```
-hpipe task --branch feat/chat-t4-chat-meter --issue 210 --text "<full task text>"
-```
-
-`hpipe task` records the task on the run and prints the **fully rendered worker prompt** —
-`prompts/task.md` wrapped around the supplied text, carrying the contract the plugin needs back:
-where to write the task-review verdict, the requirement that the PR body end in a real closing
-keyword (`Closes #N`, never "Implements #N", which does not auto-close), and the escalation rule.
-The orchestrator passes that output straight to `herdr agent start`. `prompts/dispatch.md` tells it
-to do exactly this.
-
-This keeps the contract in the package and out of the orchestrator's memory, without pretending the
-plugin can know the work.
+Teardown is the only unattended destructive action and runs **only** after `gh issue view` confirms
+the issue closed. It calls `herdr worktree remove --workspace <ws> --force`, which emits
+`worktree.removed` — one of this plugin's own hooks. That handler is idempotent: a task already
+`done` is a no-op. A worktree removed by hand marks the task `orphaned`, not `done`.
 
 ## The `hpipe` CLI
 
-Manifest actions take no arguments, so everything carrying data goes through a CLI the package
-ships. The startup hook idempotently symlinks `src/cli.ts` to `~/.local/bin/hpipe`
-(`HPIPE_LINK_PATH`, skippable with `HPIPE_LINK=0`).
+Manifest actions take no arguments, so data goes through a CLI the package ships. The startup hook
+idempotently symlinks `src/cli.ts` to `~/.local/bin/hpipe` (`HPIPE_LINK_PATH`; `HPIPE_LINK=0` to
+skip), replacing a stale symlink so a reinstall at a new managed path still resolves.
 
 | Command | Purpose |
 | --- | --- |
-| `hpipe start "<title>"` | Open a run in the current repo, claim the calling pane as orchestrator, inject `prompts/spec.md` |
-| `hpipe task --branch <b> [--issue <n>] --text <t>` | Register a task and print its fully rendered worker prompt |
-| `hpipe status [--run <id>]` | Ledger + live agent statuses, human and agent readable |
-| `hpipe drain [--run <id>]` | Print and clear queued events in full detail |
+| `hpipe start "<title>"` | Open a run, claim the calling pane, **print** the spec prompt to stdout |
+| `hpipe task --branch <b> --issue <n> --surface <s> [--depends-on <ids>] [--files <paths>] --text <t>` | Register a task; print its rendered worker prompt |
+| `hpipe status [--run <id>]` | Ledger, live agent statuses, supervisor liveness, stuck deliveries |
+| `hpipe drain [--run <id>]` | Print and clear queued events in full |
+| `hpipe rewind <run_id> <phase>` | Move a run or task back to a phase; the escape hatch when the plugin advanced wrongly |
 | `hpipe abort <run_id>` | Stop driving a run; leaves worktrees and branches alone |
 | `hpipe forget <workspace_id>` | Unbind a workspace from its run |
 
-`hpipe start` is the only thing the human or orchestrator must know to begin. Everything after it
-is injected.
+`hpipe start` **prints** rather than injects. v1 had it prompt the orchestrator that was, by
+construction, mid-turn running the command — so the orchestrator simply reads the command's output.
+Injection is reserved for waking an agent that is not currently talking to us.
+
+## Recovery
+
+The plugin can be wrong. Every layer has an exit:
+
+| Situation | Escape |
+| --- | --- |
+| Advanced a phase early | `hpipe rewind <run> <phase>` |
+| Driving a run you no longer want | `hpipe abort <run>` |
+| Supervisor wedged | Close its pane; `ci-pane` action reopens it; state is on disk |
+| Plugin misbehaving entirely | `herdr plugin disable stein.pipeline` — hooks stop, worktrees and agents are untouched |
+| Want out permanently | `herdr plugin unlink stein.pipeline`; the worktrees, branches, PRs and issues are all plain git and GitHub objects |
+
+Nothing the plugin owns is load-bearing for the *work*. Runs are bookkeeping; the artifacts are files
+in the repo and objects on GitHub.
 
 ## Configuration
 
@@ -454,51 +473,59 @@ is injected.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `DEBOUNCE_MS` | `2000` | Coalescing window |
+| `TICK_MS` | `1000` | Supervisor loop interval |
 | `WAKE_ON` | `blocked,done,idle,exited` | Transitions that prompt the orchestrator |
 | `MAX_PASSES` | `2` | Review passes before escalating |
 | `STALL_MINUTES` | `15` | Idle-without-artifact before the probe |
-| `CI_POLL_SECONDS` | `30` | Supervisor poll interval |
-| `PROMPT_RETRY_MAX` | `5` | Delivery retries before leaving it queued |
+| `SETTLE_MS` | `750` | Artifact stability re-read gap |
+| `CI_POLL_SECONDS` | `30` | CI poll interval |
+| `PROMPT_RETRY_MAX` | `5` | Delivery retries before holding |
 | `BLOCKED_TAIL_LINES` | `8` | Pane tail inlined for a blocked worker |
-| `REAP_ORPHAN_ROOT_PANE` | `1` | Reaper on/off |
 | `REPOS_ALLOW` | *(empty = all)* | Repo-key allowlist |
+| `PIPELINE_WORKSPACE_LABEL` | `pipeline` | Supervisor's workspace |
 | `HPIPE_LINK` / `HPIPE_LINK_PATH` | `1` / `~/.local/bin/hpipe` | CLI symlink |
 
 ## Failure modes
 
 | Failure | Behaviour |
 | --- | --- |
-| Ambiguous parent resolution | Warn to stderr (visible in `herdr plugin log list`), fall back, else queue parentless |
-| Orchestrator pane closed | Prompt fails; queue survives; startup hook re-resolves and replays |
-| Orchestrator itself blocked | `agent_blocked` before any input is sent; bounded retry; queue intact |
-| Two orchestrators on one repo | `REPOS_ALLOW` plus explicit `claim` disambiguate; provenance alone would pick one arbitrarily |
-| Concurrent hook processes | Atomic rename on every write; `mkdir` mutex on the flush |
-| Server restart / live handoff | Tokens lost (herdr does not restore them) and reapplied by the startup hook; ledger and queue are on disk and survive |
-| `gh` unauthenticated or rate-limited | CI pane surfaces the error and keeps polling; PR predicates report "unknown", which is not "done", so nothing advances |
-| Unparseable verdict file | Treated as absent. Phase holds. Stall probe eventually asks |
-| Worker pane exited without a PR | Task marked `failed` and surfaced to the orchestrator — a case nothing catches today |
+| Supervisor dies | Nothing advances; visible dead pane; `hpipe status` says so; `ci-pane` reopens; queue and ledger intact |
+| Two supervisors | PID file + liveness check; the second exits |
+| 32-command cap reached | Hooks are sub-50 ms and hold no slot; the cap is no longer reachable by this plugin's own design |
+| Orchestrator unresolvable | Events queue; retried each tick; reported by `status` |
+| Orchestrator blocked | `agent_blocked` before any input is sent; retried with backoff |
+| Agent reported idle while working | Freshness + settle prevent stale/partial reads; a complete-then-continue artifact can still advance early → `hpipe rewind` |
+| Server restart / live handoff | Badges lost (herdr does not restore them), reapplied by the startup hook; ledger and queue survive on disk |
+| `gh` unauthenticated or rate-limited | Renders `unknown`; not terminal; nothing advances |
+| Unparseable verdict file | Treated as absent; phase holds; stall probe eventually asks |
+| Worker exited with no PR | Task `failed` and surfaced — a case nothing catches today |
+| Hand-removed worktree | Task `orphaned`, surfaced |
 
 ## Testing
 
-`bun:test`, with a fake `herdr` and a fake `gh` earlier on `PATH` than the real ones, both replaying
-fixture JSON captured from a live session. The whole state machine is then driven with no server and
-no network.
+`bun:test`. The fake `herdr` and `gh` are injected by **overriding `HERDR_BIN_PATH` and a `GH_BIN`
+indirection**, not by `PATH` order — the plugin calls `$HERDR_BIN_PATH` by absolute path, which a
+`PATH` fake cannot intercept. Fixtures are the event payloads captured live during review.
 
-- **Unit:** parent resolution, dedup, coalescing, verdict parsing (including malformed and
-  multi-`VERDICT:` files), template rendering (including the unresolved-placeholder error), badge
-  clamping to herdr's 80-char/32-key limits.
-- **State machine:** every transition in the phase table, driven from fixture events; every failure
-  branch; `MAX_PASSES` exhaustion; the stall probe firing exactly once per phase.
-- **Concurrency:** N hook processes racing one flush; assert exactly one prompt and no lost events.
-- **Integration smoke (one, live):** link the plugin, create a throwaway worktree, assert adoption,
-  reaping, and a delivered prompt.
+- **Unit:** orchestrator resolution (including the deleted focused-pane path staying deleted), dedup,
+  verdict parsing (malformed, multiple `VERDICT:` lines, MAJOR counts), freshness and settle logic,
+  template rendering including the unresolved-placeholder error, badge clamping, `bucket` mapping and
+  `gh` exit 8.
+- **State machine:** every transition and every failure branch; `MAX_PASSES` exhaustion; the
+  livelock case (re-enter a phase whose old artifact still exists — must *not* advance); `queued`
+  gating on `depends_on` and on `files` overlap; stall probe firing exactly once per phase.
+- **Concurrency:** N hooks appending while the supervisor rotates and drains — assert no lost or
+  duplicated events.
+- **Integration smoke (live, one):** a probe-style throwaway session — link, create a worktree,
+  `agent start --kind claude --pane <root>`, assert adoption and delivery, then restore.
 
 ## Deferred
 
-- `$issue` / `$pr` badges before a run's `dispatch` phase — nothing knows the numbers until then.
 - `bun build --compile` single-binary distribution.
-- Link handlers (clicking a PR URL to jump to its task).
-- Marketplace publication (`herdr-plugin` GitHub topic).
-- Trimming the now-redundant workflow prose from `nicaraguan-laws/CLAUDE.md` — a separate change to
-  a separate repo, made only once this plugin has earned it in practice.
+- Link handlers (click a PR URL to jump to its task).
+- Marketplace publication (`herdr-plugin` topic).
+- Correcting `nicaraguan-laws/CLAUDE.md` and `~/.claude/skills/herdr`, both of which teach the
+  pre-0.9.0 `agent start` signature.
+- Trimming the now-redundant workflow prose from `CLAUDE.md` — only once this plugin has earned it.
+  **Until then v1 of this plugin adds a system without removing one**; the payoff is the automation,
+  not yet the deletion.
