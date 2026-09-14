@@ -11,7 +11,8 @@ import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { sessionKey } from './lib/session'
 import { formatStatus } from './lib/status'
-import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
+import { renderWorkerPrompt } from './lib/worker-prompt'
+import type { RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -93,26 +94,8 @@ export async function cmdTask(ctx: Ctx, input: {
     return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
 
-  const prompt = await renderWorkerPrompt(ctx, run, task)
+  const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   return ok(`task_id: ${task.task_id}\n\n${prompt}`)
-}
-
-export async function renderWorkerPrompt(ctx: Ctx, run: Run, task: Task): Promise<string> {
-  const dependsOnCore = task.depends_on.some(
-    (id) => run.tasks.find((t) => t.task_id === id)?.surface === 'core',
-  )
-  return renderPrompt(ctx.pluginRoot, 'task', {
-    branch: task.branch,
-    issue: String(task.issue),
-    surface: task.surface,
-    agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
-    task_text: task.text,
-    dist_note: dependsOnCore
-      ? '> `@repo/core` changed on `main` since this branch was cut. Run ' +
-        '`pnpm install && pnpm turbo build --filter=@repo/core` before your first edit and again ' +
-        'before opening the PR — the apps consume the built `dist`, not the source.'
-      : '',
-  })
 }
 
 export async function cmdRewind(ctx: Ctx, input: {

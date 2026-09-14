@@ -21,7 +21,8 @@ function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; tas
 }
 
 export function applyEvents(
-  runs: Run[], events: QueuedEvent[], session: SessionKey, orchestratorPanes: Set<string>,
+  runs: Run[], events: QueuedEvent[], session: SessionKey,
+  orchestratorPanes: Set<string>, wakeOn: ReadonlySet<string> = new Set(['blocked', 'done', 'idle']),
 ): ApplyResult {
   let changed = false
   const wake: WakeLine[] = []
@@ -75,7 +76,7 @@ export function applyEvents(
       if (task.agent_status === event.agent_status) continue
       task.agent_status = event.agent_status
       changed = true
-      if (event.agent_status === 'blocked' || event.agent_status === 'done' || event.agent_status === 'idle') {
+      if (wakeOn.has(event.agent_status)) {
         wake.push({
           run, task,
           text: `${task.branch} (#${task.issue}, ${task.task_id}) ${event.agent_status}`,

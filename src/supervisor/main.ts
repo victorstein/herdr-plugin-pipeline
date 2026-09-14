@@ -10,6 +10,9 @@ import { sessionKey } from '../lib/session'
 import { artifactPathFor, type DigestInput, evaluateRun, nextDelivery, refreshBadges, shouldRetry } from './deliver'
 import { stallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
+import { ciTransitions } from './ci'
+import { advanceTasks } from './tasks'
+import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 
 const EXIT_DUPLICATE = 3
 
@@ -44,6 +47,7 @@ async function main(): Promise<void> {
   const config = await loadConfig(configDir)
   const herdr = new Herdr()
   const gh = new Gh(config.GH_BIN)
+  const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   const pluginId = process.env.HERDR_PLUGIN_ID ?? 'stein.pipeline'
   const queueDir = join(stateDir, 'queue')
 
@@ -54,15 +58,28 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown)
 
   let attempts = 0
+  let lastCiPollMs = 0
   const probed = new Set<string>()
 
   for (;;) {
     try {
       const events = await drain(queueDir)
-      const runs = await listRuns(stateDir, session)
+      const allRuns = await listRuns(stateDir, session)
+      const runs = config.REPOS_ALLOW.length === 0
+        ? allRuns
+        : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
       const panes = await allOrchestratorPanes(stateDir, session)
 
-      const { changed, wake } = applyEvents(runs, events, session, panes)
+      const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))
+
+      for (const line of wake) {
+        if (line.task?.agent_status === 'blocked' && line.task.pane_id) {
+          const tail = await herdr.paneRead(line.task.pane_id, config.BLOCKED_TAIL_LINES)
+          if (tail.trim().length > 0) {
+            line.text += `\n    ${tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n    ')}`
+          }
+        }
+      }
 
       // Ledger first, delivery second: a crash here replays harmlessly through dedup.
       if (changed) for (const run of runs) await saveRun(stateDir, run)
@@ -70,10 +87,38 @@ async function main(): Promise<void> {
       const digests: DigestInput[] = []
       for (const run of pickOneAdvance(runs)) {
         const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, gh, config)
+
+        const actorIdle = run.orchestrator_pane !== null &&
+          (await herdr.agentStatus(run.orchestrator_pane)) === 'idle'
+
+        if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
+          lastCiPollMs = Date.now()
+          await ciTransitions([run], async (pr) => gh.prChecks(pr))
+        }
+
+        const taskPrompts = await advanceTasks(run, {
+          pluginRoot,
+          actorIdle,
+          maxPasses: config.MAX_PASSES,
+          prForBranch: (branch) => gh.prForBranch(branch),
+          prView: (pr) => gh.prView(pr),
+          issueView: (issue) => gh.issueView(issue),
+          verdictFor: async (r, t) => {
+            const relative = artifactPathFor(r, t)
+            if (!relative) return null
+            const absolute = join(r.repo_root, relative)
+            if (!(await isFresh(absolute, t.phase_entered_at))) return null
+            if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
+            return parseVerdict(absolute)
+          },
+          removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+        })
+
         await refreshBadges(run, herdr, pluginId)
         const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
-        if (lines.length > 0 || nextPrompt.length > 0) {
-          digests.push({ run, eventLines: lines, phaseNote, nextPrompt })
+        const combined = [nextPrompt, ...taskPrompts].filter((p) => p.length > 0).join('\n\n---\n\n')
+        if (lines.length > 0 || combined.length > 0) {
+          digests.push({ run, eventLines: lines, phaseNote, nextPrompt: combined })
         }
         await saveRun(stateDir, run)
       }
@@ -96,7 +141,7 @@ async function main(): Promise<void> {
         probed.add(candidate.key)
         const path = artifactPathFor(candidate.run, null)
         const text = await renderPrompt(
-          process.env.HERDR_PLUGIN_ROOT ?? process.cwd(), 'stall-probe', {
+          pluginRoot, 'stall-probe', {
             run_id: candidate.run.run_id,
             phase: candidate.run.phase,
             minutes: String(candidate.minutes),

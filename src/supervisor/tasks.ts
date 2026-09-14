@@ -1,0 +1,110 @@
+import { gateStatus } from '../lib/gating'
+import type { IssueView, PrView } from '../lib/gh'
+import { advanceTask, enterTaskPhase } from '../lib/machine'
+import type { VerdictResult } from '../lib/predicates'
+import { renderWorkerPrompt } from '../lib/worker-prompt'
+import type { Run, Task } from '../lib/types'
+import { runTeardown } from './teardown'
+
+export interface TaskDeps {
+  pluginRoot: string
+  /** The orchestrator's live idle state, already double-checked by the caller. */
+  actorIdle: boolean
+  maxPasses: number
+  prForBranch: (branch: string) => Promise<number | null>
+  prView: (pr: number) => Promise<PrView | null>
+  issueView: (issue: number) => Promise<IssueView | null>
+  verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
+  removeWorktree: (workspaceId: string) => Promise<boolean>
+}
+
+const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', 'merge', 'close'])
+
+/**
+ * Drives every task in a run one step. Returns any prompts the digest should
+ * carry — currently the worker prompt for a task whose gate just opened, which
+ * is delivered to the ORCHESTRATOR because a queued task has no pane yet.
+ */
+export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> {
+  const prompts: string[] = []
+
+  // Tears down whatever was ALREADY sitting at `teardown` when this tick
+  // started, before the loop below can advance anything else into that
+  // phase. Every other phase transition in this driver gets one full tick to
+  // sit before its next signal is evaluated (see the `continue` after a
+  // queued task is dispatched); calling this after the loop instead would
+  // let a task that reaches `teardown` THIS tick fall straight through to
+  // `done` in the same call, skipping that phase's own settle.
+  await runTeardown([run], deps.removeWorktree)
+
+  for (const task of run.tasks) {
+    if (task.phase === 'queued') {
+      const gate = gateStatus(task, run.tasks)
+      if (gate.state === 'blocked-on-failure') {
+        enterTaskPhase(run, task, 'blocked-on-failure', `depends on ${gate.on.join(', ')}`)
+        continue
+      }
+      if (gate.state !== 'ready') continue
+
+      enterTaskPhase(run, task, 'execute', 'gate opened')
+      prompts.push(
+        `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
+          (await renderWorkerPrompt(deps.pluginRoot, run, task)),
+      )
+      continue
+    }
+
+    // Phases whose signal comes from the orchestrator must not be evaluated
+    // while it is mid-turn, exactly as run phases are gated.
+    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+
+    const signals = await gatherSignals(run, task, deps)
+    if (signals) advanceTask(run, task, signals)
+  }
+
+  return prompts
+}
+
+async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
+  const base = {
+    actorIdle: deps.actorIdle,
+    workerIdle: task.agent_status === 'idle' || task.agent_status === 'done',
+    artifactFresh: false,
+    verdict: null as VerdictResult | null,
+    prNumber: task.pr,
+    headSha: null as string | null,
+    merged: false,
+    mergedAtMs: undefined as number | undefined,
+    issueClosed: false,
+    closedAtMs: undefined as number | undefined,
+    ciBucket: task.ci,
+    maxPasses: deps.maxPasses,
+  }
+
+  switch (task.phase) {
+    case 'execute': {
+      const pr = task.pr ?? (await deps.prForBranch(task.branch))
+      if (pr === null) return base
+      const view = await deps.prView(pr)
+      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+    }
+    case 'task-review-spec':
+    case 'task-review-quality': {
+      const verdict = await deps.verdictFor(run, task)
+      return { ...base, artifactFresh: verdict !== null, verdict }
+    }
+    case 'merge': {
+      if (task.pr === null) return base
+      const view = await deps.prView(task.pr)
+      return { ...base, merged: view?.merged ?? false, mergedAtMs: view?.mergedAtMs ?? undefined }
+    }
+    case 'close': {
+      const view = await deps.issueView(task.issue)
+      return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
+    }
+    case 'ci':
+      return base
+    default:
+      return null
+  }
+}

@@ -38,6 +38,11 @@ export async function ensureWorkspace(
     console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
     return null
   }
+  // `workspace create` also opens a root shell pane. Left alone it sits beside
+  // the supervisor forever looking like a second one.
+  for (const pane of await herdr.paneList(id)) {
+    await herdr.paneClose(pane.pane_id)
+  }
   await Bun.write(workspaceIdPath(stateDir, session), id)
   return id
 }
