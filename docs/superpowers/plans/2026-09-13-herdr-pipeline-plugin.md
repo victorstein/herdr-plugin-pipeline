@@ -6049,6 +6049,185 @@ git commit -m "feat: wire the task pipeline into the supervisor loop"
 
 ---
 
+## Task 31: Render the task-phase prompts
+
+`src/supervisor/deliver.ts` has `promptForRunPhase`, which renders the prompt for each run-level phase
+on entry. **There is no task-level counterpart.** Verified: `prompts/task-review-spec.md`,
+`task-review-quality.md`, `ci-red.md`, `merge.md` and `close.md` are never referenced anywhere in
+`src/`.
+
+Consequence: since Task 30, a task's state machine advances correctly *once the artifact or PR state
+exists* — but nothing ever tells the orchestrator to produce it. `dispatch.md` covers opening issues,
+registering tasks and starting agents, and says nothing about reviewing, merging or closing. So in a
+live run those phases stall indefinitely.
+
+**Files:**
+- Modify: `src/supervisor/tasks.ts`, `test/tasks.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tasks.test.ts`:
+
+```ts
+test('entering task-review-spec yields the stage-one review prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  const prompts = await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(prompts.join('\n')).toContain('Stage 1 review')
+  expect(prompts.join('\n')).toContain('#1')
+})
+
+test('entering merge yields the merge prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('merge')
+  expect(prompts.join('\n')).toContain('Ready to merge')
+})
+
+test('a red CI yields the ci-red prompt carrying the failure detail', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail' })])
+  const prompts = await advanceTasks(run, deps({
+    ciDetail: async () => '- build (fail) https://example/run/1',
+  }))
+  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(prompts.join('\n')).toContain('CI is red')
+  expect(prompts.join('\n')).toContain('build (fail)')
+})
+
+test('an escalated task yields the escalation prompt naming its task flag', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-quality', pass: 2 })])
+  const prompts = await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'BLOCKER', blockers: 1, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('escalated')
+  expect(prompts.join('\n')).toContain('--task t1')
+})
+
+test('a phase that advances nothing yields no prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'working' })])
+  expect(await advanceTasks(run, deps())).toHaveLength(0)
+})
+```
+
+Add `ciDetail: async () => ''` to the `deps()` helper's defaults at the top of the file.
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/tasks.test.ts`
+Expected: FAIL — the prompts array is empty for each transition.
+
+- [ ] **Step 3: Implement**
+
+In `src/supervisor/tasks.ts`, add to `TaskDeps`:
+
+```ts
+  /** Rendered detail of the failing checks, for the ci-red prompt. */
+  ciDetail: (pr: number | null) => Promise<string>
+```
+
+Add the imports it needs:
+
+```ts
+import { join } from 'node:path'
+import { renderPrompt } from '../lib/render'
+import { artifactPathFor } from './deliver'
+```
+
+Add the renderer:
+
+```ts
+/**
+ * The task-level counterpart to deliver.ts's promptForRunPhase. Without it the
+ * state machine advances once an artifact exists but nothing ever asks the
+ * orchestrator to produce one, so every task phase stalls.
+ */
+async function promptForTaskPhase(
+  run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
+): Promise<string> {
+  const common = {
+    run_id: run.run_id,
+    branch: task.branch,
+    issue: String(task.issue),
+    pr: task.pr === null ? 'unknown' : String(task.pr),
+    pass: String(task.pass),
+    verdict_path: join(run.repo_root, artifactPathFor(run, task) ?? ''),
+  }
+
+  switch (task.phase) {
+    case 'task-review-spec':
+      return renderPrompt(deps.pluginRoot, 'task-review-spec', common)
+    case 'task-review-quality':
+      return renderPrompt(deps.pluginRoot, 'task-review-quality', common)
+    case 'merge':
+      return renderPrompt(deps.pluginRoot, 'merge', common)
+    case 'close':
+      return renderPrompt(deps.pluginRoot, 'close', common)
+    case 'execute':
+      // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
+      // review does not, because the review file already says what to fix.
+      return cameFrom === 'ci'
+        ? renderPrompt(deps.pluginRoot, 'ci-red', {
+            ...common, ci_failure: await deps.ciDetail(task.pr),
+          })
+        : ''
+    case 'escalated':
+      return renderPrompt(deps.pluginRoot, 'escalate', {
+        run_id: run.run_id,
+        phase: task.escalated_from ?? cameFrom,
+        pass: String(task.pass),
+        task_flag: ` --task ${task.task_id}`,
+      })
+    default:
+      return ''
+  }
+}
+```
+
+Import `TaskPhase` alongside the other types. Then in `advanceTasks`, replace the non-queued branch:
+
+```ts
+    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+
+    const signals = await gatherSignals(run, task, deps)
+    if (!signals) continue
+
+    const cameFrom = task.phase
+    if (!advanceTask(run, task, signals)) continue
+    if (task.phase === cameFrom) continue
+
+    const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
+    if (prompt.length > 0) prompts.push(prompt)
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/tasks.test.ts`
+Expected: PASS, 14 tests.
+
+- [ ] **Step 5: Wire `ciDetail` in the supervisor**
+
+In `src/supervisor/main.ts`, add to the `advanceTasks` dependency object:
+
+```ts
+          ciDetail: async (pr) => (pr === null ? '' : gh.prChecksDetail(pr)),
+```
+
+- [ ] **Step 6: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 190 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src test
+git commit -m "feat: render the task-phase prompts so task phases actually progress"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
