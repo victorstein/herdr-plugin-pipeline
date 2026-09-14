@@ -46,6 +46,10 @@ export async function reapGhostPanes(
   herdr: Herdr, workspaceId: string, livePanePid: number | null,
 ): Promise<string[]> {
   const panes = await herdr.paneList(workspaceId)
+  // Never close the last pane: that destroys the workspace the supervisor is
+  // about to open into. A lone ghost is cleared by clearStrayPanes afterwards.
+  if (panes.length <= 1) return []
+
   const closed: string[] = []
 
   for (const pane of panes) {

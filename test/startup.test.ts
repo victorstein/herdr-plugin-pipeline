@@ -69,6 +69,19 @@ test('closes a ghost supervisor pane whose shell_pid is not the live pane_pid', 
   expect(closed).toEqual(['w3:p1'])
 })
 
+test('reapGhostPanes leaves a lone ghost alone rather than destroying the workspace', async () => {
+  // Closing a workspace's last pane destroys the workspace, which would take out
+  // the workspace the supervisor is about to open into. A lone ghost is harmless
+  // until there is something to replace it with; clearStrayPanes removes it once
+  // the real supervisor pane exists.
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w3:p1', label: 'Pipeline supervisor' }] } },
+    'pane process-info --pane w3:p1': { result: { process_info: { shell_pid: 111 } } },
+    'pane close': { result: {} },
+  })
+  expect(await reapGhostPanes(new Herdr(bin), 'w3', null)).toEqual([])
+})
+
 test('linkHpipe creates the symlink and replaces a stale one', async () => {
   const target = join(dir, 'cli.ts')
   await Bun.write(target, '#!/usr/bin/env bun\n')
