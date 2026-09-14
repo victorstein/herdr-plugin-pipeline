@@ -5,6 +5,7 @@ import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
+import { rebindOrchestrator } from '../lib/orchestrator'
 import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
@@ -110,6 +111,8 @@ async function main(): Promise<void> {
       const digests: DigestInput[] = []
       for (const run of pickOneAdvance(runs)) {
         try {
+          await rebindOrchestrator(stateDir, herdr, session, run)
+
           const runGh = ghFor(run.repo_root)
           const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
 
