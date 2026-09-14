@@ -89,6 +89,18 @@ test('task rejects a surface with no agent definition', async () => {
   expect(bad.text).toContain('kore-dev.md')
 })
 
+test('task rejects a dependency id that names no task', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'core', text: 'y', dependsOn: ['t7'], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('t7')
+})
+
 test('rewind resets the pass count for the phase it rewinds to', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.phase = 'escalated'

@@ -97,6 +97,28 @@ test('ci pass advances to merge; ci fail returns to execute', () => {
   })?.phase).toBe('execute')
 })
 
+test('a repeatedly red CI escalates instead of retrying forever', () => {
+  const { run, task } = fixture('ci')
+  task.pass = 2
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 2,
+  })
+  expect(next?.phase).toBe('escalated')
+})
+
+test('a red CI below the cap increments pass on the way back to execute', () => {
+  const { run, task } = fixture('ci')
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 3,
+  })
+  expect(next?.phase).toBe('execute')
+  expect(next?.pass).toBe(2)
+})
+
 test('a pending ci bucket advances nothing', () => {
   const { run, task } = fixture('ci')
   expect(advanceTask(run, task, {

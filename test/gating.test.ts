@@ -51,6 +51,26 @@ test('a finished task does not hold its files', () => {
   expect(gateStatus(waiting, [done, waiting]).state).toBe('ready')
 })
 
+test('an escalated task still holds its files', () => {
+  // Nothing tears an escalated task down, so its worktree and unmerged work
+  // persist — releasing the lock would let a second task edit the same files.
+  const stuck = task({ task_id: 't1', phase: 'escalated', files: ['packages/core/'] })
+  const waiting = task({ task_id: 't2', files: ['packages/core/x.ts'] })
+  expect(gateStatus(waiting, [stuck, waiting]).state).toBe('waiting')
+})
+
+test('a failed task still holds its files', () => {
+  const dead = task({ task_id: 't1', phase: 'failed', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [dead, waiting]).state).toBe('waiting')
+})
+
+test('an orphaned task releases its files, because its code already merged', () => {
+  const merged = task({ task_id: 't1', phase: 'orphaned', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [merged, waiting]).state).toBe('ready')
+})
+
 test('detectCycle names a cycle', () => {
   const a = task({ task_id: 't1', depends_on: ['t2'] })
   const b = task({ task_id: 't2', depends_on: ['t1'] })

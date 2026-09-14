@@ -58,6 +58,34 @@ test('LIVELOCK: re-entered spec does not re-advance on the stale artifact', () =
   expect(advanceRun(run, { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 })).toBeNull()
 })
 
+test('a cleared branch-review finishes the run', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 }, maxPasses: 2,
+  })
+  expect(next?.phase).toBe('done')
+})
+
+test('a blocked branch-review loops on itself, since no producer phase remains', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 3,
+  })
+  expect(next?.phase).toBe('branch-review')
+  expect(next?.pass).toBe(2)
+})
+
+test('dispatch and execute never advance on artifact signals alone', () => {
+  for (const phase of ['dispatch', 'execute'] as const) {
+    const run = enterRunPhase(mkRun(), phase, 'test')
+    expect(advanceRun(run, {
+      actorIdle: true, artifactFresh: true, verdict: null, maxPasses: 2,
+    })).toBeNull()
+  }
+})
+
 test('enterRunPhase stamps phase_entered_at and appends history', () => {
   const before = Date.now() - 1
   const run = enterRunPhase(mkRun(), 'plan', 'spec review cleared')

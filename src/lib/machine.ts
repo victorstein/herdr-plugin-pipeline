@@ -28,6 +28,10 @@ const ON_CLEAR: Partial<Record<RunPhase, RunPhase>> = {
 const ON_BLOCKER: Partial<Record<RunPhase, RunPhase>> = {
   'spec-review': 'spec',
   'plan-review': 'plan',
+  // Unlike its siblings, branch-review routes to itself: by this point every
+  // task is merged and torn down, so there is no producer phase to return to.
+  // The orchestrator patches the branch directly and writes a fresh review,
+  // and MAX_PASSES still bounds the loop.
   'branch-review': 'branch-review',
 }
 
@@ -61,9 +65,8 @@ export function advanceRun(run: Run, signals: RunSignals): Run | null {
 
   const back = ON_BLOCKER[run.phase]
   if (!back) return null
-  const passes = run.pass + 1
   enterRunPhase(run, back, `review returned BLOCKER (pass ${run.pass})`)
-  run.pass = passes
+  run.pass += 1
   return run
 }
 
@@ -119,9 +122,8 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
         return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
       }
 
-      const passes = task.pass + 1
       enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
-      task.pass = passes
+      task.pass += 1
       task.head_sha_at_entry = s.headSha
       return task
     }
@@ -129,7 +131,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'ci': {
       if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
       if (s.ciBucket === 'fail') {
+        // CI retries draw on the same budget as review retries. Without this the
+        // task cycles execute → review → ci → execute forever, bypassing the one
+        // safety valve the module has.
+        if (task.pass >= s.maxPasses) {
+          return enterTaskPhase(run, task, 'escalated', `CI still red after ${task.pass} passes`)
+        }
         enterTaskPhase(run, task, 'execute', 'CI red')
+        task.pass += 1
         task.head_sha_at_entry = s.headSha
         return task
       }

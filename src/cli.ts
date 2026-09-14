@@ -73,6 +73,14 @@ export async function cmdTask(ctx: Ctx, input: {
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   }
 
+  // detectCycle skips ids it does not recognise, so a typo would otherwise pass
+  // validation here and then wait in `queued` forever with no diagnostic. The
+  // new task's own id counts as known — depending on yourself is a cycle, not
+  // a typo, and must fall through to the cycle check below to be reported as one.
+  const known = new Set([...run.tasks.map((t) => t.task_id), task.task_id])
+  const unknown = input.dependsOn.filter((id) => !known.has(id))
+  if (unknown.length > 0) return fail(`--depends-on names no such task: ${unknown.join(', ')}`)
+
   const cycle = detectCycle([...run.tasks, task])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
