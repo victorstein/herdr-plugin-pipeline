@@ -48,3 +48,7 @@ files in your repo and objects on GitHub.
 in `docs/superpowers/reviews/`. Read the "Verified herdr facts" table before changing anything that
 touches the herdr or gh CLIs — every row was measured, and several correct-looking assumptions in
 earlier drafts were wrong.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
