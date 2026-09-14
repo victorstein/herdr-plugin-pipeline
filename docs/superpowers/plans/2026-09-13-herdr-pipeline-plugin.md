@@ -371,6 +371,7 @@ Expected: FAIL — cannot resolve `../src/lib/store`.
 ```ts
 // src/lib/store.ts
 import { mkdirSync, renameSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 
 export async function readJson<T>(path: string): Promise<T | null> {
@@ -385,7 +386,9 @@ export async function readJson<T>(path: string): Promise<T | null> {
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
+  // Unique per CALL, not per process: two concurrent writeJson calls in one
+  // process would otherwise share a tmp path and race on rename.
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   await Bun.write(tmp, `${JSON.stringify(value, null, 2)}\n`)
   renameSync(tmp, path)
 }
@@ -548,7 +551,10 @@ export async function loadConfig(configDir: string): Promise<Config> {
   if (raw.PIPELINE_WORKSPACE_LABEL) cfg.PIPELINE_WORKSPACE_LABEL = raw.PIPELINE_WORKSPACE_LABEL
   if (raw.GH_BIN) cfg.GH_BIN = raw.GH_BIN
   if (raw.HPIPE_LINK_PATH) cfg.HPIPE_LINK_PATH = raw.HPIPE_LINK_PATH
-  if (raw.HPIPE_LINK !== undefined) cfg.HPIPE_LINK = raw.HPIPE_LINK !== '0'
+  if (raw.HPIPE_LINK !== undefined) {
+    const falsy = ['0', 'false']
+    cfg.HPIPE_LINK = !falsy.includes(raw.HPIPE_LINK.toLowerCase())
+  }
 
   return cfg
 }
@@ -644,6 +650,7 @@ Expected: FAIL — cannot resolve `../src/lib/queue`.
 ```ts
 // src/lib/queue.ts
 import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { QueuedEvent } from './types'
 
@@ -652,7 +659,13 @@ let seq = 0
 const pad = (n: number, width: number) => String(n).padStart(width, '0')
 
 export function queueName(atMs: number, sequence: number, pid: number): string {
-  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}.json`
+  // The trailing random segment is a pure uniqueness tie-breaker and must stay
+  // LAST so it never perturbs sort order. Hooks are one-shot processes, so
+  // `sequence` is 0 on nearly every real call and `pid` alone would carry
+  // uniqueness — and pid reuse within one millisecond would then silently
+  // overwrite an already-queued event.
+  const unique = randomUUID().slice(0, 8)
+  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}-${unique}.json`
 }
 
 export async function enqueue(queueDir: string, event: QueuedEvent): Promise<string> {
@@ -818,8 +831,10 @@ appendFileSync(${JSON.stringify(join(dir, 'calls.log'))}, argv.join(' ') + '\\n'
 const table = ${table}
 const codes = ${codes}
 const joined = argv.join(' ')
+// Require a token boundary after the match: without it, a stub for
+// 'agent get w1:p1' silently answers 'agent get w1:p10' with the wrong payload.
 const key = Object.keys(table)
-  .filter((k) => joined.startsWith(k))
+  .filter((k) => joined === k || joined.startsWith(k + ' '))
   .sort((a, b) => b.length - a.length)[0]
 if (key === undefined) {
   process.stdout.write(JSON.stringify({ error: { code: 'unstubbed', message: joined } }))
@@ -868,9 +883,17 @@ export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
   private async call<T>(args: string[]): Promise<CallResult<T>> {
-    const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
-    const text = await new Response(proc.stdout).text()
-    await proc.exited
+    // Bun.spawn throws synchronously on a missing binary. Callers rely on these
+    // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
+    // CallResult rather than crash the supervisor loop.
+    let text: string
+    try {
+      const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      text = await new Response(proc.stdout).text()
+      await proc.exited
+    } catch (error) {
+      return { ok: false, code: 'spawn_failed', message: String(error) }
+    }
 
     let parsed: Envelope<T>
     try {
@@ -912,10 +935,17 @@ export class Herdr {
     return res.result?.text ?? ''
   }
 
-  async paneShellPid(paneId: string): Promise<number | null> {
+  /**
+   * `undefined` means the call FAILED and the pid is unknown; `null` means herdr
+   * answered but reported no shell pid. Callers that act destructively on the
+   * result must treat unknown as "do not touch" — conflating the two once made
+   * the ghost reaper close the live supervisor pane it was protecting.
+   */
+  async paneShellPid(paneId: string): Promise<number | null | undefined> {
     const res = await this.call<{ process_info: { shell_pid: number } }>(
       ['pane', 'process-info', '--pane', paneId],
     )
+    if (!res.ok) return undefined
     return res.result?.process_info.shell_pid ?? null
   }
 
@@ -1045,7 +1075,6 @@ import type { Orchestrator, Run, SessionKey } from './types'
 const FINISHED: ReadonlySet<string> = new Set(['done'])
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
-const orchestratorsPath = (stateDir: string) => join(stateDir, 'orchestrators.json')
 
 export function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
@@ -1114,30 +1143,39 @@ export async function runForWorkspace(
   return runs.find((r) => r.tasks.some((t) => t.workspace_id === workspaceId)) ?? null
 }
 
-const orchestratorKey = (session: SessionKey, repoKey: string) => `${session}/${repoKey}`
+// One file per record, mirroring the runs layout above. A single shared
+// orchestrators.json would be read-modify-written whole, so two concurrent
+// claims in different sessions could silently clobber each other's entry.
+const orchestratorPath = (stateDir: string, session: SessionKey, repoKey: string) =>
+  join(stateDir, 'orchestrators', session, `${encodeURIComponent(repoKey)}.json`)
 
 export async function writeOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string, value: Orchestrator,
 ): Promise<void> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  all[orchestratorKey(session, repoKey)] = value
-  await writeJson(orchestratorsPath(stateDir), all)
+  await writeJson(orchestratorPath(stateDir, session, repoKey), value)
 }
 
 export async function readOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<Orchestrator | null> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  return all[orchestratorKey(session, repoKey)] ?? null
+  return readJson<Orchestrator>(orchestratorPath(stateDir, session, repoKey))
 }
 
 export async function allOrchestratorPanes(
   stateDir: string, session: SessionKey,
 ): Promise<Set<string>> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
+  const dir = join(stateDir, 'orchestrators', session)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return new Set()
+  }
+
   const panes = new Set<string>()
-  for (const [key, value] of Object.entries(all)) {
-    if (key.startsWith(`${session}/`)) panes.add(value.pane_id)
+  for (const name of names.filter((n) => n.endsWith('.json'))) {
+    const entry = await readJson<Orchestrator>(join(dir, name))
+    if (entry) panes.add(entry.pane_id)
   }
   return panes
 }
@@ -1789,7 +1827,7 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test test/predicates.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -3770,8 +3808,13 @@ export async function reapGhostPanes(
 
   for (const pane of panes) {
     if (pane.label !== SUPERVISOR_LABEL) continue
+
     const shellPid = await herdr.paneShellPid(pane.pane_id)
+    // undefined means the pid lookup failed. Closing a pane we cannot identify
+    // risks killing the live supervisor, so uncertainty means leave it alone.
+    if (shellPid === undefined) continue
     if (livePanePid !== null && shellPid === livePanePid) continue
+
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
