@@ -1782,9 +1782,33 @@ test('parses a BLOCKER trailer with counts', async () => {
   expect(await parseVerdict(p)).toEqual({ verdict: 'BLOCKER', blockers: 2, majors: 5 })
 })
 
-test('uses the LAST verdict line when a review quotes an earlier one', async () => {
-  const p = await writeAged('r.md', 'quoting VERDICT: BLOCKER inline\n\nVERDICT: CLEAR\n', 9_000)
+test('an indented quotation of the contract is not read as a verdict', async () => {
+  // The review prompts document the trailer as an indented block, so a reviewer
+  // narrating the contract writes exactly this. Trimming first made it
+  // indistinguishable from a real verdict and produced a false CLEAR.
+  const p = await writeAged('r.md', [
+    '# Review', 'I found 3 BLOCKER issues.', '',
+    'Per the contract, the trailer format required is:', '',
+    '    VERDICT: CLEAR', '',
+  ].join('\n'), 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('uses the LAST verdict line when an earlier one stands at column 0', async () => {
+  const p = await writeAged(
+    'r.md', 'VERDICT: BLOCKER\nBLOCKERS: 1\n\nsuperseded\n\nVERDICT: CLEAR\n', 9_000,
+  )
   expect((await parseVerdict(p))?.verdict).toBe('CLEAR')
+})
+
+test('rejects CLEAR carrying blocker counts as self-contradictory', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nBLOCKERS: 3\n', 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('accepts CLEAR carrying major counts, which the contract permits', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nMAJORS: 2\n', 9_000)
+  expect(await parseVerdict(p)).toEqual({ verdict: 'CLEAR', blockers: 0, majors: 2 })
 })
 
 test('rejects a trailer that is not the last non-empty line', async () => {
@@ -1834,9 +1858,9 @@ export async function isFresh(path: string, phaseEnteredAt: number): Promise<boo
  * parseVerdict is the real completeness signal for a review.
  */
 export async function isSettled(path: string, settleMs: number): Promise<boolean> {
-  const before = statSync(path)
-  await Bun.sleep(settleMs)
   try {
+    const before = statSync(path)
+    await Bun.sleep(settleMs)
     const after = statSync(path)
     return before.size === after.size && before.mtimeMs === after.mtimeMs
   } catch {
@@ -1844,14 +1868,21 @@ export async function isSettled(path: string, settleMs: number): Promise<boolean
   }
 }
 
-const VERDICT_LINE = /^VERDICT:\s*(CLEAR|BLOCKER)\s*$/
-const COUNT_LINE = /^(BLOCKERS|MAJORS):\s*(\d+)\s*$/
+// Anchored at column 0 on purpose. The review prompts DOCUMENT the trailer as
+// an indented block, so trimming before matching made a quoted example
+// byte-identical to a real verdict — a reviewer narrating the contract then
+// produced a confident false CLEAR. A real trailer is never indented.
+const VERDICT_LINE = /^VERDICT:[ \t]*(CLEAR|BLOCKER)[ \t]*$/
+const COUNT_LINE = /^(BLOCKERS|MAJORS):[ \t]*(\d+)[ \t]*$/
 
 export async function parseVerdict(path: string): Promise<VerdictResult | null> {
   const file = Bun.file(path)
   if (!(await file.exists())) return null
 
-  const lines = (await file.text()).split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  const lines = (await file.text())
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+    .filter((l) => l.trim().length > 0)
 
   let verdictIndex = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -1869,6 +1900,11 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
   }
 
   const verdict = VERDICT_LINE.exec(lines[verdictIndex] ?? '')?.[1] as Verdict
+
+  // CLEAR alongside blocker findings is self-contradictory — the contract pairs
+  // counts with BLOCKER. (CLEAR with MAJORS is legal: majors are fixed inline.)
+  if (verdict === 'CLEAR' && counts.blockers > 0) return null
+
   return { verdict, ...counts }
 }
 ```
@@ -1876,7 +1912,7 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test test/predicates.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1932,7 +1968,9 @@ Expected: FAIL — cannot resolve `../src/lib/render`.
 // src/lib/render.ts
 import { join } from 'node:path'
 
-const PLACEHOLDER = /\{\{(\w+)\}\}/g
+// Matches any {{...}} token, not just \w+, so a hyphenated or dotted name
+// fails loudly instead of shipping through to an agent verbatim.
+const PLACEHOLDER = /\{\{([^}]*)\}\}/g
 
 export function render(template: string, vars: Record<string, string>): string {
   return template.replace(PLACEHOLDER, (_match, name: string) => {
@@ -2078,8 +2116,7 @@ or
 `BLOCKER` means: any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs
 a judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline.
 
-Nothing but count lines may follow the verdict line — a file with prose after it reads as still being
-written and will not be accepted.
+Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it: a file with prose after the trailer reads as still being written.
 ```
 
 - [ ] **Step 5: Write `prompts/plan.md`**
@@ -2129,7 +2166,7 @@ or
     MAJORS: 3
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 7: Write `prompts/dispatch.md`**
@@ -2231,7 +2268,7 @@ or
     MAJORS: 0
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 10: Write `prompts/task-review-quality.md`**
@@ -2264,7 +2301,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 11: Write `prompts/ci-red.md`**
@@ -2341,7 +2378,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 15: Write `prompts/escalate.md`**
