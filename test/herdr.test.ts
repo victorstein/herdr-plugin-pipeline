@@ -39,3 +39,32 @@ test('records the argv it was called with', async () => {
   const log = await Bun.file(join(dir, 'calls.log')).text()
   expect(log).toContain('agent get w1:p1')
 })
+
+test('a missing binary returns a failed result instead of throwing', async () => {
+  const res = await new Herdr(join(dir, 'no-such-binary')).agentPrompt('w1:p1', 'hello')
+  expect(res.ok).toBe(false)
+  expect(res.code).toBe('spawn_failed')
+})
+
+test('paneShellPid returns undefined when the call fails', async () => {
+  const bin = await makeFakeBin(dir, {})
+  const pid = await new Herdr(bin).paneShellPid('w1:p1')
+  expect(pid).toBeUndefined()
+})
+
+test('paneShellPid returns null when herdr answers without a pid', async () => {
+  const bin = await makeFakeBin(dir, { 'pane process-info': { result: { process_info: {} } } })
+  const pid = await new Herdr(bin).paneShellPid('w1:p1')
+  expect(pid).toBeNull()
+})
+
+test('fake-bin requires a token boundary after the matched prefix', async () => {
+  const bin = await makeFakeBin(dir, {
+    'agent get w1:p1': { result: { agent: { agent_status: 'idle' } } },
+  })
+  const proc = Bun.spawn([bin, 'agent', 'get', 'w1:p10'], { stdout: 'pipe' })
+  const text = await new Response(proc.stdout).text()
+  await proc.exited
+  const parsed = JSON.parse(text) as { error?: { code: string } }
+  expect(parsed.error?.code).toBe('unstubbed')
+})

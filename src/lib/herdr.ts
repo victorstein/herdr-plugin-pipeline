@@ -29,9 +29,17 @@ export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
   private async call<T>(args: string[]): Promise<CallResult<T>> {
-    const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
-    const text = await new Response(proc.stdout).text()
-    await proc.exited
+    // Bun.spawn throws synchronously on a missing binary. Callers rely on these
+    // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
+    // CallResult rather than crash the supervisor loop.
+    let text: string
+    try {
+      const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      text = await new Response(proc.stdout).text()
+      await proc.exited
+    } catch (error) {
+      return { ok: false, code: 'spawn_failed', message: String(error) }
+    }
 
     let parsed: Envelope<T>
     try {
@@ -73,10 +81,17 @@ export class Herdr {
     return res.result?.text ?? ''
   }
 
-  async paneShellPid(paneId: string): Promise<number | null> {
+  /**
+   * `undefined` means the call FAILED and the pid is unknown; `null` means herdr
+   * answered but reported no shell pid. Callers that act destructively on the
+   * result must treat unknown as "do not touch" — conflating the two once made
+   * the ghost reaper close the live supervisor pane it was protecting.
+   */
+  async paneShellPid(paneId: string): Promise<number | null | undefined> {
     const res = await this.call<{ process_info: { shell_pid: number } }>(
       ['pane', 'process-info', '--pane', paneId],
     )
+    if (!res.ok) return undefined
     return res.result?.process_info.shell_pid ?? null
   }
 

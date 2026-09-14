@@ -22,8 +22,10 @@ appendFileSync(${JSON.stringify(join(dir, 'calls.log'))}, argv.join(' ') + '\\n'
 const table = ${table}
 const codes = ${codes}
 const joined = argv.join(' ')
+// Require a token boundary after the match: without it, a stub for
+// 'agent get w1:p1' silently answers 'agent get w1:p10' with the wrong payload.
 const key = Object.keys(table)
-  .filter((k) => joined.startsWith(k))
+  .filter((k) => joined === k || joined.startsWith(k + ' '))
   .sort((a, b) => b.length - a.length)[0]
 if (key === undefined) {
   process.stdout.write(JSON.stringify({ error: { code: 'unstubbed', message: joined } }))

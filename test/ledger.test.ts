@@ -50,3 +50,17 @@ test('orchestrators are keyed by session and repo', async () => {
   expect((await readOrchestrator(dir, 'personal', 'k'))?.pane_id).toBe('w1:p1')
   expect(await readOrchestrator(dir, 'default', 'k')).toBeNull()
 })
+
+test('concurrent orchestrator claims for different repos in one session both persist', async () => {
+  await Promise.all([
+    writeOrchestrator(dir, 'personal', 'repo-a', {
+      pane_id: 'w1:p1', workspace_id: 'w1', socket_path: '/s', claimed_at: 1,
+    }),
+    writeOrchestrator(dir, 'personal', 'repo-b', {
+      pane_id: 'w2:p1', workspace_id: 'w2', socket_path: '/s', claimed_at: 2,
+    }),
+  ])
+
+  expect((await readOrchestrator(dir, 'personal', 'repo-a'))?.pane_id).toBe('w1:p1')
+  expect((await readOrchestrator(dir, 'personal', 'repo-b'))?.pane_id).toBe('w2:p1')
+})

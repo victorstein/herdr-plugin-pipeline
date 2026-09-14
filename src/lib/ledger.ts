@@ -6,7 +6,6 @@ import type { Orchestrator, Run, SessionKey } from './types'
 const FINISHED: ReadonlySet<string> = new Set(['done'])
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
-const orchestratorsPath = (stateDir: string) => join(stateDir, 'orchestrators.json')
 
 export function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
@@ -75,30 +74,39 @@ export async function runForWorkspace(
   return runs.find((r) => r.tasks.some((t) => t.workspace_id === workspaceId)) ?? null
 }
 
-const orchestratorKey = (session: SessionKey, repoKey: string) => `${session}/${repoKey}`
+// One file per record, mirroring the runs layout above. A single shared
+// orchestrators.json would be read-modify-written whole, so two concurrent
+// claims in different sessions could silently clobber each other's entry.
+const orchestratorPath = (stateDir: string, session: SessionKey, repoKey: string) =>
+  join(stateDir, 'orchestrators', session, `${encodeURIComponent(repoKey)}.json`)
 
 export async function writeOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string, value: Orchestrator,
 ): Promise<void> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  all[orchestratorKey(session, repoKey)] = value
-  await writeJson(orchestratorsPath(stateDir), all)
+  await writeJson(orchestratorPath(stateDir, session, repoKey), value)
 }
 
 export async function readOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<Orchestrator | null> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  return all[orchestratorKey(session, repoKey)] ?? null
+  return readJson<Orchestrator>(orchestratorPath(stateDir, session, repoKey))
 }
 
 export async function allOrchestratorPanes(
   stateDir: string, session: SessionKey,
 ): Promise<Set<string>> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
+  const dir = join(stateDir, 'orchestrators', session)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return new Set()
+  }
+
   const panes = new Set<string>()
-  for (const [key, value] of Object.entries(all)) {
-    if (key.startsWith(`${session}/`)) panes.add(value.pane_id)
+  for (const name of names.filter((n) => n.endsWith('.json'))) {
+    const entry = await readJson<Orchestrator>(join(dir, name))
+    if (entry) panes.add(entry.pane_id)
   }
   return panes
 }
