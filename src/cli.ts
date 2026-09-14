@@ -6,8 +6,11 @@ import {
   activeRunForRepo, listRuns, newRun, saveRun, writeOrchestrator,
 } from './lib/ledger'
 import { enterRunPhase } from './lib/machine'
+import { supervisorState } from './lib/pidfile'
+import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { sessionKey } from './lib/session'
+import { formatStatus } from './lib/status'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
@@ -130,6 +133,64 @@ export async function cmdRewind(ctx: Ctx, input: {
   return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; pass reset to 1`)
 }
 
+export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
+  const runs = await listRuns(ctx.stateDir, ctx.session)
+  const state = await supervisorState(ctx.stateDir, ctx.session)
+  return ok(formatStatus(
+    runs,
+    { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
+    ctx.session,
+  ))
+}
+
+export async function cmdDrain(ctx: Ctx): Promise<CmdResult> {
+  const events = await drain(join(ctx.stateDir, 'queue'))
+  return ok(events.length === 0 ? 'queue empty' : JSON.stringify(events, null, 2))
+}
+
+export async function cmdAbort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  if (!run) return fail(`no such run: ${input.runId}`)
+
+  // Record where it was so resume can put it back. Worktrees and branches are untouched.
+  run.history.push({ at: Date.now(), from: run.phase, to: 'done', why: `aborted from ${run.phase}` })
+  run.escalated_from = run.phase
+  run.phase = 'done'
+  await saveRun(ctx.stateDir, run)
+  return ok(`aborted ${run.run_id}; worktrees and branches left alone. Undo: hpipe resume ${run.run_id}`)
+}
+
+export async function cmdResume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  if (!run) return fail(`no such run: ${input.runId}`)
+
+  const aborted = run.history.at(-1)?.why?.startsWith('aborted from')
+  if (run.phase !== 'done' || !aborted || !run.escalated_from) {
+    return fail(`${run.run_id} was not aborted — nothing to resume`)
+  }
+
+  const back = run.escalated_from
+  run.history.push({ at: Date.now(), from: 'done', to: back, why: 'resumed' })
+  run.phase = back
+  run.escalated_from = null
+  run.phase_entered_at = Date.now()
+  await saveRun(ctx.stateDir, run)
+  return ok(`resumed ${run.run_id} at ${back}`)
+}
+
+export async function cmdForget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {
+  const runs = await listRuns(ctx.stateDir, ctx.session)
+  for (const run of runs) {
+    const task = run.tasks.find((t) => t.workspace_id === input.workspaceId)
+    if (!task) continue
+    task.workspace_id = null
+    task.pane_id = null
+    await saveRun(ctx.stateDir, run)
+    return ok(`unbound ${input.workspaceId} from ${task.task_id}`)
+  }
+  return fail(`no task is bound to ${input.workspaceId}`)
+}
+
 // ——— argv dispatcher ———
 
 function flag(argv: string[], name: string): string | null {
@@ -157,8 +218,9 @@ async function dispatch(argv: string[]): Promise<number> {
   const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
   const [command, ...rest] = argv
 
-  const repo = await repoContext()
-  if (!repo && command !== 'status') {
+  const needsRepo = command === 'start' || command === 'task'
+  const repo = needsRepo ? await repoContext() : null
+  if (needsRepo && !repo) {
     console.error('hpipe: not inside a git repository')
     return 1
   }
@@ -192,6 +254,12 @@ async function dispatch(argv: string[]): Promise<number> {
         runId: rest[0] ?? '', phase: rest[1] ?? '', taskId: flag(rest, 'task'),
       })
       break
+
+    case 'status': out = await cmdStatus(ctx); break
+    case 'drain': out = await cmdDrain(ctx); break
+    case 'abort': out = await cmdAbort(ctx, { runId: rest[0] ?? '' }); break
+    case 'resume': out = await cmdResume(ctx, { runId: rest[0] ?? '' }); break
+    case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
       console.error('usage: hpipe <start|task|status|drain|rewind|resume|abort|forget> …')
