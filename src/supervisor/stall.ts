@@ -49,7 +49,6 @@ export function taskStallCandidates(
     if (!run.orchestrator_pane) continue
     for (const task of run.tasks) {
       if (task.phase !== 'execute') continue
-      if (task.pr !== null) continue
 
       const minutes = (now - task.phase_entered_at) / 60_000
       if (minutes < thresholdMinutes) continue

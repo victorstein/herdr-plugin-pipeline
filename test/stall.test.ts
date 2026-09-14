@@ -62,9 +62,11 @@ test('a task sitting in execute past the threshold with no PR is a candidate', (
   expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
 })
 
-test('a task that already opened a PR is not stalled', () => {
-  const run = runWithTasks([mkTask({ pr: 42 })])
-  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+test('a task that re-entered execute with an open PR is still probed', () => {
+  // Re-entry from a blocker review or red CI: the PR exists and head_sha_at_entry
+  // is the rejected sha, so a silent worker would otherwise never be noticed.
+  const run = runWithTasks([mkTask({ pr: 42, head_sha_at_entry: 'rejected' })])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
 })
 
 test('a task inside the threshold is not a candidate', () => {
