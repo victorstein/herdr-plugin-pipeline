@@ -1,5 +1,5 @@
 import type { VerdictResult } from './predicates'
-import type { Run, RunPhase, Task, TaskPhase } from './types'
+import type { CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
 export interface RunSignals {
   actorIdle: boolean
@@ -73,4 +73,82 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
+}
+
+export interface TaskSignals {
+  actorIdle: boolean
+  workerIdle: boolean
+  artifactFresh: boolean
+  verdict: VerdictResult | null
+  prNumber: number | null
+  headSha: string | null
+  merged: boolean
+  mergedAtMs?: number
+  issueClosed: boolean
+  closedAtMs?: number
+  ciBucket: CiBucket | null
+  maxPasses: number
+}
+
+const TASK_REVIEW_PHASES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
+  'task-review-spec', 'task-review-quality',
+])
+
+export const ARTIFACT_TASK_PHASES = TASK_REVIEW_PHASES
+
+export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
+  switch (task.phase) {
+    case 'execute': {
+      // Edge, not level: the PR must have moved since this phase was entered.
+      const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
+      if (!s.workerIdle || s.prNumber === null || !moved) return null
+      task.pr = s.prNumber
+      return enterTaskPhase(run, task, 'task-review-spec', `PR #${s.prNumber} at ${s.headSha}`)
+    }
+
+    case 'task-review-spec':
+    case 'task-review-quality': {
+      if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
+
+      if (s.verdict.verdict === 'CLEAR') {
+        const next: TaskPhase = task.phase === 'task-review-spec' ? 'task-review-quality' : 'ci'
+        return enterTaskPhase(run, task, next, 'review cleared')
+      }
+
+      if (task.pass >= s.maxPasses) {
+        return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
+      }
+
+      const passes = task.pass + 1
+      enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
+      task.pass = passes
+      task.head_sha_at_entry = s.headSha
+      return task
+    }
+
+    case 'ci': {
+      if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
+      if (s.ciBucket === 'fail') {
+        enterTaskPhase(run, task, 'execute', 'CI red')
+        task.head_sha_at_entry = s.headSha
+        return task
+      }
+      return null
+    }
+
+    case 'merge': {
+      if (!s.merged) return null
+      if (s.mergedAtMs === undefined || s.mergedAtMs <= task.phase_entered_at) return null
+      return enterTaskPhase(run, task, 'close', 'PR merged')
+    }
+
+    case 'close': {
+      if (!s.issueClosed) return null
+      if (s.closedAtMs === undefined || s.closedAtMs <= task.phase_entered_at) return null
+      return enterTaskPhase(run, task, 'teardown', `issue #${task.issue} closed`)
+    }
+
+    default:
+      return null
+  }
 }
