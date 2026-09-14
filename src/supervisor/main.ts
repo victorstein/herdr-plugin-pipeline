@@ -5,8 +5,10 @@ import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
+import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
-import { type DigestInput, evaluateRun, nextDelivery, refreshBadges, shouldRetry } from './deliver'
+import { artifactPathFor, type DigestInput, evaluateRun, nextDelivery, refreshBadges, shouldRetry } from './deliver'
+import { stallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 
 const EXIT_DUPLICATE = 3
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown)
 
   let attempts = 0
+  const probed = new Set<string>()
 
   for (;;) {
     try {
@@ -86,6 +89,22 @@ async function main(): Promise<void> {
           }
         } else {
           attempts = 0
+        }
+      }
+
+      for (const candidate of stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed)) {
+        probed.add(candidate.key)
+        const path = artifactPathFor(candidate.run, null)
+        const text = await renderPrompt(
+          process.env.HERDR_PLUGIN_ROOT ?? process.cwd(), 'stall-probe', {
+            run_id: candidate.run.run_id,
+            phase: candidate.run.phase,
+            minutes: String(candidate.minutes),
+            artifact_path: join(candidate.run.repo_root, path ?? 'the expected artifact'),
+          },
+        )
+        if (candidate.run.orchestrator_pane) {
+          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
         }
       }
     } catch (error) {
