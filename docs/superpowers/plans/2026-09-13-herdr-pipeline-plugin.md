@@ -1240,7 +1240,7 @@ test('marks a release on agent_detected', () => {
   const event = toQueuedEvent('pane.agent_detected', 'personal', JSON.stringify({
     pane_id: 'w7:p1', workspace_id: 'w7', released: true,
   }))
-  expect(event.released).toBe(true)
+  expect(event?.released).toBe(true)
 })
 
 test('returns null for unparseable JSON', () => {
