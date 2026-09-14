@@ -6228,6 +6228,239 @@ git commit -m "feat: render the task-phase prompts so task phases actually progr
 
 ---
 
+## Task 32: Fix CI-poll starvation and give silent tasks a way to be noticed
+
+The final re-review confirmed the task pipeline is genuinely wired, but found that the wiring
+introduced a new Critical and left one hole open.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/supervisor/stall.ts`, `src/supervisor/tasks.ts`, `src/cli.ts`
+- Modify: `test/stall.test.ts`
+
+- [ ] **Step 1: Write the failing test for the task stall probe**
+
+Append to `test/stall.test.ts`:
+
+```ts
+import { taskStallCandidates } from '../src/supervisor/stall'
+import type { Task } from '../src/lib/types'
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  depends_on: [], files: [], keep_worktree: false, text: '',
+  workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
+  phase: 'execute', pass: 1, phase_entered_at: LONG_AGO, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null, ...over,
+})
+
+function runWithTasks(tasks: Task[]): Run {
+  const run = runAt('execute', NOW)
+  run.tasks = tasks
+  return run
+}
+
+test('a task sitting in execute past the threshold with no PR is a candidate', () => {
+  const run = runWithTasks([mkTask({})])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
+})
+
+test('a task that already opened a PR is not stalled', () => {
+  const run = runWithTasks([mkTask({ pr: 42 })])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+})
+
+test('a task inside the threshold is not a candidate', () => {
+  const run = runWithTasks([mkTask({ phase_entered_at: NOW - 60_000 })])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+})
+
+test('only execute is probed — review and merge phases are orchestrator-owned', () => {
+  for (const phase of ['task-review-spec', 'merge', 'close', 'queued'] as const) {
+    const run = runWithTasks([mkTask({ phase })])
+    expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+  }
+})
+
+test('a task already probed for this phase entry is not probed again', () => {
+  const run = runWithTasks([mkTask({})])
+  const probed = new Set([`${run.run_id}:t1:execute:${LONG_AGO}`])
+  expect(taskStallCandidates([run], NOW, 45, probed)).toHaveLength(0)
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/stall.test.ts`
+Expected: FAIL — `taskStallCandidates` is not exported.
+
+- [ ] **Step 3: Implement the task stall probe**
+
+Append to `src/supervisor/stall.ts`:
+
+```ts
+import type { Run, Task } from '../lib/types'
+
+export interface TaskStallCandidate { run: Run; task: Task; key: string; minutes: number }
+
+export function taskStallKey(run: Run, task: Task): string {
+  return `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
+}
+
+/**
+ * `execute` is the only task phase worth probing: every other phase is either
+ * orchestrator-owned (and covered by the run-level probe's actor gate) or
+ * driven by an external service. A worker whose pane hangs without emitting
+ * `pane.exited` would otherwise go unnoticed indefinitely.
+ */
+export function taskStallCandidates(
+  runs: Run[], now: number, thresholdMinutes: number, alreadyProbed: Set<string>,
+): TaskStallCandidate[] {
+  const out: TaskStallCandidate[] = []
+
+  for (const run of runs) {
+    if (!run.orchestrator_pane) continue
+    for (const task of run.tasks) {
+      if (task.phase !== 'execute') continue
+      if (task.pr !== null) continue
+
+      const minutes = (now - task.phase_entered_at) / 60_000
+      if (minutes < thresholdMinutes) continue
+
+      const key = taskStallKey(run, task)
+      if (alreadyProbed.has(key)) continue
+
+      out.push({ run, task, key, minutes: Math.floor(minutes) })
+    }
+  }
+
+  return out
+}
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/stall.test.ts`
+Expected: PASS, 11 tests.
+
+- [ ] **Step 5: Fix the CI-poll starvation (Critical)**
+
+In `src/supervisor/main.ts`, the CI throttle currently sits INSIDE the `for (const run of pickOneAdvance(runs))` loop, so the first run resets `lastCiPollMs` and every later run reads ~0 elapsed and skips its poll — permanently, since run order is stable. Move it **above** the loop and poll every run at once (`ciTransitions` already accepts an array):
+
+```ts
+      if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
+        lastCiPollMs = Date.now()
+        await ciTransitions(runs, (pr) => gh.prChecks(pr))
+      }
+
+      const digests: DigestInput[] = []
+      for (const run of pickOneAdvance(runs)) {
+```
+
+and delete the old in-loop block.
+
+- [ ] **Step 6: Give each run its own error boundary**
+
+One `try` wraps the whole tick, so a throw while handling one run kills delivery and stall probing for every other run — and `render()` throws on an unresolved placeholder, which is a live throw surface. Wrap the per-run body:
+
+```ts
+      for (const run of pickOneAdvance(runs)) {
+        try {
+          // …existing per-run body, through saveRun…
+        } catch (error) {
+          console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
+        }
+      }
+```
+
+- [ ] **Step 7: Probe stalled tasks**
+
+In `main.ts`, alongside the existing run-level stall block, add:
+
+```ts
+      for (const candidate of taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed)) {
+        probed.add(candidate.key)
+        const text = await renderPrompt(pluginRoot, 'stall-probe', {
+          run_id: candidate.run.run_id,
+          phase: `execute (${candidate.task.task_id}, ${candidate.task.branch})`,
+          minutes: String(candidate.minutes),
+          artifact_path: `a PR for ${candidate.task.branch} (#${candidate.task.issue})`,
+        })
+        if (candidate.run.orchestrator_pane) {
+          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
+        }
+      }
+```
+
+Import `taskStallCandidates` alongside `stallCandidates`.
+
+- [ ] **Step 8: Cache a task's PR number as soon as it is discovered**
+
+`gatherSignals`'s `execute` case calls `prForBranch` on every tick until the task leaves `execute`,
+because `task.pr` is only persisted on the transition out. At a 1 s tick that is two `gh` subprocess
+spawns per second per task, indefinitely. In `src/supervisor/tasks.ts`, persist it on discovery:
+
+```ts
+    case 'execute': {
+      const pr = task.pr ?? (await deps.prForBranch(task.branch))
+      if (pr === null) return base
+      // Persist on discovery, not on the phase transition: otherwise every tick
+      // re-queries gh for a PR we already know about.
+      task.pr = pr
+      const view = await deps.prView(pr)
+      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+    }
+```
+
+- [ ] **Step 9: Stop the duplicate dispatch prompt**
+
+`cmdTask` prints the worker prompt when the gate is already open, but leaves the task at `queued` —
+so the next tick's `advanceTasks` opens the gate again and injects the same prompt into the digest.
+In `src/cli.ts`, transition the task when the CLI hands over the prompt:
+
+```ts
+  const gate = gateStatus(task, run.tasks)
+  if (gate.state !== 'ready') {
+    return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
+  }
+
+  // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
+  // `queued` would make the next tick deliver the same prompt a second time.
+  enterTaskPhase(run, task, 'execute', 'dispatched at registration')
+  await saveRun(ctx.stateDir, run)
+
+  const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
+  return ok(`task_id: ${task.task_id}\n\n${prompt}`)
+```
+
+Import `enterTaskPhase` alongside `enterRunPhase`. Note the existing `saveRun` earlier in `cmdTask`
+stays — this is a second save after the transition.
+
+- [ ] **Step 10: Correct the durability comment**
+
+`main.ts`'s comment claims "Ledger first, delivery second: a crash here replays harmlessly through
+dedup." There is no replay mechanism — `drain()` unlinks as it reads. Replace with what is true:
+
+```ts
+      // Saving before delivery keeps the ledger authoritative: a crash here loses
+      // that tick's prompt, not the state transition, and the orchestrator can
+      // recover with `hpipe status`. Events themselves are at-most-once —
+      // drain() unlinks as it reads.
+```
+
+- [ ] **Step 11: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 195 tests.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src test
+git commit -m "fix: poll CI across all runs and notice silent tasks"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
