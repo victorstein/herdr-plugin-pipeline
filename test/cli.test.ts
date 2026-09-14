@@ -1,0 +1,77 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
+import { cmdRewind, cmdStart, cmdTask } from '../src/cli'
+
+let dir: string
+const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
+
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cli-')) })
+afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+test('start opens a run and prints the spec prompt', async () => {
+  const out = await cmdStart(ctx(), {
+    title: 'chat meter', repoKey: 'k', repoRoot: '/r', socketPath: '/s',
+    paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(out.ok).toBe(true)
+  expect(out.text).toContain('Write the spec')
+  expect((await activeRunForRepo(dir, 'personal', 'k'))?.title).toBe('chat meter')
+})
+
+test('start refuses a second run for the same repo and names the blocker', async () => {
+  const first = await cmdStart(ctx(), {
+    title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  const second = await cmdStart(ctx(), {
+    title: 'b', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(second.ok).toBe(false)
+  expect(second.text).toContain(JSON.parse(first.json ?? '{}').run_id ?? 'run')
+})
+
+test('task prints its id and withholds the prompt while gated', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  const t1 = await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', text: 'core work', dependsOn: [], files: [], keepWorktree: false })
+  const t2 = await cmdTask(c, { branch: 'feat/api', issue: 2, surface: 'api', text: 'api work', dependsOn: ['t1'], files: [], keepWorktree: false })
+
+  expect(t1.text).toContain('task_id: t1')
+  expect(t1.text).toContain('feat/core')
+  expect(t2.text).toContain('task_id: t2')
+  expect(t2.text).toContain('queued: waiting on t1')
+  expect(t2.text).not.toContain('api work')
+})
+
+test('task rejects a dependency cycle', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  await cmdTask(c, { branch: 'a', issue: 1, surface: 'core', text: 'x', dependsOn: [], files: [], keepWorktree: false })
+  const bad = await cmdTask(c, { branch: 'b', issue: 2, surface: 'core', text: 'y', dependsOn: ['t1', 't2'], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('cycle')
+})
+
+test('rewind resets the pass count for the phase it rewinds to', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'escalated'
+  run.escalated_from = 'spec-review'
+  run.pass = 2
+  await saveRun(dir, run)
+
+  const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: null })
+  expect(out.ok).toBe(true)
+  const after = await activeRunForRepo(dir, 'personal', 'k')
+  expect(after?.phase).toBe('spec')
+  expect(after?.pass).toBe(1)
+})
