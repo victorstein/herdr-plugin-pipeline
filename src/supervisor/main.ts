@@ -1,10 +1,12 @@
 import { join } from 'node:path'
 import { loadConfig } from '../lib/config'
+import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
 import { sessionKey } from '../lib/session'
+import { type DigestInput, evaluateRun, nextDelivery, refreshBadges, shouldRetry } from './deliver'
 import { applyEvents, pickOneAdvance } from './tick'
 
 const EXIT_DUPLICATE = 3
@@ -39,6 +41,8 @@ async function main(): Promise<void> {
 
   const config = await loadConfig(configDir)
   const herdr = new Herdr()
+  const gh = new Gh(config.GH_BIN)
+  const pluginId = process.env.HERDR_PLUGIN_ID ?? 'stein.pipeline'
   const queueDir = join(stateDir, 'queue')
 
   console.log(`[pipeline] supervisor up — session ${session}, tick ${config.TICK_MS}ms`)
@@ -47,19 +51,42 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
+  let attempts = 0
+
   for (;;) {
     try {
       const events = await drain(queueDir)
       const runs = await listRuns(stateDir, session)
       const panes = await allOrchestratorPanes(stateDir, session)
 
-      const { changed } = applyEvents(runs, events, session, panes)
+      const { changed, wake } = applyEvents(runs, events, session, panes)
 
       // Ledger first, delivery second: a crash here replays harmlessly through dedup.
       if (changed) for (const run of runs) await saveRun(stateDir, run)
 
+      const digests: DigestInput[] = []
       for (const run of pickOneAdvance(runs)) {
-        void run // Task 26 wires evaluation, badges, and delivery onto this loop.
+        const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, gh, config)
+        await refreshBadges(run, herdr, pluginId)
+        const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
+        if (lines.length > 0 || nextPrompt.length > 0) {
+          digests.push({ run, eventLines: lines, phaseNote, nextPrompt })
+        }
+        await saveRun(stateDir, run)
+      }
+
+      const delivery = nextDelivery(digests)
+      if (delivery) {
+        const sent = await herdr.agentPrompt(delivery.paneId, delivery.text)
+        if (!sent.ok) {
+          attempts += 1
+          if (!shouldRetry(sent.code, attempts, config.PROMPT_RETRY_MAX)) {
+            console.error(`[pipeline] giving up on delivery: ${sent.code}`)
+            attempts = 0
+          }
+        } else {
+          attempts = 0
+        }
       }
     } catch (error) {
       console.error('[pipeline] tick error:', error)
