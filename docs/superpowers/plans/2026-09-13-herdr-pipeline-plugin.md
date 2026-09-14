@@ -2515,6 +2515,34 @@ test('LIVELOCK: re-entered spec does not re-advance on the stale artifact', () =
   expect(advanceRun(run, { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 })).toBeNull()
 })
 
+test('a cleared branch-review finishes the run', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 }, maxPasses: 2,
+  })
+  expect(next?.phase).toBe('done')
+})
+
+test('a blocked branch-review loops on itself, since no producer phase remains', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 3,
+  })
+  expect(next?.phase).toBe('branch-review')
+  expect(next?.pass).toBe(2)
+})
+
+test('dispatch and execute never advance on artifact signals alone', () => {
+  for (const phase of ['dispatch', 'execute'] as const) {
+    const run = enterRunPhase(mkRun(), phase, 'test')
+    expect(advanceRun(run, {
+      actorIdle: true, artifactFresh: true, verdict: null, maxPasses: 2,
+    })).toBeNull()
+  }
+})
+
 test('enterRunPhase stamps phase_entered_at and appends history', () => {
   const before = Date.now() - 1
   const run = enterRunPhase(mkRun(), 'plan', 'spec review cleared')
@@ -2562,6 +2590,10 @@ const ON_CLEAR: Partial<Record<RunPhase, RunPhase>> = {
 const ON_BLOCKER: Partial<Record<RunPhase, RunPhase>> = {
   'spec-review': 'spec',
   'plan-review': 'plan',
+  // Unlike its siblings, branch-review routes to itself: by this point every
+  // task is merged and torn down, so there is no producer phase to return to.
+  // The orchestrator patches the branch directly and writes a fresh review,
+  // and MAX_PASSES still bounds the loop.
   'branch-review': 'branch-review',
 }
 
@@ -2595,9 +2627,8 @@ export function advanceRun(run: Run, signals: RunSignals): Run | null {
 
   const back = ON_BLOCKER[run.phase]
   if (!back) return null
-  const passes = run.pass + 1
   enterRunPhase(run, back, `review returned BLOCKER (pass ${run.pass})`)
-  run.pass = passes
+  run.pass += 1
   return run
 }
 
@@ -2736,6 +2767,28 @@ test('ci pass advances to merge; ci fail returns to execute', () => {
   })?.phase).toBe('execute')
 })
 
+test('a repeatedly red CI escalates instead of retrying forever', () => {
+  const { run, task } = fixture('ci')
+  task.pass = 2
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 2,
+  })
+  expect(next?.phase).toBe('escalated')
+})
+
+test('a red CI below the cap increments pass on the way back to execute', () => {
+  const { run, task } = fixture('ci')
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 3,
+  })
+  expect(next?.phase).toBe('execute')
+  expect(next?.pass).toBe(2)
+})
+
 test('a pending ci bucket advances nothing', () => {
   const { run, task } = fixture('ci')
   expect(advanceTask(run, task, {
@@ -2806,9 +2859,8 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
         return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
       }
 
-      const passes = task.pass + 1
       enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
-      task.pass = passes
+      task.pass += 1
       task.head_sha_at_entry = s.headSha
       return task
     }
@@ -2816,7 +2868,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'ci': {
       if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
       if (s.ciBucket === 'fail') {
+        // CI retries draw on the same budget as review retries. Without this the
+        // task cycles execute → review → ci → execute forever, bypassing the one
+        // safety valve the module has.
+        if (task.pass >= s.maxPasses) {
+          return enterTaskPhase(run, task, 'escalated', `CI still red after ${task.pass} passes`)
+        }
         enterTaskPhase(run, task, 'execute', 'CI red')
+        task.pass += 1
         task.head_sha_at_entry = s.headSha
         return task
       }
@@ -2923,6 +2982,26 @@ test('a finished task does not hold its files', () => {
   expect(gateStatus(waiting, [done, waiting]).state).toBe('ready')
 })
 
+test('an escalated task still holds its files', () => {
+  // Nothing tears an escalated task down, so its worktree and unmerged work
+  // persist — releasing the lock would let a second task edit the same files.
+  const stuck = task({ task_id: 't1', phase: 'escalated', files: ['packages/core/'] })
+  const waiting = task({ task_id: 't2', files: ['packages/core/x.ts'] })
+  expect(gateStatus(waiting, [stuck, waiting]).state).toBe('waiting')
+})
+
+test('a failed task still holds its files', () => {
+  const dead = task({ task_id: 't1', phase: 'failed', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [dead, waiting]).state).toBe('waiting')
+})
+
+test('an orphaned task releases its files, because its code already merged', () => {
+  const merged = task({ task_id: 't1', phase: 'orphaned', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [merged, waiting]).state).toBe('ready')
+})
+
 test('detectCycle names a cycle', () => {
   const a = task({ task_id: 't1', depends_on: ['t2'] })
   const b = task({ task_id: 't2', depends_on: ['t1'] })
@@ -2947,9 +3026,22 @@ Expected: FAIL — cannot resolve `../src/lib/gating`.
 // src/lib/gating.ts
 import type { Task, TaskPhase } from './types'
 
+/** Dependency satisfaction: a dependent may never start behind one of these. */
 const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
 const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'failed', 'orphaned', 'blocked-on-failure', 'escalated',
+])
+
+/**
+ * File ownership asks a DIFFERENT question than dependency satisfaction, so it
+ * gets its own set. `escalated` and `failed` both leave a worktree holding
+ * unmerged work, and nothing ever tears an escalated task down — releasing its
+ * files would let a second task be dispatched onto them. `orphaned` is excluded
+ * because it is only reachable after merge, so that code has already landed.
+ */
+const HOLDS_FILES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
+  'execute', 'task-review-spec', 'task-review-quality',
+  'ci', 'merge', 'close', 'teardown', 'failed', 'escalated',
 ])
 
 export type GateState =
@@ -2966,7 +3058,7 @@ export function filesOverlap(a: string[], b: string[]): boolean {
 }
 
 function isInFlight(task: Task): boolean {
-  return !TERMINAL_OK.has(task.phase) && !TERMINAL_BAD.has(task.phase) && task.phase !== 'queued'
+  return HOLDS_FILES.has(task.phase)
 }
 
 export function gateStatus(task: Task, all: Task[]): GateState {
@@ -3144,6 +3236,18 @@ test('task rejects a surface with no agent definition', async () => {
   expect(bad.text).toContain('kore-dev.md')
 })
 
+test('task rejects a dependency id that names no task', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'core', text: 'y', dependsOn: ['t7'], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('t7')
+})
+
 test('rewind resets the pass count for the phase it rewinds to', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.phase = 'escalated'
@@ -3239,6 +3343,12 @@ export async function cmdTask(ctx: Ctx, input: {
     phase: 'queued', pass: 1, phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   }
+
+  // detectCycle skips ids it does not recognise, so a typo would otherwise pass
+  // validation here and then wait in `queued` forever with no diagnostic.
+  const known = new Set(run.tasks.map((t) => t.task_id))
+  const unknown = input.dependsOn.filter((id) => !known.has(id))
+  if (unknown.length > 0) return fail(`--depends-on names no such task: ${unknown.join(', ')}`)
 
   const cycle = detectCycle([...run.tasks, task])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
