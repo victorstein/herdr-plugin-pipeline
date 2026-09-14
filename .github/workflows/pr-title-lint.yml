@@ -1,0 +1,77 @@
+name: PR Title Lint
+
+# Managed by stein-infra (tofu/pr-title-lint.tf). Do NOT edit here — this file is
+# overwritten on the next apply. Change the template in stein-infra instead.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+# Explicit block elevates over a repo's read-only default token — enough to post
+# the sticky comment. Posting a PR comment is not "approving a PR", so no elevated
+# repo default and no can_approve are needed (contrast release-please).
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: pr-title-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint-title:
+    # release-please's PRs are authored by github-actions[bot], and GitHub starts
+    # no jobs for bot-authored PRs: the run is created with zero jobs and recorded
+    # as a failure. Skipping the job makes the whole run conclude as "skipped"
+    # instead. No coverage lost — the title is machine-generated and conventional
+    # by construction. `github.head_ref` is empty outside pull_request events, so
+    # the guard never skips anything else.
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        id: lint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            ci
+            refactor
+            perf
+            test
+            build
+            style
+            revert
+          requireScope: false
+
+      # Loud: post/refresh an explanatory comment while the title is invalid.
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: always() && steps.lint.outputs.error_message != null
+        with:
+          header: pr-title-lint
+          message: |
+            **This PR's title isn't a valid Conventional Commit.**
+
+            We squash-merge, so the **PR title becomes the commit message**
+            release-please parses. A non-conventional title means **no release
+            fires** (and version bumps are skipped).
+
+            Use `<type>(<optional-scope>): <subject>`, where type is one of:
+            `feat` `fix` `chore` `docs` `ci` `refactor` `perf` `test` `build` `style` `revert`.
+
+            Examples: `feat(auth): add token refresh` · `fix: handle empty cursor`
+
+            _This check is advisory — it can't block the merge on a free-plan
+            private repo — but merging as-is will likely skip the release._
+
+            Details: ${{ steps.lint.outputs.error_message }}
+
+      # Self-clean once the title is fixed.
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: steps.lint.outputs.error_message == null
+        with:
+          header: pr-title-lint
+          delete: true
