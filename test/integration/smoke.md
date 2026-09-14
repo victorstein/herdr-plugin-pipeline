@@ -33,7 +33,7 @@ sleep 2
 3. **Hooks enqueue on a real worktree event.**
    ```bash
    herdr --session "$SMOKE" worktree create --branch smoke/x --base main
-   # assert: a file appeared under $HERDR_PLUGIN_STATE_DIR/queue/ within a second,
+   # assert: a file appeared under $HERDR_PLUGIN_STATE_DIR/queue/$SMOKE/ within a second,
    # then vanished as the supervisor drained it.
    ```
 
