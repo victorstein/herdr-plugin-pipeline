@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { buildDigest, nextDelivery, shouldRetry } from '../src/supervisor/deliver'
+import { artifactPathFor, buildDigest, nextDelivery, shouldRetry } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -86,4 +86,18 @@ test('an agent still working or blocked is not ready', () => {
   expect(isAgentReady('working')).toBe(false)
   expect(isAgentReady('blocked')).toBe(false)
   expect(isAgentReady('unknown')).toBe(false)
+})
+
+test('the plan phase resolves an artifact path even though cmdStart never seeds artifacts.plan', () => {
+  const run = mkRun()
+  run.phase = 'plan'
+  expect(run.artifacts.plan).toBeNull()
+  expect(artifactPathFor(run, null)).toBe('docs/superpowers/plans/plan.md')
+})
+
+test('a seeded artifacts.plan wins over the default', () => {
+  const run = mkRun()
+  run.phase = 'plan'
+  run.artifacts.plan = 'docs/superpowers/plans/custom.md'
+  expect(artifactPathFor(run, null)).toBe('docs/superpowers/plans/custom.md')
 })

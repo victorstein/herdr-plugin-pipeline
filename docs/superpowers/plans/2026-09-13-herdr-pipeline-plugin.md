@@ -7306,6 +7306,160 @@ git commit -m "fix: treat a done agent as having finished its turn"
 
 ---
 
+## Task 38: Three corrections found by the first live run
+
+A real orchestrator agent drove the pipeline end to end and surfaced three things no test asserts.
+Two are prompt wording; one is a path derivation. The first two were raised by the live agent itself.
+
+**Files:**
+- Modify: `prompts/spec.md`, `prompts/spec-review.md`, `prompts/plan-review.md`,
+  `prompts/task-review-spec.md`, `prompts/task-review-quality.md`, `prompts/branch-review.md`
+- Modify: `src/cli.ts`, `test/cli.test.ts`, `test/prompts.test.ts`
+
+### 1. `spec.md` asserts an agreement that may not have happened
+
+It opens *"The design for **{{title}}** is agreed."* But `hpipe start` can be run without a prior
+brainstorm, and in the live run none had happened. The agent noticed and worked around it on its own:
+*"No design conversation actually happened before this — hpipe's prompt asserts the design is
+'agreed.' I'll write the spec with the behavioral decisions stated explicitly as assumptions so
+they're reviewable rather than buried."* That is the right behaviour, so the prompt should ask for it
+rather than leaving the agent to invent it.
+
+- [ ] **Step 1: Replace the opening of `prompts/spec.md`**
+
+```markdown
+# Write the spec — run {{run_id}}
+
+Write the spec for **{{title}}** now. Do not ask whether to proceed.
+
+If a design conversation already happened, this spec records what was agreed. If one did not — the
+run can be started without it — do not manufacture agreement. Write each behavioural decision down as
+an explicit, labelled assumption so the review that follows can challenge it, rather than burying the
+choice in prose.
+```
+
+Leave the rest of the file unchanged.
+
+### 2. "A review that finds nothing is a failed review" invites padding
+
+Only `spec-review.md` carries that line, and the live orchestrator pushed back on it while passing it
+through: *"I'm instructing the reviewer to rank honestly rather than manufacture findings to satisfy
+a quota — a padded review would corrupt the gate that follows it."* An earlier design review raised
+the same risk. A fabricated MAJOR is as corrosive as a missed one, because the verdict gates the
+pipeline either way.
+
+- [ ] **Step 2: Replace that sentence in `prompts/spec-review.md`**
+
+Change:
+
+```markdown
+Dispatch a fresh subagent to review `{{spec_path}}` adversarially. A review that finds nothing is a
+failed review.
+```
+
+to:
+
+```markdown
+Dispatch a fresh subagent to review `{{spec_path}}` adversarially.
+
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+```
+
+- [ ] **Step 3: Add the same honesty clause to the other four review prompts**
+
+`plan-review.md`, `task-review-spec.md`, `task-review-quality.md` and `branch-review.md` each already
+end their instruction section with an evidence/ranking line. Insert this paragraph immediately before
+each one's `The reviewer writes the review to exactly this path:` (or, in the task-review prompts,
+before `Write the review to exactly this path:`):
+
+```markdown
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+
+```
+
+All five review prompts must end up carrying that identical paragraph, for the same reason the
+verdict contract is identical across them: drift between them produces reviewers that behave
+differently at different gates.
+
+- [ ] **Step 4: Pin it in `test/prompts.test.ts`**
+
+Extend the existing review-prompt test so the clause cannot drift:
+
+```ts
+test('every review prompt forbids padding as well as softening', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).toContain('Rank honestly')
+    expect(text).toContain('a manufactured finding costs as much as a missed one')
+  }
+})
+
+test('no review prompt still demands a finding', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).not.toContain('finds nothing is a failed review')
+  }
+})
+```
+
+### 3. The spec filename is derived from a fragment of the run id
+
+`cmdStart` builds the path from `run.run_id.split('-').slice(-2, -1)[0]`. For the run
+`widget-20260914-add-a-titlecase-helper-z9iq` that yields `helper`, so the spec landed at
+`docs/superpowers/specs/2026-09-14-helper-design.md` — losing the title. `slugify` already exists in
+`src/lib/ledger.ts` and is exported.
+
+- [ ] **Step 5: Write the failing test**
+
+Append to `test/cli.test.ts`:
+
+```ts
+test('the spec path carries the whole title, not a fragment of the run id', async () => {
+  const out = await cmdStart(ctx(), {
+    title: 'add a titleCase helper', repoKey: 'k', repoRoot: repoDir,
+    socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(out.ok).toBe(true)
+
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  expect(run?.artifacts.spec).toContain('add-a-titlecase-helper-design.md')
+})
+```
+
+- [ ] **Step 6: Run it to make sure it fails**
+
+Run: `bun test test/cli.test.ts`
+Expected: FAIL — the path contains `helper-design.md`, not the full slug.
+
+- [ ] **Step 7: Fix the derivation in `src/cli.ts`**
+
+```ts
+  run.artifacts.spec = join(
+    'docs/superpowers/specs',
+    `${new Date().toISOString().slice(0, 10)}-${slugify(input.title)}-design.md`,
+  )
+```
+
+Import `slugify` alongside the other `./lib/ledger` imports.
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 213 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test prompts
+git commit -m "fix: three corrections from the first live run"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's

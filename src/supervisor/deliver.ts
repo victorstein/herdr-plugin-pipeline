@@ -51,7 +51,10 @@ export function artifactPathFor(run: Run, task: Task | null): string | null {
     return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${key}.md`)
   }
   if (run.phase === 'spec') return run.artifacts.spec
-  if (run.phase === 'plan') return run.artifacts.plan
+  // `cmdStart` seeds `artifacts.spec` but never `artifacts.plan`, so without this fallback the
+  // `plan` phase deadlocks: `evaluateRun` bails on a null path and never checks the file, while
+  // `promptForRunPhase` has always told the orchestrator to write to this same default.
+  if (run.phase === 'plan') return run.artifacts.plan ?? join('docs/superpowers/plans', 'plan.md')
   const key = `${run.phase}-${run.pass}`
   return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${run.run_id}-${key}.md`)
 }
