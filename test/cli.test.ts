@@ -114,3 +114,14 @@ test('rewind resets the pass count for the phase it rewinds to', async () => {
   expect(after?.phase).toBe('spec')
   expect(after?.pass).toBe(1)
 })
+
+test('the spec path carries the whole title, not a fragment of the run id', async () => {
+  const out = await cmdStart(ctx(), {
+    title: 'add a titleCase helper', repoKey: 'k', repoRoot: repoDir,
+    socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(out.ok).toBe(true)
+
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  expect(run?.artifacts.spec).toContain('add-a-titlecase-helper-design.md')
+})

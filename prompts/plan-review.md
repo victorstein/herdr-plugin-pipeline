@@ -8,6 +8,10 @@ what to do without showing how? Does each task leave the tree working and commit
 
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**, most severe first.
 
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+
 The reviewer writes the review to exactly this path:
 
     {{verdict_path}}

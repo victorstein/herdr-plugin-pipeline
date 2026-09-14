@@ -36,3 +36,18 @@ test('the task prompt routes to the surface agent and demands a closing keyword'
   expect(text).toContain('{{agent_file}}')
   expect(text).toContain('Closes #{{issue}}')
 })
+
+test('every review prompt forbids padding as well as softening', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).toContain('Rank honestly')
+    expect(text).toContain('a manufactured finding costs as much as a missed one')
+  }
+})
+
+test('no review prompt still demands a finding', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).not.toContain('finds nothing is a failed review')
+  }
+})

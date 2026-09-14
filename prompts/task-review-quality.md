@@ -10,6 +10,10 @@ merely present.
 
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**.
 
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+
 Write the review to exactly this path:
 
     {{verdict_path}}

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, slugify, writeOrchestrator,
 } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase } from './lib/machine'
 import { supervisorState } from './lib/pidfile'
@@ -38,7 +38,7 @@ export async function cmdStart(ctx: Ctx, input: {
   run.orchestrator_pane = input.paneId
   run.artifacts.spec = join(
     'docs/superpowers/specs',
-    `${new Date().toISOString().slice(0, 10)}-${run.run_id.split('-').slice(-2, -1)[0] ?? 'design'}-design.md`,
+    `${new Date().toISOString().slice(0, 10)}-${slugify(input.title)}-design.md`,
   )
   await saveRun(ctx.stateDir, run)
   await writeOrchestrator(ctx.stateDir, ctx.session, input.repoKey, {

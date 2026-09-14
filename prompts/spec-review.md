@@ -1,7 +1,6 @@
 # Adversarial review of the spec — run {{run_id}}, pass {{pass}}
 
-Dispatch a fresh subagent to review `{{spec_path}}` adversarially. A review that finds nothing is a
-failed review.
+Dispatch a fresh subagent to review `{{spec_path}}` adversarially.
 
 The reviewer must be evidence-first: verify every claim against the installed packages, the live CLI
 help, and current docs — they drift. Cite `file:line` or exact command output for every finding.
@@ -10,6 +9,10 @@ happy path. A wrong or half-applied fix from a prior pass is the highest-value f
 
 Rank each finding **BLOCKER**, **MAJOR**, or **MINOR**, each as claim → problem → evidence →
 concrete fix, most severe first.
+
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
 
 The reviewer writes the review to exactly this path:
 
