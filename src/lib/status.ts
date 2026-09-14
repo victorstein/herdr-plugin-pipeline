@@ -7,6 +7,7 @@ export interface StatusSupervisor {
 
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey,
+  livePanes: ReadonlySet<string> = new Set(),
 ): string {
   const lines: string[] = []
   lines.push(`session: ${session}`)
@@ -27,6 +28,10 @@ export function formatStatus(
     lines.push('')
     lines.push(`${run.run_id}  [${run.phase}] pass ${run.pass}  ${run.title}`)
     if (run.orchestrator_pane) lines.push(`  orchestrator: ${run.orchestrator_pane}`)
+    if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {
+      lines.push(`  ⚠ orchestrator pane ${run.orchestrator_pane} is gone — run the plugin's`)
+      lines.push(`    "claim" action from the pane that should drive this run`)
+    }
     for (const task of run.tasks) {
       const bits = [
         `  ${task.task_id}`,

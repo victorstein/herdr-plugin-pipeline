@@ -1,4 +1,4 @@
-import { enterTaskPhase } from '../lib/machine'
+import { enterTaskPhase, PANE_RELEASING_RUN_PHASES } from '../lib/machine'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 export interface WakeLine {
@@ -88,19 +88,17 @@ export function applyEvents(
   return { changed, wake }
 }
 
-const FINISHED: ReadonlySet<string> = new Set(['done'])
-
 /**
- * At most one orchestrator-owned advance per orchestrator per tick. Finished runs
- * are skipped: their `orchestrator_pane` is never cleared, so without this a
- * completed run holds its pane forever and the next `hpipe start` in the same
- * terminal is silently never advanced.
+ * At most one orchestrator-owned advance per orchestrator per tick. Runs in a
+ * pane-releasing phase are skipped: their `orchestrator_pane` is never cleared,
+ * so without this such a run holds its pane forever and the next `hpipe start`
+ * in the same terminal is silently never advanced.
  */
 export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
-    if (FINISHED.has(run.phase)) continue
+    if (PANE_RELEASING_RUN_PHASES.has(run.phase)) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)

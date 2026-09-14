@@ -13,6 +13,17 @@ export const ARTIFACT_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
   'spec', 'spec-review', 'plan', 'plan-review', 'branch-review',
 ])
 
+/** A run in one of these needs no further automatic advancement. */
+export const COMPLETED_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>(['done'])
+
+/**
+ * A run in one of these must not hold an orchestrator pane slot: neither clears
+ * `orchestrator_pane`, and both need a human (`hpipe rewind`/`abort`) to leave,
+ * so either would starve the next run started in that same terminal.
+ */
+export const PANE_RELEASING_RUN_PHASES: ReadonlySet<RunPhase> =
+  new Set<RunPhase>(['done', 'escalated'])
+
 const REVIEW_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
   'spec-review', 'plan-review', 'branch-review',
 ])

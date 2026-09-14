@@ -1,9 +1,8 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { COMPLETED_RUN_PHASES } from './machine'
 import { readJson, writeJson } from './store'
 import type { Orchestrator, Run, SessionKey } from './types'
-
-const FINISHED: ReadonlySet<string> = new Set(['done'])
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
 
@@ -64,7 +63,7 @@ export async function activeRunForRepo(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<Run | null> {
   const runs = await listRuns(stateDir, session)
-  return runs.find((r) => r.repo_key === repoKey && !FINISHED.has(r.phase)) ?? null
+  return runs.find((r) => r.repo_key === repoKey && !COMPLETED_RUN_PHASES.has(r.phase)) ?? null
 }
 
 export async function runForWorkspace(

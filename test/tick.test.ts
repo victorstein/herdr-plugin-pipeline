@@ -120,3 +120,19 @@ test('two runs on different panes are both picked', () => {
   const b = mkRun([]); b.orchestrator_pane = 'w2:p1'
   expect(pickOneAdvance([a, b])).toHaveLength(2)
 })
+
+test('an escalated run does not starve a later run sharing its pane', () => {
+  // Same class as the `done` case: escalated never clears orchestrator_pane and
+  // needs a human `hpipe rewind` to leave, so it would hold the pane forever.
+  const stuck = mkRun([])
+  stuck.phase = 'escalated'
+  stuck.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  const picked = pickOneAdvance([stuck, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})

@@ -24,14 +24,17 @@ test('falls back to the repo primary workspace agent pane', async () => {
     'workspace list': {
       result: {
         workspaces: [
-          { workspace_id: 'w9', label: 'wt', worktree: { repo_key: 'k', repo_root: '/r', is_linked_worktree: true } },
-          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'k', repo_root: '/r', is_linked_worktree: false } },
+          { workspace_id: 'w9', label: 'wt', worktree: { repo_key: 'opaque-a', repo_root: '/r', is_linked_worktree: true } },
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque-b', repo_root: '/r', is_linked_worktree: false } },
         ],
       },
     },
     'pane list': { result: { panes: [{ pane_id: 'w1:p1', agent_status: 'idle' }] } },
   })
-  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBe('w1:p1')
+  // Matches on repo_root, a filesystem path, because herdr's repo_key is an
+  // opaque herdr identifier while every run record keys off `git rev-parse
+  // --show-toplevel`. Comparing those two would never match.
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', '/r')).toBe('w1:p1')
 })
 
 test('returns null when two agent panes qualify, rather than picking one', async () => {

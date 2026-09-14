@@ -1,5 +1,4 @@
-import { Herdr } from '../lib/herdr'
-import { writeOrchestrator } from '../lib/ledger'
+import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
 import { sessionKey } from '../lib/session'
 
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
@@ -10,18 +9,30 @@ if (!stateDir || !paneId || !workspaceId) {
   process.exit(1)
 }
 
-const herdr = new Herdr()
-const workspaces = await herdr.workspaceList()
-const repoKey = workspaces.find((w) => w.workspace_id === workspaceId)?.worktree?.repo_key
-if (!repoKey) {
-  console.error('[pipeline] this workspace has no repo provenance — open it as a repo workspace first')
+// Identify the repo the same way `hpipe start` does — the git toplevel — rather
+// than by herdr's opaque repo_key, so the two agree.
+const proc = Bun.spawn(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' })
+const repoRoot = (await new Response(proc.stdout).text()).trim()
+await proc.exited
+if (repoRoot.length === 0) {
+  console.error('[pipeline] claim must be invoked from inside a git repository')
   process.exit(1)
 }
 
-await writeOrchestrator(stateDir, sessionKey(), repoKey, {
+const session = sessionKey()
+await writeOrchestrator(stateDir, session, repoRoot, {
   pane_id: paneId,
   workspace_id: workspaceId,
   socket_path: process.env.HERDR_SOCKET_PATH ?? '',
   claimed_at: Date.now(),
 })
-console.log(`[pipeline] claimed ${paneId} as orchestrator for ${repoKey}`)
+
+const run = await activeRunForRepo(stateDir, session, repoRoot)
+if (run) {
+  run.orchestrator_pane = paneId
+  run.history.push({ at: Date.now(), from: 'claim', to: run.phase, why: `orchestrator rebound to ${paneId}` })
+  await saveRun(stateDir, run)
+  console.log(`[pipeline] ${paneId} now drives ${run.run_id}`)
+} else {
+  console.log(`[pipeline] claimed ${paneId} for ${repoRoot}; no active run yet`)
+}

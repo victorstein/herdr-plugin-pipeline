@@ -35,6 +35,7 @@ the escape hatch if a phase advanced early.
 | Advanced early | `hpipe rewind <run> <phase> [--task <id>]` |
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
+| Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
 | Plugin misbehaving | `herdr plugin disable stein.pipeline` |
 | Out permanently | `herdr plugin unlink stein.pipeline`, then `rm ~/.local/bin/hpipe` |
 

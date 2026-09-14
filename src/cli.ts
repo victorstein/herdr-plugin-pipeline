@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { detectCycle, gateStatus } from './lib/gating'
+import { Herdr } from './lib/herdr'
 import {
   activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
 } from './lib/ledger'
@@ -132,10 +133,12 @@ export async function cmdRewind(ctx: Ctx, input: {
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
+  const livePanes = new Set((await new Herdr().paneList()).map((p) => p.pane_id))
   return ok(formatStatus(
     runs,
     { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
     ctx.session,
+    livePanes,
   ))
 }
 
