@@ -14,6 +14,11 @@ so the pipeline never has to live in that agent's context.
 
 Requires herdr 0.9.0+, bun, and gh. No build step.
 
+**Then restart the herdr session you want it in.** Linking registers the plugin globally for your
+user, but its startup hook only runs when a server boots — so on an already-running session nothing
+happens until you restart it. If `hpipe status` reports no supervisor and no `pipeline` workspace
+appeared, that is why. (`herdr server reload-config` does not trigger it either.)
+
 ## Use
 
 From the orchestrator's pane, after brainstorming a design with the human:

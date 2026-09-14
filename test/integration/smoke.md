@@ -6,11 +6,16 @@ Manual, ~5 minutes. Uses a throwaway session so it cannot disturb `default` or `
 
 ```bash
 export SMOKE=pipesmoke
+herdr plugin link "$PWD"   # link BEFORE the session first boots — see below
+herdr plugin list          # assert: stein.pipeline present, warnings empty
 herdr --session "$SMOKE" server &
 sleep 2
-herdr plugin link "$PWD"
-herdr plugin list          # assert: stein.pipeline present, warnings empty
 ```
+
+> **Order matters.** `plugin link` registers the plugin but does **not** run its
+> startup hook against a server that is already running — verified live, including
+> after `server reload-config`. Link first, or restart the session afterwards.
+> Otherwise reconciliation never runs and assertion 1 finds an empty workspace list.
 
 ## Assertions
 
@@ -35,10 +40,14 @@ herdr plugin list          # assert: stein.pipeline present, warnings empty
 4. **`agent start` adopts the root pane.** Capture `.result.root_pane.pane_id` from the
    `worktree create` response above, then:
    ```bash
-   herdr --session "$SMOKE" agent start smoke --kind claude --pane <root_pane_id> -- --version
+   herdr --session "$SMOKE" agent start smoke --kind claude --pane <root_pane_id>
    ```
-   assert: succeeds, and `pane list` for that workspace still shows exactly ONE pane. There is no
-   orphan to close.
+   assert: `pane list` for that workspace shows exactly ONE pane both before and after. There is no
+   orphan to close — that is the whole point of this assertion.
+
+   Start the agent with no trailing `-- --version`: a command that exits immediately finishes before
+   herdr's interactive-readiness detection fires, so `agent start` reports `timeout` even though pane
+   adoption worked correctly. Judge this assertion on the pane count, and quit the agent afterwards.
 
 5. **No plugin commands were dropped.**
    ```bash
