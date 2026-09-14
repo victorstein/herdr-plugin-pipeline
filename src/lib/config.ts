@@ -80,7 +80,9 @@ export async function loadConfig(configDir: string): Promise<Config> {
   if (raw.PIPELINE_WORKSPACE_LABEL) cfg.PIPELINE_WORKSPACE_LABEL = raw.PIPELINE_WORKSPACE_LABEL
   if (raw.GH_BIN) cfg.GH_BIN = raw.GH_BIN
   if (raw.HPIPE_LINK_PATH) cfg.HPIPE_LINK_PATH = raw.HPIPE_LINK_PATH
-  if (raw.HPIPE_LINK !== undefined) cfg.HPIPE_LINK = raw.HPIPE_LINK !== '0'
+  if (raw.HPIPE_LINK !== undefined) {
+    cfg.HPIPE_LINK = !['0', 'false'].includes(raw.HPIPE_LINK.toLowerCase())
+  }
 
   return cfg
 }

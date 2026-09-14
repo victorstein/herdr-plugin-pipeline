@@ -1,13 +1,20 @@
 import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { QueuedEvent } from './types'
 
 let seq = 0
 
 const pad = (n: number, width: number) => String(n).padStart(width, '0')
 
+// Hooks are one-shot processes, so `sequence` is 0 on essentially every real
+// call and `pid` carries all the uniqueness — but pid reuse is ordinary OS
+// behavior. Two hooks with a reused pid in the same millisecond, both at
+// sequence 0, would otherwise produce an identical filename and silently
+// overwrite one event on rename. The random suffix is a pure uniqueness
+// tie-breaker and must stay last so it never affects sort order.
 export function queueName(atMs: number, sequence: number, pid: number): string {
-  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}.json`
+  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}-${randomUUID().slice(0, 8)}.json`
 }
 
 export async function enqueue(queueDir: string, event: QueuedEvent): Promise<string> {

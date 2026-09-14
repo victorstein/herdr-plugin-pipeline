@@ -39,3 +39,8 @@ test('parses HPIPE_LINK as a boolean', async () => {
   await Bun.write(join(dir, 'config.env'), 'HPIPE_LINK=0\n')
   expect((await loadConfig(dir)).HPIPE_LINK).toBe(false)
 })
+
+test('parses HPIPE_LINK=false as false', async () => {
+  await Bun.write(join(dir, 'config.env'), 'HPIPE_LINK=false\n')
+  expect((await loadConfig(dir)).HPIPE_LINK).toBe(false)
+})

@@ -18,6 +18,18 @@ test('names sort lexicographically into emission order within a process', () => 
   expect([...names].sort()).toEqual(names)
 })
 
+test('names are unique across calls with identical (atMs, sequence, pid), as with a reused pid', () => {
+  const names = new Set(Array.from({ length: 1000 }, () => queueName(1, 0, 9)))
+  expect(names.size).toBe(1000)
+})
+
+test('N concurrent enqueues all drain to exactly N events, none overwritten', async () => {
+  const n = 20
+  await Promise.all(Array.from({ length: n }, (_, i) => enqueue(dir, ev(i))))
+  const drained = await drain(dir)
+  expect(drained).toHaveLength(n)
+})
+
 test('drain returns events in emission order', async () => {
   for (let i = 0; i < 8; i++) await enqueue(dir, ev(i))
   const drained = await drain(dir)

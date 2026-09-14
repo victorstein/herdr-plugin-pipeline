@@ -35,3 +35,11 @@ test('leaves no .tmp file behind', async () => {
   await writeJson(p, { n: 1 })
   expect(readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toHaveLength(0)
 })
+
+test('concurrent writes from the same process both resolve and leave valid JSON', async () => {
+  const p = join(dir, 'a.json')
+  await Promise.all([writeJson(p, { who: 'a' }), writeJson(p, { who: 'b' })])
+  const result = await readJson<{ who: string }>(p)
+  expect(result).not.toBeNull()
+  expect(['a', 'b']).toContain(result!.who)
+})
