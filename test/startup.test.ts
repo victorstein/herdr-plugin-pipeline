@@ -4,18 +4,44 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
-import { ensureWorkspace, linkHpipe, reapGhostPanes } from '../src/startup'
+import { clearStrayPanes, ensureWorkspace, linkHpipe, reapGhostPanes } from '../src/startup'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'startup-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-test('creates the pipeline workspace when none exists', async () => {
+test('creates the pipeline workspace and leaves its pane alone', async () => {
   const bin = await makeFakeBin(dir, {
     'workspace list': { result: { workspaces: [] } },
     'workspace create': { result: { workspace: { workspace_id: 'w3', label: 'pipeline' } } },
+    'pane list': { result: { panes: [{ pane_id: 'w3:p1' }] } },
+    'pane close': { result: {} },
   })
   expect(await ensureWorkspace(new Herdr(bin), dir, 'personal', 'pipeline')).toBe('w3')
+
+  // Closing a freshly created workspace's only pane destroys the workspace, so
+  // the stray is cleared after the supervisor exists, not here.
+  const calls = await Bun.file(join(dir, 'calls.log')).text()
+  expect(calls).not.toContain('pane close')
+})
+
+test('clearStrayPanes keeps the supervisor and closes the rest', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [
+      { pane_id: 'w3:p1', label: null },
+      { pane_id: 'w3:p2', label: 'Pipeline supervisor' },
+    ] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual(['w3:p1'])
+})
+
+test('clearStrayPanes closes nothing when only the supervisor is present', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w3:p2', label: 'Pipeline supervisor' }] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual([])
 })
 
 test('reuses a recorded workspace id over a label match', async () => {

@@ -38,11 +38,6 @@ export async function ensureWorkspace(
     console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
     return null
   }
-  // `workspace create` also opens a root shell pane. Left alone it sits beside
-  // the supervisor forever looking like a second one.
-  for (const pane of await herdr.paneList(id)) {
-    await herdr.paneClose(pane.pane_id)
-  }
   await Bun.write(workspaceIdPath(stateDir, session), id)
   return id
 }
@@ -66,6 +61,25 @@ export async function reapGhostPanes(
     closed.push(pane.pane_id)
   }
 
+  return closed
+}
+
+/**
+ * Clears the shell pane `workspace create` opens alongside the supervisor. It must
+ * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
+ * the workspace, so clearing it at creation time deletes the very workspace the
+ * supervisor was about to open into.
+ */
+export async function clearStrayPanes(herdr: Herdr, workspaceId: string): Promise<string[]> {
+  const panes = await herdr.paneList(workspaceId)
+  if (panes.length <= 1) return []
+
+  const closed: string[] = []
+  for (const pane of panes) {
+    if (pane.label === SUPERVISOR_LABEL) continue
+    await herdr.paneClose(pane.pane_id)
+    closed.push(pane.pane_id)
+  }
   return closed
 }
 
@@ -109,7 +123,11 @@ async function main(): Promise<void> {
   if (!opened.ok) {
     // herdr reports this in the body while exiting 0 — checking the exit code would miss it.
     console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
+    return
   }
+
+  const strays = await clearStrayPanes(herdr, workspaceId)
+  if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
 }
 
 if (import.meta.main) await main()
