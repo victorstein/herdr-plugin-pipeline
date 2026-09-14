@@ -1,5 +1,16 @@
 import type { VerdictResult } from './predicates'
-import type { CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
+import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
+
+/**
+ * An agent has finished its turn. herdr reports `done` for "idle and not yet
+ * seen", which is the normal resting state for an agent this plugin drives —
+ * nothing human ever looks at it — so `done` must count as ready alongside
+ * `idle`. Both the orchestrator and worker paths read this one predicate so the
+ * two cannot drift apart again.
+ */
+export function isAgentReady(status: AgentStatus): boolean {
+  return status === 'idle' || status === 'done'
+}
 
 export interface RunSignals {
   actorIdle: boolean

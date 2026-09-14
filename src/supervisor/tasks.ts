@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { gateStatus } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
-import { advanceTask, enterTaskPhase } from '../lib/machine'
+import { advanceTask, enterTaskPhase, isAgentReady } from '../lib/machine'
 import type { VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -126,7 +126,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
 async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
   const base = {
     actorIdle: deps.actorIdle,
-    workerIdle: task.agent_status === 'idle' || task.agent_status === 'done',
+    workerIdle: isAgentReady(task.agent_status),
     artifactFresh: false,
     verdict: null as VerdictResult | null,
     prNumber: task.pr,

@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
-import { ARTIFACT_RUN_PHASES, advanceRun } from '../lib/machine'
+import { ARTIFACT_RUN_PHASES, advanceRun, isAgentReady } from '../lib/machine'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { buildBadges, badgeSource } from '../lib/badges'
@@ -74,7 +74,7 @@ export async function evaluateRun(
 
   if (!ARTIFACT_RUN_PHASES.has(run.phase)) return { advanced: false, nextPrompt: '', phaseNote: '' }
 
-  if ((await herdr.agentStatus(pane)) !== 'idle') {
+  if (!isAgentReady(await herdr.agentStatus(pane))) {
     return { advanced: false, nextPrompt: '', phaseNote: '' }
   }
 
@@ -89,7 +89,7 @@ export async function evaluateRun(
   }
 
   await Bun.sleep(config.ACTOR_SETTLE_MS)
-  if ((await herdr.agentStatus(pane)) !== 'idle') {
+  if (!isAgentReady(await herdr.agentStatus(pane))) {
     return { advanced: false, nextPrompt: '', phaseNote: '' }
   }
 

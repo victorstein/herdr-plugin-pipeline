@@ -11,6 +11,7 @@ import { sessionKey } from '../lib/session'
 import {
   artifactPathFor, type DigestInput, evaluateRun, nextDelivery, promptForRunPhase, refreshBadges, shouldRetry,
 } from './deliver'
+import { isAgentReady } from '../lib/machine'
 import { stallCandidates, taskStallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
@@ -117,7 +118,7 @@ async function main(): Promise<void> {
           const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
 
           const actorIdle = run.orchestrator_pane !== null &&
-            (await herdr.agentStatus(run.orchestrator_pane)) === 'idle'
+            isAgentReady(await herdr.agentStatus(run.orchestrator_pane))
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {

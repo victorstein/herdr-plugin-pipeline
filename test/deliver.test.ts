@@ -71,3 +71,19 @@ test('a blocked worker line inlines its pane tail', () => {
   })
   expect(text).toContain('Do you want to proceed?')
 })
+
+import { isAgentReady } from '../src/lib/machine'
+
+test('an agent that finished its turn is ready, whether idle or done', () => {
+  // herdr reports `done` for "idle and not yet seen". An orchestrator driven by
+  // this plugin is never seen by a human, so `done` is its normal resting state
+  // — treating only `idle` as ready stalls every run at its first phase.
+  expect(isAgentReady('idle')).toBe(true)
+  expect(isAgentReady('done')).toBe(true)
+})
+
+test('an agent still working or blocked is not ready', () => {
+  expect(isAgentReady('working')).toBe(false)
+  expect(isAgentReady('blocked')).toBe(false)
+  expect(isAgentReady('unknown')).toBe(false)
+})
