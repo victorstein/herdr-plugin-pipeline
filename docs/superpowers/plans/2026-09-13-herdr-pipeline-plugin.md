@@ -1644,7 +1644,7 @@ git commit -m "feat: orchestrator resolution by claim then repo provenance"
 ```ts
 // test/predicates.test.ts
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isFresh, parseVerdict } from '../src/lib/predicates'
@@ -1672,6 +1672,17 @@ test('a file newer than phase entry is fresh', async () => {
 
 test('a missing file is never fresh', async () => {
   expect(await isFresh(join(dir, 'nope.md'), 0)).toBe(false)
+})
+
+test('sub-millisecond mtime does not read as fresh against a truncated phase entry', async () => {
+  // Date.now() truncates; statSync().mtimeMs does not. A file written a fraction of a
+  // millisecond before phase entry must NOT count as fresh.
+  const p = await writeAged('spec.md', 'x', 5_000)
+  utimesSync(p, new Date(5_000), new Date(5_000))
+  const withFraction = join(dir, 'frac.md')
+  await Bun.write(withFraction, 'x')
+  const entered = Math.floor(statSync(withFraction).mtimeMs)
+  expect(await isFresh(withFraction, entered)).toBe(false)
 })
 
 test('parses a CLEAR trailer', async () => {
@@ -1720,7 +1731,11 @@ export interface VerdictResult {
 
 export async function isFresh(path: string, phaseEnteredAt: number): Promise<boolean> {
   try {
-    return statSync(path).mtimeMs > phaseEnteredAt
+    // `mtimeMs` carries sub-millisecond precision while `phase_entered_at` comes from
+    // `Date.now()`, which truncates. Without flooring, a file written a fraction of a
+    // millisecond BEFORE phase entry compares as greater and reads as fresh — a false
+    // positive on exactly the stale artifact edge-triggering exists to reject.
+    return Math.floor(statSync(path).mtimeMs) > phaseEnteredAt
   } catch {
     return false
   }
