@@ -5621,6 +5621,434 @@ git commit -m "docs: README and live smoke runbook"
 
 ---
 
+## Task 30: Wire the task pipeline into the supervisor
+
+The task-level machinery — `advanceTask`, `ciTransitions`, `runTeardown`, `gateStatus` — is built and
+unit-tested but **never called from `src/supervisor/main.ts`**. Verified: `main.ts` imports none of
+them, nothing in `src/` calls them, and nothing ever writes `task.phase = 'execute'`. A run therefore
+reaches `dispatch`, registers tasks, and parks every one at `queued` forever.
+
+Four config keys are parsed and never read: `WAKE_ON`, `REPOS_ALLOW`, `TASK_STALL_MINUTES`,
+`BLOCKED_TAIL_LINES`.
+
+**Files:**
+- Create: `src/lib/worker-prompt.ts`, `src/supervisor/tasks.ts`, `test/tasks.test.ts`
+- Modify: `src/cli.ts` (import the moved helper), `src/supervisor/main.ts` (call the new module),
+  `src/supervisor/tick.ts` (honour `WAKE_ON`), `src/startup.ts` (close the stray root pane)
+
+- [ ] **Step 1: Move `renderWorkerPrompt` out of `cli.ts` into a shared module**
+
+`src/supervisor/tasks.ts` needs it and must not import `cli.ts` (which carries an argv dispatcher).
+Create `src/lib/worker-prompt.ts` with the existing function body moved verbatim:
+
+```ts
+import { join } from 'node:path'
+import { renderPrompt } from './render'
+import type { Run, Task } from './types'
+
+export async function renderWorkerPrompt(
+  pluginRoot: string, run: Run, task: Task,
+): Promise<string> {
+  const dependsOnCore = task.depends_on.some(
+    (id) => run.tasks.find((t) => t.task_id === id)?.surface === 'core',
+  )
+  return renderPrompt(pluginRoot, 'task', {
+    branch: task.branch,
+    issue: String(task.issue),
+    surface: task.surface,
+    agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
+    task_text: task.text,
+    dist_note: dependsOnCore
+      ? '> `@repo/core` changed on `main` since this branch was cut. Run ' +
+        '`pnpm install && pnpm turbo build --filter=@repo/core` before your first edit and again ' +
+        'before opening the PR — the apps consume the built `dist`, not the source.'
+      : '',
+  })
+}
+```
+
+Delete the old `renderWorkerPrompt` from `src/cli.ts` and import it instead. `cli.ts`'s own call site
+passes `ctx.pluginRoot` as the first argument. Run `bun test test/cli.test.ts` — still green.
+
+- [ ] **Step 2: Write the failing test for the task driver**
+
+```ts
+// test/tasks.test.ts
+import { expect, test } from 'bun:test'
+import { advanceTasks } from '../src/supervisor/tasks'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task } from '../src/lib/types'
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  depends_on: [], files: [], keep_worktree: false, text: 'do it',
+  workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
+  phase: 'queued', pass: 1, phase_entered_at: 0, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null, ...over,
+})
+
+function mkRun(tasks: Task[]): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  run.tasks = tasks
+  return run
+}
+
+const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
+  pluginRoot: process.cwd(),
+  actorIdle: true,
+  maxPasses: 2,
+  prForBranch: async () => null,
+  prView: async () => null,
+  issueView: async () => null,
+  verdictFor: async () => null,
+  removeWorktree: async () => true,
+  ...over,
+})
+
+test('an unblocked queued task moves to execute and yields a dispatch prompt', async () => {
+  const run = mkRun([mkTask({})])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(prompts.join('\n')).toContain('feat/x')
+})
+
+test('a gated queued task stays queued and yields nothing', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'execute' }),
+    mkTask({ task_id: 't2', depends_on: ['t1'] }),
+  ])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('queued')
+  expect(prompts).toHaveLength(0)
+})
+
+test('a queued task whose dependency failed becomes blocked-on-failure', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'failed' }),
+    mkTask({ task_id: 't2', depends_on: ['t1'] }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('blocked-on-failure')
+})
+
+test('an idle worker with a fresh PR advances to task-review-spec', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+  expect(run.tasks[0]?.pr).toBe(42)
+})
+
+test('LIVELOCK: a task re-entering execute does not advance on the same sha', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'same', pr: 42 })])
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'same' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('execute')
+})
+
+test('a cleared task review advances to the second stage', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-quality')
+})
+
+test('task phases are not evaluated while the orchestrator is busy', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+  await advanceTasks(run, deps({
+    actorIdle: false,
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+})
+
+test('a merged PR advances to close, and a closed issue to teardown', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+  await advanceTasks(run, deps({
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('close')
+
+  run.tasks[0]!.phase_entered_at = 1_000
+  await advanceTasks(run, deps({ issueView: async () => ({ closed: true, closedAtMs: 2_000 }) }))
+  expect(run.tasks[0]?.phase).toBe('teardown')
+})
+
+test('teardown removes the worktree and completes the task', async () => {
+  const run = mkRun([mkTask({ phase: 'teardown' })])
+  const removed: string[] = []
+  await advanceTasks(run, deps({
+    removeWorktree: async (ws: string) => { removed.push(ws); return true },
+  }))
+  expect(removed).toEqual(['w7'])
+  expect(run.tasks[0]?.phase).toBe('done')
+  expect(run.phase).toBe('branch-review')
+})
+```
+
+- [ ] **Step 3: Run it to make sure it fails**
+
+Run: `bun test test/tasks.test.ts`
+Expected: FAIL — cannot resolve `../src/supervisor/tasks`.
+
+- [ ] **Step 4: Implement the driver**
+
+```ts
+// src/supervisor/tasks.ts
+import { gateStatus } from '../lib/gating'
+import type { IssueView, PrView } from '../lib/gh'
+import { advanceTask, enterTaskPhase } from '../lib/machine'
+import type { VerdictResult } from '../lib/predicates'
+import { renderWorkerPrompt } from '../lib/worker-prompt'
+import type { Run, Task } from '../lib/types'
+import { runTeardown } from './teardown'
+
+export interface TaskDeps {
+  pluginRoot: string
+  /** The orchestrator's live idle state, already double-checked by the caller. */
+  actorIdle: boolean
+  maxPasses: number
+  prForBranch: (branch: string) => Promise<number | null>
+  prView: (pr: number) => Promise<PrView | null>
+  issueView: (issue: number) => Promise<IssueView | null>
+  verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
+  removeWorktree: (workspaceId: string) => Promise<boolean>
+}
+
+const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', 'merge', 'close'])
+
+/**
+ * Drives every task in a run one step. Returns any prompts the digest should
+ * carry — currently the worker prompt for a task whose gate just opened, which
+ * is delivered to the ORCHESTRATOR because a queued task has no pane yet.
+ */
+export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> {
+  const prompts: string[] = []
+
+  for (const task of run.tasks) {
+    if (task.phase === 'queued') {
+      const gate = gateStatus(task, run.tasks)
+      if (gate.state === 'blocked-on-failure') {
+        enterTaskPhase(run, task, 'blocked-on-failure', `depends on ${gate.on.join(', ')}`)
+        continue
+      }
+      if (gate.state !== 'ready') continue
+
+      enterTaskPhase(run, task, 'execute', 'gate opened')
+      prompts.push(
+        `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
+          (await renderWorkerPrompt(deps.pluginRoot, run, task)),
+      )
+      continue
+    }
+
+    // Phases whose signal comes from the orchestrator must not be evaluated
+    // while it is mid-turn, exactly as run phases are gated.
+    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+
+    const signals = await gatherSignals(run, task, deps)
+    if (signals) advanceTask(run, task, signals)
+  }
+
+  await runTeardown([run], deps.removeWorktree)
+  return prompts
+}
+
+async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
+  const base = {
+    actorIdle: deps.actorIdle,
+    workerIdle: task.agent_status === 'idle' || task.agent_status === 'done',
+    artifactFresh: false,
+    verdict: null as VerdictResult | null,
+    prNumber: task.pr,
+    headSha: null as string | null,
+    merged: false,
+    mergedAtMs: undefined as number | undefined,
+    issueClosed: false,
+    closedAtMs: undefined as number | undefined,
+    ciBucket: task.ci,
+    maxPasses: deps.maxPasses,
+  }
+
+  switch (task.phase) {
+    case 'execute': {
+      const pr = task.pr ?? (await deps.prForBranch(task.branch))
+      if (pr === null) return base
+      const view = await deps.prView(pr)
+      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+    }
+    case 'task-review-spec':
+    case 'task-review-quality': {
+      const verdict = await deps.verdictFor(run, task)
+      return { ...base, artifactFresh: verdict !== null, verdict }
+    }
+    case 'merge': {
+      if (task.pr === null) return base
+      const view = await deps.prView(task.pr)
+      return { ...base, merged: view?.merged ?? false, mergedAtMs: view?.mergedAtMs ?? undefined }
+    }
+    case 'close': {
+      const view = await deps.issueView(task.issue)
+      return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
+    }
+    case 'ci':
+      return base
+    default:
+      return null
+  }
+}
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `bun test test/tasks.test.ts`
+Expected: PASS, 9 tests.
+
+- [ ] **Step 6: Wire it into the supervisor loop**
+
+In `src/supervisor/main.ts`, inside the per-run loop, after `evaluateRun` and before the digest is
+pushed, add the task driver and the CI poll. Import at the top:
+
+```ts
+import { ciTransitions } from './ci'
+import { advanceTasks } from './tasks'
+import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+```
+
+Add a CI poll clock alongside `attempts`:
+
+```ts
+  let lastCiPollMs = 0
+```
+
+Then, inside the `for (const run of pickOneAdvance(runs))` body, after the `evaluateRun` call:
+
+```ts
+        const actorIdle = run.orchestrator_pane !== null &&
+          (await herdr.agentStatus(run.orchestrator_pane)) === 'idle'
+
+        if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
+          lastCiPollMs = Date.now()
+          await ciTransitions([run], async (pr) => gh.prChecks(pr))
+        }
+
+        const taskPrompts = await advanceTasks(run, {
+          pluginRoot,
+          actorIdle,
+          maxPasses: config.MAX_PASSES,
+          prForBranch: (branch) => gh.prForBranch(branch),
+          prView: (pr) => gh.prView(pr),
+          issueView: (issue) => gh.issueView(issue),
+          verdictFor: async (r, t) => {
+            const relative = artifactPathFor(r, t)
+            if (!relative) return null
+            const absolute = join(r.repo_root, relative)
+            if (!(await isFresh(absolute, t.phase_entered_at))) return null
+            if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
+            return parseVerdict(absolute)
+          },
+          removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+        })
+```
+
+and include `taskPrompts` in the digest for that run by appending them to `nextPrompt`:
+
+```ts
+        const combined = [nextPrompt, ...taskPrompts].filter((p) => p.length > 0).join('\n\n---\n\n')
+```
+
+using `combined` where `nextPrompt` was used in the `digests.push({...})` call.
+
+`pluginRoot` comes from `process.env.HERDR_PLUGIN_ROOT ?? process.cwd()` — declare it beside `herdr`.
+
+- [ ] **Step 7: Honour `WAKE_ON` in `tick.ts`**
+
+`applyEvents` hardcodes which statuses wake the orchestrator. Replace the hardcoded check with the
+configured set. Change the signature to take it:
+
+```ts
+export function applyEvents(
+  runs: Run[], events: QueuedEvent[], session: SessionKey,
+  orchestratorPanes: Set<string>, wakeOn: ReadonlySet<string> = new Set(['blocked', 'done', 'idle']),
+): ApplyResult {
+```
+
+and the status branch to `if (wakeOn.has(event.agent_status))`. In `main.ts` pass
+`new Set(config.WAKE_ON)`. Keep the existing default so the current tests still pass unchanged.
+
+- [ ] **Step 8: Inline a blocked worker's pane tail (`BLOCKED_TAIL_LINES`)**
+
+In `main.ts`, when building the event lines for a digest, a wake line whose task is `blocked` should
+carry a tail of that pane. After `applyEvents` returns `wake`, enrich blocked entries:
+
+```ts
+      for (const line of wake) {
+        if (line.task?.agent_status === 'blocked' && line.task.pane_id) {
+          const tail = await herdr.paneRead(line.task.pane_id, config.BLOCKED_TAIL_LINES)
+          if (tail.trim().length > 0) {
+            line.text += `\n    ${tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n    ')}`
+          }
+        }
+      }
+```
+
+This is the design's stated primary signal — a blocked worker is Claude explicitly asking for a
+decision, and the orchestrator should be able to answer without a round trip.
+
+- [ ] **Step 9: Honour `REPOS_ALLOW`**
+
+In `main.ts`, after `listRuns`, drop runs whose repo is not allowed:
+
+```ts
+      const allowed = config.REPOS_ALLOW.length === 0
+        ? runs
+        : runs.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
+```
+
+and use `allowed` everywhere `runs` was used below that point.
+
+- [ ] **Step 10: Close the stray root pane in `ensureWorkspace`**
+
+`workspace create` also creates a root pane that nothing closes. In `src/startup.ts`, after a
+successful `workspaceCreate`, close any pane in the new workspace that is not the supervisor:
+
+```ts
+  const created = await herdr.workspaceCreate(label)
+  const id = created.result?.workspace.workspace_id
+  if (!id) {
+    console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
+    return null
+  }
+  // `workspace create` also opens a root shell pane. Left alone it sits beside
+  // the supervisor forever looking like a second one.
+  for (const pane of await herdr.paneList(id)) {
+    await herdr.paneClose(pane.pane_id)
+  }
+  await Bun.write(workspaceIdPath(stateDir, session), id)
+  return id
+```
+
+- [ ] **Step 11: Run the full suite and typecheck**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 185 tests.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src test
+git commit -m "feat: wire the task pipeline into the supervisor loop"
+```
+
+---
+
 ## Done
 
 At this point the plugin runs end to end. Before merging the final milestone, re-read the spec's
