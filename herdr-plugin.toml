@@ -1,0 +1,59 @@
+id = "stein.pipeline"
+name = "Pipeline"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Drives the superpowers pipeline across herdr worktrees"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["bun", "run", "src/startup.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "src/hooks/worktree-created.ts"]
+
+[[events]]
+on = "worktree.removed"
+command = ["bun", "run", "src/hooks/worktree-removed.ts"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["bun", "run", "src/hooks/agent-detected.ts"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bun", "run", "src/hooks/agent-status.ts"]
+
+[[events]]
+on = "pane.exited"
+command = ["bun", "run", "src/hooks/pane-exited.ts"]
+
+[[actions]]
+id = "status"
+title = "Pipeline status"
+contexts = ["global", "workspace"]
+command = ["bun", "run", "src/actions/status.ts"]
+
+[[actions]]
+id = "claim"
+title = "Claim this pane as orchestrator"
+contexts = ["pane"]
+command = ["bun", "run", "src/actions/claim.ts"]
+
+[[actions]]
+id = "drain"
+title = "Drain pending events"
+contexts = ["global"]
+command = ["bun", "run", "src/actions/drain.ts"]
+
+[[actions]]
+id = "supervisor"
+title = "Reopen the supervisor"
+contexts = ["global"]
+command = ["bun", "run", "src/actions/supervisor.ts"]
+
+[[panes]]
+id = "supervisor"
+title = "Pipeline supervisor"
+placement = "tab"
+command = ["sh", "-c", "bun run src/supervisor/main.ts; code=$?; [ $code = 3 ] || echo '[pipeline] supervisor exited — run hpipe status'; exec \"${SHELL:-/bin/sh}\""]

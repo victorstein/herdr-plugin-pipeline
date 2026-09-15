@@ -371,6 +371,7 @@ Expected: FAIL — cannot resolve `../src/lib/store`.
 ```ts
 // src/lib/store.ts
 import { mkdirSync, renameSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 
 export async function readJson<T>(path: string): Promise<T | null> {
@@ -385,7 +386,9 @@ export async function readJson<T>(path: string): Promise<T | null> {
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
+  // Unique per CALL, not per process: two concurrent writeJson calls in one
+  // process would otherwise share a tmp path and race on rename.
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
   await Bun.write(tmp, `${JSON.stringify(value, null, 2)}\n`)
   renameSync(tmp, path)
 }
@@ -548,7 +551,10 @@ export async function loadConfig(configDir: string): Promise<Config> {
   if (raw.PIPELINE_WORKSPACE_LABEL) cfg.PIPELINE_WORKSPACE_LABEL = raw.PIPELINE_WORKSPACE_LABEL
   if (raw.GH_BIN) cfg.GH_BIN = raw.GH_BIN
   if (raw.HPIPE_LINK_PATH) cfg.HPIPE_LINK_PATH = raw.HPIPE_LINK_PATH
-  if (raw.HPIPE_LINK !== undefined) cfg.HPIPE_LINK = raw.HPIPE_LINK !== '0'
+  if (raw.HPIPE_LINK !== undefined) {
+    const falsy = ['0', 'false']
+    cfg.HPIPE_LINK = !falsy.includes(raw.HPIPE_LINK.toLowerCase())
+  }
 
   return cfg
 }
@@ -644,6 +650,7 @@ Expected: FAIL — cannot resolve `../src/lib/queue`.
 ```ts
 // src/lib/queue.ts
 import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { QueuedEvent } from './types'
 
@@ -652,7 +659,13 @@ let seq = 0
 const pad = (n: number, width: number) => String(n).padStart(width, '0')
 
 export function queueName(atMs: number, sequence: number, pid: number): string {
-  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}.json`
+  // The trailing random segment is a pure uniqueness tie-breaker and must stay
+  // LAST so it never perturbs sort order. Hooks are one-shot processes, so
+  // `sequence` is 0 on nearly every real call and `pid` alone would carry
+  // uniqueness — and pid reuse within one millisecond would then silently
+  // overwrite an already-queued event.
+  const unique = randomUUID().slice(0, 8)
+  return `${pad(atMs, 13)}-${pad(sequence, 6)}-${pad(pid, 6)}-${unique}.json`
 }
 
 export async function enqueue(queueDir: string, event: QueuedEvent): Promise<string> {
@@ -818,8 +831,10 @@ appendFileSync(${JSON.stringify(join(dir, 'calls.log'))}, argv.join(' ') + '\\n'
 const table = ${table}
 const codes = ${codes}
 const joined = argv.join(' ')
+// Require a token boundary after the match: without it, a stub for
+// 'agent get w1:p1' silently answers 'agent get w1:p10' with the wrong payload.
 const key = Object.keys(table)
-  .filter((k) => joined.startsWith(k))
+  .filter((k) => joined === k || joined.startsWith(k + ' '))
   .sort((a, b) => b.length - a.length)[0]
 if (key === undefined) {
   process.stdout.write(JSON.stringify({ error: { code: 'unstubbed', message: joined } }))
@@ -868,9 +883,17 @@ export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
   private async call<T>(args: string[]): Promise<CallResult<T>> {
-    const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
-    const text = await new Response(proc.stdout).text()
-    await proc.exited
+    // Bun.spawn throws synchronously on a missing binary. Callers rely on these
+    // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
+    // CallResult rather than crash the supervisor loop.
+    let text: string
+    try {
+      const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      text = await new Response(proc.stdout).text()
+      await proc.exited
+    } catch (error) {
+      return { ok: false, code: 'spawn_failed', message: String(error) }
+    }
 
     let parsed: Envelope<T>
     try {
@@ -912,10 +935,17 @@ export class Herdr {
     return res.result?.text ?? ''
   }
 
-  async paneShellPid(paneId: string): Promise<number | null> {
+  /**
+   * `undefined` means the call FAILED and the pid is unknown; `null` means herdr
+   * answered but reported no shell pid. Callers that act destructively on the
+   * result must treat unknown as "do not touch" — conflating the two once made
+   * the ghost reaper close the live supervisor pane it was protecting.
+   */
+  async paneShellPid(paneId: string): Promise<number | null | undefined> {
     const res = await this.call<{ process_info: { shell_pid: number } }>(
       ['pane', 'process-info', '--pane', paneId],
     )
+    if (!res.ok) return undefined
     return res.result?.process_info.shell_pid ?? null
   }
 
@@ -1045,7 +1075,6 @@ import type { Orchestrator, Run, SessionKey } from './types'
 const FINISHED: ReadonlySet<string> = new Set(['done'])
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
-const orchestratorsPath = (stateDir: string) => join(stateDir, 'orchestrators.json')
 
 export function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
@@ -1114,30 +1143,39 @@ export async function runForWorkspace(
   return runs.find((r) => r.tasks.some((t) => t.workspace_id === workspaceId)) ?? null
 }
 
-const orchestratorKey = (session: SessionKey, repoKey: string) => `${session}/${repoKey}`
+// One file per record, mirroring the runs layout above. A single shared
+// orchestrators.json would be read-modify-written whole, so two concurrent
+// claims in different sessions could silently clobber each other's entry.
+const orchestratorPath = (stateDir: string, session: SessionKey, repoKey: string) =>
+  join(stateDir, 'orchestrators', session, `${encodeURIComponent(repoKey)}.json`)
 
 export async function writeOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string, value: Orchestrator,
 ): Promise<void> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  all[orchestratorKey(session, repoKey)] = value
-  await writeJson(orchestratorsPath(stateDir), all)
+  await writeJson(orchestratorPath(stateDir, session, repoKey), value)
 }
 
 export async function readOrchestrator(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<Orchestrator | null> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
-  return all[orchestratorKey(session, repoKey)] ?? null
+  return readJson<Orchestrator>(orchestratorPath(stateDir, session, repoKey))
 }
 
 export async function allOrchestratorPanes(
   stateDir: string, session: SessionKey,
 ): Promise<Set<string>> {
-  const all = (await readJson<Record<string, Orchestrator>>(orchestratorsPath(stateDir))) ?? {}
+  const dir = join(stateDir, 'orchestrators', session)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return new Set()
+  }
+
   const panes = new Set<string>()
-  for (const [key, value] of Object.entries(all)) {
-    if (key.startsWith(`${session}/`)) panes.add(value.pane_id)
+  for (const name of names.filter((n) => n.endsWith('.json'))) {
+    const entry = await readJson<Orchestrator>(join(dir, name))
+    if (entry) panes.add(entry.pane_id)
   }
   return panes
 }
@@ -1202,13 +1240,23 @@ test('marks a release on agent_detected', () => {
   const event = toQueuedEvent('pane.agent_detected', 'personal', JSON.stringify({
     pane_id: 'w7:p1', workspace_id: 'w7', released: true,
   }))
-  expect(event.released).toBe(true)
+  expect(event?.released).toBe(true)
 })
 
-test('returns null-ish safe event for unparseable JSON', () => {
-  const event = toQueuedEvent('pane.exited', 'personal', 'not json')
-  expect(event.kind).toBe('pane.exited')
-  expect(event.pane_id).toBeUndefined()
+test('returns null for unparseable JSON', () => {
+  expect(toQueuedEvent('pane.exited', 'personal', 'not json')).toBeNull()
+})
+
+test('returns null for JSON that parses to a non-object', () => {
+  // JSON.parse("null") succeeds; reading a field off it would throw out of a hook.
+  expect(toQueuedEvent('pane.exited', 'personal', 'null')).toBeNull()
+  expect(toQueuedEvent('pane.exited', 'personal', '42')).toBeNull()
+})
+
+test('an unparseable payload enqueues nothing rather than a phantom entry', async () => {
+  const { runHook } = await import('../src/hooks/_hook')
+  await runHook('pane.exited', dir, 'personal', 'null')
+  expect(await drain(dir)).toHaveLength(0)
 })
 
 test('the enqueued event survives a round trip through the queue', async () => {
@@ -1245,15 +1293,22 @@ interface RawEvent {
   worktree?: { branch?: string | null; path?: string }
 }
 
-export function toQueuedEvent(kind: EventKind, session: string, rawJson: string): QueuedEvent {
-  const event: QueuedEvent = { kind, session, at: Date.now() }
-
+/** Returns null when the payload carries nothing actionable. */
+export function toQueuedEvent(
+  kind: EventKind, session: string, rawJson: string,
+): QueuedEvent | null {
   let raw: RawEvent
   try {
-    raw = JSON.parse(rawJson) as RawEvent
+    const parsed: unknown = JSON.parse(rawJson)
+    // `JSON.parse("null")` succeeds and returns null, so guarding the parse
+    // alone is not enough — reading a field off it would throw out of a hook.
+    if (parsed === null || typeof parsed !== 'object') return null
+    raw = parsed as RawEvent
   } catch {
-    return event
+    return null
   }
+
+  const event: QueuedEvent = { kind, session, at: Date.now() }
 
   if (raw.pane_id) event.pane_id = raw.pane_id
   if (raw.agent_status) event.agent_status = raw.agent_status
@@ -1278,7 +1333,15 @@ export function toQueuedEvent(kind: EventKind, session: string, rawJson: string)
 export async function runHook(
   kind: EventKind, queueDir: string, session: string, rawJson: string,
 ): Promise<void> {
-  await enqueue(queueDir, toQueuedEvent(kind, session, rawJson))
+  const event = toQueuedEvent(kind, session, rawJson)
+  if (!event) {
+    // A queue entry with no fields is indistinguishable from a legitimately
+    // sparse event, so the supervisor could not act on it either way. Report
+    // and drop rather than enqueue something unactionable.
+    console.error(`[pipeline] ${kind}: unparseable event payload, dropped`)
+    return
+  }
+  await enqueue(queueDir, event)
 }
 
 /** Entrypoint shared by all five hook scripts. Parses env, enqueues, exits. */
@@ -1562,6 +1625,23 @@ test('falls back to the repo primary workspace agent pane', async () => {
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBe('w1:p1')
 })
 
+test('returns null when two agent panes qualify, rather than picking one', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'k', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+    'pane list': { result: { panes: [
+      { pane_id: 'w1:p1', agent_status: 'idle' },
+      { pane_id: 'w1:p2', agent_status: 'working' },
+    ] } },
+  })
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
+})
+
 test('returns null rather than guessing when nothing resolves', async () => {
   const bin = await makeFakeBin(dir, { 'workspace list': { result: { workspaces: [] } } })
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
@@ -1608,8 +1688,15 @@ export async function resolveOrchestrator(
   if (!primary) return null
 
   const panes = await herdr.paneList(primary.workspace_id)
-  const agentPane = panes.find((p) => p.agent_status !== undefined && p.agent_status !== 'unknown')
-  return agentPane?.pane_id ?? null
+  const agentPanes = panes.filter(
+    (p) => p.agent_status !== undefined && p.agent_status !== 'unknown',
+  )
+
+  // Ambiguity is not resolved by guessing. Pane list order is not documented as
+  // meaningful, and picking wrong types a long prompt into an unrelated agent.
+  // Explicit `claim` is the disambiguator, so force it.
+  if (agentPanes.length !== 1) return null
+  return agentPanes[0]?.pane_id ?? null
 }
 ```
 
@@ -1644,7 +1731,7 @@ git commit -m "feat: orchestrator resolution by claim then repo provenance"
 ```ts
 // test/predicates.test.ts
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isFresh, parseVerdict } from '../src/lib/predicates'
@@ -1674,6 +1761,17 @@ test('a missing file is never fresh', async () => {
   expect(await isFresh(join(dir, 'nope.md'), 0)).toBe(false)
 })
 
+test('sub-millisecond mtime does not read as fresh against a truncated phase entry', async () => {
+  // Date.now() truncates; statSync().mtimeMs does not. A file written a fraction of a
+  // millisecond before phase entry must NOT count as fresh.
+  const p = await writeAged('spec.md', 'x', 5_000)
+  utimesSync(p, new Date(5_000), new Date(5_000))
+  const withFraction = join(dir, 'frac.md')
+  await Bun.write(withFraction, 'x')
+  const entered = Math.floor(statSync(withFraction).mtimeMs)
+  expect(await isFresh(withFraction, entered)).toBe(false)
+})
+
 test('parses a CLEAR trailer', async () => {
   const p = await writeAged('r.md', 'findings\n\nVERDICT: CLEAR\n', 9_000)
   expect(await parseVerdict(p)).toEqual({ verdict: 'CLEAR', blockers: 0, majors: 0 })
@@ -1684,9 +1782,33 @@ test('parses a BLOCKER trailer with counts', async () => {
   expect(await parseVerdict(p)).toEqual({ verdict: 'BLOCKER', blockers: 2, majors: 5 })
 })
 
-test('uses the LAST verdict line when a review quotes an earlier one', async () => {
-  const p = await writeAged('r.md', 'quoting VERDICT: BLOCKER inline\n\nVERDICT: CLEAR\n', 9_000)
+test('an indented quotation of the contract is not read as a verdict', async () => {
+  // The review prompts document the trailer as an indented block, so a reviewer
+  // narrating the contract writes exactly this. Trimming first made it
+  // indistinguishable from a real verdict and produced a false CLEAR.
+  const p = await writeAged('r.md', [
+    '# Review', 'I found 3 BLOCKER issues.', '',
+    'Per the contract, the trailer format required is:', '',
+    '    VERDICT: CLEAR', '',
+  ].join('\n'), 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('uses the LAST verdict line when an earlier one stands at column 0', async () => {
+  const p = await writeAged(
+    'r.md', 'VERDICT: BLOCKER\nBLOCKERS: 1\n\nsuperseded\n\nVERDICT: CLEAR\n', 9_000,
+  )
   expect((await parseVerdict(p))?.verdict).toBe('CLEAR')
+})
+
+test('rejects CLEAR carrying blocker counts as self-contradictory', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nBLOCKERS: 3\n', 9_000)
+  expect(await parseVerdict(p)).toBeNull()
+})
+
+test('accepts CLEAR carrying major counts, which the contract permits', async () => {
+  const p = await writeAged('r.md', 'x\n\nVERDICT: CLEAR\nMAJORS: 2\n', 9_000)
+  expect(await parseVerdict(p)).toEqual({ verdict: 'CLEAR', blockers: 0, majors: 2 })
 })
 
 test('rejects a trailer that is not the last non-empty line', async () => {
@@ -1720,7 +1842,11 @@ export interface VerdictResult {
 
 export async function isFresh(path: string, phaseEnteredAt: number): Promise<boolean> {
   try {
-    return statSync(path).mtimeMs > phaseEnteredAt
+    // `mtimeMs` carries sub-millisecond precision while `phase_entered_at` comes from
+    // `Date.now()`, which truncates. Without flooring, a file written a fraction of a
+    // millisecond BEFORE phase entry compares as greater and reads as fresh — a false
+    // positive on exactly the stale artifact edge-triggering exists to reject.
+    return Math.floor(statSync(path).mtimeMs) > phaseEnteredAt
   } catch {
     return false
   }
@@ -1732,9 +1858,9 @@ export async function isFresh(path: string, phaseEnteredAt: number): Promise<boo
  * parseVerdict is the real completeness signal for a review.
  */
 export async function isSettled(path: string, settleMs: number): Promise<boolean> {
-  const before = statSync(path)
-  await Bun.sleep(settleMs)
   try {
+    const before = statSync(path)
+    await Bun.sleep(settleMs)
     const after = statSync(path)
     return before.size === after.size && before.mtimeMs === after.mtimeMs
   } catch {
@@ -1742,14 +1868,21 @@ export async function isSettled(path: string, settleMs: number): Promise<boolean
   }
 }
 
-const VERDICT_LINE = /^VERDICT:\s*(CLEAR|BLOCKER)\s*$/
-const COUNT_LINE = /^(BLOCKERS|MAJORS):\s*(\d+)\s*$/
+// Anchored at column 0 on purpose. The review prompts DOCUMENT the trailer as
+// an indented block, so trimming before matching made a quoted example
+// byte-identical to a real verdict — a reviewer narrating the contract then
+// produced a confident false CLEAR. A real trailer is never indented.
+const VERDICT_LINE = /^VERDICT:[ \t]*(CLEAR|BLOCKER)[ \t]*$/
+const COUNT_LINE = /^(BLOCKERS|MAJORS):[ \t]*(\d+)[ \t]*$/
 
 export async function parseVerdict(path: string): Promise<VerdictResult | null> {
   const file = Bun.file(path)
   if (!(await file.exists())) return null
 
-  const lines = (await file.text()).split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  const lines = (await file.text())
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+    .filter((l) => l.trim().length > 0)
 
   let verdictIndex = -1
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -1767,6 +1900,11 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
   }
 
   const verdict = VERDICT_LINE.exec(lines[verdictIndex] ?? '')?.[1] as Verdict
+
+  // CLEAR alongside blocker findings is self-contradictory — the contract pairs
+  // counts with BLOCKER. (CLEAR with MAJORS is legal: majors are fixed inline.)
+  if (verdict === 'CLEAR' && counts.blockers > 0) return null
+
   return { verdict, ...counts }
 }
 ```
@@ -1774,7 +1912,7 @@ export async function parseVerdict(path: string): Promise<VerdictResult | null> 
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test test/predicates.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1830,7 +1968,9 @@ Expected: FAIL — cannot resolve `../src/lib/render`.
 // src/lib/render.ts
 import { join } from 'node:path'
 
-const PLACEHOLDER = /\{\{(\w+)\}\}/g
+// Matches any {{...}} token, not just \w+, so a hyphenated or dotted name
+// fails loudly instead of shipping through to an agent verbatim.
+const PLACEHOLDER = /\{\{([^}]*)\}\}/g
 
 export function render(template: string, vars: Record<string, string>): string {
   return template.replace(PLACEHOLDER, (_match, name: string) => {
@@ -1976,8 +2116,7 @@ or
 `BLOCKER` means: any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs
 a judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline.
 
-Nothing but count lines may follow the verdict line — a file with prose after it reads as still being
-written and will not be accepted.
+Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it: a file with prose after the trailer reads as still being written.
 ```
 
 - [ ] **Step 5: Write `prompts/plan.md`**
@@ -2027,7 +2166,7 @@ or
     MAJORS: 3
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 7: Write `prompts/dispatch.md`**
@@ -2129,7 +2268,7 @@ or
     MAJORS: 0
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 10: Write `prompts/task-review-quality.md`**
@@ -2162,7 +2301,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 11: Write `prompts/ci-red.md`**
@@ -2239,7 +2378,7 @@ or
     MAJORS: 2
 
 `BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the user can make. Nothing but count lines may follow the verdict line.
+judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline. Write the trailer at the **start of the line** — not indented, and not inside a code fence. An indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 ```
 
 - [ ] **Step 15: Write `prompts/escalate.md`**
@@ -2376,6 +2515,34 @@ test('LIVELOCK: re-entered spec does not re-advance on the stale artifact', () =
   expect(advanceRun(run, { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 })).toBeNull()
 })
 
+test('a cleared branch-review finishes the run', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 }, maxPasses: 2,
+  })
+  expect(next?.phase).toBe('done')
+})
+
+test('a blocked branch-review loops on itself, since no producer phase remains', () => {
+  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
+  const next = advanceRun(run, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 3,
+  })
+  expect(next?.phase).toBe('branch-review')
+  expect(next?.pass).toBe(2)
+})
+
+test('dispatch and execute never advance on artifact signals alone', () => {
+  for (const phase of ['dispatch', 'execute'] as const) {
+    const run = enterRunPhase(mkRun(), phase, 'test')
+    expect(advanceRun(run, {
+      actorIdle: true, artifactFresh: true, verdict: null, maxPasses: 2,
+    })).toBeNull()
+  }
+})
+
 test('enterRunPhase stamps phase_entered_at and appends history', () => {
   const before = Date.now() - 1
   const run = enterRunPhase(mkRun(), 'plan', 'spec review cleared')
@@ -2423,6 +2590,10 @@ const ON_CLEAR: Partial<Record<RunPhase, RunPhase>> = {
 const ON_BLOCKER: Partial<Record<RunPhase, RunPhase>> = {
   'spec-review': 'spec',
   'plan-review': 'plan',
+  // Unlike its siblings, branch-review routes to itself: by this point every
+  // task is merged and torn down, so there is no producer phase to return to.
+  // The orchestrator patches the branch directly and writes a fresh review,
+  // and MAX_PASSES still bounds the loop.
   'branch-review': 'branch-review',
 }
 
@@ -2456,9 +2627,8 @@ export function advanceRun(run: Run, signals: RunSignals): Run | null {
 
   const back = ON_BLOCKER[run.phase]
   if (!back) return null
-  const passes = run.pass + 1
   enterRunPhase(run, back, `review returned BLOCKER (pass ${run.pass})`)
-  run.pass = passes
+  run.pass += 1
   return run
 }
 
@@ -2597,6 +2767,28 @@ test('ci pass advances to merge; ci fail returns to execute', () => {
   })?.phase).toBe('execute')
 })
 
+test('a repeatedly red CI escalates instead of retrying forever', () => {
+  const { run, task } = fixture('ci')
+  task.pass = 2
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 2,
+  })
+  expect(next?.phase).toBe('escalated')
+})
+
+test('a red CI below the cap increments pass on the way back to execute', () => {
+  const { run, task } = fixture('ci')
+  const next = advanceTask(run, task, {
+    actorIdle: false, workerIdle: false, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
+    ciBucket: 'fail', maxPasses: 3,
+  })
+  expect(next?.phase).toBe('execute')
+  expect(next?.pass).toBe(2)
+})
+
 test('a pending ci bucket advances nothing', () => {
   const { run, task } = fixture('ci')
   expect(advanceTask(run, task, {
@@ -2667,9 +2859,8 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
         return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
       }
 
-      const passes = task.pass + 1
       enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
-      task.pass = passes
+      task.pass += 1
       task.head_sha_at_entry = s.headSha
       return task
     }
@@ -2677,7 +2868,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'ci': {
       if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
       if (s.ciBucket === 'fail') {
+        // CI retries draw on the same budget as review retries. Without this the
+        // task cycles execute → review → ci → execute forever, bypassing the one
+        // safety valve the module has.
+        if (task.pass >= s.maxPasses) {
+          return enterTaskPhase(run, task, 'escalated', `CI still red after ${task.pass} passes`)
+        }
         enterTaskPhase(run, task, 'execute', 'CI red')
+        task.pass += 1
         task.head_sha_at_entry = s.headSha
         return task
       }
@@ -2784,6 +2982,26 @@ test('a finished task does not hold its files', () => {
   expect(gateStatus(waiting, [done, waiting]).state).toBe('ready')
 })
 
+test('an escalated task still holds its files', () => {
+  // Nothing tears an escalated task down, so its worktree and unmerged work
+  // persist — releasing the lock would let a second task edit the same files.
+  const stuck = task({ task_id: 't1', phase: 'escalated', files: ['packages/core/'] })
+  const waiting = task({ task_id: 't2', files: ['packages/core/x.ts'] })
+  expect(gateStatus(waiting, [stuck, waiting]).state).toBe('waiting')
+})
+
+test('a failed task still holds its files', () => {
+  const dead = task({ task_id: 't1', phase: 'failed', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [dead, waiting]).state).toBe('waiting')
+})
+
+test('an orphaned task releases its files, because its code already merged', () => {
+  const merged = task({ task_id: 't1', phase: 'orphaned', files: ['apps/api/'] })
+  const waiting = task({ task_id: 't2', files: ['apps/api/main.ts'] })
+  expect(gateStatus(waiting, [merged, waiting]).state).toBe('ready')
+})
+
 test('detectCycle names a cycle', () => {
   const a = task({ task_id: 't1', depends_on: ['t2'] })
   const b = task({ task_id: 't2', depends_on: ['t1'] })
@@ -2808,9 +3026,22 @@ Expected: FAIL — cannot resolve `../src/lib/gating`.
 // src/lib/gating.ts
 import type { Task, TaskPhase } from './types'
 
+/** Dependency satisfaction: a dependent may never start behind one of these. */
 const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
 const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'failed', 'orphaned', 'blocked-on-failure', 'escalated',
+])
+
+/**
+ * File ownership asks a DIFFERENT question than dependency satisfaction, so it
+ * gets its own set. `escalated` and `failed` both leave a worktree holding
+ * unmerged work, and nothing ever tears an escalated task down — releasing its
+ * files would let a second task be dispatched onto them. `orphaned` is excluded
+ * because it is only reachable after merge, so that code has already landed.
+ */
+const HOLDS_FILES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
+  'execute', 'task-review-spec', 'task-review-quality',
+  'ci', 'merge', 'close', 'teardown', 'failed', 'escalated',
 ])
 
 export type GateState =
@@ -2827,7 +3058,7 @@ export function filesOverlap(a: string[], b: string[]): boolean {
 }
 
 function isInFlight(task: Task): boolean {
-  return !TERMINAL_OK.has(task.phase) && !TERMINAL_BAD.has(task.phase) && task.phase !== 'queued'
+  return HOLDS_FILES.has(task.phase)
 }
 
 export function gateStatus(task: Task, all: Task[]): GateState {
@@ -2915,21 +3146,34 @@ construction mid-turn running the command.
 ```ts
 // test/cli.test.ts
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
 import { cmdRewind, cmdStart, cmdTask } from '../src/cli'
 
 let dir: string
+let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
 
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cli-')) })
-afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'cli-'))
+  // `hpipe task` rejects a --surface with no matching agent definition, so the
+  // fixture repo must carry real ones.
+  repoDir = mkdtempSync(join(tmpdir(), 'repo-'))
+  mkdirSync(join(repoDir, '.claude', 'agents'), { recursive: true })
+  for (const surface of ['core', 'api']) {
+    writeFileSync(join(repoDir, '.claude', 'agents', `${surface}-dev.md`), `# ${surface}-dev\n`)
+  }
+})
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true })
+  rmSync(repoDir, { recursive: true, force: true })
+})
 
 test('start opens a run and prints the spec prompt', async () => {
   const out = await cmdStart(ctx(), {
-    title: 'chat meter', repoKey: 'k', repoRoot: '/r', socketPath: '/s',
+    title: 'chat meter', repoKey: 'k', repoRoot: repoDir, socketPath: '/s',
     paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(out.ok).toBe(true)
@@ -2939,10 +3183,10 @@ test('start opens a run and prints the spec prompt', async () => {
 
 test('start refuses a second run for the same repo and names the blocker', async () => {
   const first = await cmdStart(ctx(), {
-    title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+    title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
   })
   const second = await cmdStart(ctx(), {
-    title: 'b', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+    title: 'b', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(second.ok).toBe(false)
   expect(second.text).toContain(JSON.parse(first.json ?? '{}').run_id ?? 'run')
@@ -2950,7 +3194,7 @@ test('start refuses a second run for the same repo and names the blocker', async
 
 test('task prints its id and withholds the prompt while gated', async () => {
   const c = ctx()
-  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
   const run = await activeRunForRepo(dir, 'personal', 'k')
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
@@ -2967,7 +3211,7 @@ test('task prints its id and withholds the prompt while gated', async () => {
 
 test('task rejects a dependency cycle', async () => {
   const c = ctx()
-  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: '/r', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
   const run = await activeRunForRepo(dir, 'personal', 'k')
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
@@ -2978,8 +3222,34 @@ test('task rejects a dependency cycle', async () => {
   expect(bad.text).toContain('cycle')
 })
 
+test('task rejects a surface with no agent definition', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  // A typo in --surface would otherwise render a plausible dead path into the
+  // worker prompt and fail only once the worker went looking for it.
+  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'kore', text: 'y', dependsOn: [], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('kore-dev.md')
+})
+
+test('task rejects a dependency id that names no task', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  run!.phase = 'dispatch'
+  await saveRun(dir, run!)
+
+  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'core', text: 'y', dependsOn: ['t7'], files: [], keepWorktree: false })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('t7')
+})
+
 test('rewind resets the pass count for the phase it rewinds to', async () => {
-  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.phase = 'escalated'
   run.escalated_from = 'spec-review'
   run.pass = 2
@@ -3073,6 +3343,12 @@ export async function cmdTask(ctx: Ctx, input: {
     phase: 'queued', pass: 1, phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   }
+
+  // detectCycle skips ids it does not recognise, so a typo would otherwise pass
+  // validation here and then wait in `queued` forever with no diagnostic.
+  const known = new Set(run.tasks.map((t) => t.task_id))
+  const unknown = input.dependsOn.filter((id) => !known.has(id))
+  if (unknown.length > 0) return fail(`--depends-on names no such task: ${unknown.join(', ')}`)
 
   const cycle = detectCycle([...run.tasks, task])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
@@ -3755,8 +4031,13 @@ export async function reapGhostPanes(
 
   for (const pane of panes) {
     if (pane.label !== SUPERVISOR_LABEL) continue
+
     const shellPid = await herdr.paneShellPid(pane.pane_id)
+    // undefined means the pid lookup failed. Closing a pane we cannot identify
+    // risks killing the live supervisor, so uncertainty means leave it alone.
+    if (shellPid === undefined) continue
     if (livePanePid !== null && shellPid === livePanePid) continue
+
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
@@ -5336,6 +5617,1845 @@ assertion 5 fails, a hook has started blocking — stop and fix it before mergin
 ```bash
 git add README.md test/integration/smoke.md
 git commit -m "docs: README and live smoke runbook"
+```
+
+---
+
+## Task 30: Wire the task pipeline into the supervisor
+
+The task-level machinery — `advanceTask`, `ciTransitions`, `runTeardown`, `gateStatus` — is built and
+unit-tested but **never called from `src/supervisor/main.ts`**. Verified: `main.ts` imports none of
+them, nothing in `src/` calls them, and nothing ever writes `task.phase = 'execute'`. A run therefore
+reaches `dispatch`, registers tasks, and parks every one at `queued` forever.
+
+Four config keys are parsed and never read: `WAKE_ON`, `REPOS_ALLOW`, `TASK_STALL_MINUTES`,
+`BLOCKED_TAIL_LINES`.
+
+**Files:**
+- Create: `src/lib/worker-prompt.ts`, `src/supervisor/tasks.ts`, `test/tasks.test.ts`
+- Modify: `src/cli.ts` (import the moved helper), `src/supervisor/main.ts` (call the new module),
+  `src/supervisor/tick.ts` (honour `WAKE_ON`), `src/startup.ts` (close the stray root pane)
+
+- [ ] **Step 1: Move `renderWorkerPrompt` out of `cli.ts` into a shared module**
+
+`src/supervisor/tasks.ts` needs it and must not import `cli.ts` (which carries an argv dispatcher).
+Create `src/lib/worker-prompt.ts` with the existing function body moved verbatim:
+
+```ts
+import { join } from 'node:path'
+import { renderPrompt } from './render'
+import type { Run, Task } from './types'
+
+export async function renderWorkerPrompt(
+  pluginRoot: string, run: Run, task: Task,
+): Promise<string> {
+  const dependsOnCore = task.depends_on.some(
+    (id) => run.tasks.find((t) => t.task_id === id)?.surface === 'core',
+  )
+  return renderPrompt(pluginRoot, 'task', {
+    branch: task.branch,
+    issue: String(task.issue),
+    surface: task.surface,
+    agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
+    task_text: task.text,
+    dist_note: dependsOnCore
+      ? '> `@repo/core` changed on `main` since this branch was cut. Run ' +
+        '`pnpm install && pnpm turbo build --filter=@repo/core` before your first edit and again ' +
+        'before opening the PR — the apps consume the built `dist`, not the source.'
+      : '',
+  })
+}
+```
+
+Delete the old `renderWorkerPrompt` from `src/cli.ts` and import it instead. `cli.ts`'s own call site
+passes `ctx.pluginRoot` as the first argument. Run `bun test test/cli.test.ts` — still green.
+
+- [ ] **Step 2: Write the failing test for the task driver**
+
+```ts
+// test/tasks.test.ts
+import { expect, test } from 'bun:test'
+import { advanceTasks } from '../src/supervisor/tasks'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task } from '../src/lib/types'
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  depends_on: [], files: [], keep_worktree: false, text: 'do it',
+  workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
+  phase: 'queued', pass: 1, phase_entered_at: 0, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null, ...over,
+})
+
+function mkRun(tasks: Task[]): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  run.tasks = tasks
+  return run
+}
+
+const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
+  pluginRoot: process.cwd(),
+  actorIdle: true,
+  maxPasses: 2,
+  prForBranch: async () => null,
+  prView: async () => null,
+  issueView: async () => null,
+  verdictFor: async () => null,
+  removeWorktree: async () => true,
+  ...over,
+})
+
+test('an unblocked queued task moves to execute and yields a dispatch prompt', async () => {
+  const run = mkRun([mkTask({})])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(prompts.join('\n')).toContain('feat/x')
+})
+
+test('a gated queued task stays queued and yields nothing', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'execute' }),
+    mkTask({ task_id: 't2', depends_on: ['t1'] }),
+  ])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('queued')
+  expect(prompts).toHaveLength(0)
+})
+
+test('a queued task whose dependency failed becomes blocked-on-failure', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'failed' }),
+    mkTask({ task_id: 't2', depends_on: ['t1'] }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('blocked-on-failure')
+})
+
+test('an idle worker with a fresh PR advances to task-review-spec', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+  expect(run.tasks[0]?.pr).toBe(42)
+})
+
+test('LIVELOCK: a task re-entering execute does not advance on the same sha', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'same', pr: 42 })])
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'same' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('execute')
+})
+
+test('a cleared task review advances to the second stage', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-quality')
+})
+
+test('task phases are not evaluated while the orchestrator is busy', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+  await advanceTasks(run, deps({
+    actorIdle: false,
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+})
+
+test('a merged PR advances to close, and a closed issue to teardown', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+  await advanceTasks(run, deps({
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('close')
+
+  run.tasks[0]!.phase_entered_at = 1_000
+  await advanceTasks(run, deps({ issueView: async () => ({ closed: true, closedAtMs: 2_000 }) }))
+  expect(run.tasks[0]?.phase).toBe('teardown')
+})
+
+test('teardown removes the worktree and completes the task', async () => {
+  const run = mkRun([mkTask({ phase: 'teardown' })])
+  const removed: string[] = []
+  await advanceTasks(run, deps({
+    removeWorktree: async (ws: string) => { removed.push(ws); return true },
+  }))
+  expect(removed).toEqual(['w7'])
+  expect(run.tasks[0]?.phase).toBe('done')
+  expect(run.phase).toBe('branch-review')
+})
+```
+
+- [ ] **Step 3: Run it to make sure it fails**
+
+Run: `bun test test/tasks.test.ts`
+Expected: FAIL — cannot resolve `../src/supervisor/tasks`.
+
+- [ ] **Step 4: Implement the driver**
+
+```ts
+// src/supervisor/tasks.ts
+import { gateStatus } from '../lib/gating'
+import type { IssueView, PrView } from '../lib/gh'
+import { advanceTask, enterTaskPhase } from '../lib/machine'
+import type { VerdictResult } from '../lib/predicates'
+import { renderWorkerPrompt } from '../lib/worker-prompt'
+import type { Run, Task } from '../lib/types'
+import { runTeardown } from './teardown'
+
+export interface TaskDeps {
+  pluginRoot: string
+  /** The orchestrator's live idle state, already double-checked by the caller. */
+  actorIdle: boolean
+  maxPasses: number
+  prForBranch: (branch: string) => Promise<number | null>
+  prView: (pr: number) => Promise<PrView | null>
+  issueView: (issue: number) => Promise<IssueView | null>
+  verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
+  removeWorktree: (workspaceId: string) => Promise<boolean>
+}
+
+const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', 'merge', 'close'])
+
+/**
+ * Drives every task in a run one step. Returns any prompts the digest should
+ * carry — currently the worker prompt for a task whose gate just opened, which
+ * is delivered to the ORCHESTRATOR because a queued task has no pane yet.
+ */
+export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> {
+  const prompts: string[] = []
+
+  for (const task of run.tasks) {
+    if (task.phase === 'queued') {
+      const gate = gateStatus(task, run.tasks)
+      if (gate.state === 'blocked-on-failure') {
+        enterTaskPhase(run, task, 'blocked-on-failure', `depends on ${gate.on.join(', ')}`)
+        continue
+      }
+      if (gate.state !== 'ready') continue
+
+      enterTaskPhase(run, task, 'execute', 'gate opened')
+      prompts.push(
+        `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
+          (await renderWorkerPrompt(deps.pluginRoot, run, task)),
+      )
+      continue
+    }
+
+    // Phases whose signal comes from the orchestrator must not be evaluated
+    // while it is mid-turn, exactly as run phases are gated.
+    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+
+    const signals = await gatherSignals(run, task, deps)
+    if (signals) advanceTask(run, task, signals)
+  }
+
+  await runTeardown([run], deps.removeWorktree)
+  return prompts
+}
+
+async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
+  const base = {
+    actorIdle: deps.actorIdle,
+    workerIdle: task.agent_status === 'idle' || task.agent_status === 'done',
+    artifactFresh: false,
+    verdict: null as VerdictResult | null,
+    prNumber: task.pr,
+    headSha: null as string | null,
+    merged: false,
+    mergedAtMs: undefined as number | undefined,
+    issueClosed: false,
+    closedAtMs: undefined as number | undefined,
+    ciBucket: task.ci,
+    maxPasses: deps.maxPasses,
+  }
+
+  switch (task.phase) {
+    case 'execute': {
+      const pr = task.pr ?? (await deps.prForBranch(task.branch))
+      if (pr === null) return base
+      const view = await deps.prView(pr)
+      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+    }
+    case 'task-review-spec':
+    case 'task-review-quality': {
+      const verdict = await deps.verdictFor(run, task)
+      return { ...base, artifactFresh: verdict !== null, verdict }
+    }
+    case 'merge': {
+      if (task.pr === null) return base
+      const view = await deps.prView(task.pr)
+      return { ...base, merged: view?.merged ?? false, mergedAtMs: view?.mergedAtMs ?? undefined }
+    }
+    case 'close': {
+      const view = await deps.issueView(task.issue)
+      return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
+    }
+    case 'ci':
+      return base
+    default:
+      return null
+  }
+}
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `bun test test/tasks.test.ts`
+Expected: PASS, 9 tests.
+
+- [ ] **Step 6: Wire it into the supervisor loop**
+
+In `src/supervisor/main.ts`, inside the per-run loop, after `evaluateRun` and before the digest is
+pushed, add the task driver and the CI poll. Import at the top:
+
+```ts
+import { ciTransitions } from './ci'
+import { advanceTasks } from './tasks'
+import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+```
+
+Add a CI poll clock alongside `attempts`:
+
+```ts
+  let lastCiPollMs = 0
+```
+
+Then, inside the `for (const run of pickOneAdvance(runs))` body, after the `evaluateRun` call:
+
+```ts
+        const actorIdle = run.orchestrator_pane !== null &&
+          (await herdr.agentStatus(run.orchestrator_pane)) === 'idle'
+
+        if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
+          lastCiPollMs = Date.now()
+          await ciTransitions([run], async (pr) => gh.prChecks(pr))
+        }
+
+        const taskPrompts = await advanceTasks(run, {
+          pluginRoot,
+          actorIdle,
+          maxPasses: config.MAX_PASSES,
+          prForBranch: (branch) => gh.prForBranch(branch),
+          prView: (pr) => gh.prView(pr),
+          issueView: (issue) => gh.issueView(issue),
+          verdictFor: async (r, t) => {
+            const relative = artifactPathFor(r, t)
+            if (!relative) return null
+            const absolute = join(r.repo_root, relative)
+            if (!(await isFresh(absolute, t.phase_entered_at))) return null
+            if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
+            return parseVerdict(absolute)
+          },
+          removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+        })
+```
+
+and include `taskPrompts` in the digest for that run by appending them to `nextPrompt`:
+
+```ts
+        const combined = [nextPrompt, ...taskPrompts].filter((p) => p.length > 0).join('\n\n---\n\n')
+```
+
+using `combined` where `nextPrompt` was used in the `digests.push({...})` call.
+
+`pluginRoot` comes from `process.env.HERDR_PLUGIN_ROOT ?? process.cwd()` — declare it beside `herdr`.
+
+- [ ] **Step 7: Honour `WAKE_ON` in `tick.ts`**
+
+`applyEvents` hardcodes which statuses wake the orchestrator. Replace the hardcoded check with the
+configured set. Change the signature to take it:
+
+```ts
+export function applyEvents(
+  runs: Run[], events: QueuedEvent[], session: SessionKey,
+  orchestratorPanes: Set<string>, wakeOn: ReadonlySet<string> = new Set(['blocked', 'done', 'idle']),
+): ApplyResult {
+```
+
+and the status branch to `if (wakeOn.has(event.agent_status))`. In `main.ts` pass
+`new Set(config.WAKE_ON)`. Keep the existing default so the current tests still pass unchanged.
+
+- [ ] **Step 8: Inline a blocked worker's pane tail (`BLOCKED_TAIL_LINES`)**
+
+In `main.ts`, when building the event lines for a digest, a wake line whose task is `blocked` should
+carry a tail of that pane. After `applyEvents` returns `wake`, enrich blocked entries:
+
+```ts
+      for (const line of wake) {
+        if (line.task?.agent_status === 'blocked' && line.task.pane_id) {
+          const tail = await herdr.paneRead(line.task.pane_id, config.BLOCKED_TAIL_LINES)
+          if (tail.trim().length > 0) {
+            line.text += `\n    ${tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n    ')}`
+          }
+        }
+      }
+```
+
+This is the design's stated primary signal — a blocked worker is Claude explicitly asking for a
+decision, and the orchestrator should be able to answer without a round trip.
+
+- [ ] **Step 9: Honour `REPOS_ALLOW`**
+
+In `main.ts`, after `listRuns`, drop runs whose repo is not allowed:
+
+```ts
+      const allowed = config.REPOS_ALLOW.length === 0
+        ? runs
+        : runs.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
+```
+
+and use `allowed` everywhere `runs` was used below that point.
+
+- [ ] **Step 10: Close the stray root pane in `ensureWorkspace`**
+
+`workspace create` also creates a root pane that nothing closes. In `src/startup.ts`, after a
+successful `workspaceCreate`, close any pane in the new workspace that is not the supervisor:
+
+```ts
+  const created = await herdr.workspaceCreate(label)
+  const id = created.result?.workspace.workspace_id
+  if (!id) {
+    console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
+    return null
+  }
+  // `workspace create` also opens a root shell pane. Left alone it sits beside
+  // the supervisor forever looking like a second one.
+  for (const pane of await herdr.paneList(id)) {
+    await herdr.paneClose(pane.pane_id)
+  }
+  await Bun.write(workspaceIdPath(stateDir, session), id)
+  return id
+```
+
+- [ ] **Step 11: Run the full suite and typecheck**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 185 tests.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src test
+git commit -m "feat: wire the task pipeline into the supervisor loop"
+```
+
+---
+
+## Task 31: Render the task-phase prompts
+
+`src/supervisor/deliver.ts` has `promptForRunPhase`, which renders the prompt for each run-level phase
+on entry. **There is no task-level counterpart.** Verified: `prompts/task-review-spec.md`,
+`task-review-quality.md`, `ci-red.md`, `merge.md` and `close.md` are never referenced anywhere in
+`src/`.
+
+Consequence: since Task 30, a task's state machine advances correctly *once the artifact or PR state
+exists* — but nothing ever tells the orchestrator to produce it. `dispatch.md` covers opening issues,
+registering tasks and starting agents, and says nothing about reviewing, merging or closing. So in a
+live run those phases stall indefinitely.
+
+**Files:**
+- Modify: `src/supervisor/tasks.ts`, `test/tasks.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tasks.test.ts`:
+
+```ts
+test('entering task-review-spec yields the stage-one review prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  const prompts = await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(prompts.join('\n')).toContain('Stage 1 review')
+  expect(prompts.join('\n')).toContain('#1')
+})
+
+test('entering merge yields the merge prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('merge')
+  expect(prompts.join('\n')).toContain('Ready to merge')
+})
+
+test('a red CI yields the ci-red prompt carrying the failure detail', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail' })])
+  const prompts = await advanceTasks(run, deps({
+    ciDetail: async () => '- build (fail) https://example/run/1',
+  }))
+  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(prompts.join('\n')).toContain('CI is red')
+  expect(prompts.join('\n')).toContain('build (fail)')
+})
+
+test('an escalated task yields the escalation prompt naming its task flag', async () => {
+  const run = mkRun([mkTask({ phase: 'task-review-quality', pass: 2 })])
+  const prompts = await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'BLOCKER', blockers: 1, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('escalated')
+  expect(prompts.join('\n')).toContain('--task t1')
+})
+
+test('a phase that advances nothing yields no prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'working' })])
+  expect(await advanceTasks(run, deps())).toHaveLength(0)
+})
+```
+
+Add `ciDetail: async () => ''` to the `deps()` helper's defaults at the top of the file.
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/tasks.test.ts`
+Expected: FAIL — the prompts array is empty for each transition.
+
+- [ ] **Step 3: Implement**
+
+In `src/supervisor/tasks.ts`, add to `TaskDeps`:
+
+```ts
+  /** Rendered detail of the failing checks, for the ci-red prompt. */
+  ciDetail: (pr: number | null) => Promise<string>
+```
+
+Add the imports it needs:
+
+```ts
+import { join } from 'node:path'
+import { renderPrompt } from '../lib/render'
+import { artifactPathFor } from './deliver'
+```
+
+Add the renderer:
+
+```ts
+/**
+ * The task-level counterpart to deliver.ts's promptForRunPhase. Without it the
+ * state machine advances once an artifact exists but nothing ever asks the
+ * orchestrator to produce one, so every task phase stalls.
+ */
+async function promptForTaskPhase(
+  run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
+): Promise<string> {
+  const common = {
+    run_id: run.run_id,
+    branch: task.branch,
+    issue: String(task.issue),
+    pr: task.pr === null ? 'unknown' : String(task.pr),
+    pass: String(task.pass),
+    verdict_path: join(run.repo_root, artifactPathFor(run, task) ?? ''),
+  }
+
+  switch (task.phase) {
+    case 'task-review-spec':
+      return renderPrompt(deps.pluginRoot, 'task-review-spec', common)
+    case 'task-review-quality':
+      return renderPrompt(deps.pluginRoot, 'task-review-quality', common)
+    case 'merge':
+      return renderPrompt(deps.pluginRoot, 'merge', common)
+    case 'close':
+      return renderPrompt(deps.pluginRoot, 'close', common)
+    case 'execute':
+      // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
+      // review does not, because the review file already says what to fix.
+      return cameFrom === 'ci'
+        ? renderPrompt(deps.pluginRoot, 'ci-red', {
+            ...common, ci_failure: await deps.ciDetail(task.pr),
+          })
+        : ''
+    case 'escalated':
+      return renderPrompt(deps.pluginRoot, 'escalate', {
+        run_id: run.run_id,
+        phase: task.escalated_from ?? cameFrom,
+        pass: String(task.pass),
+        task_flag: ` --task ${task.task_id}`,
+      })
+    default:
+      return ''
+  }
+}
+```
+
+Import `TaskPhase` alongside the other types. Then in `advanceTasks`, replace the non-queued branch:
+
+```ts
+    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+
+    const signals = await gatherSignals(run, task, deps)
+    if (!signals) continue
+
+    const cameFrom = task.phase
+    if (!advanceTask(run, task, signals)) continue
+    if (task.phase === cameFrom) continue
+
+    const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
+    if (prompt.length > 0) prompts.push(prompt)
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/tasks.test.ts`
+Expected: PASS, 14 tests.
+
+- [ ] **Step 5: Wire `ciDetail` in the supervisor**
+
+In `src/supervisor/main.ts`, add to the `advanceTasks` dependency object:
+
+```ts
+          ciDetail: async (pr) => (pr === null ? '' : gh.prChecksDetail(pr)),
+```
+
+- [ ] **Step 6: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 190 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src test
+git commit -m "feat: render the task-phase prompts so task phases actually progress"
+```
+
+---
+
+## Task 32: Fix CI-poll starvation and give silent tasks a way to be noticed
+
+The final re-review confirmed the task pipeline is genuinely wired, but found that the wiring
+introduced a new Critical and left one hole open.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/supervisor/stall.ts`, `src/supervisor/tasks.ts`, `src/cli.ts`
+- Modify: `test/stall.test.ts`
+
+- [ ] **Step 1: Write the failing test for the task stall probe**
+
+Append to `test/stall.test.ts`:
+
+```ts
+import { taskStallCandidates } from '../src/supervisor/stall'
+import type { Task } from '../src/lib/types'
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  depends_on: [], files: [], keep_worktree: false, text: '',
+  workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
+  phase: 'execute', pass: 1, phase_entered_at: LONG_AGO, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null, ...over,
+})
+
+function runWithTasks(tasks: Task[]): Run {
+  const run = runAt('execute', NOW)
+  run.tasks = tasks
+  return run
+}
+
+test('a task sitting in execute past the threshold with no PR is a candidate', () => {
+  const run = runWithTasks([mkTask({})])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
+})
+
+test('a task that already opened a PR is not stalled', () => {
+  const run = runWithTasks([mkTask({ pr: 42 })])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+})
+
+test('a task inside the threshold is not a candidate', () => {
+  const run = runWithTasks([mkTask({ phase_entered_at: NOW - 60_000 })])
+  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+})
+
+test('only execute is probed — review and merge phases are orchestrator-owned', () => {
+  for (const phase of ['task-review-spec', 'merge', 'close', 'queued'] as const) {
+    const run = runWithTasks([mkTask({ phase })])
+    expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+  }
+})
+
+test('a task already probed for this phase entry is not probed again', () => {
+  const run = runWithTasks([mkTask({})])
+  const probed = new Set([`${run.run_id}:t1:execute:${LONG_AGO}`])
+  expect(taskStallCandidates([run], NOW, 45, probed)).toHaveLength(0)
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/stall.test.ts`
+Expected: FAIL — `taskStallCandidates` is not exported.
+
+- [ ] **Step 3: Implement the task stall probe**
+
+Append to `src/supervisor/stall.ts`:
+
+```ts
+import type { Run, Task } from '../lib/types'
+
+export interface TaskStallCandidate { run: Run; task: Task; key: string; minutes: number }
+
+export function taskStallKey(run: Run, task: Task): string {
+  return `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
+}
+
+/**
+ * `execute` is the only task phase worth probing: every other phase is either
+ * orchestrator-owned (and covered by the run-level probe's actor gate) or
+ * driven by an external service. A worker whose pane hangs without emitting
+ * `pane.exited` would otherwise go unnoticed indefinitely.
+ */
+export function taskStallCandidates(
+  runs: Run[], now: number, thresholdMinutes: number, alreadyProbed: Set<string>,
+): TaskStallCandidate[] {
+  const out: TaskStallCandidate[] = []
+
+  for (const run of runs) {
+    if (!run.orchestrator_pane) continue
+    for (const task of run.tasks) {
+      if (task.phase !== 'execute') continue
+      if (task.pr !== null) continue
+
+      const minutes = (now - task.phase_entered_at) / 60_000
+      if (minutes < thresholdMinutes) continue
+
+      const key = taskStallKey(run, task)
+      if (alreadyProbed.has(key)) continue
+
+      out.push({ run, task, key, minutes: Math.floor(minutes) })
+    }
+  }
+
+  return out
+}
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/stall.test.ts`
+Expected: PASS, 11 tests.
+
+- [ ] **Step 5: Fix the CI-poll starvation (Critical)**
+
+In `src/supervisor/main.ts`, the CI throttle currently sits INSIDE the `for (const run of pickOneAdvance(runs))` loop, so the first run resets `lastCiPollMs` and every later run reads ~0 elapsed and skips its poll — permanently, since run order is stable. Move it **above** the loop and poll every run at once (`ciTransitions` already accepts an array):
+
+```ts
+      if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
+        lastCiPollMs = Date.now()
+        await ciTransitions(runs, (pr) => gh.prChecks(pr))
+      }
+
+      const digests: DigestInput[] = []
+      for (const run of pickOneAdvance(runs)) {
+```
+
+and delete the old in-loop block.
+
+- [ ] **Step 6: Give each run its own error boundary**
+
+One `try` wraps the whole tick, so a throw while handling one run kills delivery and stall probing for every other run — and `render()` throws on an unresolved placeholder, which is a live throw surface. Wrap the per-run body:
+
+```ts
+      for (const run of pickOneAdvance(runs)) {
+        try {
+          // …existing per-run body, through saveRun…
+        } catch (error) {
+          console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
+        }
+      }
+```
+
+- [ ] **Step 7: Probe stalled tasks**
+
+In `main.ts`, alongside the existing run-level stall block, add:
+
+```ts
+      for (const candidate of taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed)) {
+        probed.add(candidate.key)
+        const text = await renderPrompt(pluginRoot, 'stall-probe', {
+          run_id: candidate.run.run_id,
+          phase: `execute (${candidate.task.task_id}, ${candidate.task.branch})`,
+          minutes: String(candidate.minutes),
+          artifact_path: `a PR for ${candidate.task.branch} (#${candidate.task.issue})`,
+        })
+        if (candidate.run.orchestrator_pane) {
+          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
+        }
+      }
+```
+
+Import `taskStallCandidates` alongside `stallCandidates`.
+
+- [ ] **Step 8: Cache a task's PR number as soon as it is discovered**
+
+`gatherSignals`'s `execute` case calls `prForBranch` on every tick until the task leaves `execute`,
+because `task.pr` is only persisted on the transition out. At a 1 s tick that is two `gh` subprocess
+spawns per second per task, indefinitely. In `src/supervisor/tasks.ts`, persist it on discovery:
+
+```ts
+    case 'execute': {
+      const pr = task.pr ?? (await deps.prForBranch(task.branch))
+      if (pr === null) return base
+      // Persist on discovery, not on the phase transition: otherwise every tick
+      // re-queries gh for a PR we already know about.
+      task.pr = pr
+      const view = await deps.prView(pr)
+      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+    }
+```
+
+- [ ] **Step 9: Stop the duplicate dispatch prompt**
+
+`cmdTask` prints the worker prompt when the gate is already open, but leaves the task at `queued` —
+so the next tick's `advanceTasks` opens the gate again and injects the same prompt into the digest.
+In `src/cli.ts`, transition the task when the CLI hands over the prompt:
+
+```ts
+  const gate = gateStatus(task, run.tasks)
+  if (gate.state !== 'ready') {
+    return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
+  }
+
+  // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
+  // `queued` would make the next tick deliver the same prompt a second time.
+  enterTaskPhase(run, task, 'execute', 'dispatched at registration')
+  await saveRun(ctx.stateDir, run)
+
+  const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
+  return ok(`task_id: ${task.task_id}\n\n${prompt}`)
+```
+
+Import `enterTaskPhase` alongside `enterRunPhase`. Note the existing `saveRun` earlier in `cmdTask`
+stays — this is a second save after the transition.
+
+- [ ] **Step 10: Correct the durability comment**
+
+`main.ts`'s comment claims "Ledger first, delivery second: a crash here replays harmlessly through
+dedup." There is no replay mechanism — `drain()` unlinks as it reads. Replace with what is true:
+
+```ts
+      // Saving before delivery keeps the ledger authoritative: a crash here loses
+      // that tick's prompt, not the state transition, and the orchestrator can
+      // recover with `hpipe status`. Events themselves are at-most-once —
+      // drain() unlinks as it reads.
+```
+
+- [ ] **Step 11: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 195 tests.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src test
+git commit -m "fix: poll CI across all runs and notice silent tasks"
+```
+
+---
+
+## Task 33: Run `gh` in the right repo, and stop finished runs starving their successors
+
+The third whole-branch review confirmed Task 32 introduced nothing, but found four defects that only a
+whole-branch view exposes. Two are Critical.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/supervisor/tick.ts`, `src/hooks/_hook.ts`, `src/cli.ts`,
+  `src/actions/drain.ts`, `src/lib/ledger.ts`
+- Modify: `test/tick.test.ts`, `test/queue.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tick.test.ts`:
+
+```ts
+test('a finished run does not starve a later run sharing its orchestrator pane', () => {
+  const finished = mkRun([])
+  finished.phase = 'done'
+  finished.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  // listRuns sorts deterministically, so without a phase filter the finished run
+  // wins the pane forever and its successor is never evaluated.
+  const picked = pickOneAdvance([finished, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})
+
+test('two runs on different panes are both picked', () => {
+  const a = mkRun([]); a.orchestrator_pane = 'w1:p1'
+  const b = mkRun([]); b.orchestrator_pane = 'w2:p1'
+  expect(pickOneAdvance([a, b])).toHaveLength(2)
+})
+```
+
+Append to `test/queue.test.ts`:
+
+```ts
+test('queues in different sessions do not consume each other', async () => {
+  // drain() unlinks as it reads, so a shared queue directory means whichever
+  // supervisor ticks first destroys the other session's events.
+  const a = join(dir, 'queue', 'personal')
+  const b = join(dir, 'queue', 'default')
+  await enqueue(a, ev(1))
+  await enqueue(b, ev(2))
+
+  expect((await drain(a)).map((e) => e.at)).toEqual([1])
+  expect((await drain(b)).map((e) => e.at)).toEqual([2])
+})
+```
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/tick.test.ts test/queue.test.ts`
+Expected: the pane-starvation test fails (`picked[0].phase` is `'done'`). The queue test may already
+pass — `enqueue`/`drain` take a directory, so the bug is in the callers, not the queue module. That is
+fine; it locks the behaviour while Step 5 fixes the call sites.
+
+- [ ] **Step 3: Fix pane starvation (Critical)**
+
+In `src/supervisor/tick.ts`:
+
+```ts
+const FINISHED: ReadonlySet<string> = new Set(['done'])
+
+/**
+ * At most one orchestrator-owned advance per orchestrator per tick. Finished runs
+ * are skipped: their `orchestrator_pane` is never cleared, so without this a
+ * completed run holds its pane forever and the next `hpipe start` in the same
+ * terminal is silently never advanced.
+ */
+export function pickOneAdvance(runs: Run[]): Run[] {
+  const seen = new Set<string>()
+  const picked: Run[] = []
+  for (const run of runs) {
+    if (FINISHED.has(run.phase)) continue
+    const pane = run.orchestrator_pane
+    if (!pane || seen.has(pane)) continue
+    seen.add(pane)
+    picked.push(run)
+  }
+  return picked
+}
+```
+
+- [ ] **Step 4: Give `gh` the run's repo (Critical)**
+
+`main.ts:49` builds one `new Gh(config.GH_BIN)` with no `cwd`, so every `gh` call inherits the
+supervisor's own working directory — the dedicated pipeline workspace, not any repo. `prForBranch`
+therefore never resolves a task's PR, so no task ever leaves `execute` once a worker finishes. The
+`Gh` constructor already takes a `cwd`; nothing in production passed one.
+
+Replace the single instance with a per-repo cache. Near where `herdr` is constructed:
+
+```ts
+  // gh must run inside the run's own checkout: a PR lookup resolves against the
+  // repo of the working directory, and the supervisor's own cwd is the pipeline
+  // workspace, which is not a repo at all.
+  const ghClients = new Map<string, Gh>()
+  const ghFor = (repoRoot: string): Gh => {
+    let client = ghClients.get(repoRoot)
+    if (!client) {
+      client = new Gh(config.GH_BIN, repoRoot)
+      ghClients.set(repoRoot, client)
+    }
+    return client
+  }
+```
+
+Delete `const gh = new Gh(config.GH_BIN)`.
+
+The CI poll already receives the repo root and was discarding it:
+
+```ts
+        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
+```
+
+And inside the per-run body, resolve once and use it everywhere `gh` was used:
+
+```ts
+          const runGh = ghFor(run.repo_root)
+```
+
+so the `advanceTasks` dependency object becomes:
+
+```ts
+            prForBranch: (branch) => runGh.prForBranch(branch),
+            prView: (pr) => runGh.prView(pr),
+            issueView: (issue) => runGh.issueView(issue),
+            ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
+```
+
+- [ ] **Step 5: Session-scope the event queue**
+
+Every other piece of shared state is namespaced by session, but the queue is not — and `drain()`
+unlinks as it reads, so whichever session's supervisor ticks first destroys the other's events.
+
+- `src/hooks/_hook.ts`: `const session = sessionKey()` first, then
+  `await runHook(kind, join(stateDir, 'queue', session), session, process.env.HERDR_PLUGIN_EVENT_JSON ?? '')`
+- `src/supervisor/main.ts`: `const queueDir = join(stateDir, 'queue', session)`
+- `src/cli.ts` `cmdDrain`: `drain(joinPath(ctx.stateDir, 'queue', ctx.session))`
+- `src/actions/drain.ts`: `drain(join(stateDir, 'queue', sessionKey()))` — import `sessionKey`.
+
+Also update the `.tmp` GC in `src/startup.ts` to the session's queue:
+`await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)`.
+
+- [ ] **Step 6: Prompt the orchestrator when the run enters `branch-review`**
+
+`runTeardown` flips the run to `branch-review` with no prompt, and `promptForRunPhase`'s
+`branch-review` case is only reachable on a later self-loop — so on first entry the orchestrator is
+told nothing until a generic stall probe fires 15 minutes later, and that probe names no verdict path
+or format.
+
+In `src/supervisor/deliver.ts`, export the existing renderer so the wiring can reuse it rather than
+duplicating prompt logic:
+
+```ts
+export async function promptForRunPhase(run: Run, config: Config): Promise<string> {
+```
+
+In `src/supervisor/main.ts`, inside the per-run body, capture the phase before the task driver runs
+and render if it changed:
+
+```ts
+          const runPhaseBefore = run.phase
+          const taskPrompts = await advanceTasks(run, { /* …as now… */ })
+
+          if (run.phase !== runPhaseBefore) {
+            const entered = await promptForRunPhase(run, config)
+            if (entered.length > 0) taskPrompts.push(entered)
+          }
+```
+
+Import `promptForRunPhase` alongside the other `./deliver` imports.
+
+- [ ] **Step 7: Remove the dead exports**
+
+`ARTIFACT_TASK_PHASES` (`src/lib/machine.ts`) is referenced nowhere — delete it. `cmdForget`
+(`src/cli.ts`) hand-rolls the workspace→run lookup that `runForWorkspace` (`src/lib/ledger.ts`)
+already provides; use `runForWorkspace` there and keep the helper, or delete the helper and keep the
+inline loop. Pick one and say which in your report.
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 198 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test
+git commit -m "fix: run gh in the run's repo and stop finished runs holding their pane"
+```
+
+---
+
+## Task 34: Close the orchestrator-reclaim loop and the second starvation case
+
+Round 4 confirmed the happy path now completes end to end and that the previous fix introduced
+nothing. Two Importants remain, both cheap.
+
+**Files:**
+- Modify: `src/supervisor/tick.ts`, `src/lib/ledger.ts`, `src/lib/orchestrator.ts`,
+  `src/actions/claim.ts`, `src/lib/status.ts`, `src/cli.ts`, `README.md`
+- Modify: `test/tick.test.ts`, `test/orchestrator.test.ts`, `test/status.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/tick.test.ts`:
+
+```ts
+test('an escalated run does not starve a later run sharing its pane', () => {
+  // Same class as the `done` case: escalated never clears orchestrator_pane and
+  // needs a human `hpipe rewind` to leave, so it would hold the pane forever.
+  const stuck = mkRun([])
+  stuck.phase = 'escalated'
+  stuck.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'spec'
+  active.orchestrator_pane = 'w1:p1'
+
+  const picked = pickOneAdvance([stuck, active])
+  expect(picked).toHaveLength(1)
+  expect(picked[0]?.phase).toBe('spec')
+})
+```
+
+Replace the repo-provenance test in `test/orchestrator.test.ts` so it matches on `repo_root`:
+
+```ts
+test('falls back to the repo primary workspace agent pane', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w9', label: 'wt', worktree: { repo_key: 'opaque-a', repo_root: '/r', is_linked_worktree: true } },
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque-b', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p1', agent_status: 'idle' }] } },
+  })
+  // Matches on repo_root, a filesystem path, because herdr's repo_key is an
+  // opaque herdr identifier while every run record keys off `git rev-parse
+  // --show-toplevel`. Comparing those two would never match.
+  expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', '/r')).toBe('w1:p1')
+})
+```
+
+Append to `test/status.test.ts`:
+
+```ts
+test('reports an orchestrator pane that no longer exists', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w4:p9'
+  const text = formatStatus([run], { state: 'live' }, 'personal', new Set())
+  expect(text).toContain('orchestrator pane w4:p9 is gone')
+  expect(text).toContain('claim')
+})
+
+test('does not warn when the pane is live', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w1:p1'
+  const text = formatStatus([run], { state: 'live' }, 'personal', new Set(['w1:p1']))
+  expect(text).not.toContain('is gone')
+})
+```
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/tick.test.ts test/orchestrator.test.ts test/status.test.ts`
+Expected: the escalated-starvation test fails (`picked[0].phase` is `'escalated'`); the orchestrator
+test fails (resolution returns null, since it still compares `repo_key`); the two status tests fail
+(`formatStatus` takes three arguments).
+
+- [ ] **Step 3: One source of truth for terminal run phases**
+
+`FINISHED` is currently defined twice — `src/lib/ledger.ts` and `src/supervisor/tick.ts` — for two
+different questions, and they were allowed to drift, which is exactly how the second starvation case
+survived. Put both in `src/lib/machine.ts` with names that say what each is for:
+
+```ts
+/** A run in one of these needs no further automatic advancement. */
+export const COMPLETED_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>(['done'])
+
+/**
+ * A run in one of these must not hold an orchestrator pane slot: neither clears
+ * `orchestrator_pane`, and both need a human (`hpipe rewind`/`abort`) to leave,
+ * so either would starve the next run started in that same terminal.
+ */
+export const PANE_RELEASING_RUN_PHASES: ReadonlySet<RunPhase> =
+  new Set<RunPhase>(['done', 'escalated'])
+```
+
+`ledger.ts` imports `COMPLETED_RUN_PHASES` for `activeRunForRepo` (unchanged behaviour — an escalated
+run still blocks a second run on the *same* repo, which is correct). `tick.ts` imports
+`PANE_RELEASING_RUN_PHASES` for `pickOneAdvance`. Delete both local `FINISHED` constants.
+
+- [ ] **Step 4: Resolve orchestrators by repo root, not repo key**
+
+`src/lib/orchestrator.ts`'s provenance branch compares herdr's `worktree.repo_key` against the run's
+`repo_key`, but `cmdStart` sets `repo_key` from `git rev-parse --show-toplevel` while herdr's
+`repo_key` is its own opaque identifier — so that branch could never match. Compare the paths instead:
+
+```ts
+export async function resolveOrchestrator(
+  stateDir: string, herdr: Herdr, session: SessionKey, repoRoot: string,
+): Promise<string | null> {
+  const claimed = await readOrchestrator(stateDir, session, repoRoot)
+  if (claimed) {
+    const panes = await herdr.paneList(claimed.workspace_id)
+    if (panes.some((p) => p.pane_id === claimed.pane_id)) return claimed.pane_id
+  }
+
+  // herdr's repo_key is an opaque herdr identifier; run records key off the git
+  // toplevel path. repo_root is the only value both sides agree on.
+  const workspaces = await herdr.workspaceList()
+  const primary = workspaces.find(
+    (w) => w.worktree?.repo_root === repoRoot && w.worktree.is_linked_worktree === false,
+  )
+  if (!primary) return null
+
+  const panes = await herdr.paneList(primary.workspace_id)
+  const agentPanes = panes.filter(
+    (p) => p.agent_status !== undefined && p.agent_status !== 'unknown',
+  )
+  if (agentPanes.length !== 1) return null
+  return agentPanes[0]?.pane_id ?? null
+}
+```
+
+Rename the parameter at the remaining call sites accordingly. (Run records set `repo_key === repo_root`,
+so passing either is the same string today; the rename documents which one is meant.)
+
+- [ ] **Step 5: Make `claim` actually rebind the run**
+
+`src/actions/claim.ts` currently writes `orchestrators.json` and nothing reads it for delivery
+routing, so the manifest's "Claim this pane as orchestrator" action has no effect on a live run — and
+it is the documented recovery when an orchestrator pane dies or changes id. Make it rebind:
+
+```ts
+import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
+import { sessionKey } from '../lib/session'
+
+const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
+const paneId = process.env.HERDR_PANE_ID
+const workspaceId = process.env.HERDR_WORKSPACE_ID
+if (!stateDir || !paneId || !workspaceId) {
+  console.error('[pipeline] claim must be invoked from inside a pane')
+  process.exit(1)
+}
+
+// Identify the repo the same way `hpipe start` does — the git toplevel — rather
+// than by herdr's opaque repo_key, so the two agree.
+const proc = Bun.spawn(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' })
+const repoRoot = (await new Response(proc.stdout).text()).trim()
+await proc.exited
+if (repoRoot.length === 0) {
+  console.error('[pipeline] claim must be invoked from inside a git repository')
+  process.exit(1)
+}
+
+const session = sessionKey()
+await writeOrchestrator(stateDir, session, repoRoot, {
+  pane_id: paneId,
+  workspace_id: workspaceId,
+  socket_path: process.env.HERDR_SOCKET_PATH ?? '',
+  claimed_at: Date.now(),
+})
+
+const run = await activeRunForRepo(stateDir, session, repoRoot)
+if (run) {
+  run.orchestrator_pane = paneId
+  run.history.push({ at: Date.now(), from: 'claim', to: run.phase, why: `orchestrator rebound to ${paneId}` })
+  await saveRun(stateDir, run)
+  console.log(`[pipeline] ${paneId} now drives ${run.run_id}`)
+} else {
+  console.log(`[pipeline] claimed ${paneId} for ${repoRoot}; no active run yet`)
+}
+```
+
+- [ ] **Step 6: Surface a dead orchestrator pane in `hpipe status`**
+
+`src/lib/status.ts` — add a fourth parameter and the warning:
+
+```ts
+export function formatStatus(
+  runs: Run[], supervisor: StatusSupervisor, session: SessionKey,
+  livePanes: ReadonlySet<string> = new Set(),
+): string {
+```
+
+and inside the per-run block, after the orchestrator line:
+
+```ts
+    if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {
+      lines.push(`  ⚠ orchestrator pane ${run.orchestrator_pane} is gone — run the plugin's`)
+      lines.push(`    "claim" action from the pane that should drive this run`)
+    }
+```
+
+In `src/cli.ts`'s `cmdStatus` and `src/actions/status.ts`, pass the live pane set from
+`new Herdr().paneList()` (all panes, no workspace filter), mapped to `pane_id`. If the herdr call
+fails it returns `[]`, and an empty set disables the check — which is why the guard tests
+`livePanes.size > 0`.
+
+- [ ] **Step 7: Document the recovery**
+
+In `README.md`'s "Getting out" table, add a row:
+
+```
+| Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
+```
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 201 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test README.md
+git commit -m "fix: make claim rebind a run and stop escalated runs holding a pane"
+```
+
+---
+
+## Task 35: Let the supervisor re-resolve a stale orchestrator pane
+
+`resolveOrchestrator` is the last component that is fully built and unit-tested but never called from
+production. Task 34 routed around it — `claim` writes `orchestrator_pane` directly, `hpipe status`
+reads `paneList` directly — which closes the practical problem only if a human notices and acts.
+
+Wire it so the supervisor self-heals instead. herdr brings a restored pane back with a new id, so a
+run whose `orchestrator_pane` went stale should recover on the next tick rather than failing delivery
+until `PROMPT_RETRY_MAX` is exhausted and then going quiet.
+
+**Files:**
+- Modify: `src/supervisor/main.ts`, `src/lib/orchestrator.ts`
+- Create: `test/rebind.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// test/rebind.test.ts
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { makeFakeBin } from './helpers/fake-bin'
+import { Herdr } from '../src/lib/herdr'
+import { newRun } from '../src/lib/ledger'
+import { rebindOrchestrator } from '../src/lib/orchestrator'
+import type { Run } from '../src/lib/types'
+
+let dir: string
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'rebind-')) })
+afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+function mkRun(pane: string | null): Run {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: '/r', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = pane
+  return run
+}
+
+test('a live pane is left alone and costs no resolution', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w1:p1', agent_status: 'idle' }] } },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(false)
+  expect(run.orchestrator_pane).toBe('w1:p1')
+})
+
+test('a stale pane is rebound from repo provenance', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list --workspace w1': { result: { panes: [{ pane_id: 'w1:p7', agent_status: 'idle' }] } },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p7', agent_status: 'idle' }] } },
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(true)
+  expect(run.orchestrator_pane).toBe('w1:p7')
+  expect(run.history.at(-1)?.why).toContain('rebound')
+})
+
+test('an unresolvable orchestrator is left untouched rather than cleared', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [] } },
+    'workspace list': { result: { workspaces: [] } },
+  })
+  const run = mkRun('w1:p1')
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(false)
+  // Keeping the stale id preserves the diagnostic `hpipe status` prints.
+  expect(run.orchestrator_pane).toBe('w1:p1')
+})
+
+test('a run with no orchestrator at all can acquire one', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list --workspace w1': { result: { panes: [{ pane_id: 'w1:p3', agent_status: 'idle' }] } },
+    'pane list': { result: { panes: [{ pane_id: 'w1:p3', agent_status: 'idle' }] } },
+    'workspace list': {
+      result: {
+        workspaces: [
+          { workspace_id: 'w1', label: 'main', worktree: { repo_key: 'opaque', repo_root: '/r', is_linked_worktree: false } },
+        ],
+      },
+    },
+  })
+  const run = mkRun(null)
+  expect(await rebindOrchestrator(dir, new Herdr(bin), 'personal', run)).toBe(true)
+  expect(run.orchestrator_pane).toBe('w1:p3')
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/rebind.test.ts`
+Expected: FAIL — `rebindOrchestrator` is not exported.
+
+- [ ] **Step 3: Implement**
+
+Append to `src/lib/orchestrator.ts`:
+
+```ts
+/**
+ * Re-points a run at a live orchestrator pane when its recorded one has gone.
+ * herdr restores a pane under a new id, so without this a run keeps prompting a
+ * pane that no longer exists until the retry budget runs out, then goes quiet.
+ *
+ * Returns whether the run was changed. A run whose orchestrator cannot be
+ * resolved keeps its stale id on purpose — clearing it would lose the
+ * diagnostic `hpipe status` prints.
+ */
+export async function rebindOrchestrator(
+  stateDir: string, herdr: Herdr, session: SessionKey, run: Run,
+): Promise<boolean> {
+  if (run.orchestrator_pane) {
+    const panes = await herdr.paneList()
+    if (panes.some((p) => p.pane_id === run.orchestrator_pane)) return false
+  }
+
+  const resolved = await resolveOrchestrator(stateDir, herdr, session, run.repo_root)
+  if (!resolved || resolved === run.orchestrator_pane) return false
+
+  const previous = run.orchestrator_pane ?? 'none'
+  run.orchestrator_pane = resolved
+  run.history.push({
+    at: Date.now(), from: previous, to: resolved,
+    why: `orchestrator rebound after ${previous} went away`,
+  })
+  return true
+}
+```
+
+Import `Run` alongside the existing type imports.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/rebind.test.ts`
+Expected: PASS, 4 tests.
+
+- [ ] **Step 5: Wire it into the tick**
+
+In `src/supervisor/main.ts`, inside the per-run `try` block and **before** anything reads
+`run.orchestrator_pane` (so before `evaluateRun`), add:
+
+```ts
+          await rebindOrchestrator(stateDir, herdr, session, run)
+```
+
+Import `rebindOrchestrator` from `../lib/orchestrator`. The existing unconditional `saveRun` later in
+the same block persists any rebinding, so no extra save is needed.
+
+Note this adds one `pane list` call per picked run per tick. That is one herdr socket round trip, not
+a `gh` subprocess, and it replaces a failure mode that currently costs `PROMPT_RETRY_MAX` failed
+prompt deliveries before going silent.
+
+- [ ] **Step 6: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 205 tests.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src test
+git commit -m "feat: re-resolve a run's orchestrator pane when it goes stale"
+```
+
+---
+
+## Task 36: Don't destroy the workspace while clearing its stray pane
+
+Found by a live run: **the plugin cannot start at all.**
+
+`ensureWorkspace` creates the pipeline workspace and then closes every pane in it. A freshly created
+workspace has exactly one pane, and closing a workspace's last pane destroys the workspace. So the
+workspace is created, its id is recorded, it is immediately destroyed, and the subsequent
+`plugin pane open --workspace <id>` has nothing to open into. Observed live: `workspace.pipelab.id`
+contained `w1` while `workspace list` returned `[]`, and no supervisor pane ever appeared.
+
+The intent (Task 33) was to clear the stray root pane that `workspace create` opens so it does not sit
+beside the supervisor. The ordering was wrong: the supervisor pane does not exist yet at that point,
+so "every pane" and "the stray pane" are the same pane.
+
+**Fix:** `ensureWorkspace` stops closing panes; `main()` clears strays *after* the supervisor pane is
+open, keeping the supervisor and anything else it does not recognise as a stray shell.
+
+**Files:**
+- Modify: `src/startup.ts`, `test/startup.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+Replace the `ensureWorkspace` creation test in `test/startup.test.ts` and add the new reaper test:
+
+```ts
+test('creates the pipeline workspace and leaves its pane alone', async () => {
+  const bin = await makeFakeBin(dir, {
+    'workspace list': { result: { workspaces: [] } },
+    'workspace create': { result: { workspace: { workspace_id: 'w3', label: 'pipeline' } } },
+    'pane list': { result: { panes: [{ pane_id: 'w3:p1' }] } },
+    'pane close': { result: {} },
+  })
+  expect(await ensureWorkspace(new Herdr(bin), dir, 'personal', 'pipeline')).toBe('w3')
+
+  // Closing a freshly created workspace's only pane destroys the workspace, so
+  // the stray is cleared after the supervisor exists, not here.
+  const calls = await Bun.file(join(dir, 'calls.log')).text()
+  expect(calls).not.toContain('pane close')
+})
+
+test('clearStrayPanes keeps the supervisor and closes the rest', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [
+      { pane_id: 'w3:p1', label: null },
+      { pane_id: 'w3:p2', label: 'Pipeline supervisor' },
+    ] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual(['w3:p1'])
+})
+
+test('clearStrayPanes closes nothing when only the supervisor is present', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [{ pane_id: 'w3:p2', label: 'Pipeline supervisor' }] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3')).toEqual([])
+})
+```
+
+Import `clearStrayPanes` alongside the existing imports.
+
+- [ ] **Step 2: Run them to make sure they fail**
+
+Run: `bun test test/startup.test.ts`
+Expected: FAIL — `clearStrayPanes` is not exported, and the creation test sees a `pane close` call.
+
+- [ ] **Step 3: Implement**
+
+In `src/startup.ts`, remove the pane-closing loop from `ensureWorkspace` so it ends:
+
+```ts
+  const created = await herdr.workspaceCreate(label)
+  const id = created.result?.workspace.workspace_id
+  if (!id) {
+    console.error(`[pipeline] could not create workspace: ${created.code ?? 'unknown'}`)
+    return null
+  }
+  await Bun.write(workspaceIdPath(stateDir, session), id)
+  return id
+```
+
+Add the reaper beside `reapGhostPanes`:
+
+```ts
+/**
+ * Clears the shell pane `workspace create` opens alongside the supervisor. It must
+ * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
+ * the workspace, so clearing it at creation time deletes the very workspace the
+ * supervisor was about to open into.
+ */
+export async function clearStrayPanes(herdr: Herdr, workspaceId: string): Promise<string[]> {
+  const panes = await herdr.paneList(workspaceId)
+  if (panes.length <= 1) return []
+
+  const closed: string[] = []
+  for (const pane of panes) {
+    if (pane.label === SUPERVISOR_LABEL) continue
+    await herdr.paneClose(pane.pane_id)
+    closed.push(pane.pane_id)
+  }
+  return closed
+}
+```
+
+In `main()`, move the clearing to after a successful open:
+
+```ts
+  const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
+  if (!opened.ok) {
+    console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
+    return
+  }
+
+  const strays = await clearStrayPanes(herdr, workspaceId)
+  if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `bun test test/startup.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 207 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src test
+git commit -m "fix: clear the stray pane after the supervisor opens, not before"
+```
+
+---
+
+## Task 37: An actor that reports `done` has finished its turn
+
+Found by a live run: **every run stalls at its first phase.**
+
+herdr reports a finished agent as `done` — "idle and not yet seen" — and an orchestrator driven by
+this plugin is never "seen" by a human, so `done` is its *normal* resting state. The design's phase
+table says the gate is `actor pane idle|done`, and `tasks.ts` gets this right for workers
+(`task.agent_status === 'idle' || task.agent_status === 'done'`). The three orchestrator-side checks
+test for `idle` only, so the gate never opens.
+
+Observed live: orchestrator wrote the spec to exactly the expected path, `agent list` reported
+`w2:p1 done`, and the run sat in `spec` indefinitely across repeated probes.
+
+No test caught it because every test injects `actorIdle` as a boolean, so the status→boolean mapping
+— the part that is wrong — is never exercised.
+
+**Files:**
+- Modify: `src/lib/machine.ts`, `src/supervisor/deliver.ts`, `src/supervisor/main.ts`,
+  `src/supervisor/tasks.ts`
+- Modify: `test/deliver.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `test/deliver.test.ts`:
+
+```ts
+import { isAgentReady } from '../src/lib/machine'
+
+test('an agent that finished its turn is ready, whether idle or done', () => {
+  // herdr reports `done` for "idle and not yet seen". An orchestrator driven by
+  // this plugin is never seen by a human, so `done` is its normal resting state
+  // — treating only `idle` as ready stalls every run at its first phase.
+  expect(isAgentReady('idle')).toBe(true)
+  expect(isAgentReady('done')).toBe(true)
+})
+
+test('an agent still working or blocked is not ready', () => {
+  expect(isAgentReady('working')).toBe(false)
+  expect(isAgentReady('blocked')).toBe(false)
+  expect(isAgentReady('unknown')).toBe(false)
+})
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `bun test test/deliver.test.ts`
+Expected: FAIL — `isAgentReady` is not exported.
+
+- [ ] **Step 3: Implement the shared predicate**
+
+In `src/lib/machine.ts`:
+
+```ts
+/**
+ * An agent has finished its turn. herdr reports `done` for "idle and not yet
+ * seen", which is the normal resting state for an agent this plugin drives —
+ * nothing human ever looks at it — so `done` must count as ready alongside
+ * `idle`. Both the orchestrator and worker paths read this one predicate so the
+ * two cannot drift apart again.
+ */
+export function isAgentReady(status: AgentStatus): boolean {
+  return status === 'idle' || status === 'done'
+}
+```
+
+Import `AgentStatus` from `./types` if it is not already imported there.
+
+- [ ] **Step 4: Use it at all four sites**
+
+`src/supervisor/deliver.ts` — both checks (there are two, one at predicate evaluation and one after
+`ACTOR_SETTLE_MS`):
+
+```ts
+  if (!isAgentReady(await herdr.agentStatus(pane))) {
+```
+
+`src/supervisor/main.ts`:
+
+```ts
+          const actorIdle = run.orchestrator_pane !== null &&
+            isAgentReady(await herdr.agentStatus(run.orchestrator_pane))
+```
+
+`src/supervisor/tasks.ts` — replace the inline comparison so the worker path reads the same predicate:
+
+```ts
+    workerIdle: isAgentReady(task.agent_status),
+```
+
+Import `isAgentReady` from `../lib/machine` in each file.
+
+- [ ] **Step 5: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 210 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src test
+git commit -m "fix: treat a done agent as having finished its turn"
+```
+
+---
+
+## Task 38: Three corrections found by the first live run
+
+A real orchestrator agent drove the pipeline end to end and surfaced three things no test asserts.
+Two are prompt wording; one is a path derivation. The first two were raised by the live agent itself.
+
+**Files:**
+- Modify: `prompts/spec.md`, `prompts/spec-review.md`, `prompts/plan-review.md`,
+  `prompts/task-review-spec.md`, `prompts/task-review-quality.md`, `prompts/branch-review.md`
+- Modify: `src/cli.ts`, `test/cli.test.ts`, `test/prompts.test.ts`
+
+### 1. `spec.md` asserts an agreement that may not have happened
+
+It opens *"The design for **{{title}}** is agreed."* But `hpipe start` can be run without a prior
+brainstorm, and in the live run none had happened. The agent noticed and worked around it on its own:
+*"No design conversation actually happened before this — hpipe's prompt asserts the design is
+'agreed.' I'll write the spec with the behavioral decisions stated explicitly as assumptions so
+they're reviewable rather than buried."* That is the right behaviour, so the prompt should ask for it
+rather than leaving the agent to invent it.
+
+- [ ] **Step 1: Replace the opening of `prompts/spec.md`**
+
+```markdown
+# Write the spec — run {{run_id}}
+
+Write the spec for **{{title}}** now. Do not ask whether to proceed.
+
+If a design conversation already happened, this spec records what was agreed. If one did not — the
+run can be started without it — do not manufacture agreement. Write each behavioural decision down as
+an explicit, labelled assumption so the review that follows can challenge it, rather than burying the
+choice in prose.
+```
+
+Leave the rest of the file unchanged.
+
+### 2. "A review that finds nothing is a failed review" invites padding
+
+Only `spec-review.md` carries that line, and the live orchestrator pushed back on it while passing it
+through: *"I'm instructing the reviewer to rank honestly rather than manufacture findings to satisfy
+a quota — a padded review would corrupt the gate that follows it."* An earlier design review raised
+the same risk. A fabricated MAJOR is as corrosive as a missed one, because the verdict gates the
+pipeline either way.
+
+- [ ] **Step 2: Replace that sentence in `prompts/spec-review.md`**
+
+Change:
+
+```markdown
+Dispatch a fresh subagent to review `{{spec_path}}` adversarially. A review that finds nothing is a
+failed review.
+```
+
+to:
+
+```markdown
+Dispatch a fresh subagent to review `{{spec_path}}` adversarially.
+
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+```
+
+- [ ] **Step 3: Add the same honesty clause to the other four review prompts**
+
+`plan-review.md`, `task-review-spec.md`, `task-review-quality.md` and `branch-review.md` each already
+end their instruction section with an evidence/ranking line. Insert this paragraph immediately before
+each one's `The reviewer writes the review to exactly this path:` (or, in the task-review prompts,
+before `Write the review to exactly this path:`):
+
+```markdown
+Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
+agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
+if the work is genuinely sound, `CLEAR` is the correct and useful answer.
+
+```
+
+All five review prompts must end up carrying that identical paragraph, for the same reason the
+verdict contract is identical across them: drift between them produces reviewers that behave
+differently at different gates.
+
+- [ ] **Step 4: Pin it in `test/prompts.test.ts`**
+
+Extend the existing review-prompt test so the clause cannot drift:
+
+```ts
+test('every review prompt forbids padding as well as softening', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).toContain('Rank honestly')
+    expect(text).toContain('a manufactured finding costs as much as a missed one')
+  }
+})
+
+test('no review prompt still demands a finding', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text).not.toContain('finds nothing is a failed review')
+  }
+})
+```
+
+### 3. The spec filename is derived from a fragment of the run id
+
+`cmdStart` builds the path from `run.run_id.split('-').slice(-2, -1)[0]`. For the run
+`widget-20260914-add-a-titlecase-helper-z9iq` that yields `helper`, so the spec landed at
+`docs/superpowers/specs/2026-09-14-helper-design.md` — losing the title. `slugify` already exists in
+`src/lib/ledger.ts` and is exported.
+
+- [ ] **Step 5: Write the failing test**
+
+Append to `test/cli.test.ts`:
+
+```ts
+test('the spec path carries the whole title, not a fragment of the run id', async () => {
+  const out = await cmdStart(ctx(), {
+    title: 'add a titleCase helper', repoKey: 'k', repoRoot: repoDir,
+    socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(out.ok).toBe(true)
+
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  expect(run?.artifacts.spec).toContain('add-a-titlecase-helper-design.md')
+})
+```
+
+- [ ] **Step 6: Run it to make sure it fails**
+
+Run: `bun test test/cli.test.ts`
+Expected: FAIL — the path contains `helper-design.md`, not the full slug.
+
+- [ ] **Step 7: Fix the derivation in `src/cli.ts`**
+
+```ts
+  run.artifacts.spec = join(
+    'docs/superpowers/specs',
+    `${new Date().toISOString().slice(0, 10)}-${slugify(input.title)}-design.md`,
+  )
+```
+
+Import `slugify` alongside the other `./lib/ledger` imports.
+
+- [ ] **Step 8: Full suite**
+
+Run: `bun test && bun run typecheck`
+Expected: all green, 213 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src test prompts
+git commit -m "fix: three corrections from the first live run"
 ```
 
 ---
