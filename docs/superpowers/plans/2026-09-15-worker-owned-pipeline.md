@@ -2320,20 +2320,28 @@ Must carry: `gh issue view #{{issue}}` as the brief, the surface agent file, `{{
 
 - [ ] **Step 5: Revise `prompts/dispatch.md`** — drop plan decomposition, keep `worktree create` + `agent start`, and add the `hpipe dispatch --done` line so every registration path also carries the closing path.
 
-- [ ] **Step 6: Run the prompt tests**
+- [ ] **Step 6: Update `test/prompts.test.ts` to match the new prompt set**
+
+This file keeps its own two lists, independent of the phase table, and Task 3 only extended `ALL` with the placeholders. Now that the real set is landing:
+
+- `REVIEW_PROMPTS`: drop `task-review-spec` and `task-review-quality`; add `pr-review-intent` and `pr-review-quality`. This is what forces the four worker review prompts to carry `VERDICT: CLEAR`, `VERDICT: BLOCKER`, `last non-empty line` and `{{verdict_path}}`.
+- `ALL`: drop `task` (replaced by `worker-brief`); add `worker-brief`.
+- The test named "the task prompt routes to the surface agent and demands a closing keyword" reads `prompts/task.md`. Point it at `worker-brief.md` and add an assertion that the file does **not** contain `{{task_text}}`.
+
+- [ ] **Step 7: Run the prompt tests**
 
 Run: `bun test test/prompts.test.ts test/table.test.ts`
 Expected: PASS
 
-- [ ] **Step 7: Verify branch-review carries neither worker instruction**
+- [ ] **Step 8: Verify branch-review carries neither worker instruction**
 
 Run: `grep -c "wait for it within this turn" prompts/branch-review.md`
 Expected: `0`
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add prompts/
+git add prompts/ test/prompts.test.ts
 git commit -m "feat: the worker-owned prompt set"
 ```
 
