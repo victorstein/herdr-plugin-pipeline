@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { RUN_ROWS, runRow } from '../src/lib/phases'
+import { RUN_ROWS, runRow, TASK_ROWS, taskRow } from '../src/lib/phases'
 
 test('every run phase has exactly one row', () => {
   const seen = new Set(RUN_ROWS.map((r) => r.phase))
@@ -14,4 +14,28 @@ test('runRow returns the row for a phase', () => {
 test('intake is an orchestrator row with no counter', () => {
   expect(runRow('intake').actor).toBe('orchestrator')
   expect(runRow('intake').counter).toBeUndefined()
+})
+
+test('every task phase has exactly one row', () => {
+  const seen = new Set(TASK_ROWS.map((r) => r.phase))
+  expect(seen.size).toBe(TASK_ROWS.length)
+})
+
+test('the eight worker-owned rows are exactly the design loop', () => {
+  const worker = TASK_ROWS.filter((r) => r.actor === 'worker').map((r) => r.phase).sort()
+  expect(worker).toEqual([
+    'implement', 'plan', 'plan-review', 'pr-review-intent',
+    'pr-review-quality', 'research', 'spec', 'spec-review',
+  ])
+})
+
+test('ci carries its own counter — it is not a review row but it loops', () => {
+  expect(taskRow('ci').counter).toBe('ci')
+  expect(taskRow('ci').onBlocker).toBe('implement')
+})
+
+test('blocked-on-files holds no files and has no actor pane', () => {
+  expect(taskRow('blocked-on-files').holdsFiles).toBe(false)
+  expect(taskRow('blocked-on-files').actor).toBeUndefined()
+  expect(taskRow('blocked-on-files').probeTarget).toBe('orchestrator')
 })
