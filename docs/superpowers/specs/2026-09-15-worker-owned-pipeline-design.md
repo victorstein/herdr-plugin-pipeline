@@ -1,8 +1,8 @@
 # Worker-owned pipeline — design
 
 **Date:** 2026-09-15
-**Status:** Design v2 — all 18 findings from `reviews/2026-09-15-worker-owned-adversarial-1.md`
-(`VERDICT: BLOCKER`, 5 BLOCKER / 8 MAJOR / 5 MINOR) applied. Awaiting a second adversarial pass.
+**Status:** Design v3 — all 18 findings from adversarial round 1 and all 13 from round 2 applied
+(`reviews/2026-09-15-worker-owned-adversarial-{1,2}.md`; `BLOCKER`, `BLOCKER`). Awaiting a third pass.
 **Supersedes:** the Roles and Phase machine sections of
 `specs/2026-09-13-herdr-pipeline-plugin-design.md` (v4). Everything that document says about the
 supervisor, hooks, event transport, queue, session scoping, orchestrator identity, predicate
@@ -11,21 +11,30 @@ except where §Event transport is amended in §Code shape below.
 **Plugin id:** `stein.pipeline`
 **Target:** herdr 0.9.0+
 
-> **Review history.** Round 1 returned `BLOCKER` with 5 BLOCKERs. All five were defects in v1's own
-> new material, not inherited: a `pass`-reset rule that **deleted the bound it was written to fix**;
-> a `close` row restated verbatim from v4 that is unsatisfiable under this repo's mandated
-> `Closes #n` convention; an `execute` completion rule that closes a run while the orchestrator is
-> still filing tasks, breaking the one capability the design was written to add; a delivery path that
-> addresses one pane per tick, inherited safely from v4 and unsafe the moment eight rows changed
-> actor; and a second `hpipe decide` overwriting `decision_from` with `blocked-on-decision`.
+> **Review history.** Two adversarial rounds. Round 1 found 5 BLOCKERs, 8 MAJORs, 5 MINORs; round 2
+> found 2 BLOCKERs, 5 MAJORs, 6 MINORs *and* audited round 1's fixes as **11 genuine / 0 cosmetic /
+> 7 displaced**. All 31 findings are applied here.
 >
-> The first is the instructive one. v4's review history records "fixing an instance instead of the
-> class" four times; v1 corrected one instance of a shared `pass` counter and re-created round 3's
-> MAJOR 4 (unbounded review loops) as a side effect. The counter is now keyed by the phase it bounds.
+> **One failure recurred in both rounds, and it is the same one v4's history records four times:
+> fixing an instance instead of the class.** The review-loop bound was written three times before it
+> held. v1 reset `pass` on every forward transition, which deleted the bound entirely, because every
+> entry to a review phase is a forward transition. v2 replaced it with a per-phase map that deleted
+> its counter on `CLEAR` — which bounded the four review loops and silently removed a bound that
+> already ships, `advanceTask`'s `ci` retry budget, leaving `implement → pr-review-* → ci(red) →
+> implement` unbounded. Both were a reset justified by local reasoning about one loop, in a machine
+> where the loops overlap. v3 states the rule as a class — *every row that can send a record back to
+> a producer carries a monotone counter keyed by itself* — and nothing resets on forward progress.
 >
-> Two of v1's claims about the v4 implementation were also false and are corrected here: `MAX_PASSES`
-> defaults to **2**, not 3, and `teardown.ts` already advances a run on `every(SETTLED)` — the "last
-> task torn down" limitation was true of the v4 *document* and false of its *code*.
+> Round 2 also caught three fixes that traded one failure for its mirror image: `intake_closed`
+> turned round 1's early completion into a permanent hang whose stated mitigation did not exist
+> (`stallCandidates` gates on `ARTIFACT_RUN_PHASES`, which excludes `execute`); `adopted_at` turned a
+> level predicate into a one-way door, because `applyEvents` only writes it when `workspace_id` is
+> null; and the `hpipe answer` delivery precondition rested on a retry loop `main.ts` does not
+> implement.
+>
+> Claims about the v4 implementation withdrawn across the rounds: that `MAX_PASSES` defaults to 3 (it
+> is 2); that `teardown.ts` fails to advance on a failed task (it already uses `every(SETTLED)`); and
+> that v4 retries a failed delivery across ticks (the document says so; `main.ts` drops it).
 
 ## Problem
 
@@ -91,7 +100,7 @@ dispatch.
 | --- | --- | --- | --- | --- |
 | `intake` | orchestrator | actor idle **and** a task whose `registered_at > phase_entered_at` exists | `dispatch` | — |
 | `dispatch` | orchestrator | a task whose `adopted_at > phase_entered_at` exists | `execute` | — |
-| `execute` | — | `intake_closed` **and** every task terminal | `branch-review` if ≥1 task is `done`, else `escalated` | — |
+| `execute` | — (probed via orchestrator) | `intake_closed` **and** every task terminal | `branch-review` if ≥1 task is `done`, else `escalated` | — |
 | `branch-review` | orchestrator | actor idle **and** verdict fresh, parses | `CLEAR` → `done` | else `branch-review`, `passes[branch-review]`+1; at `MAX_PASSES` → `escalated` |
 | `escalated` | human | `hpipe rewind` clears `passes` | → `escalated_from` | — |
 | `done` | — | terminal | — | — |
@@ -105,6 +114,14 @@ escape — re-advanced them on the next tick without the orchestrator acting. Th
 (`merge`/`close` as pure level predicates) reproduced on the two rows v5 introduces. `Task` gains
 `registered_at` and `adopted_at` so both rows compare against the run's `phase_entered_at`.
 
+**`adopted_at` must be clearable, or the fix overshoots into a dead end.** `applyEvents` binds a
+worktree only when `workspace_id === null`, so a re-`worktree create` on an already-adopted task
+never re-fires and `adopted_at` is write-once. A human who rewinds a run to `dispatch` after every
+task is adopted would then have no satisfiable exit at all. **`hpipe rewind <run> dispatch` therefore
+clears `adopted_at` on every task whose `workspace_id` is still bound**, so re-issuing `agent start`
+against the existing worktree re-qualifies the row. §Recovery states this explicitly: after rewinding
+to `dispatch`, the orchestrator re-dispatches from the existing worktrees; it does not recreate them.
+
 **`intake` advances on the first registration, not the last, and closes explicitly.** The orchestrator
 may register tasks at any phase in `intake | dispatch | execute`; a task registered during `execute`
 enters `queued` and is gated normally. That capability is what makes "you report a problem mid-run"
@@ -117,6 +134,21 @@ ships a third of the work.
 `Run.intake_closed` is therefore set by `hpipe dispatch --done` and **cleared by any subsequent
 `hpipe task`**. `execute` completes only when it is true and every task is terminal. This mirrors
 `blocked-on-decision`: where a state must not be inferred, an explicit call writes it.
+
+An explicit flag trades early completion for a hang: a run whose tasks are all terminal with
+`intake_closed === false` waits forever. Two things close that, and neither is "the stall probe
+covers it" — `stallCandidates` gates on `ARTIFACT_RUN_PHASES`, which does not contain `execute`, so
+that mitigation does not exist in the code it was claimed of.
+
+1. **Every path that registers a task also carries the path that closes intake.** The gate-open
+   dispatch prompt — delivered to the orchestrator whenever a task's `queued` gate opens, including
+   for a task registered mid-`execute` — carries the `hpipe dispatch --done` instruction alongside
+   the worktree and `agent start` lines. Without this, a mid-`execute` `hpipe task` clears the flag
+   and nothing ever tells the orchestrator to set it again.
+2. **`execute` is `stallable: true`**, with the probe targeting `run.orchestrator_pane` directly
+   because the row has no actor. Past `STALL_MINUTES` with every task terminal and `intake_closed`
+   false, the orchestrator is told exactly that, once per phase entry, and `hpipe status` names the
+   missing close.
 
 **`execute` → `branch-review` requires every task terminal**, where terminal means
 `done | failed | orphaned | blocked-on-failure | escalated`. A run where *no* task reached `done` has
@@ -136,13 +168,13 @@ torn down", which is where v1's mistaken "this is a fix" framing came from.)
 | `spec-review` | worker | worker idle **and** verdict fresh, parses | `CLEAR` → `plan` | else `spec`, `passes[spec-review]`+1; at `MAX_PASSES` → `escalated` |
 | `plan` | worker | worker idle **and** plan fresh | `plan-review` | pane exited → `failed` |
 | `plan-review` | worker | worker idle **and** verdict fresh, parses | `CLEAR` → `blocked-on-files` | else `plan`, `passes[plan-review]`+1; at `MAX_PASSES` → `escalated` |
-| `blocked-on-files` | supervisor | no in-flight task holds an overlapping `files` prefix | `implement` | — |
+| `blocked-on-files` | supervisor (probed via orchestrator) | no in-flight task holds an overlapping `files` prefix | `implement` | — |
 | `implement` | worker | worker idle **and** PR exists **and** `headRefOid != head_sha_at_entry` | `pr-review-intent` | pane exited or agent released → `failed` |
 | `pr-review-intent` | worker | worker idle **and** verdict fresh, parses | `CLEAR` → `pr-review-quality` | else `implement`, `passes[pr-review-intent]`+1; at `MAX_PASSES` → `escalated` |
 | `pr-review-quality` | worker | worker idle **and** verdict fresh, parses | `CLEAR` → `ci` | else `implement`, `passes[pr-review-quality]`+1; at `MAX_PASSES` → `escalated` |
-| `ci` | supervisor | `gh pr checks` bucket terminal **and** changed | `pass` → `merge` | `fail` → `implement` with the failing check |
-| `merge` | orchestrator | `state` is `MERGED` **and** `mergedAt > phase_entered_at`; records `merged_at_ms` | `close` | — |
-| `close` | orchestrator | `closed` is true **and** `closedAt >= merged_at_ms` | `teardown` | — |
+| `ci` | supervisor | `gh pr checks` bucket terminal **and** changed | `pass` → `merge` | `fail` → `implement` with the failing check, `passes[ci]`+1; at `MAX_PASSES` → `escalated` |
+| `merge` | orchestrator | `state` is `MERGED` **and** `mergedAt > phase_entered_at`; records `merged_at_ms` and `issue_closed_at_entry` | `close` | — |
+| `close` | orchestrator | `issue_closed_at_entry`, **or** `closed` is true **and** `closedAt >= merged_at_ms` | `teardown` | — |
 | `teardown` | supervisor | `worktree remove --workspace <ws> --force` succeeded | `done`; unblocks `queued` and `blocked-on-files`; last terminal → run `branch-review` | removal fails → `orphaned`; `keep_worktree` → skip to `done` |
 | `blocked-on-decision` | orchestrator | **none — no inferred exit.** Left only by a *delivered* `hpipe answer` | → `decision_from` | pane exited → `failed`, open decisions marked abandoned |
 | `escalated` | human | `hpipe rewind --task <id>` clears `passes` | → `escalated_from` | — |
@@ -155,29 +187,53 @@ torn down", which is where v1's mistaken "this is a fix" framing came from.)
 `pr-review-quality` checks tests, pattern conformance, and dead code. Two review phases per task, per
 `CLAUDE.md:46`, preserved.
 
-#### `passes` is keyed by phase
+#### `passes` is keyed by phase, and monotone
 
 `Task.pass: number` and `Run.pass: number` are replaced by
-`passes: Partial<Record<Phase, number>>`. A review row's `onBlocker` increments `passes[reviewPhase]`
-and tests **that** value against `MAX_PASSES`; a review row's `onClear` deletes `passes[reviewPhase]`;
-`hpipe rewind` clears the whole map. Verdict keys render `<phase>-<passes[phase] ?? 0>`.
+`passes: Partial<Record<Phase, number>>`.
 
-**No transition into a review phase ever resets that phase's own counter.** This sentence is the
-whole rule, and v1 got it backwards. v1 said "entering via `onClear` sets `pass = 0`" — but every
-entry to a review phase *is* an `onClear` entry from its producer, so the counter tested at
-`spec-review` was permanently `0` and the loop `spec ↔ spec-review` had no bound at all. It also
-collapsed every verdict key to `spec-review-0`, so each pass silently overwrote the last, in direct
-contradiction of §Artifacts' own claim.
+**The rule, stated as a class:** *every row that can send a record back to a producer phase carries a
+counter keyed by itself, increments it on the way back, escalates at `MAX_PASSES`, and never resets
+it. The only thing that clears a counter is `hpipe rewind`.*
 
-The defect v1 was correcting is real and remains corrected: with one shared counter at
-`MAX_PASSES = 2` (the configured default), a task that took two passes at `spec-review` arrives at
-`plan-review` holding `pass = 2` and escalates on its first BLOCKER, because the implementation tests
-`pass >= maxPasses`. `MAX_PASSES` means passes *at this phase*, which is the only reading under which
-the number is interpretable — and a per-phase map is the only structure that delivers it.
+That is six rows — `spec-review`, `plan-review`, `pr-review-intent`, `pr-review-quality`, `ci`, and
+`branch-review` — not the four review rows v2 named. Concretely, on a backward transition from phase
+`p`: `passes[p] += 1`, then escalate if `passes[p] >= MAX_PASSES`, else enter the producer phase. At
+the configured default of 2 that is **one remediation attempt**: the first BLOCKER returns the record
+to its producer, the second escalates.
+
+**Nothing resets a counter on forward progress.** This is the third statement of this rule, and the
+first two were both wrong in the same direction:
+
+- **v1** reset `pass` on every forward transition. Every entry to a review phase *is* a forward
+  transition from its producer, so the counter tested at `spec-review` was permanently `0` and
+  `spec ↔ spec-review` had no bound at all.
+- **v2** kept a per-phase map but deleted `passes[p]` on `CLEAR`. That bounded the four review loops
+  in isolation and **deleted a bound that already ships**: `advanceTask`'s `ci` case tests
+  `task.pass >= s.maxPasses` and escalates, under a source comment naming the exact hazard ("Without
+  this the task cycles execute → review → ci → execute forever, bypassing the one safety valve the
+  module has"). v2's `ci` row carried no counter, and because both PR review rows deleted their own
+  counters on `CLEAR`, the lap `implement → pr-review-intent → pr-review-quality → ci(red) →
+  implement` reset every counter it touched and ran forever.
+
+Both were the same move: a reset justified by local reasoning about one loop, in a machine where the
+loops overlap. Monotone counters remove the move entirely. The cost is that `MAX_PASSES` becomes a
+per-phase lifetime budget for the record rather than a per-episode one, so a task that fails
+`pr-review-quality` once and later fails it again after a red CI escalates on the second. That is the
+safe direction to be wrong in: escalation surfaces to a human, and a livelock does not.
+
+Monotone counters also close §Artifacts' overwrite hole for free — `<phase>-<passes[phase] ?? 0>`
+strictly increases, so no verdict file is ever written twice.
+
+The defect v1 set out to correct is real and stays corrected: with one shared counter at
+`MAX_PASSES = 2`, a task that took two passes at `spec-review` arrives at `plan-review` already
+holding `pass = 2` and escalates on its first BLOCKER there.
 
 `hpipe rewind` clears the map rather than setting `1`, per v4's stated intent that "a human who
 answers an escalation is not immediately re-escalated". v4's `cmdRewind` sets `pass = 1`, which under
-a base of 0 spends one of two passes on the rescue itself.
+a base of 0 spends the entire remediation budget on the rescue itself.
+
+Any prompt rendering `{{pass}}` — `escalate.md` today — renders `passes[phase] ?? 0`.
 
 #### The file gate moved from `queued` to `blocked-on-files`
 
@@ -202,11 +258,31 @@ The gate is therefore split:
 - `blocked-on-decision` holds files **iff `holdsFiles(decision_from)`**, so a decision raised during
   `plan` blocks nothing and one raised during `implement` keeps its reservation.
 
-Ties are broken by `task_id` ordering so two mutually-overlapping tasks cannot both wait on each
-other. The cost of this split is stated in §Failure modes: a task released from `blocked-on-files`
-planned against files its sibling has since changed, and its plan may be stale. Re-planning on
-release was considered and rejected as one extra plan+review cycle per collision; the worker is
-instructed to re-read its touched files on entering `implement`.
+**Overlap is resolved in one pass over tasks in `task_id` order, and at most one task leaves
+`blocked-on-files` per overlapping group per tick.** That is the real invariant. v2 offered a
+`task_id` tie-break against two tasks "waiting on each other", which cannot happen — neither holds
+files while blocked — and missed the race that can: two tasks released by the same `teardown` both
+evaluating "nothing overlaps" on the same tick and both entering `implement`.
+
+**`blocked-on-files` starves behind a `failed` or `escalated` sibling.** Both hold their files
+forever by the rule above, and nothing tears them down. Since `blocked-on-files` is non-terminal, the
+run's `execute` row never completes either, so one failed task strands the run. Three things address
+it, and the first two are not sufficient alone:
+
+- `teardown` unblocks `queued` and `blocked-on-files`, and **entering `failed` or `escalated` also
+  re-evaluates `blocked-on-files`** — which changes nothing on its own, because the holder still
+  holds. It matters only so the blocked task's state is recomputed rather than stale.
+- `blocked-on-files` is **`stallable: true`**, probed via `run.orchestrator_pane`. The stall fallback
+  rule is widened from "a null pane" to "**no pane**", because this row's actor is `supervisor`,
+  which resolves to no pane field at all rather than to a null one.
+- **`hpipe release --task <id>`** drops a terminal-but-holding task's `files` reservation, and is the
+  documented human escape. `hpipe status` states the dependency plainly: *"t2 blocked on files held
+  by t1 (failed)"*.
+
+The cost of the split is in §Failure modes: a task released from `blocked-on-files` planned against
+files its sibling has since changed, so its plan may be stale. Re-planning on release was considered
+and rejected as one extra plan+review cycle per collision; the worker is instructed to re-read its
+touched files on entering `implement`.
 
 #### `head_sha_at_entry` and when verdicts are committed
 
@@ -219,6 +295,13 @@ committed at the *start* of the next `implement` turn, the first `git push` woul
 off `head_sha_at_entry` with zero remediation performed, and the unfixed PR would advance to
 `pr-review-quality`. This cannot happen in v4, where the reviewer is the orchestrator working in the
 main checkout and the verdict never touches the worker's branch.
+
+**`close` handles an issue that was already closed.** `merge` records `issue_closed_at_entry`
+alongside `merged_at_ms`. If the issue was closed *before* the merge — closed by hand, or by an
+earlier PR — then `closedAt < merged_at_ms` and the edge comparison can never be satisfied, so the
+flag short-circuits the row and `close` completes on its first evaluation. In that case, and whenever
+`closed` is already true at entry, **`close.md` is not delivered**: the phase completes before the
+orchestrator could act, and prompting it to close an already-closed issue is noise it has to read.
 
 **The review phase's own turn commits and pushes its verdict.** The phase does not complete until the
 verdict is written *and* on the branch, and `head_sha_at_entry` is captured on `implement` entry
@@ -282,8 +365,9 @@ state. Two preserved paths still write over it, and both are specified:
 
 - **`applyEvents` on `pane.exited` or a released `pane.agent_detected`** writes `failed` from any
   phase, with no guard. A worker whose pane dies while its decision is open goes to `failed`, and
-  every open decision on that task is marked `answered_by: "abandoned"` as it does, so `hpipe status`
-  and the stall probe stop reporting a question nobody is waiting on.
+  every open **or undelivered** decision on that task is marked `answered_by: "abandoned"` as it
+  does, so `hpipe status` and the stall probe stop reporting a question nobody is waiting on, and an
+  answered-but-undelivered decision does not outlive the pane it was addressed to.
 - **`hpipe rewind --task <id> <phase>`** writes any phase over any phase, unchanged.
 
 **`hpipe answer` refuses a task not currently in `blocked-on-decision`**, printing its actual phase.
@@ -322,8 +406,20 @@ the artifact it was writing all along, touch the file after the reset, and compl
 the answer unread** — the precise failure the reset exists to prevent, with `run.history` asserting
 the decision was applied.
 
-On `PROMPT_RETRY_MAX` exhaustion the task stays blocked and `hpipe status` reports **"answered but
-undelivered"**, which is a true statement a human can act on.
+**The retry loop this rests on does not exist yet.** v4's §Event transport says a failed delivery is
+"retried with backoff across ticks"; `main.ts` does not do that — it attempts one send, and a failure
+is dropped, with a module-level `attempts` counter that aggregates unrelated failures and resets on
+give-up. So §Code shape adds it: **a per-task pending delivery, re-attempted each tick while
+`pending_answer` is set**, with the retry budget kept **per message** rather than per pane and reset
+on a successful send to that pane. This is the same class of correction as "last task torn down" — a
+v4 document claim its implementation does not honour.
+
+On budget exhaustion the task stays blocked and `hpipe status` reports **"answered but undelivered"**.
+That state has an exit, which v2 omitted: **`hpipe answer` on a task that already has
+`pending_answer` re-arms delivery** (and says so), and **`hpipe rewind --task` clears
+`pending_answer`**, recording *"answer discarded undelivered"* in `run.history`. Without an exit the
+only escape was a bare `hpipe rewind`, which returns the task to `decision_from` with the answer
+still unread — reproducing the exact failure the precondition was added to prevent.
 
 The `phase_entered_at` reset is still load-bearing: the half-written artifact the worker produced
 before asking predates the question, and without a reset its mtime already exceeds the phase's entry
@@ -388,7 +484,7 @@ The prompt states plainly that it may be short.
 | --- | --- | --- |
 | new | `intake.md` | orchestrator |
 | new | `decision.md` | orchestrator |
-| new | `worker-brief.md` (replaces `task.md`) | worker, at dispatch |
+| new | `worker-brief.md` (replaces `task.md`) | orchestrator, at gate-open (relayed to the worker by `agent start`) |
 | new | `research.md`, `spec.md`, `spec-review.md`, `plan.md`, `plan-review.md`, `implement.md`, `pr-review-intent.md`, `pr-review-quality.md`, `answer.md` | worker |
 | revised | `dispatch.md` — loses plan decomposition, keeps worktree create + `agent start`, adds `hpipe dispatch --done` | orchestrator |
 | kept | `ci-red.md`, `merge.md`, `close.md`, `branch-review.md`, `escalate.md`, `stall-probe.md`, `digest.md` | as before |
@@ -439,7 +535,9 @@ interface PhaseRow<P> {
   prompt?: string
   resumePrompt?: string
   resumeActor?: 'orchestrator' | 'worker'
+  counter?: P              // the key this row increments on a backward transition
   stallable?: boolean
+  probeTarget?: 'orchestrator'   // required when `actor` resolves to no pane
   holdsFiles?: boolean | 'inherit'
   releasesPane?: boolean
   terminal?: boolean
@@ -459,9 +557,17 @@ Everything v4 spread across five sets and two maps derives from it:
 | implicit "every task phase delivers to the orchestrator" | `actor` |
 | implicit "stall-probe the artifact phases" | `stallable` |
 
-**`stallable` is explicit, not derived from `signal`.** `blocked-on-decision` has no artifact and must
-still be probed, and its probe targets the orchestrator. Deriving stall eligibility from the signal
-would silently exclude the one row that most needs it.
+**`stallable` is explicit, not derived from `signal`.** Three rows have no artifact and must still be
+probed — `blocked-on-decision`, `blocked-on-files`, and the run's `execute` — and none of them has an
+actor with a pane. Deriving stall eligibility from the signal excludes exactly the rows that most need
+it, which is how v2 came to claim a mitigation that `stallCandidates` could not provide.
+`probeTarget: 'orchestrator'` is required on any `stallable` row whose actor resolves to no pane, and
+`table.test.ts` asserts it.
+
+**`counter` is explicit for the same reason.** A row that can send a record backwards must name the
+key it increments, so the bound is a property of the row rather than of the reviewer's memory of which
+rows are reviews. `ci` is the row that proves the point: it is not a review, it has no verdict, and it
+had a retry budget in v4 that v2 dropped precisely because it was reasoning about "review phases".
 
 **`resumePrompt` / `resumeActor` are explicit too.** `answer.md` goes to the *worker* while
 `blocked-on-decision`'s `actor` is the *orchestrator*; there is no row whose `actor` is that prompt's
@@ -480,13 +586,28 @@ Call sites that change beyond the table:
    counters replace the single module-level `attempts`. v4's coalescing rule is restated as **"at most
    one advance per actor pane per tick"** — round 3's MAJOR 6, generalized from its instance.
 2. **`evaluateRun` / task evaluation take the pane from `row.actor`** — `run.orchestrator_pane` or
-   `task.pane_id`. `TaskSignals`' separate `actorIdle` and `workerIdle` collapse into one `actorIdle`
-   resolved per row.
+   `task.pane_id`. `TaskSignals`' separate `actorIdle` and `workerIdle` collapse into one `actorIdle`,
+   and the collapse must be spelled out because the two fields are not the same kind of signal today:
+   `workerIdle` is **cached from events**, while `actorIdle` is a **live read, double-checked after
+   `ACTOR_SETTLE_MS`**. Reading the cached one for worker rows would advance `implement` on a stale
+   `idle` recorded before the worker's push; reading the live one silently adds a settle window per
+   worker pane per tick against `TICK_MS = 1000`.
+
+   **`actorIdle` is the live read.** It resolves as a `herdr agent status` call on `row.actor`'s pane,
+   double-checked after `ACTOR_SETTLE_MS`, exactly as `evaluateRun` does today for the orchestrator.
+   `task.agent_status` stays the badge and wake cache and is **never** a completion signal. The settle
+   windows for distinct panes run **concurrently**, so a tick costs one `ACTOR_SETTLE_MS`, not one per
+   pane — without that, six workers would not fit in a 1000 ms tick. The cost is priced in
+   §Failure modes.
 3. **`artifactPathFor`** resolves relative to `task.checkout_path` for task phases, and reads
    `row.artifact` to select the `research`/`spec`/`plan` slot rather than assuming every task artifact
    is a verdict — which held in v4 only because every task phase the orchestrator acted on was a review.
 4. **`gateStatus`** splits: `depends_on` at `queued`, overlap at `blocked-on-files`, with
    `holdsFiles: 'inherit'` resolved through `decision_from`.
+   **`src/lib/worker-prompt.ts`** renders `worker-brief.md` and is delivered to the *orchestrator* at
+   gate-open, which relays it verbatim as the `agent start` argument. The worker never receives it as
+   a prompt, because a `queued` task has no pane — §Prompts names the orchestrator as the recipient
+   for exactly this reason.
 5. **`cmdDecide`, `cmdAnswer`, `cmdDispatchDone` in `src/cli.ts`**, beside `cmdTask` and `cmdRewind`.
    **Not** `src/actions/` — every file there is a `[[actions]]` entry in `herdr-plugin.toml`, and v4's
    verified-facts table records that `plugin.action.invoke` accepts no user arguments, so data goes
@@ -501,7 +622,8 @@ Call sites that change beyond the table:
 | `hpipe decide` | **new** — `--task`, `--question`, `--recommend` (all required); refuses a task already blocked |
 | `hpipe answer` | **new** — `--task`, `--decision`, `--answer`, `--by` (all required); refuses a task not in `blocked-on-decision` |
 | `hpipe status` | lists open decisions with age, task, question; flags "answered but undelivered" |
-| `hpipe rewind` | accepts the new phases; **clears `passes`** rather than setting 1 |
+| `hpipe release --task <id>` | **new** — drops a terminal-but-holding task's `files` reservation, freeing a sibling stuck in `blocked-on-files` |
+| `hpipe rewind` | accepts the new phases; **clears `passes`** rather than setting 1; clears `pending_answer` (recording "answer discarded undelivered"); `rewind <run> dispatch` clears `adopted_at` on bound tasks |
 | `hpipe start`, `claim`, `abort`, `resume`, `forget`, `drain` | unchanged |
 
 ## Configuration
@@ -538,29 +660,49 @@ an orchestrator holding work no worker can inherit.
 | Six artifacts × N tasks in one branch | Real cost, accepted. Each is scoped to one issue and reviewed by that issue's PR reviews. |
 | Escalation volume is unbounded by design | Intake quality sets it. A vague issue produces questions. Intended feedback loop, but a bad batch can flood the orchestrator and `hpipe status` is the only throttle. |
 | A run with every task `failed` | `execute` → `escalated` rather than `branch-review`, because there is nothing to review. |
-| The orchestrator forgets `hpipe dispatch --done` | The run sits in `execute` with every task terminal. The stall probe covers it, and `hpipe status` names the missing close. Chosen over inferring closure, which is BLOCKER 3. |
+| The orchestrator forgets `hpipe dispatch --done` | The run sits in `execute` with every task terminal. `execute` is `stallable` with the probe aimed at `orchestrator_pane`, and the gate-open dispatch prompt carries the instruction on every registration path. Chosen over inferring closure, which is round 1's BLOCKER 3. |
+| A task strands in `blocked-on-files` behind a `failed` or `escalated` sibling | The holder never tears down, so the block is permanent and the run's `execute` row never completes. Surfaced by the stall probe via the orchestrator and named in `hpipe status`; released by `hpipe release --task`. A human decision by design — the held files may contain work worth rescuing. |
+| Live `actorIdle` reads cost one `ACTOR_SETTLE_MS` per tick | Settle windows for distinct panes run concurrently, so the cost is one window per tick rather than one per pane. At `ACTOR_SETTLE_MS` near `TICK_MS = 1000` a tick can still overrun; the supervisor skips evaluation rather than queueing ticks, and `hpipe status` reports tick overrun. Measure on the live run. |
+| `MAX_PASSES` is a per-phase lifetime budget, not a per-episode one | A task that fails `pr-review-quality` once, passes, then fails it again after a red CI escalates on the second failure rather than getting a fresh budget. Deliberate: monotone counters are the only shape under which no forward transition can delete a bound, and escalation is the safe direction to be wrong in. |
 
 ## Testing
 
-- `machine-run.test.ts`, `machine-task.test.ts` — rewritten row sets, including a trace asserting
-  `spec ↔ spec-review` **escalates** at `MAX_PASSES`, `head_sha_at_entry` re-capture on every
-  `implement` entry, and `close` completing against `merged_at_ms` on an auto-closed issue.
+- `machine-run.test.ts`, `machine-task.test.ts` — rewritten row sets, including: a trace asserting
+  each of the six counter-bearing rows **escalates** at `MAX_PASSES`; a full-lap trace of
+  `implement → pr-review-intent → pr-review-quality → ci(red) → implement` asserting the lap
+  terminates rather than resetting; `head_sha_at_entry` re-capture on every `implement` entry; `close`
+  completing against `merged_at_ms` on an auto-closed issue **and** against `issue_closed_at_entry` on
+  an issue closed before the merge.
 - `deliver.test.ts` — **per-pane** routing: three tasks advancing in one tick produce three
   `Delivery` objects, no prompt is joined across panes, no prompt is dropped, and a task with
   `pane_id === null` is skipped rather than errored.
 - `gating.test.ts` — the split gate: `queued` ignores overlap, `blocked-on-files` enforces it,
-  `holdsFiles: 'inherit'` resolves through `decision_from`, and two mutually-overlapping tasks do not
-  deadlock.
+  `holdsFiles: 'inherit'` resolves through `decision_from`, **at most one task leaves
+  `blocked-on-files` per overlapping group per tick** (the simultaneous-release race, not the
+  impossible mutual-wait), and a task blocked behind a `failed` sibling is released by
+  `hpipe release`.
 - `decide.test.ts` — **new**: surface → triage → answer → *delivered* → resume, asserting the
   `phase_entered_at` reset happens only on successful submission, that `passes` is untouched, that a
-  second `hpipe decide` is refused, that `hpipe answer` on a non-blocked task is refused, and that a
-  pane death abandons open decisions.
-- `table.test.ts` — **new**, the class-level check: every non-terminal row has an `onClear` **or** a
-  `returnsTo`; every `verdict` row has an `onBlocker`; every row naming a `prompt` or `resumePrompt`
-  names a file present in `prompts/`; every `actor ∈ {orchestrator, worker}` resolves to a pane field
-  that exists on the record type; and every `prompts/*-review*.md` contains both the await instruction
-  and the commit-and-push instruction. The v4 review rounds caught four separate instances of this
-  class one at a time.
+  second `hpipe decide` is refused, that `hpipe answer` on a non-blocked task is refused, that an
+  exhausted delivery budget leaves the task blocked with an exit via re-armed `hpipe answer`, and that
+  a pane death abandons open **and undelivered** decisions.
+- `table.test.ts` — **new**, the class-level check:
+  - **every row with an `onBlocker` names a counter key and a `MAX_PASSES` branch** — the invariant
+    that would have caught v2's missing `ci` counter, stated over the property rather than over the
+    four rows that happened to be reviews;
+  - no row's `onClear` or `onBlocker` deletes or zeroes a counter (monotonicity);
+  - every non-terminal row has an `onClear` **or** a `returnsTo`;
+  - every row naming a `prompt` or `resumePrompt` names a file present in `prompts/`;
+  - every `actor ∈ {orchestrator, worker}` resolves to a pane field that exists on the record type,
+    and every row whose actor resolves to **no** pane is either `terminal` or names a probe target;
+  - each of the **four named worker review prompts** (`spec-review.md`, `plan-review.md`,
+    `pr-review-intent.md`, `pr-review-quality.md`) contains the await instruction and the
+    commit-and-push instruction, and **`branch-review.md` contains neither** — it is orchestrator-owned,
+    and a glob of `prompts/*-review*.md` would wrongly catch it.
+
+  These are string and shape assertions. They cannot test obedience — a prompt containing the await
+  instruction is not a worker that awaited — so the subagent question stays assigned to the live run.
+  The v4 review rounds caught four separate instances of this class one at a time.
 
 **Unit tests are not sufficient here.** The first live run of v4 surfaced two startup/gating defects
 that dependency-injected fakes had passed. This change must be exercised against a real herdr session
@@ -582,3 +724,5 @@ measured statically and must be measured there.
 | One issue per run | An issue becomes the unit of work end to end, but it breaks the one-active-run-per-repo invariant and reduces `branch-review` to a third review of a single PR. |
 | A standing per-repo pipeline with no run boundaries | Removes `branch-review` entirely and rewrites `hpipe start`/`abort`. Largest state change for the least gain right now. |
 | Fold `research` into `spec` | Five artifacts instead of six, but loses the evidence record that `spec-review` checks the design against. |
+| Reset a phase's counter on `CLEAR` (v2) | Bounds each review loop in isolation and deletes the bound on any loop that spans several rows — which is how the shipped `ci` retry budget disappeared. Monotone counters cost a strictly smaller per-phase budget and cannot be reasoned away one loop at a time. |
+| Infer intake closure from orchestrator idleness | Would remove `hpipe dispatch --done`, and is round 1's BLOCKER 3: the orchestrator is idle between turns by construction, so inferring closure closes the run mid-intake. |
