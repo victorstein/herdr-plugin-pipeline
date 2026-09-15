@@ -48,6 +48,9 @@ test('forget unbinds a workspace from its task', async () => {
     keep_worktree: false, text: '', workspace_id: 'w7', pane_id: 'w7:p1',
     agent_status: 'idle', phase: 'execute', pass: 1, phase_entered_at: 0,
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
+    checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
+    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    decision_from: null, pending_answer: null, notes: '',
   })
   await saveRun(dir, run)
 

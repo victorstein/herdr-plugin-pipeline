@@ -64,3 +64,10 @@ test('concurrent orchestrator claims for different repos in one session both per
   expect((await readOrchestrator(dir, 'personal', 'repo-a'))?.pane_id).toBe('w1:p1')
   expect((await readOrchestrator(dir, 'personal', 'repo-b'))?.pane_id).toBe('w2:p1')
 })
+
+test('a new run carries schema_version 2 and an open intake', () => {
+  const run = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+  expect(run.schema_version).toBe(2)
+  expect(run.intake_closed).toBe(false)
+  expect(run.passes).toEqual({})
+})

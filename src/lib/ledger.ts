@@ -36,6 +36,9 @@ export function newRun(input: {
     artifacts: { spec: null, plan: null, verdicts: {} },
     tasks: [],
     history: [],
+    schema_version: 2,
+    intake_closed: false,
+    passes: {},
   }
 }
 

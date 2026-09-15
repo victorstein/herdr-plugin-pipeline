@@ -35,6 +35,17 @@ export interface QueuedEvent {
   is_linked_worktree?: boolean
 }
 
+export interface Decision {
+  id: string
+  asked_at: number
+  from_phase: string
+  question: string
+  recommendation: string
+  answer: string | null
+  answered_by: 'orchestrator' | 'human' | 'abandoned' | null
+  answered_at: number | null
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -54,6 +65,18 @@ export interface Task {
   head_sha_at_entry: string | null
   pr: number | null
   ci: CiBucket | null
+  /** Worktree checkout path. Task artifacts resolve against this, not repo_root. */
+  checkout_path: string | null
+  registered_at: number
+  adopted_at: number | null
+  merged_at_ms: number | null
+  /** True when the issue was already closed at `merge` completion. */
+  issue_closed_at_entry: boolean
+  passes: Record<string, number>
+  decisions: Decision[]
+  decision_from: string | null
+  pending_answer: string | null
+  notes: string
 }
 
 export interface RunArtifacts {
@@ -77,6 +100,9 @@ export interface Run {
   artifacts: RunArtifacts
   tasks: Task[]
   history: HistoryEntry[]
+  schema_version: number
+  intake_closed: boolean
+  passes: Record<string, number>
 }
 
 export interface HistoryEntry {

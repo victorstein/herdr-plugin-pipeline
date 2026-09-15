@@ -7,7 +7,11 @@ const task = (over: Partial<Task>): Task => ({
   depends_on: [], files: [], keep_worktree: false, text: '',
   workspace_id: null, pane_id: null, agent_status: 'unknown',
   phase: 'queued', pass: 1, phase_entered_at: 0, escalated_from: null,
-  head_sha_at_entry: null, pr: null, ci: null, ...over,
+  head_sha_at_entry: null, pr: null, ci: null,
+  checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
+  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  decision_from: null, pending_answer: null, notes: '',
+  ...over,
 })
 
 test('files overlap on a prefix, not only an exact path', () => {

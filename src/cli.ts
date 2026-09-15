@@ -73,6 +73,9 @@ export async function cmdTask(ctx: Ctx, input: {
     workspace_id: null, pane_id: null, agent_status: 'unknown',
     phase: 'queued', pass: 1, phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
+    checkout_path: null, registered_at: Date.now(), adopted_at: null,
+    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    decision_from: null, pending_answer: null, notes: '',
   }
 
   // detectCycle skips ids it does not recognise, so a typo would otherwise pass
