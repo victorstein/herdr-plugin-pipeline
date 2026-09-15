@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.0.0...v1.1.0) (2026-09-15)
+
+
+### Features
+
+* the herdr pipeline plugin ([#1](https://github.com/victorstein/herdr-plugin-pipeline/issues/1)) ([38ffabf](https://github.com/victorstein/herdr-plugin-pipeline/commit/38ffabf1e975fc30a82ce5383be5231b9f772e89))
+
 ## 1.0.0 (2026-09-14)
 
 
