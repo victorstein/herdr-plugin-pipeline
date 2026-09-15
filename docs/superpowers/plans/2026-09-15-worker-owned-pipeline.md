@@ -1140,7 +1140,21 @@ Expected: PASS, 6 tests
 - [ ] **Step 5: Close the red window**
 
 Run: `bun run typecheck`
-Fix every remaining error by replacing old phase names with new ones: `execute` → `implement` in task contexts, `task-review-spec` → `pr-review-intent`, `task-review-quality` → `pr-review-quality`. `teardown.ts`'s `SETTLED` set becomes `TASK_ROWS.filter(r => r.terminal)`.
+Fix every remaining error by replacing old phase names with new ones: `execute` → `implement` in task contexts, `task-review-spec` → `pr-review-intent`, `task-review-quality` → `pr-review-quality`.
+
+**`teardown.ts`'s `SETTLED` is NOT `TASK_ROWS.filter(r => r.terminal)`.** The two sets differ by
+`escalated`, which is settled for the purpose of "has this task stopped moving" but is not terminal —
+it has a `returnsTo` and a human can rewind it. Deriving `SETTLED` from `terminal` drops `escalated`,
+and a run with one escalated task then never leaves `execute`. Define it explicitly:
+
+```ts
+const SETTLED: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
+  ...TASK_ROWS.filter((r) => r.terminal).map((r) => r.phase),
+  'escalated',
+])
+```
+
+and state in a comment why `escalated` is added, because the asymmetry looks like a bug otherwise.
 
 - [ ] **Step 6: Run the full suite**
 
@@ -1224,7 +1238,13 @@ Expected: FAIL — `filesClearFor` is not exported
 
 - [ ] **Step 3: Write minimal implementation**
 
-Delete `HOLDS_FILES` from `gating.ts`. Add:
+Delete `HOLDS_FILES` from `gating.ts` — but **first move its comment onto the rows it explains**.
+`gating.ts` is currently the only place recording why `failed` and `escalated` hold their files
+forever while `orphaned` does not ("`orphaned` is only reachable after merge, so that code has
+already landed"). That is a constraint that looks arbitrary without the reason, which is exactly what
+this repo's comment rule preserves. Put it above the `failed`/`orphaned` rows in `phases.ts`.
+
+Then add:
 
 ```ts
 import { taskRow } from './phases'
@@ -2320,7 +2340,32 @@ Must carry: `gh issue view #{{issue}}` as the brief, the surface agent file, `{{
 
 - [ ] **Step 5: Revise `prompts/dispatch.md`** — drop plan decomposition, keep `worktree create` + `agent start`, and add the `hpipe dispatch --done` line so every registration path also carries the closing path.
 
-- [ ] **Step 6: Update `test/prompts.test.ts` to match the new prompt set**
+- [ ] **Step 6: Add the prompt-content invariant to `test/table.test.ts`**
+
+The spec requires this in three places and no task ever writes it. Add to `table.test.ts`:
+
+```ts
+const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality']
+
+test('every worker review prompt demands an awaited subagent and a pushed verdict', async () => {
+  for (const name of WORKER_REVIEW_PROMPTS) {
+    const text = await Bun.file(join(import.meta.dir, '..', 'prompts', `${name}.md`)).text()
+    expect(text, `${name}.md must require the subagent be awaited`).toContain('wait for it within this turn')
+    expect(text, `${name}.md must require the verdict be pushed`).toContain('Commit and push the verdict')
+  }
+})
+
+test('branch-review carries neither worker instruction — it is orchestrator-owned', async () => {
+  const text = await Bun.file(join(import.meta.dir, '..', 'prompts', 'branch-review.md')).text()
+  expect(text).not.toContain('wait for it within this turn')
+  expect(text).not.toContain('Commit and push the verdict')
+})
+```
+
+Name the four files explicitly. A glob of `prompts/*-review*.md` also catches `branch-review.md`,
+which must carry neither.
+
+- [ ] **Step 7: Update `test/prompts.test.ts` to match the new prompt set**
 
 This file keeps its own two lists, independent of the phase table, and Task 3 only extended `ALL` with the placeholders. Now that the real set is landing:
 
@@ -2328,15 +2373,10 @@ This file keeps its own two lists, independent of the phase table, and Task 3 on
 - `ALL`: drop `task` (replaced by `worker-brief`); add `worker-brief`.
 - The test named "the task prompt routes to the surface agent and demands a closing keyword" reads `prompts/task.md`. Point it at `worker-brief.md` and add an assertion that the file does **not** contain `{{task_text}}`.
 
-- [ ] **Step 7: Run the prompt tests**
+- [ ] **Step 8: Run the prompt tests**
 
 Run: `bun test test/prompts.test.ts test/table.test.ts`
 Expected: PASS
-
-- [ ] **Step 8: Verify branch-review carries neither worker instruction**
-
-Run: `grep -c "wait for it within this turn" prompts/branch-review.md`
-Expected: `0`
 
 - [ ] **Step 9: Commit**
 

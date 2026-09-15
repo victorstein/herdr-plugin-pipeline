@@ -4,6 +4,7 @@ import { RUN_ROWS, runRow, TASK_ROWS, taskRow } from '../src/lib/phases'
 test('every run phase has exactly one row', () => {
   const seen = new Set(RUN_ROWS.map((r) => r.phase))
   expect(seen.size).toBe(RUN_ROWS.length)
+  expect(RUN_ROWS.length).toBe(6)
 })
 
 test('runRow returns the row for a phase', () => {
@@ -19,6 +20,7 @@ test('intake is an orchestrator row with no counter', () => {
 test('every task phase has exactly one row', () => {
   const seen = new Set(TASK_ROWS.map((r) => r.phase))
   expect(seen.size).toBe(TASK_ROWS.length)
+  expect(TASK_ROWS.length).toBe(20)
 })
 
 test('the eight worker-owned rows are exactly the design loop', () => {
@@ -27,6 +29,10 @@ test('the eight worker-owned rows are exactly the design loop', () => {
     'implement', 'plan', 'plan-review', 'pr-review-intent',
     'pr-review-quality', 'research', 'spec', 'spec-review',
   ])
+})
+
+test('implement is probed — it is the longest worker phase and the one that hangs', () => {
+  expect(taskRow('implement').stallable).toBe(true)
 })
 
 test('ci carries its own counter — it is not a review row but it loops', () => {

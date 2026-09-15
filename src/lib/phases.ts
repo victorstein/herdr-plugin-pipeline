@@ -1,7 +1,7 @@
 export type RunPhase =
   | 'intake' | 'dispatch' | 'execute' | 'branch-review' | 'escalated' | 'done'
 
-export type Actor = 'orchestrator' | 'worker' | 'supervisor' | 'human'
+export type Actor = 'orchestrator' | 'worker' | 'human'
 
 export type Signal =
   | 'artifact' | 'verdict' | 'pr' | 'ci' | 'merged' | 'closed'
@@ -27,7 +27,7 @@ export interface PhaseRow<P extends string> {
   prompt?: string
   /** Prompt sent to `resumeActor` when this row is left, not when it is entered. */
   resumePrompt?: string
-  resumeActor?: Actor
+  resumeActor?: 'orchestrator' | 'worker'
   stallable?: boolean
   /** Required when `actor` resolves to no pane and the row is stallable. */
   probeTarget?: 'orchestrator'
@@ -38,7 +38,7 @@ export interface PhaseRow<P extends string> {
 
 export const RUN_ROWS: readonly PhaseRow<RunPhase>[] = [
   { phase: 'intake', actor: 'orchestrator', signal: 'registration',
-    onClear: 'dispatch', prompt: 'intake', stallable: true },
+    onClear: 'dispatch', prompt: 'intake' },
   { phase: 'dispatch', actor: 'orchestrator', signal: 'worktree',
     onClear: 'execute', prompt: 'dispatch', stallable: true },
   { phase: 'execute', signal: 'gate',
@@ -84,8 +84,10 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   { phase: 'blocked-on-files', signal: 'files', onClear: 'implement',
     stallable: true, probeTarget: 'orchestrator', holdsFiles: false },
 
+  // A worker whose pane hangs without emitting `pane.exited` goes unnoticed
+  // otherwise; this is the one task-level probe that ships today.
   { phase: 'implement', actor: 'worker', signal: 'pr',
-    onClear: 'pr-review-intent', prompt: 'implement', holdsFiles: true },
+    onClear: 'pr-review-intent', prompt: 'implement', stallable: true, holdsFiles: true },
   { phase: 'pr-review-intent', actor: 'worker', signal: 'verdict',
     onClear: 'pr-review-quality', onBlocker: 'implement', counter: 'pr-review-intent',
     prompt: 'pr-review-intent', stallable: true, holdsFiles: true },
