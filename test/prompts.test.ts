@@ -9,6 +9,8 @@ const REVIEW_PROMPTS = [
 const ALL = [
   'spec', 'plan', 'dispatch', 'task', 'ci-red', 'merge', 'close',
   'escalate', 'stall-probe', 'digest', ...REVIEW_PROMPTS,
+  'intake', 'decision', 'answer', 'research', 'implement',
+  'pr-review-intent', 'pr-review-quality',
 ]
 
 test('every declared prompt file exists', () => {
