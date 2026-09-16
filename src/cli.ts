@@ -126,6 +126,20 @@ export async function cmdTask(ctx: Ctx, input: {
   return ok(`task_id: ${task.task_id}\n\n${prompt}`)
 }
 
+/**
+ * Read-only. Without it the only way to see a worker brief is to register a
+ * task, which mutates the run — so an orchestrator that loses its context has
+ * no way back to the text it is supposed to hand over. Measured on a live run.
+ */
+export async function cmdBrief(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
+  const task = run?.tasks.find((t) => t.task_id === input.taskId)
+  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+
+  return ok(await renderWorkerPrompt(ctx.pluginRoot, run, task))
+}
+
 export async function cmdDispatchDone(ctx: Ctx, input: { runId?: string }): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const run = input.runId
@@ -372,6 +386,10 @@ async function dispatch(argv: string[]): Promise<number> {
         files: listFlag(rest, 'files'),
         keepWorktree: rest.includes('--keep-worktree'),
       })
+      break
+
+    case 'brief':
+      out = await cmdBrief(ctx, { taskId: flag(rest, 'task') ?? '' })
       break
 
     case 'dispatch':

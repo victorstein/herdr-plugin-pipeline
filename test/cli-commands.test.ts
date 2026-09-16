@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdRewind, cmdStatus, cmdTask,
+  cmdAbort, cmdBrief, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdRewind, cmdStatus, cmdTask,
 } from '../src/cli'
 import { filesClearFor } from '../src/lib/gating'
 import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
@@ -299,4 +299,21 @@ test('task registration refuses an empty branch', async () => {
   })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--branch')
+})
+
+test('brief renders a worker brief without mutating the run', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 11, surface: 'core', notes: 'land first',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+
+  const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
+  const result = await cmdBrief(ctx(), { taskId: 't1' })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('11')
+  expect(result.text).toContain('land first')
+  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
 })
