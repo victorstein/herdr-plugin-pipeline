@@ -151,12 +151,20 @@ function advanceLoopingRow(
 
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
   switch (task.phase) {
-    case 'execute': {
-      // Edge, not level: the PR must have moved since this phase was entered.
+    case 'research':
+    case 'spec':
+    case 'plan': {
+      if (!s.actorIdle || !s.artifactFresh) return null
+      return enterTaskPhase(
+        run, task, taskRow(task.phase).onClear as TaskPhase, 'actor idle + artifact fresh',
+      )
+    }
+
+    case 'implement': {
       const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
       if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
-      return enterTaskPhase(run, task, 'task-review-spec', `PR #${s.prNumber} at ${s.headSha}`)
+      return enterTaskPhase(run, task, 'pr-review-intent', `PR #${s.prNumber} at ${s.headSha}`)
     }
 
     case 'spec-review':

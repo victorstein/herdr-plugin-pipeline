@@ -191,3 +191,44 @@ test('a review row escalates at MAX_PASSES on its own counter', () => {
   advanceTask(run, task, s)
   expect(task.phase).toBe('escalated')
 })
+
+test('an artifact row advances on actor idle plus a fresh artifact', () => {
+  const { run, task } = fixture('research')
+  const s = {
+    actorIdle: true, artifactFresh: true, verdict: null, prNumber: null,
+    headSha: null, merged: false, issueClosed: false, ciBucket: null, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, s)?.phase).toBe('spec')
+})
+
+test('an artifact row does not advance on a stale artifact', () => {
+  const { run, task } = fixture('spec')
+  const s = {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: null,
+    headSha: null, merged: false, issueClosed: false, ciBucket: null, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, s)).toBeNull()
+})
+
+test('implement advances only when the head sha moved, and goes to pr-review-intent', () => {
+  const { run, task } = fixture('implement')
+  const s = {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5,
+    headSha: 'bbb', merged: false, issueClosed: false, ciBucket: null, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, s)?.phase).toBe('pr-review-intent')
+  const stale = fixture('implement')
+  expect(advanceTask(stale.run, stale.task, { ...s, headSha: 'aaa' })).toBeNull()
+})
+
+test('re-entry to implement re-captures head_sha_at_entry', () => {
+  const { run, task } = fixture('pr-review-quality')
+  advanceTask(run, task, {
+    actorIdle: true, artifactFresh: true,
+    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 },
+    prNumber: 5, headSha: 'ccc', merged: false, issueClosed: false,
+    ciBucket: null, maxPasses: 2,
+  })
+  expect(task.phase).toBe('implement')
+  expect(task.head_sha_at_entry).toBe('ccc')
+})
