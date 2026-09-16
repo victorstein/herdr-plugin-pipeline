@@ -258,3 +258,16 @@ test('rewind to dispatch clears adopted_at on bound tasks so the row can re-fire
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.tasks[0]?.adopted_at).toBeNull()
 })
+
+test('dispatch --done finds the active run when no id is given', async () => {
+  // Both intake.md and dispatch.md invoke it bare, so the fallback is the path
+  // the orchestrator actually takes.
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdDispatchDone(ctx(), {})
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.intake_closed).toBe(true)
+})
