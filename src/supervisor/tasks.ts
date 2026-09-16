@@ -1,8 +1,9 @@
+import { join } from 'node:path'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
-import type { VerdictResult } from '../lib/predicates'
+import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
@@ -18,6 +19,7 @@ export interface TaskDeps {
    */
   liveIdle: (paneId: string) => Promise<boolean>
   maxPasses: number
+  fileSettleMs: number
   prForBranch: (branch: string) => Promise<number | null>
   prView: (pr: number) => Promise<PrView | null>
   issueView: (issue: number) => Promise<IssueView | null>
@@ -42,9 +44,19 @@ export async function promptForTaskPhase(
     pr: task.pr === null ? 'unknown' : String(task.pr),
     pass: String(counterFor(task, task.phase)),
     verdict_path: absoluteArtifactPath(run, task) ?? '',
+    title: run.title,
+    research_path: taskArtifactPath(run, task, 'research'),
+    spec_path: taskArtifactPath(run, task, 'spec'),
+    plan_path: taskArtifactPath(run, task, 'plan'),
   }
 
   switch (task.phase) {
+    case 'research':
+    case 'spec':
+    case 'spec-review':
+    case 'plan':
+    case 'plan-review':
+      return renderPrompt(deps.pluginRoot, taskRow(task.phase).prompt as string, common)
     case 'pr-review-intent':
       return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
     case 'pr-review-quality':
@@ -73,6 +85,12 @@ export async function promptForTaskPhase(
     default:
       return ''
   }
+}
+
+function taskArtifactPath(run: Run, task: Task, slot: 'research' | 'spec' | 'plan'): string {
+  const rel = task.artifacts[slot]
+  if (rel === null) return ''
+  return join(task.checkout_path ?? run.repo_root, rel)
 }
 
 export interface TaskPrompt {
@@ -178,6 +196,18 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       const view = await deps.prView(pr)
       return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
     }
+    case 'research':
+    case 'spec':
+    case 'plan': {
+      if (!actorIdle) return base
+      const absolute = absoluteArtifactPath(run, task)
+      if (absolute === null) return base
+      if (!(await isFresh(absolute, task.phase_entered_at))) return base
+      if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+      return { ...base, artifactFresh: true }
+    }
+    case 'spec-review':
+    case 'plan-review':
     case 'pr-review-intent':
     case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)

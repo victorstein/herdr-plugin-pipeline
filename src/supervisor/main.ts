@@ -168,6 +168,7 @@ async function main(): Promise<void> {
             pluginRoot,
             liveIdle,
             maxPasses: config.MAX_PASSES,
+            fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
             issueView: (issue) => runGh.issueView(issue),

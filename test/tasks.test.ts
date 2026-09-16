@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
+import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -28,6 +32,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   pluginRoot: process.cwd(),
   liveIdle: async () => true,
   maxPasses: 2,
+  fileSettleMs: 0,
   prForBranch: async () => null,
   prView: async () => null,
   issueView: async () => null,
@@ -230,4 +235,76 @@ test('close prompts only when the issue is still open', async () => {
 
   const closed = mkRun([mkTask({ phase: 'close', pr: 42, issue_closed_at_entry: true })])
   expect(await promptForTaskPhase(closed, closed.tasks[0]!, deps(), 'merge')).toBe('')
+})
+
+const designArtifacts = (): Task['artifacts'] => ({
+  research: join('docs/superpowers/research', '2026-01-01-issue-1-research.md'),
+  spec: join('docs/superpowers/specs', '2026-01-01-issue-1-design.md'),
+  plan: join('docs/superpowers/plans', '2026-01-01-issue-1-plan.md'),
+  verdicts: {},
+})
+
+function worktreeWith(relative: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'hpipe-design-'))
+  mkdirSync(join(dir, dirname(relative)), { recursive: true })
+  writeFileSync(join(dir, relative), 'findings\n')
+  return dir
+}
+
+test('a design artifact row advances when its artifact is fresh in the worktree', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: dir, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('a design artifact row does not advance on a file that predates phase entry', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: Date.now() + 60_000, checkout_path: dir, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('a design review row reads its verdict from the worktree', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('entering a design row delivers that row prompt to the worker pane', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: dir, artifacts,
+  })])
+
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]?.paneId).toBe('w7:p1')
+  expect(prompts[0]?.text.length).toBeGreaterThan(0)
+})
+
+test('a design row prompt names the artifact path its own predicate will check', async () => {
+  for (const phase of ['spec', 'spec-review', 'plan', 'plan-review'] as const) {
+    const run = mkRun([mkTask({
+      phase, checkout_path: '/r/.worktrees/feat-x', artifacts: designArtifacts(),
+    })])
+    const task = run.tasks[0] as Task
+
+    const watched = absoluteArtifactPath(run, task)
+    expect(watched).not.toBeNull()
+    expect(await promptForTaskPhase(run, task, deps(), 'research')).toContain(watched as string)
+  }
 })
