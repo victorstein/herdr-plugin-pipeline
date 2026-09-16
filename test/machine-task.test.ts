@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { advanceTask, enterTaskPhase } from '../src/lib/machine'
+import { advanceTask, bumpCounter, counterFor, enterTaskPhase } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
@@ -135,4 +135,21 @@ test('enterTaskPhase records the task id in run history', () => {
   const { run, task } = fixture('execute')
   enterTaskPhase(run, task, 'ci', 'both reviews cleared')
   expect(run.history.at(-1)).toMatchObject({ task_id: 't1', to: 'ci' })
+})
+
+test('a counter increments and never resets on forward progress', () => {
+  const { task } = fixture('spec-review')
+  expect(counterFor(task, 'spec-review')).toBe(0)
+  bumpCounter(task, 'spec-review')
+  expect(counterFor(task, 'spec-review')).toBe(1)
+  bumpCounter(task, 'spec-review')
+  expect(counterFor(task, 'spec-review')).toBe(2)
+})
+
+test('counters are independent per phase', () => {
+  const { task } = fixture('spec-review')
+  bumpCounter(task, 'spec-review')
+  bumpCounter(task, 'spec-review')
+  expect(counterFor(task, 'plan-review')).toBe(0)
+  expect(counterFor(task, 'ci')).toBe(0)
 })

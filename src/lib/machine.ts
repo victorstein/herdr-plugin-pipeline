@@ -1,6 +1,24 @@
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
+interface HasPasses { passes: Record<string, number | undefined> }
+
+export function counterFor(record: HasPasses, phase: string): number {
+  return record.passes[phase] ?? 0
+}
+
+/**
+ * Monotone by construction. Nothing in this module decrements or deletes a
+ * counter — only `hpipe rewind` clears the map. Two earlier drafts reset on a
+ * forward transition and each time deleted a bound: the review loop in one, the
+ * shipped CI retry budget in the other.
+ */
+export function bumpCounter(record: HasPasses, phase: string): number {
+  const next = counterFor(record, phase) + 1
+  record.passes[phase] = next
+  return next
+}
+
 /**
  * An agent has finished its turn. herdr reports `done` for "idle and not yet
  * seen", which is the normal resting state for an agent this plugin drives —
