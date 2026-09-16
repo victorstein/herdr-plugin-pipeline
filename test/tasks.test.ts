@@ -40,7 +40,7 @@ test('an unblocked queued task moves to implement and yields a dispatch prompt',
   const run = mkRun([mkTask({})])
   const prompts = await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('implement')
-  expect(prompts.join('\n')).toContain('feat/x')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('feat/x')
 })
 
 test('a gated queued task stays queued and yields nothing', async () => {
@@ -126,14 +126,14 @@ test('entering pr-review-intent yields that row\'s review prompt', async () => {
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(prompts.join('\n')).toContain('pr-review-intent')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('pr-review-intent')
 })
 
 test('entering merge yields the merge prompt', async () => {
   const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
   const prompts = await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('merge')
-  expect(prompts.join('\n')).toContain('Ready to merge')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('Ready to merge')
 })
 
 test('a red CI yields the ci-red prompt carrying the failure detail', async () => {
@@ -142,8 +142,8 @@ test('a red CI yields the ci-red prompt carrying the failure detail', async () =
     ciDetail: async () => '- build (fail) https://example/run/1',
   }))
   expect(run.tasks[0]?.phase).toBe('implement')
-  expect(prompts.join('\n')).toContain('CI is red')
-  expect(prompts.join('\n')).toContain('build (fail)')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('CI is red')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('build (fail)')
 })
 
 test('an escalated task yields the escalation prompt naming its task flag', async () => {
@@ -152,7 +152,30 @@ test('an escalated task yields the escalation prompt naming its task flag', asyn
     verdictFor: async () => ({ verdict: 'BLOCKER', blockers: 1, majors: 0 }),
   }))
   expect(run.tasks[0]?.phase).toBe('escalated')
-  expect(prompts.join('\n')).toContain('--task t1')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('--task t1')
+})
+
+test('a worker-owned phase addresses its prompt to the worker pane, not the orchestrator', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  const prompts = await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(prompts[0]?.paneId).toBe('w7:p1')
+})
+
+test('an orchestrator-owned phase addresses its prompt to the orchestrator pane', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('merge')
+  expect(prompts[0]?.paneId).toBe('w1:p1')
+})
+
+test('a dispatch prompt is addressed to the orchestrator — a queued task has no pane yet', async () => {
+  const run = mkRun([mkTask({ pane_id: null })])
+  const prompts = await advanceTasks(run, deps())
+  expect(prompts[0]?.paneId).toBe('w1:p1')
 })
 
 test('a phase that advances nothing yields no prompt', async () => {

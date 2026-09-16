@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  artifactPathFor, buildDigest, nextDelivery, shouldRetry, taskSignalsFor,
+  artifactPathFor, buildDigest, deliveriesFor, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -43,16 +43,60 @@ test('a digest with no phase change still delivers the events', () => {
   expect(text).toContain('blocked')
 })
 
-test('nextDelivery skips a run with no orchestrator pane', () => {
+test('three prompts for three panes produce three deliveries', () => {
   const run = mkRun()
-  run.orchestrator_pane = null
-  expect(nextDelivery([{ run, eventLines: ['x'], phaseNote: '', nextPrompt: '' }])).toBeNull()
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: 'orchestrator prompt', isOrchestrator: true, events: ['e1'] },
+    { paneId: 'w7:p1', run, text: 'worker 1 prompt', isOrchestrator: false, events: [] },
+    { paneId: 'w8:p1', run, text: 'worker 2 prompt', isOrchestrator: false, events: [] },
+  ])
+  expect(out).toHaveLength(3)
+  expect(out.map((d) => d.paneId).sort()).toEqual(['w1:p1', 'w7:p1', 'w8:p1'])
 })
 
-test('nextDelivery returns the first deliverable payload', () => {
+test('a worker delivery carries no run digest header', () => {
   const run = mkRun()
-  const picked = nextDelivery([{ run, eventLines: ['x'], phaseNote: '', nextPrompt: '' }])
-  expect(picked?.paneId).toBe('w1:p1')
+  const out = deliveriesFor([
+    { paneId: 'w7:p1', run, text: 'worker prompt', isOrchestrator: false, events: ['e1'] },
+  ])
+  expect(out[0]?.text).toBe('worker prompt')
+  expect(out[0]?.text).not.toContain('[pipeline] run')
+})
+
+test('the orchestrator delivery carries the header and its events', () => {
+  const run = mkRun()
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: 'do the thing', isOrchestrator: true, events: ['e1', 'e2'] },
+  ])
+  expect(out[0]?.text).toContain('[pipeline] run')
+  expect(out[0]?.text).toContain('2 events')
+  expect(out[0]?.text).toContain('do the thing')
+})
+
+test('two prompts for the SAME pane are joined, not dropped', () => {
+  const run = mkRun()
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: 'first', isOrchestrator: true, events: [] },
+    { paneId: 'w1:p1', run, text: 'second', isOrchestrator: true, events: [] },
+  ])
+  expect(out).toHaveLength(1)
+  expect(out[0]?.text).toContain('first')
+  expect(out[0]?.text).toContain('second')
+})
+
+test('no prompt with content is ever dropped', () => {
+  const run = mkRun()
+  const texts = ['alpha prompt', 'bravo prompt', 'charlie prompt', 'delta prompt', 'echo prompt']
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: texts[0] as string, isOrchestrator: true, events: ['e1'] },
+    { paneId: 'w7:p1', run, text: texts[1] as string, isOrchestrator: false, events: [] },
+    { paneId: 'w1:p1', run, text: texts[2] as string, isOrchestrator: true, events: [] },
+    { paneId: 'w8:p1', run, text: texts[3] as string, isOrchestrator: false, events: [] },
+    { paneId: 'w9:p1', run, text: texts[4] as string, isOrchestrator: false, events: [] },
+  ])
+  for (const text of texts) {
+    expect(out.filter((d) => d.text.includes(text))).toHaveLength(1)
+  }
 })
 
 test('agent_blocked is retryable below the cap', () => {

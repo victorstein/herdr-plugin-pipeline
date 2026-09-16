@@ -9,7 +9,8 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
-  artifactPathFor, type DigestInput, evaluateRun, nextDelivery, promptForRunPhase, refreshBadges, shouldRetry,
+  artifactPathFor, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
+  refreshBadges, shouldRetry,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
 import { stallCandidates, taskStallCandidates } from './stall'
@@ -74,7 +75,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  let attempts = 0
+  const attempts = new Map<string, number>()
   let lastCiPollMs = 0
   const probed = new Set<string>()
 
@@ -109,8 +110,19 @@ async function main(): Promise<void> {
         await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
       }
 
-      const digests: DigestInput[] = []
+      const pending: PendingPrompt[] = []
       for (const run of pickOneAdvance(runs)) {
+        const addPending = (paneId: string | null, text: string, eventLines: string[], subject: string) => {
+          if (text.length === 0 && eventLines.length === 0) return
+          if (paneId === null) {
+            console.error(`[pipeline] run ${run.run_id}: dropping prompt for ${subject} — no pane`)
+            return
+          }
+          pending.push({
+            paneId, run, text, events: eventLines,
+            isOrchestrator: paneId === run.orchestrator_pane,
+          })
+        }
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
@@ -140,34 +152,35 @@ async function main(): Promise<void> {
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
           })
 
-          if (run.phase !== runPhaseBefore) {
-            const entered = await promptForRunPhase(run, config)
-            if (entered.length > 0) taskPrompts.push(entered)
-          }
+          const enteredRunPhase = run.phase === runPhaseBefore
+            ? ''
+            : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
           const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
-          const combined = [nextPrompt, ...taskPrompts].filter((p) => p.length > 0).join('\n\n---\n\n')
-          if (lines.length > 0 || combined.length > 0) {
-            digests.push({ run, eventLines: lines, phaseNote, nextPrompt: combined })
+          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`)
+          for (const prompt of taskPrompts) {
+            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
           }
+          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`)
           await saveRun(stateDir, run)
         } catch (error) {
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
         }
       }
 
-      const delivery = nextDelivery(digests)
-      if (delivery) {
+      for (const delivery of deliveriesFor(pending)) {
         const sent = await herdr.agentPrompt(delivery.paneId, delivery.text)
-        if (!sent.ok) {
-          attempts += 1
-          if (!shouldRetry(sent.code, attempts, config.PROMPT_RETRY_MAX)) {
-            console.error(`[pipeline] giving up on delivery: ${sent.code}`)
-            attempts = 0
-          }
+        if (sent.ok) {
+          attempts.delete(delivery.paneId)
+          continue
+        }
+        const failures = (attempts.get(delivery.paneId) ?? 0) + 1
+        if (shouldRetry(sent.code, failures, config.PROMPT_RETRY_MAX)) {
+          attempts.set(delivery.paneId, failures)
         } else {
-          attempts = 0
+          console.error(`[pipeline] giving up on delivery to ${delivery.paneId}: ${sent.code}`)
+          attempts.delete(delivery.paneId)
         }
       }
 

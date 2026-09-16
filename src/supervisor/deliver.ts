@@ -30,13 +30,44 @@ export function buildDigest(input: DigestInput): string {
   ].join('\n').trimEnd()
 }
 
-export function nextDelivery(inputs: DigestInput[]): Delivery | null {
-  for (const input of inputs) {
-    if (!input.run.orchestrator_pane) continue
-    if (input.eventLines.length === 0 && input.nextPrompt.length === 0) continue
-    return { paneId: input.run.orchestrator_pane, text: buildDigest(input), run: input.run }
+export interface PendingPrompt {
+  paneId: string
+  run: Run
+  text: string
+  isOrchestrator: boolean
+  events: string[]
+}
+
+/**
+ * Grouped by pane. The previous design returned ONE delivery per tick and
+ * discarded the rest, which was safe only because every prompt-producing row had
+ * the same recipient. With eight worker-owned rows a tick routinely produces
+ * prompts for several panes, and a dropped one is never regenerated because the
+ * run is already saved.
+ */
+export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
+  const byPane = new Map<string, PendingPrompt[]>()
+  for (const p of pending) {
+    if (p.text.length === 0 && p.events.length === 0) continue
+    const list = byPane.get(p.paneId) ?? []
+    list.push(p)
+    byPane.set(p.paneId, list)
   }
-  return null
+
+  const out: Delivery[] = []
+  for (const [paneId, group] of byPane) {
+    const first = group[0] as PendingPrompt
+    const body = group.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
+    const events = group.flatMap((p) => p.events)
+    const text = first.isOrchestrator
+      ? buildDigest({
+          run: first.run, eventLines: events,
+          phaseNote: ` → ${first.run.phase}`, nextPrompt: body,
+        })
+      : body
+    out.push({ paneId, text, run: first.run })
+  }
+  return out
 }
 
 const RETRYABLE = new Set(['agent_blocked', 'pane_not_found', 'not_found', 'unparseable'])

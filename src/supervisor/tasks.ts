@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
-import { TASK_ROWS } from '../lib/phases'
+import { TASK_ROWS, taskRow } from '../lib/phases'
 import type { VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -76,13 +76,25 @@ export async function promptForTaskPhase(
   }
 }
 
+export interface TaskPrompt {
+  text: string
+  paneId: string | null
+  taskId: string
+}
+
+/** The pane that owns the phase the task has just entered. */
+function recipientPane(run: Run, task: Task): string | null {
+  return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
+}
+
 /**
- * Drives every task in a run one step. Returns any prompts the digest should
- * carry — currently the worker prompt for a task whose gate just opened, which
- * is delivered to the ORCHESTRATOR because a queued task has no pane yet.
+ * Drives every task in a run one step. Each returned prompt names the pane it is
+ * addressed to, because worker-owned rows send one tick's prompts to several
+ * different agents; the dispatch prompt is the exception, addressed to the
+ * ORCHESTRATOR because a queued task has no pane yet.
  */
-export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> {
-  const prompts: string[] = []
+export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt[]> {
+  const prompts: TaskPrompt[] = []
 
   // Tears down whatever was ALREADY sitting at `teardown` when this tick
   // started, before the loop below can advance anything else into that
@@ -105,10 +117,12 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
       if (gate.state !== 'ready') continue
 
       enterTaskPhase(run, task, 'implement', 'gate opened')
-      prompts.push(
-        `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
+      prompts.push({
+        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
-      )
+        paneId: run.orchestrator_pane,
+        taskId: task.task_id,
+      })
       continue
     }
 
@@ -124,7 +138,9 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
     if (task.phase === cameFrom) continue
 
     const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
-    if (prompt.length > 0) prompts.push(prompt)
+    if (prompt.length > 0) {
+      prompts.push({ text: prompt, paneId: recipientPane(run, task), taskId: task.task_id })
+    }
   }
 
   return prompts
