@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { advanceRun, counterFor } from '../lib/machine'
-import { runRow } from '../lib/phases'
+import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { buildBadges, badgeSource } from '../lib/badges'
@@ -83,11 +83,22 @@ export function shouldRetry(code: string | undefined, attempts: number, max: num
 /** Artifact path for the phase the run or task is currently in. */
 export function artifactPathFor(run: Run, task: Task | null): string | null {
   if (task) {
-    const key = `${task.task_id}-${task.phase}-${counterFor(task, task.phase)}`
-    return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${key}.md`)
+    const row = taskRow(task.phase)
+    if (row.artifact) return task.artifacts[row.artifact]
+    const key = `${task.phase}-${counterFor(task, task.phase)}`
+    return task.artifacts.verdicts[key]
+      ?? join('docs/superpowers/reviews', `issue-${task.issue}-${key}.md`)
   }
   const key = `${run.phase}-${counterFor(run, run.phase)}`
   return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${run.run_id}-${key}.md`)
+}
+
+/** Task artifacts live in the worker's linked worktree; run artifacts in the main checkout. */
+export function absoluteArtifactPath(run: Run, task: Task | null): string | null {
+  const rel = artifactPathFor(run, task)
+  if (rel === null) return null
+  const base = task?.checkout_path ?? run.repo_root
+  return join(base, rel)
 }
 
 export function taskSignalsFor(run: Run) {
@@ -131,9 +142,8 @@ export async function evaluateRun(
   if (signal === 'artifact' || signal === 'verdict') {
     if (!actorIdle) return stay
 
-    const relative = artifactPathFor(run, null)
-    if (!relative) return stay
-    const absolute = join(run.repo_root, relative)
+    const absolute = absoluteArtifactPath(run, null)
+    if (!absolute) return stay
 
     if (!(await isFresh(absolute, run.phase_entered_at))) return stay
     if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return stay
@@ -157,7 +167,7 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   const specPath = join(run.repo_root, run.artifacts.spec ?? 'docs/superpowers/specs/design.md')
   const planPath = join(run.repo_root, run.artifacts.plan ?? 'docs/superpowers/plans/plan.md')
-  const verdictPath = join(run.repo_root, artifactPathFor(run, null) ?? 'review.md')
+  const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
     run_id: run.run_id, title: run.title,

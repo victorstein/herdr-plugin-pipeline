@@ -9,7 +9,7 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
-  artifactPathFor, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
+  absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, shouldRetry,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
@@ -172,9 +172,8 @@ async function main(): Promise<void> {
             prView: (pr) => runGh.prView(pr),
             issueView: (issue) => runGh.issueView(issue),
             verdictFor: async (r, t) => {
-              const relative = artifactPathFor(r, t)
-              if (!relative) return null
-              const absolute = join(r.repo_root, relative)
+              const absolute = absoluteArtifactPath(r, t)
+              if (!absolute) return null
               if (!(await isFresh(absolute, t.phase_entered_at))) return null
               if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
               return parseVerdict(absolute)
@@ -227,13 +226,13 @@ async function main(): Promise<void> {
       await sendProbes(
         stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed), probed,
         async (candidate) => {
-          const path = artifactPathFor(candidate.run, null)
+          const path = absoluteArtifactPath(candidate.run, null)
           const text = await renderPrompt(
             pluginRoot, 'stall-probe', {
               run_id: candidate.run.run_id,
               phase: candidate.run.phase,
               minutes: String(candidate.minutes),
-              artifact_path: join(candidate.run.repo_root, path ?? 'the expected artifact'),
+              artifact_path: path ?? 'the expected artifact',
             },
           )
           return herdr.agentPrompt(candidate.paneId, text)

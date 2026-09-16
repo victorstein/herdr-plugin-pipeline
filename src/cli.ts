@@ -78,6 +78,7 @@ export async function cmdTask(ctx: Ctx, input: {
     phase: 'queued', phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: null, registered_at: Date.now(), adopted_at: null,
+    artifacts: { research: null, spec: null, plan: null, verdicts: {} },
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }

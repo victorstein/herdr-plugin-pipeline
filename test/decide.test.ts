@@ -16,6 +16,7 @@ function taskFixture(phase: TaskPhase): Task {
     phase, phase_entered_at: Date.now(), escalated_from: null,
     head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
+    artifacts: { research: null, spec: null, plan: null, verdicts: {} },
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }
@@ -76,6 +77,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,
+  artifacts: { research: null, spec: null, plan: null, verdicts: {} },
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  artifactPathFor, buildDigest, deliveriesFor, shouldRetry, taskSignalsFor,
+  absoluteArtifactPath, artifactPathFor, buildDigest, deliveriesFor, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -12,6 +12,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
+  artifacts: { research: null, spec: null, plan: null, verdicts: {} },
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
@@ -200,4 +201,47 @@ test('the digest keeps evaluateRun\'s transition note, not just the current phas
     },
   ])
   expect(out[0]?.text).toContain('(from execute)')
+})
+
+test('a task artifact path resolves against the worktree, not repo_root', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'spec', checkout_path: '/r/.worktrees/feat-x' })
+  task.artifacts.spec = 'docs/superpowers/specs/2026-09-15-issue-210-design.md'
+  run.tasks = [task]
+  expect(absoluteArtifactPath(run, task))
+    .toBe('/r/.worktrees/feat-x/docs/superpowers/specs/2026-09-15-issue-210-design.md')
+})
+
+test('a run artifact path resolves against repo_root', () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  expect(absoluteArtifactPath(run, null)).toStartWith('/r/docs/superpowers/reviews/')
+})
+
+test('a verdict row reads the verdict slot keyed by phase and counter', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'spec-review', checkout_path: '/w', passes: { 'spec-review': 1 } })
+  run.tasks = [task]
+  expect(absoluteArtifactPath(run, task)).toContain('spec-review-1')
+})
+
+test('each artifact row reads its own slot, not a verdict path', () => {
+  const run = mkRun()
+  const seeded = {
+    research: 'docs/superpowers/research/note.md',
+    spec: 'docs/superpowers/specs/design.md',
+    plan: 'docs/superpowers/plans/plan.md',
+    verdicts: { 'research-0': 'wrong.md', 'spec-0': 'wrong.md', 'plan-0': 'wrong.md' },
+  }
+  for (const phase of ['research', 'spec', 'plan'] as const) {
+    const task = mkTask({ phase, checkout_path: '/w', artifacts: { ...seeded, verdicts: {} } })
+    expect(absoluteArtifactPath(run, task)).toBe(`/w/${seeded[phase]}`)
+  }
+})
+
+test('a task with no checkout path falls back to repo_root', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'spec', checkout_path: null })
+  task.artifacts.spec = 'docs/superpowers/specs/design.md'
+  expect(absoluteArtifactPath(run, task)).toBe('/r/docs/superpowers/specs/design.md')
 })

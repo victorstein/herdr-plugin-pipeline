@@ -60,6 +60,12 @@ export interface Task {
   ci: CiBucket | null
   /** Worktree checkout path. Task artifacts resolve against this, not repo_root. */
   checkout_path: string | null
+  artifacts: {
+    research: string | null
+    spec: string | null
+    plan: string | null
+    verdicts: Record<string, string>
+  }
   registered_at: number
   adopted_at: number | null
   merged_at_ms: number | null

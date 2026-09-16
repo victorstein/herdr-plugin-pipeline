@@ -1,4 +1,3 @@
-import { join } from 'node:path'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
@@ -7,7 +6,7 @@ import type { VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { artifactPathFor } from './deliver'
+import { absoluteArtifactPath } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -42,7 +41,7 @@ export async function promptForTaskPhase(
     issue: String(task.issue),
     pr: task.pr === null ? 'unknown' : String(task.pr),
     pass: String(counterFor(task, task.phase)),
-    verdict_path: join(run.repo_root, artifactPathFor(run, task) ?? ''),
+    verdict_path: absoluteArtifactPath(run, task) ?? '',
   }
 
   switch (task.phase) {
