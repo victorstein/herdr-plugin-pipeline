@@ -32,7 +32,7 @@ export function newRun(input: {
     phase_entered_at: Date.now(),
     escalated_from: null,
     orchestrator_pane: null,
-    artifacts: { spec: null, plan: null, verdicts: {} },
+    artifacts: { verdicts: {} },
     tasks: [],
     history: [],
     schema_version: 2,

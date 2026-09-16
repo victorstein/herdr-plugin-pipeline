@@ -128,7 +128,7 @@ test('rewind clears the counters for the phase it rewinds to', async () => {
   expect(after?.passes).toEqual({})
 })
 
-test('the spec path carries the whole title, not a fragment of the run id', async () => {
+test('the run id carries the whole title, not a fragment of it', async () => {
   const out = await cmdStart(ctx(), {
     title: 'add a titleCase helper', repoKey: 'k', repoRoot: repoDir,
     socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
@@ -136,5 +136,5 @@ test('the spec path carries the whole title, not a fragment of the run id', asyn
   expect(out.ok).toBe(true)
 
   const run = await activeRunForRepo(dir, 'personal', 'k')
-  expect(run?.artifacts.spec).toContain('add-a-titlecase-helper-design.md')
+  expect(run?.run_id).toContain('add-a-titlecase-helper')
 })

@@ -165,14 +165,12 @@ export async function evaluateRun(
 
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
-  const specPath = join(run.repo_root, run.artifacts.spec ?? 'docs/superpowers/specs/design.md')
-  const planPath = join(run.repo_root, run.artifacts.plan ?? 'docs/superpowers/plans/plan.md')
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
     run_id: run.run_id, title: run.title,
     pass: String(counterFor(run, run.phase)),
-    spec_path: specPath, plan_path: planPath, verdict_path: verdictPath,
+    verdict_path: verdictPath,
   }
 
   switch (run.phase) {

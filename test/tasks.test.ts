@@ -297,7 +297,7 @@ test('entering a design row delivers that row prompt to the worker pane', async 
 })
 
 test('a design row prompt names the artifact path its own predicate will check', async () => {
-  for (const phase of ['spec', 'spec-review', 'plan', 'plan-review'] as const) {
+  for (const phase of ['research', 'spec', 'spec-review', 'plan', 'plan-review'] as const) {
     const run = mkRun([mkTask({
       phase, checkout_path: '/r/.worktrees/feat-x', artifacts: designArtifacts(),
     })])

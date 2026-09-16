@@ -66,13 +66,14 @@ export async function promptForTaskPhase(
     case 'close':
       return task.issue_closed_at_entry ? '' : renderPrompt(deps.pluginRoot, 'close', common)
     case 'implement':
-      // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
-      // review does not, because the review file already says what to fix.
+      // Re-entry from a red CI needs the failing checks inlined; every other
+      // entry gets the standing brief, which points a returning worker at the
+      // review file that sent it back.
       return cameFrom === 'ci'
         ? renderPrompt(deps.pluginRoot, 'ci-red', {
             ...common, ci_failure: await deps.ciDetail(task.pr),
           })
-        : ''
+        : renderPrompt(deps.pluginRoot, 'implement', common)
     case 'escalated': {
       const from = task.escalated_from ?? cameFrom
       return renderPrompt(deps.pluginRoot, 'escalate', {

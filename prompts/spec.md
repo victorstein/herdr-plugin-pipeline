@@ -1,22 +1,24 @@
-# Write the spec — run {{run_id}}
+# Write the spec — {{branch}} (#{{issue}})
 
-Write the spec for **{{title}}** now. Do not ask whether to proceed.
-
-If a design conversation already happened, this spec records what was agreed. If one did not — the
-run can be started without it — do not manufacture agreement. Write each behavioural decision down as
-an explicit, labelled assumption so the review that follows can challenge it, rather than burying the
-choice in prose.
+Write the spec for issue #{{issue}} now. Do not ask whether to proceed.
 
 Write it to exactly this path:
 
     {{spec_path}}
 
-Cover: problem, goal, non-goals, architecture, the data and control flow, error handling, and a
-testing strategy. Cite `file:line` for every claim about how this repo already works — verify against
-the code, do not assert from memory.
+Cover: problem, goal, non-goals, architecture, the data and control flow, error handling, and the
+testing strategy. Build on your research note at `{{research_path}}` and cite `file:line` for every
+claim about how this repo already works — verify against the code, never from memory.
 
-Follow the repo's prime directive: mirror the nearest existing example and name the file you modelled
-on. If neither this repo nor the gold standard establishes a pattern the work needs, stop and say so
-rather than inventing one.
+Every behavioural decision goes down as an explicit, labelled assumption, so the review that follows
+can attack it. A choice buried in prose is a choice nobody reviews.
 
-When the file exists and is complete, stop. The next step is dispatched automatically.
+Mirror the nearest existing example and name the file you modelled on. If neither this repo nor its
+gold standard establishes a pattern this work needs, do not invent one — `hpipe decide` with your
+recommendation.
+
+If you are back here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file for this
+issue under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept, and record in
+the spec what changed and why — a half-applied fix is the highest-value finding the next pass has.
+
+Commit and push the spec, then stop.

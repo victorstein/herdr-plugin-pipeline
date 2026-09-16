@@ -79,8 +79,6 @@ export interface Task {
 }
 
 export interface RunArtifacts {
-  spec: string | null
-  plan: string | null
   verdicts: Record<string, string>
 }
 

@@ -4,13 +4,12 @@ import { join } from 'node:path'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
-  'spec-review', 'plan-review', 'task-review-spec', 'task-review-quality', 'branch-review',
+  'spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
 ]
 const ALL = [
-  'spec', 'plan', 'dispatch', 'task', 'worker-brief', 'ci-red', 'merge', 'close',
+  'spec', 'plan', 'dispatch', 'worker-brief', 'ci-red', 'merge', 'close',
   'escalate', 'stall-probe', 'digest', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement',
-  'pr-review-intent', 'pr-review-quality',
 ]
 
 test('every declared prompt file exists', () => {
@@ -33,10 +32,13 @@ test('review prompts demand the trailer as the last line', async () => {
   }
 })
 
-test('the task prompt routes to the surface agent and demands a closing keyword', async () => {
-  const text = await Bun.file(join(ROOT, 'prompts', 'task.md')).text()
+test('the worker brief routes to the surface agent and demands a closing keyword', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
   expect(text).toContain('{{agent_file}}')
   expect(text).toContain('Closes #{{issue}}')
+  // The issue body is the brief now; `render()` throws on a placeholder no
+  // caller resolves, so an inherited {{task_text}} kills the first dispatch.
+  expect(text).not.toContain('{{task_text}}')
 })
 
 test('every review prompt forbids padding as well as softening', async () => {

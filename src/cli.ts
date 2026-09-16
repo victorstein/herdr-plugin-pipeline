@@ -5,7 +5,7 @@ import { answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, slugify, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
 } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
 import { taskRow } from './lib/phases'
@@ -38,10 +38,6 @@ export async function cmdStart(ctx: Ctx, input: {
     repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
   })
   run.orchestrator_pane = input.paneId
-  run.artifacts.spec = join(
-    'docs/superpowers/specs',
-    `${new Date().toISOString().slice(0, 10)}-${slugify(input.title)}-design.md`,
-  )
   await saveRun(ctx.stateDir, run)
   await writeOrchestrator(ctx.stateDir, ctx.session, input.repoKey, {
     pane_id: input.paneId, workspace_id: input.workspaceId,
@@ -49,7 +45,7 @@ export async function cmdStart(ctx: Ctx, input: {
   })
 
   const text = await renderPrompt(ctx.pluginRoot, 'intake', {
-    run_id: run.run_id, title: run.title, spec_path: join(run.repo_root, run.artifacts.spec),
+    run_id: run.run_id, title: run.title,
   })
   return ok(text, JSON.stringify({ run_id: run.run_id }))
 }

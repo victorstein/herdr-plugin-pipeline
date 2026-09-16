@@ -52,3 +52,26 @@ test('every resumePrompt names a resumeActor', () => {
     expect(row.resumeActor, `${row.phase} has a resumePrompt with no actor`).toBeDefined()
   }
 })
+
+// Named one by one, not globbed: `prompts/*-review*.md` also matches
+// branch-review.md, which is orchestrator-owned and must carry neither.
+const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality']
+
+const promptText = (name: string) =>
+  Bun.file(join(import.meta.dir, '..', 'prompts', `${name}.md`)).text()
+
+test('every worker review prompt demands an awaited subagent and a pushed verdict', async () => {
+  for (const name of WORKER_REVIEW_PROMPTS) {
+    const text = await promptText(name)
+    expect(text, `${name}.md must require the subagent be awaited`)
+      .toContain('wait for it within this turn')
+    expect(text, `${name}.md must require the verdict be pushed`)
+      .toContain('Commit and push the verdict')
+  }
+})
+
+test('branch-review carries neither worker instruction — it is orchestrator-owned', async () => {
+  const text = await promptText('branch-review')
+  expect(text).not.toContain('wait for it within this turn')
+  expect(text).not.toContain('Commit and push the verdict')
+})
