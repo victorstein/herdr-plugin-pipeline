@@ -69,6 +69,7 @@ export interface Task {
   decisions: Decision[]
   decision_from: TaskPhase | null
   pending_answer: string | null
+  delivery_attempts: number
   notes: string
 }
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmdDecide } from '../src/cli'
+import { cmdAnswer, cmdDecide } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
@@ -16,7 +16,7 @@ function taskFixture(phase: TaskPhase): Task {
     head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-    decision_from: null, pending_answer: null, notes: '',
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }
 }
 
@@ -76,7 +76,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-  decision_from: null, pending_answer: null, notes: '',
+  decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
 
@@ -124,4 +124,76 @@ test('decide requires a recommendation', async () => {
   const saved = await savedRun(run.run_id)
   expect(saved?.tasks[0]?.phase).toBe('plan')
   expect(saved?.tasks[0]?.decisions).toHaveLength(0)
+})
+
+// ——— cmdAnswer ———
+
+test('answer records the answer but leaves the task blocked', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  const decided = await savedRun(run.run_id)
+  const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
+
+  const result = await cmdAnswer(ctx(), {
+    task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator',
+  })
+  expect(result.ok).toBe(true)
+
+  const saved = await savedRun(run.run_id)
+  const task = saved!.tasks[0]!
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.pending_answer).toBe(decisionId)
+  const decision = task.decisions.find((d) => d.id === decisionId)
+  expect(decision?.answer).toBe('do X')
+  expect(decision?.answered_by).toBe('orchestrator')
+})
+
+test('answer refuses a task that is not blocked', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  const result = await cmdAnswer(ctx(), {
+    task: 't1', decision: 'd1', answer: 'do X', by: 'orchestrator',
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('plan')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved?.tasks[0]?.phase).toBe('plan')
+})
+
+test('answer on a task with a pending answer re-arms delivery', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  const decided = await savedRun(run.run_id)
+  const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
+
+  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'first answer', by: 'orchestrator' })
+
+  const exhausted = await savedRun(run.run_id)
+  exhausted!.tasks[0]!.delivery_attempts = 5
+  await saveRun(dir, exhausted!)
+
+  const result = await cmdAnswer(ctx(), {
+    task: 't1', decision: decisionId, answer: 'second answer', by: 'human',
+  })
+  expect(result.ok).toBe(true)
+
+  const saved = await savedRun(run.run_id)
+  const task = saved!.tasks[0]!
+  expect(task.delivery_attempts).toBe(0)
+  expect(task.pending_answer).toBe(decisionId)
+  const decision = task.decisions.find((d) => d.id === decisionId)
+  expect(decision?.answer).toBe('second answer')
+  expect(decision?.answered_by).toBe('human')
+})
+
+test('answering does not touch passes', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan', passes: { plan: 2 } })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  const decided = await savedRun(run.run_id)
+  const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
+
+  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator' })
+
+  const saved = await savedRun(run.run_id)
+  expect(saved?.tasks[0]?.passes).toEqual({ plan: 2 })
 })

@@ -11,7 +11,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   head_sha_at_entry: null, pr: 5, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-  decision_from: null, pending_answer: null, notes: '',
+  decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
 

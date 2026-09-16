@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { openDecision, openDecisionFor } from './lib/decisions'
+import { answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
@@ -79,7 +79,7 @@ export async function cmdTask(ctx: Ctx, input: {
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: null, registered_at: Date.now(), adopted_at: null,
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-    decision_from: null, pending_answer: null, notes: '',
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }
 
   // detectCycle skips ids it does not recognise, so a typo would otherwise pass
@@ -177,6 +177,37 @@ export async function cmdDecide(ctx: Ctx, input: {
   enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
   await saveRun(ctx.stateDir, run)
   return ok(`opened decision ${decision.id} on ${input.task}; task blocked-on-decision`)
+}
+
+export async function cmdAnswer(ctx: Ctx, input: {
+  task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
+}): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.task))
+  const task = run?.tasks.find((t) => t.task_id === input.task)
+  if (!run || !task) return fail(`no such task: ${input.task}`)
+
+  if (input.by !== 'orchestrator' && input.by !== 'human') {
+    return fail(`--by must be 'orchestrator' or 'human', got: ${input.by}`)
+  }
+
+  if (task.phase !== 'blocked-on-decision') {
+    return fail(`task ${input.task} is not blocked on a decision (phase: ${task.phase})`)
+  }
+
+  let decision
+  try {
+    decision = answerDecision(task, input.decision, input.answer, input.by)
+  } catch {
+    return fail(`no such decision: ${input.decision}`)
+  }
+
+  // Delivery is a separate step (Task 20): writing the answer must not resume
+  // the task, or a slow worker's late file touch would complete the phase unread.
+  task.pending_answer = decision.id
+  task.delivery_attempts = 0
+  await saveRun(ctx.stateDir, run)
+  return ok(`recorded answer to ${decision.id} on ${input.task}; pending delivery`)
 }
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
@@ -313,6 +344,15 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
+    case 'answer':
+      out = await cmdAnswer(ctx, {
+        task: flag(rest, 'task') ?? '',
+        decision: flag(rest, 'decision') ?? '',
+        answer: flag(rest, 'answer') ?? '',
+        by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
+      })
+      break
+
     case 'status': out = await cmdStatus(ctx); break
     case 'drain': out = await cmdDrain(ctx); break
     case 'abort': out = await cmdAbort(ctx, { runId: rest[0] ?? '' }); break
@@ -320,7 +360,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|status|drain|rewind|release|decide|resume|abort|forget> …')
+      console.error('usage: hpipe <start|task|status|drain|rewind|release|decide|answer|resume|abort|forget> …')
       return 1
   }
 

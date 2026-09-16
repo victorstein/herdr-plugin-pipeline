@@ -26,7 +26,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-  decision_from: null, pending_answer: null, notes: '',
+  decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
 
@@ -69,7 +69,7 @@ test('forget unbinds a workspace from its task', async () => {
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-    decision_from: null, pending_answer: null, notes: '',
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   })
   await saveRun(dir, run)
 
