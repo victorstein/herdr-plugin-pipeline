@@ -107,9 +107,15 @@ Two rules in the current design exist because breaking them shipped real bugs, t
   against the event that should have caused them. A level predicate re-fires forever and makes
   `hpipe rewind` a no-op on the row it was offered as the escape for.
 
-`test/integration/smoke.md` is the live runbook. Two things the unit suite cannot prove — per-pane
-prompt fan-out, and whether a review subagent perturbs its worker pane's reported status — are
-assertions in that runbook, not in `bun test`.
+`test/integration/smoke.md` is the live runbook, and its findings section records a full run: two
+issues, two workers, two merged PRs, run `done`. That run found five bugs no unit test reached — the
+worst being that herdr wraps every event as `{event, data:{…}}` while the hook read the outer object,
+so **no task ever bound its pane** and the suite passed anyway, because the test fed the inner shape.
+
+Two questions the unit suite cannot reach were measured there rather than asserted in `bun test`:
+per-pane prompt fan-out, and whether a review subagent perturbs its worker pane's reported status. It
+does not — a backgrounded subagent keeps the pane reading `working` for its whole duration, because
+herdr's detection manifest has a dedicated rule for it. Re-run the runbook if you change either.
 
 ## License
 
