@@ -2512,6 +2512,21 @@ Must carry: `gh issue view #{{issue}}` as the brief, the surface agent file, `{{
 
 - [ ] **Step 4: Write `intake.md`** — research the report or take the user's, open one issue per task with `gh issue create`, register with `hpipe task`, and **call `hpipe dispatch --done` when the batch is complete**.
 
+- [ ] **Step 4a: Shrink `RunArtifacts` to `{ verdicts }`**
+
+The spec says run-level `spec`/`plan` are deleted, but `RunArtifacts` still declares both and
+`promptForRunPhase` still computes `spec_path` and `plan_path` from them and renders them into
+`dispatch.md` and `branch-review.md`. They are always null now — nothing has written them since the
+run-level `spec`/`plan` phases were removed — so both templates are interpolating a default path to a
+document that no longer exists.
+
+Order matters: drop `{{spec_path}}`/`{{plan_path}}` from those two templates **first**, then remove
+`spec_path`/`plan_path` from `promptForRunPhase`'s vars, then drop `spec`/`plan` from `RunArtifacts`
+and `newRun`. Doing it the other way round makes `render()` throw on an unresolved placeholder.
+
+`branch-review.md` reviewed a run-level spec that no longer exists; point it at the branch's merged
+PRs and the per-task specs those PRs carry instead.
+
 - [ ] **Step 5: Revise `prompts/dispatch.md`** — drop plan decomposition, keep `worktree create` + `agent start`, and add the `hpipe dispatch --done` line so every registration path also carries the closing path.
 
 - [ ] **Step 6: Add the prompt-content invariant to `test/table.test.ts`**
