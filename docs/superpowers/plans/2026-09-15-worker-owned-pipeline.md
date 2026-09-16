@@ -57,7 +57,11 @@ So: **inside Milestone 2, run the specific test file named in the task. At each 
 | M2 — The machine | 5–10 | Full suite green, old phase names gone from `src/` |
 | M3 — Gating and delivery | 11–16 | Full suite green |
 | M4 — The decision channel | 17–22 | Full suite green |
-| M5 — Prompts, intake, migration | 23–29 | Full suite green + the live smoke run |
+| M5 — Prompts, intake, migration | 23, **23a**, 24–29 | Full suite green + the live smoke run |
+
+**Task 23a was added mid-execution**, after Task 14 routed dispatch into `research` and revealed that
+nothing in the original 29 tasks ever taught the supervisor to evaluate the five design rows. The
+worker loop is routed but not driven until it lands.
 
 ---
 
@@ -2369,6 +2373,113 @@ Expected: PASS
 ```bash
 git add src/cli.ts src/lib/worker-prompt.ts test/cli-commands.test.ts
 git commit -m "feat: the issue body is the brief; hpipe task takes notes, not text"
+```
+
+---
+
+### Task 23a: Drive the design loop
+
+**This task was missing from the plan entirely.** Tasks 1–14 built the table, the counters, the file
+gate, per-pane delivery and the routing into `research` — but nothing ever taught the supervisor how
+to *evaluate* the five design rows. `gatherSignals` has arms for `implement`, `pr-review-*`, `merge`,
+`close`, `blocked-on-files` and `ci`; `research`, `spec`, `plan`, `spec-review` and `plan-review` fall
+through to `default: return null`, so a dispatched task enters `research` and stalls there forever.
+`promptForTaskPhase` likewise has no arm for them, so entering one delivers nothing at all.
+
+It sits here because it depends on Task 22 (`absoluteArtifactPath` resolving against the worker's
+worktree) and Task 23 (`cmdTask` seeding `Task.artifacts`). Without those, every arm below would read
+a path under `repo_root` that the worker never writes to.
+
+**Files:** `src/supervisor/tasks.ts`, `test/tasks.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test('an artifact row advances when its artifact is fresh in the worktree', async () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w7:p1', checkout_path: worktree })])
+  writeFileSync(join(worktree, run.tasks[0]!.artifacts.research), '# notes
+')
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('an artifact row does not advance on a file that predates phase entry', async () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w7:p1', checkout_path: worktree })])
+  writeFileSync(join(worktree, run.tasks[0]!.artifacts.research), '# stale
+')
+  run.tasks[0]!.phase_entered_at = Date.now() + 10_000
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('a worker review row reads its verdict from the worktree', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', pane_id: 'w7:p1', checkout_path: worktree })])
+  await advanceTasks(run, { ...deps(), verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }) })
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('entering a design row delivers that row's prompt to the worker', async () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w7:p1', checkout_path: worktree })])
+  writeFileSync(join(worktree, run.tasks[0]!.artifacts.research), '# notes
+')
+  const prompts = await advanceTasks(run, deps())
+  expect(prompts.find((p) => p.taskId === 't1')?.paneId).toBe('w7:p1')
+})
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `bun test test/tasks.test.ts -t "design"`
+Expected: FAIL — the task never leaves `research`, because `gatherSignals` returns `null` for it.
+
+- [ ] **Step 3: Add the `gatherSignals` arms**
+
+The three artifact rows need `actorIdle` and `artifactFresh`; the two verdict rows need `actorIdle`, `artifactFresh` and `verdict`. Both resolve their path through `absoluteArtifactPath(run, task)`, which Task 22 made worktree-relative:
+
+```ts
+    case 'research':
+    case 'spec':
+    case 'plan': {
+      const path = absoluteArtifactPath(run, task)
+      if (path === null) return null
+      return {
+        ...base,
+        actorIdle,
+        artifactFresh: await isFresh(path, task.phase_entered_at) &&
+          await isSettled(path, deps.fileSettleMs),
+      }
+    }
+
+    case 'spec-review':
+    case 'plan-review':
+      return {
+        ...base, actorIdle,
+        artifactFresh: await deps.artifactFresh(run, task),
+        verdict: await deps.verdictFor(run, task),
+      }
+```
+
+Reuse whatever the `pr-review-*` arm already does for freshness rather than writing a second path —
+the two verdict shapes are identical and must not drift.
+
+- [ ] **Step 4: Add the `promptForTaskPhase` arms**
+
+Each of the five rows renders the prompt its table row names (`taskRow(task.phase).prompt`), to the
+worker's pane. The rendered vars must include the artifact path the worker is expected to write, so
+the prompt and the predicate agree on one location.
+
+- [ ] **Step 5: Gate**
+
+```
+bun test
+bun run typecheck; echo "exit: $?"
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/supervisor/tasks.ts test/tasks.test.ts
+git commit -m "feat: evaluate and prompt the five design rows"
 ```
 
 ---
