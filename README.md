@@ -30,28 +30,32 @@ or, for local development:
 Requires herdr 0.9.0+, bun, and gh. No build step, and no runtime dependencies —
 `@types/bun` and `typescript` are devDependencies for `bun run typecheck` only.
 
-**You do not need `hpipe` on your PATH.** herdr's manifest has no way to install a binary, so every
-prompt renders the CLI invocation itself — `bun run <plugin-root>/src/cli.ts …` — which works whether
-the plugin was installed from GitHub or linked locally.
+**There is nothing else to install.** Agents never need `hpipe` on your PATH — every prompt renders
+the CLI invocation in full, so the pipeline works the moment the plugin is installed.
 
-If you want the short form for your own typing, use the wrapper, not a direct symlink:
+The things you would reach for yourself are herdr **actions**, available from herdr's UI with no CLI
+at all:
 
-    ln -s /path/to/herdr-plugin-pipeline/bin/hpipe ~/.local/bin/hpipe
+| Action | What it does |
+|---|---|
+| Pipeline status | the fleet, every open decision, anything waiting on you |
+| Claim this pane as orchestrator | rebind a run whose orchestrator pane changed |
+| Reopen the supervisor | when `status` says it died |
+| Drain pending events | force a queue drain |
 
-**Do not symlink `src/cli.ts` directly.** The CLI and the supervisor share one ledger — `cli.ts` falls
-back to `~/.local/state/herdr/plugins/stein.pipeline` when herdr has not injected
-`HERDR_PLUGIN_STATE_DIR` — so a symlink pinned to a checkout means your hand-typed commands write
-*that checkout's* schema into state the installed supervisor is driving. When the two drift, which is
-the normal state of a repo you develop in, you get one of two failures:
+A CLI is only needed for the recovery commands, which take arguments actions cannot: `rewind`,
+`release`, `abort`, `resume`, `forget`. Run those as `bun run <plugin-root>/src/cli.ts …`, or install
+the shorthand with the **Install the hpipe shorthand** action — it links `bin/hpipe` into
+`~/.local/bin` (override with `HPIPE_BIN_DIR`) and tells you if that is not on your PATH.
 
-- a phase the installed table does not have makes `taskRow()` throw on the next tick, visible only in
-  the supervisor pane;
-- a bumped `schema_version` makes the run **silently invisible** to the supervisor, which just stops
-  advancing it and tells you to abort.
-
-`bin/hpipe` asks herdr which copy is installed at call time, so one codebase writes the ledger. It
-survives upgrades — the install directory carries a content hash that changes — and it falls back to
-its own checkout when the plugin is not installed, so it also works from a clone.
+**If you link it by hand, link `bin/hpipe`, never `src/cli.ts`.** The CLI and the supervisor share one
+ledger — `cli.ts` falls back to `~/.local/state/herdr/plugins/stein.pipeline` when herdr has not
+injected `HERDR_PLUGIN_STATE_DIR` — so a link pinned to a checkout means your hand-typed commands
+write *that checkout's* schema into state the installed supervisor is driving. When the two drift,
+which is the normal state of a repo you develop in, you get one of two failures: a phase the installed
+table lacks makes `taskRow()` throw on the next tick, visible only in the supervisor pane; or a bumped
+`schema_version` makes the run **silently invisible** to the supervisor, which just stops advancing it.
+`bin/hpipe` asks herdr which copy is installed at call time, so one codebase writes the ledger.
 
 **Then restart the herdr session you want it in.** Linking registers the plugin globally for your
 user, but its startup hook only runs when a server boots — so on an already-running session nothing

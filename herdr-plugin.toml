@@ -52,6 +52,12 @@ title = "Reopen the supervisor"
 contexts = ["global"]
 command = ["bun", "run", "src/actions/supervisor.ts"]
 
+[[actions]]
+id = "install-cli"
+title = "Install the hpipe shorthand"
+contexts = ["global"]
+command = ["bun", "run", "src/actions/install-cli.ts"]
+
 [[panes]]
 id = "supervisor"
 title = "Pipeline supervisor"
