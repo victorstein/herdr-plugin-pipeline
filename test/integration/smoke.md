@@ -370,20 +370,57 @@ stamped, answered, and resumed to the correct `decision_from`; `close → teardo
 issue — the deadlock this repo's memory records as live; `hpipe status` surfacing an open decision
 with its age.
 
-#### §3 `blocked-on-files` — NOT exercised
+#### §3 `blocked-on-files` — exercised and PASSED (forced)
 
-t1 passed through in 1s, t2 in 2s. t1 reached `done` at 23:23:19; t2 only reached `blocked-on-files`
-at 23:27:02, by which time t1 held nothing. The tasks staggered naturally because t2 spent an extra
-plan-review pass. **The collision path remains unproven.** To force it, give the two tasks equal-length
-design work, or dispatch the second only once the first is at `implement`.
+It did not occur naturally: t1 passed through in 1s and t2 in 2s, because t1 reached `done` at
+23:23:19 while t2 only arrived at 23:27:02 — t2's extra plan-review pass staggered them by nine
+minutes. Two tasks of similar design length would collide; these did not.
 
-#### §5 subagent / `agent_status` — NOT measured
+Forced afterwards with a seeded run (`collide-probe`), driving the real supervisor:
 
-The poll loop below was not run during a review window, so the open question stands. The run gives
-only weak indirect evidence: every review row advanced on a parsed verdict and **no false advance was
-observed**, which is consistent with the design's claim that the verdict-file predicate is an
-independent guard and that a backgrounded subagent therefore costs a delay rather than a wrong
-transition. That is not a measurement. Run the loop.
+| Observation | Result |
+| --- | --- |
+| t1 `implement` holding `src/lib/config.ts`, t2 `blocked-on-files` wanting `src/lib/` | t2 held for 6 consecutive ticks |
+| `hpipe status` during the hold | `⚠ t2 blocked on files held by t1 (implement)` |
+| t1 → `done`, with **two** waiters (t2 `src/lib/`, t3 `src/lib/config.ts`) | **t2 advanced, t3 did not** |
+| t3 after t2 became the holder | held for 8 further ticks, `status` renaming the holder as t2 |
+
+So: a waiter is held while a sibling holds an overlapping prefix; **exactly one task leaves an
+overlapping group per tick**, chosen by `task_id` order; and the released task immediately becomes the
+new holder for the rest of the group. The invariant `releasableFromFiles`' running set exists to
+enforce holds live.
+
+One bug found doing it: `status` advised ``hpipe release --task <holder>`` unconditionally, but
+`cmdRelease` refuses an in-flight holder — so against a healthy one it sent the human at a command
+that bounces. Release is the escape only when the holder is terminal or escalated; otherwise the
+line now reads "waiting for it to finish".
+
+#### §5 subagent / `agent_status` — MEASURED. The pane does NOT read idle.
+
+**Answer: a backgrounded subagent keeps the parent pane reading `working`.** The four worker rows that
+gate on actor idleness are safe even when a worker ignores the await instruction.
+
+Measured directly. A Claude agent in a herdr pane was told to dispatch a subagent **in the background**
+and end its turn immediately — confirmed from the pane: *"Backgrounded agent"*, then *"Subagent
+dispatched in the background. It's still running — ending my turn now."* Polling
+`herdr agent get <pane>` every 2s for the full 78s the subagent ran:
+
+```
+00:38:25 status=idle     verdict_exists=no     <- before dispatch
+00:38:27 status=working  verdict_exists=no     <- dispatched, turn ended
+   … 38 consecutive samples, all status=working, verdict_exists=no …
+00:39:45 status=working  verdict_exists=yes    <- subagent finished
+```
+
+Never once `idle`. The mechanism is herdr's own detection manifest: the parent pane displays
+`✻ Waiting for 1 background agent to finish`, which matches the dedicated `background_agents_working`
+rule (priority 965) and classifies as `working`.
+
+**Caveat on the scope of this result.** It holds while Claude Code prints that specific waiting line.
+If that text changes, or if a future version returns the parent to a bare prompt while children run,
+the rule stops matching and the question reopens. The await-and-do-not-end-your-turn instruction in the
+four review prompts is therefore worth keeping as defence in depth, but it is not load-bearing today —
+and the verdict-file predicate remains an independent guard regardless.
 
 #### Environment note
 

@@ -40,9 +40,16 @@ function taskWarnings(run: Run): string[] {
         (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
       )
       for (const holder of holders) {
+        // `hpipe release` refuses an in-flight holder, so offering it against a
+        // healthy one sends the human at a command that will bounce. It is the
+        // escape only when the holder has stopped moving and nothing will tear
+        // it down.
+        const stuck = taskRow(holder.phase).terminal || holder.phase === 'escalated'
         lines.push(
           `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
-          `\`hpipe release --task ${holder.task_id}\` is the only way out`,
+          (stuck
+            ? `\`hpipe release --task ${holder.task_id}\` is the only way out`
+            : 'waiting for it to finish'),
         )
       }
     }

@@ -125,3 +125,26 @@ test('status tells the human to abort a run from an earlier plugin version', () 
     `— hpipe abort ${run.run_id} to release the repo.`,
   )
 })
+
+test('a healthy holder is reported as finishing, not as needing release', () => {
+  // Live-run finding: `hpipe release` refuses an in-flight task, so advising it
+  // against a healthy holder sends the human at a command that bounces.
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement', files: ['src/lib/'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/lib/config.ts'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal')
+  expect(text).toContain('blocked on files held by t1 (implement)')
+  expect(text).toContain('waiting for it to finish')
+  expect(text).not.toContain('hpipe release --task t1')
+})
+
+test('a stuck holder is still reported as needing release', () => {
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'failed', files: ['src/lib/'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/lib/config.ts'] }),
+  ]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).toContain('hpipe release --task t1')
+})
