@@ -271,3 +271,32 @@ test('dispatch --done finds the active run when no id is given', async () => {
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.intake_closed).toBe(true)
 })
+
+test('task registration refuses a missing issue number', async () => {
+  // Live-run finding: the argv parser defaults --issue to 0, so a mistyped
+  // command minted a ghost task into a running run.
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 0, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--issue')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks).toHaveLength(0)
+})
+
+test('task registration refuses an empty branch', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: '   ', issue: 7, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--branch')
+})

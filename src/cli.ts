@@ -60,6 +60,14 @@ export async function cmdTask(ctx: Ctx, input: {
   )
   if (!run) return fail('no run is in the intake, dispatch or execute phase')
 
+  // The argv parser defaults a missing --issue to 0 and a missing --branch to
+  // "". Without these checks a mistyped command mints a ghost task into a live
+  // run, and there is no command that removes one. Measured on a live run.
+  if (!Number.isInteger(input.issue) || input.issue <= 0) {
+    return fail(`--issue must be a positive issue number, got: ${input.issue || '(missing)'}`)
+  }
+  if (input.branch.trim().length === 0) return fail('--branch is required')
+
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
     return fail(`no agent definition at ${agentFile} — check --surface`)
