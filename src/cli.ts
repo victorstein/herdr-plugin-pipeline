@@ -135,16 +135,21 @@ export async function cmdRewind(ctx: Ctx, input: {
   return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
 }
 
-export async function cmdRelease(stateDir: string, run: Run, taskId: string): Promise<void> {
-  const task = run.tasks.find((t) => t.task_id === taskId)
-  if (!task) throw new Error(`no such task: ${taskId}`)
+export async function cmdRelease(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
+  const task = run?.tasks.find((t) => t.task_id === input.taskId)
+  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+
   // `escalated` is not `terminal` — it carries `escalated_from` so a human can
   // rewind it — but it has stopped moving and is a legitimate release target too.
   if (!taskRow(task.phase).terminal && task.phase !== 'escalated') {
-    throw new Error(`task ${taskId} is still in flight (${task.phase})`)
+    return fail(`task ${input.taskId} is still in flight (${task.phase})`)
   }
+
   task.files = []
-  await saveRun(stateDir, run)
+  await saveRun(ctx.stateDir, run)
+  return ok(`released ${input.taskId}; files reservation cleared`)
 }
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
@@ -269,19 +274,9 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
-    case 'release': {
-      const taskId = flag(rest, 'task') ?? ''
-      const owner = (await listRuns(ctx.stateDir, ctx.session))
-        .find((r) => r.tasks.some((t) => t.task_id === taskId))
-      if (!owner) { out = fail(`no such task: ${taskId}`); break }
-      try {
-        await cmdRelease(ctx.stateDir, owner, taskId)
-        out = ok(`released ${taskId}; files reservation cleared`)
-      } catch (err) {
-        out = fail(err instanceof Error ? err.message : String(err))
-      }
+    case 'release':
+      out = await cmdRelease(ctx, { taskId: flag(rest, 'task') ?? '' })
       break
-    }
 
     case 'status': out = await cmdStatus(ctx); break
     case 'drain': out = await cmdDrain(ctx); break

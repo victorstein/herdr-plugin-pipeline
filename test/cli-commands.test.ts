@@ -82,13 +82,24 @@ test('release drops a terminal task files reservation', async () => {
     { task_id: 't1', phase: 'failed', files: ['a/'] },
     { task_id: 't2', phase: 'blocked-on-files', files: ['a/'] },
   ])
-  await cmdRelease(dir, run, 't1')
-  expect(run.tasks[0]?.files).toEqual([])
+  await saveRun(dir, run)
+
+  expect((await cmdRelease(ctx(), { taskId: 't1' })).ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.files).toEqual([])
 })
 
 test('release refuses a task that is still in flight', async () => {
   const run = runWithTasks([{ task_id: 't1', phase: 'implement', files: ['a/'] }])
-  await expect(cmdRelease(dir, run, 't1')).rejects.toThrow('still in flight')
+  await saveRun(dir, run)
+
+  const result = await cmdRelease(ctx(), { taskId: 't1' })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('still in flight')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.files).toEqual(['a/'])
 })
 
 test('release unblocks a sibling that was waiting on the same files', async () => {
@@ -96,10 +107,11 @@ test('release unblocks a sibling that was waiting on the same files', async () =
     { task_id: 't1', phase: 'failed', files: ['a/'] },
     { task_id: 't2', phase: 'blocked-on-files', files: ['a/'] },
   ])
-  const waiter = run.tasks[1]!
-  expect(filesClearFor(waiter, run.tasks)).toBe(false)
+  await saveRun(dir, run)
+  expect(filesClearFor(run.tasks[1]!, run.tasks)).toBe(false)
 
-  await cmdRelease(dir, run, 't1')
+  await cmdRelease(ctx(), { taskId: 't1' })
 
-  expect(filesClearFor(waiter, run.tasks)).toBe(true)
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(filesClearFor(saved!.tasks[1]!, saved!.tasks)).toBe(true)
 })
