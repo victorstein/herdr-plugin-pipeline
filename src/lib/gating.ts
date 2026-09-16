@@ -43,12 +43,31 @@ export function gateStatus(task: Task, all: Task[]): GateState {
   })
   if (pending.length > 0) return { state: 'waiting', on: pending }
 
-  const colliding = all
-    .filter((t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files))
-    .map((t) => t.task_id)
-  if (colliding.length > 0) return { state: 'waiting', on: colliding }
-
   return { state: 'ready' }
+}
+
+export function filesClearFor(task: Task, all: Task[]): boolean {
+  return !all.some(
+    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
+  )
+}
+
+/**
+ * One pass in task_id order, at most one release per overlapping group. Without
+ * the running set, two tasks freed by the same teardown both read "nothing
+ * overlaps" on the same tick and both enter `implement`.
+ */
+export function releasableFromFiles(all: Task[]): Task[] {
+  const waiting = all
+    .filter((t) => t.phase === 'blocked-on-files')
+    .sort((a, b) => a.task_id.localeCompare(b.task_id))
+  const released: Task[] = []
+  for (const t of waiting) {
+    if (!filesClearFor(t, all)) continue
+    if (released.some((r) => filesOverlap(r.files, t.files))) continue
+    released.push(t)
+  }
+  return released
 }
 
 /** Kahn's algorithm. Returns the ids still in the graph when progress stops. */

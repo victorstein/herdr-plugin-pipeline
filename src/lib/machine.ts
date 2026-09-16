@@ -105,7 +105,7 @@ export interface TaskSignals {
   mergedAtMs?: number
   issueClosed: boolean
   closedAtMs?: number
-  filesClear?: boolean
+  filesClear: boolean
   ciBucket: CiBucket | null
   maxPasses: number
 }

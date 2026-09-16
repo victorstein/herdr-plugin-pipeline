@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { gateStatus } from '../lib/gating'
+import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { TASK_ROWS } from '../lib/phases'
@@ -93,6 +93,8 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
   // `done` in the same call, skipping that phase's own settle.
   await runTeardown([run], deps.removeWorktree)
 
+  const releasable = new Set(releasableFromFiles(run.tasks).map((t) => t.task_id))
+
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
       const gate = gateStatus(task, run.tasks)
@@ -114,7 +116,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
     // while it is mid-turn, exactly as run phases are gated.
     if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
 
-    const signals = await gatherSignals(run, task, deps)
+    const signals = await gatherSignals(run, task, deps, releasable)
     if (!signals) continue
 
     const cameFrom = task.phase
@@ -128,7 +130,9 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
   return prompts
 }
 
-async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
+async function gatherSignals(
+  run: Run, task: Task, deps: TaskDeps, releasable: ReadonlySet<string>,
+) {
   const base = {
     actorIdle: deps.actorIdle,
     artifactFresh: false,
@@ -139,6 +143,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
     mergedAtMs: undefined as number | undefined,
     issueClosed: false,
     closedAtMs: undefined as number | undefined,
+    filesClear: false,
     ciBucket: task.ci,
     maxPasses: deps.maxPasses,
   }
@@ -167,6 +172,8 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
       const view = await deps.issueView(task.issue)
       return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
     }
+    case 'blocked-on-files':
+      return { ...base, filesClear: releasable.has(task.task_id) }
     case 'ci':
       return base
     default:
