@@ -3,6 +3,7 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "separate-pull-requests": true,
+  "extra-files": ["herdr-plugin.toml"],
   "packages": {".":{"changelog-path":"CHANGELOG.md","package-name":"herdr-plugin-pipeline","release-type":"simple"}},
   "changelog-sections": [
     { "type": "feat",     "section": "Features" },
