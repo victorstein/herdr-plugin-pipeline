@@ -59,6 +59,8 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
     }
 
     case 'dispatch': {
+      // Edge, not level: `hpipe rewind <run> dispatch` clears `adopted_at` on
+      // bound tasks so this can re-fire. Without that this row is a one-way door.
       if (s.newestAdoptedAt === null || s.newestAdoptedAt <= run.phase_entered_at) return null
       return enterRunPhase(run, 'execute', 'a worktree was adopted')
     }

@@ -1484,6 +1484,28 @@ git commit -m "feat: group delivery by actor pane instead of by run"
 
 ### Task 14: Resolve `actorIdle` per row, live
 
+> **⚠ MUST-FIX, carried from Task 10.** `src/supervisor/tasks.ts` currently opens the gate with
+> `enterTaskPhase(run, task, 'implement', 'gate opened')`, and `src/cli.ts` does the same at
+> registration — while `taskRow('queued').onClear` is `research`. **A dispatched task therefore skips
+> `research → spec → spec-review → plan → plan-review` and goes straight to writing code**, which is
+> the entire loop this redesign exists to create. Task 10 routed it this way deliberately and said so:
+> `gatherSignals` had no arms for the worker artifact rows, so routing to `research` would have
+> stranded every task with no signal. This task adds those arms, so it must also flip the routing.
+>
+> Both call sites take their next phase from the table — `taskRow('queued').onClear` — rather than a
+> literal, and add this regression test to `test/tasks.test.ts`:
+>
+> ```ts
+> test('an opened gate dispatches into the design loop, not straight to implement', async () => {
+>   const run = mkRun([mkTask({ task_id: 't1', phase: 'queued' })])
+>   await advanceTasks(run, deps())
+>   expect(run.tasks[0]?.phase).toBe('research')
+> })
+> ```
+>
+> Do not close this task with the literal still in place.
+
+
 **Files:**
 - Modify: `src/supervisor/tasks.ts`
 - Test: `test/tasks.test.ts`
