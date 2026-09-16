@@ -17,7 +17,7 @@ import { taskRow } from '../lib/phases'
 import { sendProbes, stallCandidates, taskStallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
-import { advanceTasks } from './tasks'
+import { advanceTasks, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import type { AgentStatus } from '../lib/types'
 
@@ -181,6 +181,15 @@ async function main(): Promise<void> {
             },
             removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
+          })
+
+          // After advanceTasks, so a task resumed this tick gets a full tick to
+          // settle before its phase is evaluated — the same grace every other
+          // transition in the driver gets.
+          await deliverPendingAnswers(run, {
+            pluginRoot,
+            promptRetryMax: config.PROMPT_RETRY_MAX,
+            send: (paneId, text) => herdr.agentPrompt(paneId, text),
           })
 
           const enteredRunPhase = run.phase === runPhaseBefore

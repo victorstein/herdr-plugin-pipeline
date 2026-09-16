@@ -208,3 +208,47 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       return null
   }
 }
+
+export interface AnswerDeps {
+  pluginRoot: string
+  promptRetryMax: number
+  send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string }>
+}
+
+/**
+ * The phase reset is a consequence of a successful send, never of the write.
+ * A worker busy for more than PROMPT_RETRY_MAX ticks would otherwise have its
+ * phase reset, its delivery abandoned, and would then complete the phase with
+ * the answer unread — with run.history asserting the decision was applied.
+ */
+export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise<void> {
+  for (const task of run.tasks) {
+    if (task.phase !== 'blocked-on-decision' || task.pending_answer === null) continue
+    if (task.pane_id === null) continue
+    if (task.delivery_attempts >= deps.promptRetryMax) continue
+
+    const resumeTo = task.decision_from
+    if (resumeTo === null) continue
+
+    const decision = task.decisions.find((d) => d.id === task.pending_answer)
+    if (!decision) continue
+
+    const text = await renderPrompt(deps.pluginRoot, 'answer', {
+      question: decision.question,
+      answer: decision.answer ?? '',
+      answered_by: decision.answered_by ?? 'orchestrator',
+      phase: resumeTo,
+    })
+
+    const result = await deps.send(task.pane_id, text)
+    if (!result.ok) {
+      task.delivery_attempts += 1
+      continue
+    }
+
+    task.pending_answer = null
+    task.delivery_attempts = 0
+    enterTaskPhase(run, task, resumeTo, `decision ${decision.id} answered`)
+    task.decision_from = null
+  }
+}

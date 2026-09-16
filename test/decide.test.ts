@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cmdAnswer, cmdDecide } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { type AnswerDeps, deliverPendingAnswers } from '../src/supervisor/tasks'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
 function taskFixture(phase: TaskPhase): Task {
@@ -196,4 +197,119 @@ test('answering does not touch passes', async () => {
 
   const saved = await savedRun(run.run_id)
   expect(saved?.tasks[0]?.passes).toEqual({ plan: 2 })
+})
+
+// ——— deliverPendingAnswers ———
+
+function blockedOnDecision(): { run: Run; task: Task; decisionId: string } {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const task = mkTask({ task_id: 't1', phase: 'plan', pane_id: 'w7:p1' })
+  const decision = openDecision(task, { question: 'ship or wait?', recommendation: 'ship' })
+  answerDecision(task, decision.id, 'wait for the audit', 'human')
+  task.phase = 'blocked-on-decision'
+  task.decision_from = 'plan'
+  task.pending_answer = decision.id
+  task.phase_entered_at = Date.now() - 60_000
+  run.tasks = [task]
+  return { run, task, decisionId: decision.id }
+}
+
+const answerDeps = (over: Partial<AnswerDeps> = {}): AnswerDeps => ({
+  pluginRoot: join(import.meta.dir, '..'),
+  promptRetryMax: 5,
+  send: async () => ({ ok: true }),
+  ...over,
+})
+
+test('a delivered answer returns the task and resets phase_entered_at', async () => {
+  const { run, task } = blockedOnDecision()
+  const enteredBefore = task.phase_entered_at
+
+  await deliverPendingAnswers(run, answerDeps())
+
+  expect(task.phase).toBe('plan')
+  expect(task.pending_answer).toBeNull()
+  expect(task.decision_from).toBeNull()
+  expect(task.delivery_attempts).toBe(0)
+  expect(task.phase_entered_at).toBeGreaterThan(enteredBefore)
+})
+
+test('a failed send leaves the task blocked and counts the attempt', async () => {
+  const { run, task, decisionId } = blockedOnDecision()
+
+  await deliverPendingAnswers(run, answerDeps({
+    send: async () => ({ ok: false, code: 'agent_blocked' }),
+  }))
+
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.decision_from).toBe('plan')
+  expect(task.pending_answer).toBe(decisionId)
+  expect(task.delivery_attempts).toBe(1)
+})
+
+test('an exhausted budget holds the task blocked rather than resuming it', async () => {
+  const { run, task, decisionId } = blockedOnDecision()
+  task.delivery_attempts = 5
+  let sends = 0
+
+  await deliverPendingAnswers(run, answerDeps({
+    send: async () => { sends += 1; return { ok: true } },
+  }))
+
+  expect(sends).toBe(0)
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.pending_answer).toBe(decisionId)
+  expect(task.delivery_attempts).toBe(5)
+})
+
+test('counters are untouched by a decision round trip', async () => {
+  const { run, task } = blockedOnDecision()
+  task.passes = { plan: 2 }
+
+  await deliverPendingAnswers(run, answerDeps())
+
+  expect(task.phase).toBe('plan')
+  expect(task.passes).toEqual({ plan: 2 })
+})
+
+test('the delivered prompt carries the question and the answer', async () => {
+  const { run } = blockedOnDecision()
+  const pluginRoot = mkdtempSync(join(tmpdir(), 'answer-prompt-'))
+  mkdirSync(join(pluginRoot, 'prompts'))
+  writeFileSync(
+    join(pluginRoot, 'prompts', 'answer.md'),
+    'resume {{phase}}\nQ: {{question}}\nA: {{answer}}\nby {{answered_by}}\n',
+  )
+  const sent: Array<{ paneId: string; text: string }> = []
+
+  try {
+    await deliverPendingAnswers(run, answerDeps({
+      pluginRoot,
+      send: async (paneId, text) => { sent.push({ paneId, text }); return { ok: true } },
+    }))
+  } finally {
+    rmSync(pluginRoot, { recursive: true, force: true })
+  }
+
+  expect(sent).toHaveLength(1)
+  expect(sent[0]?.paneId).toBe('w7:p1')
+  expect(sent[0]?.text).toContain('Q: ship or wait?')
+  expect(sent[0]?.text).toContain('A: wait for the audit')
+  expect(sent[0]?.text).toContain('by human')
+  expect(sent[0]?.text).toContain('resume plan')
+})
+
+test('a task whose pane died is skipped rather than resumed', async () => {
+  const { run, task, decisionId } = blockedOnDecision()
+  task.pane_id = null
+  let sends = 0
+
+  await deliverPendingAnswers(run, answerDeps({
+    send: async () => { sends += 1; return { ok: true } },
+  }))
+
+  expect(sends).toBe(0)
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.pending_answer).toBe(decisionId)
+  expect(task.delivery_attempts).toBe(0)
 })
