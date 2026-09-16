@@ -29,6 +29,14 @@ export interface PhaseRow<P extends string> {
   resumePrompt?: string
   resumeActor?: 'orchestrator' | 'worker'
   stallable?: boolean
+  /**
+   * Extra condition for a stallable row that is healthy while it waits. Without
+   * it, `execute` is probed 15 minutes into every run — during the phase where
+   * the orchestrator is busiest — which is the false alarm v4's third review
+   * round removed. Structurally typed to keep this module free of a types.ts
+   * import, which would cycle.
+   */
+  stallWhen?: (run: { intake_closed: boolean; tasks: readonly { phase: string }[] }) => boolean
   /** Required when `actor` resolves to no pane and the row is stallable. */
   probeTarget?: 'orchestrator'
   holdsFiles?: boolean | 'inherit'
@@ -36,13 +44,19 @@ export interface PhaseRow<P extends string> {
   releasesPane?: boolean
 }
 
+const TERMINAL_OR_SETTLED: ReadonlySet<string> = new Set([
+  'done', 'failed', 'orphaned', 'blocked-on-failure', 'escalated',
+])
+
 export const RUN_ROWS: readonly PhaseRow<RunPhase>[] = [
   { phase: 'intake', actor: 'orchestrator', signal: 'registration',
     onClear: 'dispatch', prompt: 'intake' },
   { phase: 'dispatch', actor: 'orchestrator', signal: 'worktree',
     onClear: 'execute', prompt: 'dispatch', stallable: true },
-  { phase: 'execute', signal: 'gate',
-    onClear: 'branch-review', stallable: true, probeTarget: 'orchestrator' },
+  { phase: 'execute', signal: 'gate', onClear: 'branch-review',
+    stallable: true, probeTarget: 'orchestrator',
+    stallWhen: (run) => !run.intake_closed && run.tasks.length > 0 &&
+      run.tasks.every((t) => TERMINAL_OR_SETTLED.has(t.phase)) },
   // Unlike the other review rows, this one loops back onto itself: by the time
   // it runs every task is merged and torn down, so there is no producer phase
   // to return to. The orchestrator patches the branch directly, and the counter
@@ -91,8 +105,7 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   { phase: 'blocked-on-files', signal: 'files', onClear: 'implement',
     stallable: true, probeTarget: 'orchestrator', holdsFiles: false },
 
-  // A worker whose pane hangs without emitting `pane.exited` goes unnoticed
-  // otherwise; this is the one task-level probe that ships today.
+  // A worker whose pane hangs without emitting `pane.exited` goes unnoticed otherwise.
   { phase: 'implement', actor: 'worker', signal: 'pr',
     onClear: 'pr-review-intent', prompt: 'implement', stallable: true, holdsFiles: true },
   { phase: 'pr-review-intent', actor: 'worker', signal: 'verdict',

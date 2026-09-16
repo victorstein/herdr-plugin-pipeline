@@ -21,11 +21,28 @@ test('a verdict phase open past the threshold is a candidate', () => {
   expect(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, new Set())).toHaveLength(1)
 })
 
-test('execute is probed via the orchestrator when intake was never closed', () => {
+test('execute is probed once every task is terminal but intake was never closed', () => {
   const run = runAt('execute', LONG_AGO)
   run.intake_closed = false
+  run.tasks = [mkTask({ phase: 'done' })]
   const out = stallCandidates([run], NOW, 15, new Set())
   expect(out.map((c) => c.paneId)).toEqual([ORCHESTRATOR_PANE])
+})
+
+test('a healthy execute with work still running is NOT probed', () => {
+  // v4's third review round removed exactly this false alarm: a six-worker run
+  // would otherwise be probed 15 minutes in, while the orchestrator is busiest.
+  const run = runAt('execute', LONG_AGO)
+  run.intake_closed = false
+  run.tasks = [mkTask({ phase: 'implement' }), mkTask({ task_id: 't2', phase: 'done' })]
+  expect(stallCandidates([run], NOW, 15, new Set())).toHaveLength(0)
+})
+
+test('execute is not probed once intake is properly closed', () => {
+  const run = runAt('execute', LONG_AGO)
+  run.intake_closed = true
+  run.tasks = [mkTask({ phase: 'done' })]
+  expect(stallCandidates([run], NOW, 15, new Set())).toHaveLength(0)
 })
 
 test('dispatch is probed via the orchestrator too — its row is stallable', () => {

@@ -33,6 +33,7 @@ export function stallCandidates(
   for (const run of runs) {
     const row = runRow(run.phase)
     if (!row.stallable) continue
+    if (row.stallWhen && !row.stallWhen(run)) continue
 
     const paneId = probePaneFor(run, row, null)
     if (!paneId) continue
