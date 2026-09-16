@@ -139,7 +139,8 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
       prompts.push({
-        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
+        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
+          `worktree create --cwd ${run.repo_root}:\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
         taskId: task.task_id,

@@ -171,6 +171,7 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
     run_id: run.run_id, title: run.title,
     pass: String(counterFor(run, run.phase)),
     verdict_path: verdictPath,
+    repo_root: run.repo_root,
   }
 
   switch (run.phase) {

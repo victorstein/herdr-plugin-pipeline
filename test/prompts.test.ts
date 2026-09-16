@@ -55,3 +55,11 @@ test('no review prompt still demands a finding', async () => {
     expect(text).not.toContain('finds nothing is a failed review')
   }
 })
+
+test('the dispatch prompt pins the worktree to the run repo, not the focused workspace', async () => {
+  // Live-run finding: without --cwd, herdr resolves the repo from the focused
+  // workspace — the supervisor's own on a cold start — and the worker is
+  // launched in the wrong repository entirely.
+  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(text).toContain('worktree create --cwd {{repo_root}}')
+})

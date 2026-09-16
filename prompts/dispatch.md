@@ -5,13 +5,20 @@ two agents off the same files.
 
 **When you are told a task is ready**, create its worktree and start the worker on it:
 
-    herdr worktree create --branch <branch> --base main
+    herdr worktree create --cwd {{repo_root}} --branch <branch> --base main
     # capture .result.root_pane.pane_id from that response
     herdr agent start <name> --kind claude --pane <root_pane_id> -- \
       --dangerously-skip-permissions "<the worker brief you were given>"
 
+**`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
+*focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
+start. Omitting it creates the worktree in whatever repo happens to be focused and launches the
+worker there, reading `gh issue view` against a different repo's issues. Measured on a live run.
+
 `agent start` adopts the **existing** root pane — it does not create one, and there is no orphan pane
-to close. Do not pass `--cwd`, `--workspace` or `--split`; they are not the 0.9.0 signature.
+to close. Do not pass `--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its
+0.9.0 signature. That prohibition is about `agent start` only — `worktree create` has `--cwd` and
+needs it.
 
 Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
 issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
