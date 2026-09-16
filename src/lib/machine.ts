@@ -1,3 +1,4 @@
+import { type PhaseRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
@@ -120,7 +121,6 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
 
 export interface TaskSignals {
   actorIdle: boolean
-  workerIdle: boolean
   artifactFresh: boolean
   verdict: VerdictResult | null
   prNumber: number | null
@@ -133,54 +133,48 @@ export interface TaskSignals {
   maxPasses: number
 }
 
-const TASK_REVIEW_PHASES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  'task-review-spec', 'task-review-quality',
-])
+function advanceLoopingRow(
+  run: Run, task: Task, row: PhaseRow<TaskPhase>, cleared: boolean,
+  maxPasses: number, headSha: string | null,
+): Task | null {
+  if (cleared) {
+    return enterTaskPhase(run, task, row.onClear as TaskPhase, 'cleared')
+  }
+  const count = bumpCounter(task, row.phase)
+  if (count >= maxPasses) {
+    return enterTaskPhase(run, task, 'escalated', `${count} passes at ${row.phase}`)
+  }
+  enterTaskPhase(run, task, row.onBlocker as TaskPhase, `returned (pass ${count})`)
+  if (task.phase === 'implement') task.head_sha_at_entry = headSha
+  return task
+}
 
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
   switch (task.phase) {
     case 'execute': {
       // Edge, not level: the PR must have moved since this phase was entered.
       const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
-      if (!s.workerIdle || s.prNumber === null || !moved) return null
+      if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
       return enterTaskPhase(run, task, 'task-review-spec', `PR #${s.prNumber} at ${s.headSha}`)
     }
 
-    case 'task-review-spec':
-    case 'task-review-quality': {
+    case 'spec-review':
+    case 'plan-review':
+    case 'pr-review-intent':
+    case 'pr-review-quality': {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
-
-      if (s.verdict.verdict === 'CLEAR') {
-        const next: TaskPhase = task.phase === 'task-review-spec' ? 'task-review-quality' : 'ci'
-        return enterTaskPhase(run, task, next, 'review cleared')
-      }
-
-      if (task.pass >= s.maxPasses) {
-        return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
-      }
-
-      enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
-      task.pass += 1
-      task.head_sha_at_entry = s.headSha
-      return task
+      return advanceLoopingRow(
+        run, task, taskRow(task.phase), s.verdict.verdict === 'CLEAR',
+        s.maxPasses, s.headSha,
+      )
     }
 
     case 'ci': {
-      if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
-      if (s.ciBucket === 'fail') {
-        // CI retries draw on the same budget as review retries. Without this the
-        // task cycles execute → review → ci → execute forever, bypassing the one
-        // safety valve the module has.
-        if (task.pass >= s.maxPasses) {
-          return enterTaskPhase(run, task, 'escalated', `CI still red after ${task.pass} passes`)
-        }
-        enterTaskPhase(run, task, 'execute', 'CI red')
-        task.pass += 1
-        task.head_sha_at_entry = s.headSha
-        return task
-      }
-      return null
+      if (s.ciBucket !== 'pass' && s.ciBucket !== 'fail') return null
+      return advanceLoopingRow(
+        run, task, taskRow('ci'), s.ciBucket === 'pass', s.maxPasses, s.headSha,
+      )
     }
 
     case 'merge': {

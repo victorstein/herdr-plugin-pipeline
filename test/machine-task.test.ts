@@ -153,3 +153,41 @@ test('counters are independent per phase', () => {
   expect(counterFor(task, 'plan-review')).toBe(0)
   expect(counterFor(task, 'ci')).toBe(0)
 })
+
+test('the implement -> reviews -> red ci lap terminates instead of resetting', () => {
+  const { run, task } = fixture('pr-review-intent')
+  const clear = { verdict: 'CLEAR' as const, blockers: 0, majors: 0 }
+  const signals = {
+    actorIdle: true, artifactFresh: true, verdict: clear,
+    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
+    ciBucket: null as null, maxPasses: 2,
+  }
+
+  advanceTask(run, task, signals)
+  advanceTask(run, task, signals)
+  expect(task.phase).toBe('ci')
+  advanceTask(run, task, { ...signals, verdict: null, ciBucket: 'fail' })
+  expect(task.phase).toBe('implement')
+  expect(counterFor(task, 'ci')).toBe(1)
+
+  enterTaskPhase(run, task, 'pr-review-intent', 'test')
+  advanceTask(run, task, signals)
+  advanceTask(run, task, signals)
+  advanceTask(run, task, { ...signals, verdict: null, ciBucket: 'fail' })
+  expect(task.phase).toBe('escalated')
+  expect(counterFor(task, 'ci')).toBe(2)
+})
+
+test('a review row escalates at MAX_PASSES on its own counter', () => {
+  const { run, task } = fixture('spec-review')
+  const blocker = { verdict: 'BLOCKER' as const, blockers: 1, majors: 0 }
+  const s = {
+    actorIdle: true, artifactFresh: true, verdict: blocker, prNumber: null,
+    headSha: null, merged: false, issueClosed: false, ciBucket: null, maxPasses: 2,
+  }
+  advanceTask(run, task, s)
+  expect(task.phase).toBe('spec')
+  enterTaskPhase(run, task, 'spec-review', 'test')
+  advanceTask(run, task, s)
+  expect(task.phase).toBe('escalated')
+})
