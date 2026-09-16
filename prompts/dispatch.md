@@ -22,12 +22,12 @@ needs it.
 
 Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
 issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
-for `hpipe decide`. Do not summarise it, do not add task text of your own: the issue body is the
+for `{{hpipe}} decide`. Do not summarise it, do not add task text of your own: the issue body is the
 brief, and anything you say here instead of in the issue is lost.
 
 **Still registering?** New tasks go in with an issue first, then:
 
-    hpipe task --branch <branch> --issue <n> --surface <surface> \
+    {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
                [--depends-on <task_ids>] [--files <path-prefixes>] \
                [--notes "<batch context that does not belong in a public issue>"]
 
@@ -36,6 +36,6 @@ with `--files`, or with `--depends-on` when one needs the other's result.
 
 **When the last task is registered:**
 
-    hpipe dispatch --done
+    {{hpipe}} dispatch --done
 
 Nothing infers that the batch is complete, and the run cannot finish until you say so.

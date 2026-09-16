@@ -14,7 +14,7 @@ Every behavioural decision goes down as an explicit, labelled assumption, so the
 can attack it. A choice buried in prose is a choice nobody reviews.
 
 Mirror the nearest existing example and name the file you modelled on. If neither this repo nor its
-gold standard establishes a pattern this work needs, do not invent one — `hpipe decide` with your
+gold standard establishes a pattern this work needs, do not invent one — `{{hpipe}} decide` with your
 recommendation.
 
 If you are back here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file for this

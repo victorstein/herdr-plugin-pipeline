@@ -25,7 +25,7 @@ and passing it up unformed is exactly the cost this pipeline exists to remove.
 
 ## Either way, record the answer
 
-    hpipe answer --task {{task_id}} --decision {{decision_id}} \
+    {{hpipe}} answer --task {{task_id}} --decision {{decision_id}} \
                  --answer "<the decision and the reason for it>" \
                  --by orchestrator|human
 

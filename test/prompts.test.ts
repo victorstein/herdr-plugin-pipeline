@@ -63,3 +63,13 @@ test('the dispatch prompt pins the worktree to the run repo, not the focused wor
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
   expect(text).toContain('worktree create --cwd {{repo_root}}')
 })
+
+test('no prompt hardcodes the hpipe binary — it must be rendered', async () => {
+  // herdr's manifest cannot put a binary on PATH, so a plugin installed from
+  // GitHub has no `hpipe`. A prompt naming it literally is uninvokable there.
+  for (const name of ALL) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    const bare = text.replace(/\{\{hpipe\}\}/g, '')
+    expect(bare, `${name}.md hardcodes hpipe; use {{hpipe}}`).not.toContain('hpipe')
+  }
+})

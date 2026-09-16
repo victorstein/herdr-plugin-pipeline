@@ -20,17 +20,17 @@ plans its own issue.
 
 4. **Register each one:**
 
-       hpipe task --branch <branch> --issue <n> --surface <surface> \
+       {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
                   [--depends-on <task_ids>] [--files <path-prefixes>] \
                   [--notes "<batch context that does not belong in a public issue>"]
 
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
-   exists. `hpipe task` prints the task id, and either the worker brief to dispatch or
+   exists. `{{hpipe}} task` prints the task id, and either the worker brief to dispatch or
    `queued: waiting on …` — which is correct, and you will be told when that task is ready.
 
 5. **When the last task is registered, close intake:**
 
-       hpipe dispatch --done
+       {{hpipe}} dispatch --done
 
    Nothing infers that you are finished. Until you run it the run cannot complete, and the supervisor
    keeps a finished batch open waiting for a task you were never going to add.

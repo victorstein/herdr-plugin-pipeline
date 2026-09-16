@@ -43,7 +43,7 @@ When you hit a choice you should not make alone — expensive to undo, changes s
 surface to a contract, invents a pattern this repo does not already establish, or trades off
 security or data integrity — surface it as the **last action of your turn**:
 
-    hpipe decide --task {{task_id}} \
+    {{hpipe}} decide --task {{task_id}} \
       --question "<what must be decided, and why it cannot be settled here>" \
       --recommend "<the path you would take, and the reasoning>"
 

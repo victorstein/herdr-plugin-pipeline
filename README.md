@@ -19,9 +19,26 @@ window.
 
 ## Install
 
+From GitHub:
+
+    herdr plugin install victorstein/herdr-plugin-pipeline
+
+or, for local development:
+
     herdr plugin link /path/to/herdr-plugin-pipeline
 
-Requires herdr 0.9.0+, bun, and gh. No build step.
+Requires herdr 0.9.0+, bun, and gh. No build step, and no runtime dependencies —
+`@types/bun` and `typescript` are devDependencies for `bun run typecheck` only.
+
+**You do not need `hpipe` on your PATH.** herdr's manifest has no way to install a binary, so every
+prompt renders the CLI invocation instead: `bun run <plugin-root>/src/cli.ts …` when the plugin was
+installed from GitHub, and plain `hpipe` when a symlink on your PATH resolves back into this same
+checkout. If you want the short form for your own typing:
+
+    ln -s /path/to/herdr-plugin-pipeline/src/cli.ts ~/.local/bin/hpipe
+
+That is a convenience, not a requirement — and a symlink pointing at a *different* checkout is
+ignored deliberately, so agents are never aimed at another copy's ledger.
 
 **Then restart the herdr session you want it in.** Linking registers the plugin globally for your
 user, but its startup hook only runs when a server boots — so on an already-running session nothing
