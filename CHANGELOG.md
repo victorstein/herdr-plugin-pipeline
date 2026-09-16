@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.0...v1.2.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* resolve the installed plugin instead of symlinking a checkout ([#6](https://github.com/victorstein/herdr-plugin-pipeline/issues/6)) ([0d5d545](https://github.com/victorstein/herdr-plugin-pipeline/commit/0d5d5456d037e251b3f15a312f9d13cbc4b567b0))
+
 ## [1.2.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.1.0...v1.2.0) (2026-09-16)
 
 
