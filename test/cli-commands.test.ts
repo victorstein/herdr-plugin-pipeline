@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmdAbort, cmdForget, cmdRelease, cmdResume, cmdStatus, cmdTask } from '../src/cli'
+import { cmdAbort, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdStatus, cmdTask } from '../src/cli'
 import { filesClearFor } from '../src/lib/gating'
 import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -180,6 +180,35 @@ test('registering a task reopens intake', async () => {
 
   const result = await cmdTask(ctx(), {
     branch: 'feat/reopen', issue: 7, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.intake_closed).toBe(false)
+})
+
+test('dispatch --done closes intake', async () => {
+  const run = await seed()
+  expect(run.intake_closed).toBe(false)
+
+  const result = await cmdDispatchDone(ctx(), { runId: run.run_id })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.intake_closed).toBe(true)
+})
+
+test('registering a task after dispatch --done reopens intake', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  await cmdDispatchDone(ctx(), { runId: run.run_id })
+  const closed = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(closed?.intake_closed).toBe(true)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/reopen-again', issue: 9, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
   })
   expect(result.ok).toBe(true)

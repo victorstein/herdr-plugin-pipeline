@@ -118,6 +118,22 @@ export async function cmdTask(ctx: Ctx, input: {
   return ok(`task_id: ${task.task_id}\n\n${prompt}`)
 }
 
+export async function cmdDispatchDone(ctx: Ctx, input: { runId?: string }): Promise<CmdResult> {
+  const runs = await listRuns(ctx.stateDir, ctx.session)
+  const run = input.runId
+    ? runs.find((r) => r.run_id === input.runId)
+    : runs.find((r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute')
+  if (!run) {
+    return fail(input.runId
+      ? `no such run: ${input.runId}`
+      : 'no run is in the intake, dispatch or execute phase')
+  }
+
+  run.intake_closed = true
+  await saveRun(ctx.stateDir, run)
+  return ok(`intake closed for ${run.run_id}`)
+}
+
 export async function cmdRewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
 }): Promise<CmdResult> {
@@ -334,6 +350,14 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
+    case 'dispatch':
+      if (!rest.includes('--done')) {
+        console.error('usage: hpipe dispatch --done [--run <run-id>]')
+        return 1
+      }
+      out = await cmdDispatchDone(ctx, { runId: flag(rest, 'run') ?? undefined })
+      break
+
     case 'rewind':
       out = await cmdRewind(ctx, {
         runId: rest[0] ?? '', phase: rest[1] ?? '', taskId: flag(rest, 'task'),
@@ -368,7 +392,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|status|drain|rewind|release|decide|answer|resume|abort|forget> …')
+      console.error('usage: hpipe <start|task|dispatch|status|drain|rewind|release|decide|answer|resume|abort|forget> …')
       return 1
   }
 
