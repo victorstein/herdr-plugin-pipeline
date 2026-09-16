@@ -100,7 +100,7 @@ test('a pane exit while blocked fails the task and abandons its decisions', () =
     phase: 'blocked-on-decision',
     decisions: [{
       id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
-      answer: null, answered_by: null, answered_at: null,
+      answer: null, answered_by: null, answered_at: null, prompted_at: null,
     }],
   })])
   const events: QueuedEvent[] = [
@@ -117,7 +117,7 @@ test('an answered but undelivered decision is also abandoned on pane death', () 
     pending_answer: 'd1',
     decisions: [{
       id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
-      answer: 'go ahead', answered_by: 'orchestrator', answered_at: 2,
+      answer: 'go ahead', answered_by: 'orchestrator', answered_at: 2, prompted_at: null,
     }],
   })])
   const events: QueuedEvent[] = [

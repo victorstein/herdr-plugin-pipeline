@@ -13,7 +13,7 @@ export function openDecision(
     from_phase: task.phase as TaskPhase,
     question: input.question,
     recommendation: input.recommendation,
-    answer: null, answered_by: null, answered_at: null,
+    answer: null, answered_by: null, answered_at: null, prompted_at: null,
   }
   task.decisions.push(decision)
   return decision

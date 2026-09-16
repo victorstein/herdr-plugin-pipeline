@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { openDecisionFor } from '../lib/decisions'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
@@ -280,5 +281,29 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
     task.delivery_attempts = 0
     enterTaskPhase(run, task, resumeTo, `decision ${decision.id} answered`)
     task.decision_from = null
+  }
+}
+
+/**
+ * Stamping `prompted_at` only on a successful send mirrors deliverPendingAnswers:
+ * a failed send must leave the decision eligible, or the orchestrator never
+ * learns a question is waiting and the worker blocks forever.
+ */
+export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<void> {
+  if (run.orchestrator_pane === null) return
+  for (const task of run.tasks) {
+    if (task.phase !== 'blocked-on-decision') continue
+    const decision = openDecisionFor(task)
+    if (!decision || decision.prompted_at !== null) continue
+
+    const text = await renderPrompt(deps.pluginRoot, 'decision', {
+      task_id: task.task_id, decision_id: decision.id,
+      phase: task.decision_from ?? '', question: decision.question,
+      recommendation: decision.recommendation,
+      branch: task.branch, issue: String(task.issue),
+    })
+
+    const result = await deps.send(run.orchestrator_pane, text)
+    if (result.ok) decision.prompted_at = Date.now()
   }
 }

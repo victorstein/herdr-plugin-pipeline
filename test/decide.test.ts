@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { cmdAnswer, cmdDecide } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
-import { type AnswerDeps, deliverPendingAnswers } from '../src/supervisor/tasks'
+import { type AnswerDeps, announceDecisions, deliverPendingAnswers } from '../src/supervisor/tasks'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
 function taskFixture(phase: TaskPhase): Task {
@@ -314,4 +314,72 @@ test('a task whose pane died is skipped rather than resumed', async () => {
   expect(task.phase).toBe('blocked-on-decision')
   expect(task.pending_answer).toBe(decisionId)
   expect(task.delivery_attempts).toBe(0)
+})
+
+// ——— announceDecisions ———
+
+function blockedWithOpenDecision(over: { question?: string; recommendation?: string } = {}): Run {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = 'w1:p1'
+  const task = mkTask({ task_id: 't1', phase: 'blocked-on-decision', pane_id: 'w7:p1', decision_from: 'plan' })
+  openDecision(task, {
+    question: over.question ?? 'ship or wait?',
+    recommendation: over.recommendation ?? 'ship',
+  })
+  run.tasks = [task]
+  return run
+}
+
+test('an open decision is announced to the orchestrator exactly once', async () => {
+  const run = blockedWithOpenDecision()
+  const sent: Array<{ paneId: string; text: string }> = []
+  const deps = { ...answerDeps(), send: async (paneId: string, text: string) => { sent.push({ paneId, text }); return { ok: true } } }
+
+  await announceDecisions(run, deps)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]?.paneId).toBe(run.orchestrator_pane ?? undefined)
+  expect(sent[0]?.text).toContain('ship or wait?')
+
+  await announceDecisions(run, deps)
+  expect(sent).toHaveLength(1)
+})
+
+test('a failed announcement is retried next tick', async () => {
+  const run = blockedWithOpenDecision()
+  let sends = 0
+  const deps = answerDeps({
+    send: async () => { sends += 1; return { ok: false, code: 'agent_blocked' } },
+  })
+
+  await announceDecisions(run, deps)
+  expect(sends).toBe(1)
+  expect(openDecisionFor(run.tasks[0]!)?.prompted_at).toBeNull()
+
+  await announceDecisions(run, deps)
+  expect(sends).toBe(2)
+})
+
+test('an answered decision is not announced', async () => {
+  const run = blockedWithOpenDecision()
+  const decision = openDecisionFor(run.tasks[0]!)!
+  answerDecision(run.tasks[0]!, decision.id, 'wait for the audit', 'human')
+  run.tasks[0]!.pending_answer = decision.id
+  let sends = 0
+  const deps = answerDeps({ send: async () => { sends += 1; return { ok: true } } })
+
+  await announceDecisions(run, deps)
+  expect(sends).toBe(0)
+})
+
+test('the announcement carries the recommendation, not just the question', async () => {
+  const run = blockedWithOpenDecision({
+    question: 'ship or wait?',
+    recommendation: 'ship now, add the audit as a follow-up issue',
+  })
+  const sent: Array<{ paneId: string; text: string }> = []
+  const deps = { ...answerDeps(), send: async (paneId: string, text: string) => { sent.push({ paneId, text }); return { ok: true } } }
+
+  await announceDecisions(run, deps)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]?.text).toContain('ship now, add the audit as a follow-up issue')
 })

@@ -38,6 +38,7 @@ export interface Decision {
   answer: string | null
   answered_by: 'orchestrator' | 'human' | 'abandoned' | null
   answered_at: number | null
+  prompted_at: number | null
 }
 
 export interface Task {
