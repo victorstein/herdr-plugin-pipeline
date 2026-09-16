@@ -345,24 +345,52 @@ accepts `idle` *and* `done`.
 
 ### Findings — fill this in during the run
 
-> **Observed:** _(not yet run)_
->
-> - Statuses seen while the subagent ran, with counts: `working=__  idle=__  done=__  blocked=__  unknown=__`
-> - Did the pane ever read `idle`/`done` before the verdict file existed? **yes / no**
-> - If yes: for how long, and how many consecutive polls?
-> - Did the supervisor send a stall probe during the review? (search the worker pane for the
->   stall-probe text; `TASK_STALL_MINUTES` defaults to 45, so a long review can trip it legitimately)
-> - Did the phase advance before the verdict file was complete?
-> - Attach `/tmp/subagent-status.log`.
->
-> **Conclusion:** _(one of — "a subagent keeps the pane `working`, the gate is sound"; "the pane
-> reads idle during a subagent, and artifact freshness is the only thing preventing a false
-> advance"; "the pane reads idle and a false advance was observed" — the last is a Critical.)_
+**Run of 2026-09-15/16, herdr 0.9.0, commit `98044d4`. Result: the pipeline completed end to end** —
+two issues, two workers, two merged PRs, both issues closed, both worktrees torn down, branch-review
+`CLEAR`, run `done`. Wall clock 22:29 → 00:30, of which ~70 min was unattended task work; the rest was
+diagnosing the four bugs below.
 
-This section is the deliverable. The runbook exists partly to get this recorded, so do not skip it
-even if everything else passes.
+#### Bugs the run found (all fixed, each with a regression test)
 
----
+| # | What | Severity |
+| --- | --- | --- |
+| 1 | **herdr wraps every event as `{event, data:{…}}`** and `toQueuedEvent` read the fields off the outer object. Every hook enqueued a bare `{kind, session, at}`, so **no task ever bound its workspace, pane or checkout path**, agent status never updated, and a pane exit never failed a task. Observed with two workers dispatched and running while both tasks read `[research] unknown`. `test/hook.test.ts` fed the *inner* object, encoding the same wrong assumption, so all 331 tests passed. | **Critical** |
+| 2 | `dispatch.md` ran `herdr worktree create` with no `--cwd`, so herdr resolved the repo from the **focused** workspace — the supervisor's own on a cold start. The first dispatch created the worktree in the plugin's own repo and would have run the worker against a different repo's issues. | **Critical** |
+| 3 | `hpipe task` validated only `--surface`; a missing `--issue` became `Number('0')` and minted a ghost task with no branch into a live run, unremovable by any command. | Major |
+| 4 | No read-only way to obtain a worker brief — the only source was `hpipe task`'s output, which registers a task. An orchestrator that lost its context could not recover the text without corrupting the run. Added `hpipe brief --task <id>`. | Major |
+
+#### Verified working, live
+
+Startup reconciliation on cold **and** warm restart (exactly one supervisor pane, no ghost duplicate);
+supervisor death leaving a readable pane; run state surviving a full server restart; the
+`intake → dispatch` edge predicate; `queued → research` routing; both tasks in design phases
+concurrently despite overlapping `--files`; a genuine `plan-review → plan (returned, pass 1)` retry
+with the monotone counter; both decisions surfaced, announced to the orchestrator with `prompted_at`
+stamped, answered, and resumed to the correct `decision_from`; `close → teardown` on an auto-closed
+issue — the deadlock this repo's memory records as live; `hpipe status` surfacing an open decision
+with its age.
+
+#### §3 `blocked-on-files` — NOT exercised
+
+t1 passed through in 1s, t2 in 2s. t1 reached `done` at 23:23:19; t2 only reached `blocked-on-files`
+at 23:27:02, by which time t1 held nothing. The tasks staggered naturally because t2 spent an extra
+plan-review pass. **The collision path remains unproven.** To force it, give the two tasks equal-length
+design work, or dispatch the second only once the first is at `implement`.
+
+#### §5 subagent / `agent_status` — NOT measured
+
+The poll loop below was not run during a review window, so the open question stands. The run gives
+only weak indirect evidence: every review row advanced on a parsed verdict and **no false advance was
+observed**, which is consistent with the design's claim that the verdict-file predicate is an
+independent guard and that a backgrounded subagent therefore costs a delay rather than a wrong
+transition. That is not a measurement. Run the loop.
+
+#### Environment note
+
+`herdr agent start` returns `agent_not_ready` when Claude Code shows its folder-trust dialog on a
+path it has not seen. Trust is per-path: the orchestrator blocked on a brand-new repo, the workers did
+not, because `~/.herdr/worktrees/` was already trusted on this machine. On a fresh machine every
+worker would block once. Not a plugin bug, but it will stall a first run.
 
 ## 6. Finish the run
 
