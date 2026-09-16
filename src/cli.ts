@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
@@ -152,6 +153,32 @@ export async function cmdRelease(ctx: Ctx, input: { taskId: string }): Promise<C
   return ok(`released ${input.taskId}; files reservation cleared`)
 }
 
+export async function cmdDecide(ctx: Ctx, input: {
+  task: string; question: string; recommendation: string
+}): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.task))
+  const task = run?.tasks.find((t) => t.task_id === input.task)
+  if (!run || !task) return fail(`no such task: ${input.task}`)
+
+  if (input.recommendation.trim().length === 0) {
+    return fail('--recommend is required: a bare question pushes the call up to the orchestrator')
+  }
+
+  // decision_from records where the worker actually was; a second call while
+  // already blocked-on-decision would overwrite it with 'blocked-on-decision'
+  // itself, stranding the task with no phase to rewind back to.
+  if (task.phase === 'blocked-on-decision') {
+    return fail(`task ${input.task} already has an open decision: ${openDecisionFor(task)?.id}`)
+  }
+
+  task.decision_from = task.phase
+  const decision = openDecision(task, { question: input.question, recommendation: input.recommendation })
+  enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
+  await saveRun(ctx.stateDir, run)
+  return ok(`opened decision ${decision.id} on ${input.task}; task blocked-on-decision`)
+}
+
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
@@ -278,6 +305,14 @@ async function dispatch(argv: string[]): Promise<number> {
       out = await cmdRelease(ctx, { taskId: flag(rest, 'task') ?? '' })
       break
 
+    case 'decide':
+      out = await cmdDecide(ctx, {
+        task: flag(rest, 'task') ?? '',
+        question: flag(rest, 'question') ?? '',
+        recommendation: flag(rest, 'recommend') ?? '',
+      })
+      break
+
     case 'status': out = await cmdStatus(ctx); break
     case 'drain': out = await cmdDrain(ctx); break
     case 'abort': out = await cmdAbort(ctx, { runId: rest[0] ?? '' }); break
@@ -285,7 +320,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|status|drain|rewind|release|resume|abort|forget> …')
+      console.error('usage: hpipe <start|task|status|drain|rewind|release|decide|resume|abort|forget> …')
       return 1
   }
 
