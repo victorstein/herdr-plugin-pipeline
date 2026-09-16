@@ -1,16 +1,10 @@
+import type { RunPhase, TaskPhase } from './phases'
+
 export type SessionKey = string
 
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done' | 'unknown'
 
-export type RunPhase =
-  | 'spec' | 'spec-review' | 'plan' | 'plan-review'
-  | 'dispatch' | 'execute' | 'branch-review'
-  | 'escalated' | 'done'
-
-export type TaskPhase =
-  | 'queued' | 'execute' | 'task-review-spec' | 'task-review-quality'
-  | 'ci' | 'merge' | 'close' | 'teardown'
-  | 'done' | 'failed' | 'orphaned' | 'blocked-on-failure' | 'escalated'
+export type { RunPhase, TaskPhase } from './phases'
 
 export type Verdict = 'CLEAR' | 'BLOCKER'
 
@@ -38,7 +32,7 @@ export interface QueuedEvent {
 export interface Decision {
   id: string
   asked_at: number
-  from_phase: string
+  from_phase: TaskPhase
   question: string
   recommendation: string
   answer: string | null
@@ -72,9 +66,9 @@ export interface Task {
   merged_at_ms: number | null
   /** True when the issue was already closed at `merge` completion. */
   issue_closed_at_entry: boolean
-  passes: Record<string, number>
+  passes: Partial<Record<TaskPhase, number>>
   decisions: Decision[]
-  decision_from: string | null
+  decision_from: TaskPhase | null
   pending_answer: string | null
   notes: string
 }
@@ -102,7 +96,7 @@ export interface Run {
   history: HistoryEntry[]
   schema_version: number
   intake_closed: boolean
-  passes: Record<string, number>
+  passes: Partial<Record<RunPhase, number>>
 }
 
 export interface HistoryEntry {
