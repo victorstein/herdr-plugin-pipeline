@@ -102,7 +102,7 @@ export async function cmdTask(ctx: Ctx, input: {
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
   // `queued` would make the next tick deliver the same prompt a second time.
-  enterTaskPhase(run, task, 'implement', 'dispatched at registration')
+  enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)

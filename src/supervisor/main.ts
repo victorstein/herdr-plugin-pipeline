@@ -132,13 +132,10 @@ async function main(): Promise<void> {
           const runGh = ghFor(run.repo_root)
           const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
 
-          const actorIdle = run.orchestrator_pane !== null &&
-            isAgentReady(await herdr.agentStatus(run.orchestrator_pane))
-
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
-            actorIdle,
+            liveIdle: async (pane) => isAgentReady(await herdr.agentStatus(pane)),
             maxPasses: config.MAX_PASSES,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),

@@ -25,7 +25,7 @@ function mkRun(tasks: Task[]): Run {
 
 const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   pluginRoot: process.cwd(),
-  actorIdle: true,
+  liveIdle: async () => true,
   maxPasses: 2,
   prForBranch: async () => null,
   prView: async () => null,
@@ -36,11 +36,51 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   ...over,
 })
 
-test('an unblocked queued task moves to implement and yields a dispatch prompt', async () => {
+test('an unblocked queued task is dispatched and yields a dispatch prompt', async () => {
   const run = mkRun([mkTask({})])
   const prompts = await advanceTasks(run, deps())
-  expect(run.tasks[0]?.phase).toBe('implement')
   expect(prompts.map((p) => p.text).join('\n')).toContain('feat/x')
+})
+
+test('an opened gate dispatches into the design loop, not straight to implement', async () => {
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'queued' })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('advanceTasks releases a blocked-on-files task once its sibling settles', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'done', files: ['a/'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('implement')
+})
+
+test('a worker row reads the worker pane live, not the cached agent_status', async () => {
+  const run = mkRun([mkTask({ phase: 'spec', pane_id: 'w7:p1', agent_status: 'idle' })])
+  const reads: string[] = []
+  await advanceTasks(run, deps({
+    liveIdle: async (pane: string) => { reads.push(pane); return false },
+  }))
+  expect(reads).toEqual(['w7:p1'])
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('an orchestrator row reads the orchestrator pane', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pane_id: 'w7:p1' })])
+  run.orchestrator_pane = 'w1:p1'
+  const reads: string[] = []
+  await advanceTasks(run, deps({
+    liveIdle: async (pane: string) => { reads.push(pane); return true },
+  }))
+  expect(reads).toEqual(['w1:p1'])
+})
+
+test('a task with no pane is skipped, not errored', async () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: null })])
+  await expect(advanceTasks(run, deps())).resolves.toBeDefined()
+  expect(run.tasks[0]?.phase).toBe('research')
 })
 
 test('a gated queued task stays queued and yields nothing', async () => {
@@ -92,7 +132,7 @@ test('a cleared task review advances to the second stage', async () => {
 test('orchestrator-owned task phases are not evaluated while the orchestrator is busy', async () => {
   const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
   await advanceTasks(run, deps({
-    actorIdle: false,
+    liveIdle: async () => false,
     prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
   }))
   expect(run.tasks[0]?.phase).toBe('merge')

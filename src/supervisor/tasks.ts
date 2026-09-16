@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
-import { TASK_ROWS, taskRow } from '../lib/phases'
+import { taskRow } from '../lib/phases'
 import type { VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -12,8 +12,12 @@ import { runTeardown } from './teardown'
 
 export interface TaskDeps {
   pluginRoot: string
-  /** The orchestrator's live idle state, already double-checked by the caller. */
-  actorIdle: boolean
+  /**
+   * Live `herdr agent status` read on a pane, already double-checked after
+   * ACTOR_SETTLE_MS by the caller. NOT task.agent_status, which is the badge and
+   * wake cache and can be stale by a whole turn.
+   */
+  liveIdle: (paneId: string) => Promise<boolean>
   maxPasses: number
   prForBranch: (branch: string) => Promise<number | null>
   prView: (pr: number) => Promise<PrView | null>
@@ -23,10 +27,6 @@ export interface TaskDeps {
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
 }
-
-const ORCHESTRATOR_OWNED: ReadonlySet<TaskPhase> = new Set(
-  TASK_ROWS.filter((r) => r.actor === 'orchestrator').map((r) => r.phase),
-)
 
 /**
  * The task-level counterpart to deliver.ts's promptForRunPhase. Without it the
@@ -82,8 +82,12 @@ export interface TaskPrompt {
   taskId: string
 }
 
-/** The pane that owns the phase the task has just entered. */
-function recipientPane(run: Run, task: Task): string | null {
+/**
+ * The pane of the actor that owns the task's current row: both where that row's
+ * prompt is delivered and the pane whose idleness gates it. Rows with no actor
+ * of their own fall back to the orchestrator's.
+ */
+function actorPane(run: Run, task: Task): string | null {
   return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
 }
 
@@ -105,8 +109,6 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // `done` in the same call, skipping that phase's own settle.
   await runTeardown([run], deps.removeWorktree)
 
-  const releasable = new Set(releasableFromFiles(run.tasks).map((t) => t.task_id))
-
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
       const gate = gateStatus(task, run.tasks)
@@ -116,7 +118,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       }
       if (gate.state !== 'ready') continue
 
-      enterTaskPhase(run, task, 'implement', 'gate opened')
+      enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
@@ -126,11 +128,16 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       continue
     }
 
+    const row = taskRow(task.phase)
+    const pane = actorPane(run, task)
+    if (row.actor !== undefined && pane === null) continue
+    const actorIdle = pane === null ? false : await deps.liveIdle(pane)
+
     // Phases whose signal comes from the orchestrator must not be evaluated
     // while it is mid-turn, exactly as run phases are gated.
-    if (ORCHESTRATOR_OWNED.has(task.phase) && !deps.actorIdle) continue
+    if (row.actor === 'orchestrator' && !actorIdle) continue
 
-    const signals = await gatherSignals(run, task, deps, releasable)
+    const signals = await gatherSignals(run, task, deps, actorIdle)
     if (!signals) continue
 
     const cameFrom = task.phase
@@ -139,18 +146,16 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 
     const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
     if (prompt.length > 0) {
-      prompts.push({ text: prompt, paneId: recipientPane(run, task), taskId: task.task_id })
+      prompts.push({ text: prompt, paneId: actorPane(run, task), taskId: task.task_id })
     }
   }
 
   return prompts
 }
 
-async function gatherSignals(
-  run: Run, task: Task, deps: TaskDeps, releasable: ReadonlySet<string>,
-) {
+async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: boolean) {
   const base = {
-    actorIdle: deps.actorIdle,
+    actorIdle,
     artifactFresh: false,
     verdict: null as VerdictResult | null,
     prNumber: task.pr,
@@ -188,8 +193,15 @@ async function gatherSignals(
       const view = await deps.issueView(task.issue)
       return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
     }
+    // Recomputed here rather than snapshotted before the loop: a row that holds
+    // no files can enter one that does mid-tick (a design row escalating, say),
+    // and a snapshot taken before that would release an overlapping sibling onto
+    // files now in flight.
     case 'blocked-on-files':
-      return { ...base, filesClear: releasable.has(task.task_id) }
+      return {
+        ...base,
+        filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),
+      }
     case 'ci':
       return base
     default:

@@ -62,6 +62,19 @@ test('task prints its id and withholds the prompt while gated', async () => {
   expect(t2.text).not.toContain('api work')
 })
 
+test('a task dispatched at registration enters the design loop, not implement', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', text: 'core work', dependsOn: [], files: [], keepWorktree: false })
+
+  const run = await activeRunForRepo(dir, 'personal', 'k')
+  expect(run?.tasks[0]?.phase).toBe('research')
+})
+
 test('task rejects a dependency cycle', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
