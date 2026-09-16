@@ -1504,6 +1504,32 @@ git commit -m "feat: group delivery by actor pane instead of by run"
 > ```
 >
 > Do not close this task with the literal still in place.
+>
+> **Two consequences from Task 11, both closed by the same fix.**
+>
+> 1. **Add the missing end-to-end test.** `releasableFromFiles` and `advanceTask`'s
+>    `blocked-on-files` arm are each unit-tested, but nothing drives `advanceTasks` through that
+>    phase — which is exactly the seam where `gatherSignals` was silently missing its arm and made
+>    the phase a permanent production sink. Add to `test/tasks.test.ts`:
+>
+>    ```ts
+>    test('advanceTasks releases a blocked-on-files task once its sibling settles', async () => {
+>      const run = mkRun([
+>        mkTask({ task_id: 't1', phase: 'done', files: ['a/'] }),
+>        mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] }),
+>      ])
+>      await advanceTasks(run, deps())
+>      expect(run.tasks[1]?.phase).toBe('implement')
+>    })
+>    ```
+>
+> 2. **A snapshot race exists until the routing is fixed.** `advanceTasks` takes the `releasable`
+>    snapshot before its loop, but the loop can currently move a `queued` task straight into
+>    `implement`. A `blocked-on-files` task later in `run.tasks` order can then be released against a
+>    snapshot that predates that new file-holder, and the two overlap — the precise race the running
+>    set exists to prevent. Routing `queued` to `research` closes it, because `research` holds no
+>    files. Verify that reasoning still holds when you make the change; if it does not, the snapshot
+>    must move inside the loop.
 
 
 **Files:**
