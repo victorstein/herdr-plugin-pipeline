@@ -12,8 +12,11 @@
 #   - a bumped schema_version makes the run silently invisible to the
 #     supervisor, which simply stops advancing it.
 #
-# Asking herdr at call time keeps one codebase writing the ledger, and survives
-# upgrades — the install directory carries a content hash that changes.
+# Asking herdr at call time keeps one codebase writing the ledger, and follows
+# the plugin wherever it lives — including a switch between `plugin install` and
+# `plugin link`, which move the root. (Measured: an in-place upgrade reuses the
+# same install directory, so the path is stabler than it looks — but it is the
+# install/link switch, not the upgrade, that this survives.)
 set -e
 
 root=$(herdr plugin list --json 2>/dev/null | bun -e '
