@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmdAbort, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdStatus, cmdTask } from '../src/cli'
+import {
+  cmdAbort, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdRewind, cmdStatus, cmdTask,
+} from '../src/cli'
 import { filesClearFor } from '../src/lib/gating'
 import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -215,4 +217,44 @@ test('registering a task after dispatch --done reopens intake', async () => {
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.intake_closed).toBe(false)
+})
+
+test('rewind clears the whole counter map rather than spending a pass', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'escalated', passes: { 'spec-review': 2, ci: 1 } },
+  ])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: 't1' })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.passes).toEqual({})
+})
+
+test('rewind clears a pending answer and records the discard', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'blocked-on-decision', pending_answer: 'd1' },
+  ])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan', taskId: 't1' })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.pending_answer).toBeNull()
+  expect(saved?.history.some((h) => h.why.includes('d1') && h.why.includes('discard'))).toBe(true)
+})
+
+test('rewind to dispatch clears adopted_at on bound tasks so the row can re-fire', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'implement', workspace_id: 'w7', adopted_at: 1000 },
+  ])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'dispatch', taskId: null })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.adopted_at).toBeNull()
 })

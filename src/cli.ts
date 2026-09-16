@@ -143,8 +143,18 @@ export async function cmdRewind(ctx: Ctx, input: {
   if (input.taskId) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
+
+    if (task.pending_answer !== null) {
+      run.history.push({
+        at: Date.now(), task_id: task.task_id, from: task.phase, to: input.phase,
+        why: `answer to ${task.pending_answer} discarded, undelivered`,
+      })
+      task.pending_answer = null
+    }
+
     task.phase = input.phase as TaskPhase
     task.passes = {}
+    task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
     task.escalated_from = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
@@ -153,6 +163,12 @@ export async function cmdRewind(ctx: Ctx, input: {
     run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
+    // applyEvents binds a worktree only when workspace_id is null, so adopted_at is
+    // write-once — without clearing it here, rewinding to `dispatch` could never
+    // re-fire that row's edge and the rewind would be a one-way door.
+    if (input.phase === 'dispatch') {
+      for (const t of run.tasks) if (t.workspace_id !== null) t.adopted_at = null
+    }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
   }
 
