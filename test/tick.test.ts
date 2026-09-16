@@ -94,6 +94,52 @@ test('worktree.created binds a workspace to the matching branch', () => {
   expect(run.tasks[0]?.workspace_id).toBe('w9')
 })
 
+test('a pane exit while blocked fails the task and abandons its decisions', () => {
+  const run = mkRun([mkTask({
+    phase: 'blocked-on-decision',
+    decisions: [{
+      id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
+      answer: null, answered_by: null, answered_at: null,
+    }],
+  })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('failed')
+  expect(run.tasks[0]?.decisions[0]?.answered_by).toBe('abandoned')
+})
+
+test('an answered but undelivered decision is also abandoned on pane death', () => {
+  const run = mkRun([mkTask({
+    phase: 'blocked-on-decision',
+    pending_answer: 'd1',
+    decisions: [{
+      id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
+      answer: 'go ahead', answered_by: 'orchestrator', answered_at: 2,
+    }],
+  })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('failed')
+  expect(run.tasks[0]?.decisions[0]?.answered_by).toBe('abandoned')
+})
+
+test('worktree.created records the checkout path and adoption time', () => {
+  const run = mkRun([mkTask({ workspace_id: null, branch: 'feat/x', checkout_path: null, adopted_at: null })])
+  const events: QueuedEvent[] = [
+    {
+      kind: 'worktree.created', session: 'personal', at: 1, workspace_id: 'w9', branch: 'feat/x',
+      checkout_path: '/r/.worktrees/feat-x', repo_key: 'k', repo_root: '/r', is_linked_worktree: true,
+    },
+  ]
+  applyEvents([run], events, 'personal', new Set())
+  expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
+  expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
+})
+
 test('pickOneAdvance returns at most one candidate per orchestrator', () => {
   const run = mkRun([
     mkTask({ task_id: 't1', phase: 'pr-review-intent' }),
