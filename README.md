@@ -31,14 +31,27 @@ Requires herdr 0.9.0+, bun, and gh. No build step, and no runtime dependencies �
 `@types/bun` and `typescript` are devDependencies for `bun run typecheck` only.
 
 **You do not need `hpipe` on your PATH.** herdr's manifest has no way to install a binary, so every
-prompt renders the CLI invocation instead: `bun run <plugin-root>/src/cli.ts …` when the plugin was
-installed from GitHub, and plain `hpipe` when a symlink on your PATH resolves back into this same
-checkout. If you want the short form for your own typing:
+prompt renders the CLI invocation itself — `bun run <plugin-root>/src/cli.ts …` — which works whether
+the plugin was installed from GitHub or linked locally.
 
-    ln -s /path/to/herdr-plugin-pipeline/src/cli.ts ~/.local/bin/hpipe
+If you want the short form for your own typing, use the wrapper, not a direct symlink:
 
-That is a convenience, not a requirement — and a symlink pointing at a *different* checkout is
-ignored deliberately, so agents are never aimed at another copy's ledger.
+    ln -s /path/to/herdr-plugin-pipeline/bin/hpipe ~/.local/bin/hpipe
+
+**Do not symlink `src/cli.ts` directly.** The CLI and the supervisor share one ledger — `cli.ts` falls
+back to `~/.local/state/herdr/plugins/stein.pipeline` when herdr has not injected
+`HERDR_PLUGIN_STATE_DIR` — so a symlink pinned to a checkout means your hand-typed commands write
+*that checkout's* schema into state the installed supervisor is driving. When the two drift, which is
+the normal state of a repo you develop in, you get one of two failures:
+
+- a phase the installed table does not have makes `taskRow()` throw on the next tick, visible only in
+  the supervisor pane;
+- a bumped `schema_version` makes the run **silently invisible** to the supervisor, which just stops
+  advancing it and tells you to abort.
+
+`bin/hpipe` asks herdr which copy is installed at call time, so one codebase writes the ledger. It
+survives upgrades — the install directory carries a content hash that changes — and it falls back to
+its own checkout when the plugin is not installed, so it also works from a clone.
 
 **Then restart the herdr session you want it in.** Linking registers the plugin globally for your
 user, but its startup hook only runs when a server boots — so on an already-running session nothing

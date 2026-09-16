@@ -1,0 +1,40 @@
+#!/bin/sh
+# Runs whichever copy of this plugin herdr currently has installed.
+#
+# The CLI and the supervisor share one ledger — `cli.ts` falls back to
+# ~/.local/state/herdr/plugins/stein.pipeline when herdr has not injected
+# HERDR_PLUGIN_STATE_DIR — so a symlink straight to a checkout's src/cli.ts
+# means hand-typed commands write that checkout's schema into state the
+# installed supervisor is driving. Two failure modes, both nasty:
+#
+#   - a phase the installed table lacks makes taskRow() throw on the next tick,
+#     visible only in the supervisor pane;
+#   - a bumped schema_version makes the run silently invisible to the
+#     supervisor, which simply stops advancing it.
+#
+# Asking herdr at call time keeps one codebase writing the ledger, and survives
+# upgrades — the install directory carries a content hash that changes.
+set -e
+
+root=$(herdr plugin list --json 2>/dev/null | bun -e '
+try {
+  const d = await Bun.stdin.json()
+  const p = (d?.result?.plugins ?? []).find((x) => x.plugin_id === "stein.pipeline")
+  if (p?.plugin_root) console.log(p.plugin_root)
+} catch { /* fall through to the checkout */ }
+' 2>/dev/null || true)
+
+# Not installed? Fall back to the checkout this script lives in, so `bin/hpipe`
+# works from a clone during development.
+if [ -z "$root" ]; then
+  self=$(cd "$(dirname "$0")" && pwd -P)
+  root=$(dirname "$self")
+fi
+
+if [ ! -f "$root/src/cli.ts" ]; then
+  echo "hpipe: no plugin found. Install it with:" >&2
+  echo "  herdr plugin install victorstein/herdr-plugin-pipeline" >&2
+  exit 1
+fi
+
+exec bun run "$root/src/cli.ts" "$@"

@@ -73,3 +73,19 @@ test('no prompt hardcodes the hpipe binary — it must be rendered', async () =>
     expect(bare, `${name}.md hardcodes hpipe; use {{hpipe}}`).not.toContain('hpipe')
   }
 })
+
+test('the hpipe wrapper resolves the installed plugin rather than a fixed checkout', async () => {
+  // A symlink straight to src/cli.ts pins hand-typed commands to one checkout,
+  // which then writes its own schema into the ledger the installed supervisor
+  // drives. The wrapper asks herdr which copy is installed at call time.
+  const wrapper = await Bun.file(join(ROOT, 'bin', 'hpipe')).text()
+  expect(wrapper).toContain('herdr plugin list --json')
+  expect(wrapper).toContain('plugin_root')
+  expect(wrapper).toContain('exec bun run')
+})
+
+test('the README does not tell anyone to symlink src/cli.ts directly', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).not.toContain('ln -s /path/to/herdr-plugin-pipeline/src/cli.ts')
+  expect(readme).toContain('bin/hpipe')
+})
