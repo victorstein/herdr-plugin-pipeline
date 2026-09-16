@@ -2496,6 +2496,38 @@ Replaces the Task 3 stubs with real text. No tests beyond `table.test.ts` and `p
 
 Must carry: `gh issue view #{{issue}}` as the brief, the surface agent file, `{{notes}}`, the three artifact paths, the loop, the `hpipe decide` contract, the re-read instruction on entering `implement`, the `Closes #{{issue}}` rule, TDD, and conventional commits. It must **not** contain `{{task_text}}`.
 
+- [ ] **Step 1a: Rewrite the four leftover run-level design prompts**
+
+`spec.md`, `spec-review.md`, `plan.md` and `plan-review.md` are **not** stubs — they are the original
+run-level prompts from before design moved down into workers. They render without error against the
+current variable bag, which is why nothing has flagged them, but their text addresses the *run*:
+`spec.md` opens "Write the spec for **{{title}}**", where `{{title}}` is the run title, not the issue.
+A worker handed that would write a spec for the whole batch.
+
+Rewrite all four to address one worker on one issue. Only `research.md` is genuinely blank.
+
+The variable bag available to a task-row prompt is exactly:
+`run_id, branch, issue, pr, pass, verdict_path, title, research_path, spec_path, plan_path`.
+Using any other name makes `render()` throw at delivery.
+
+- [ ] **Step 1b: Decide where the research instruction lives, and pin it**
+
+`prompts/research.md` is never delivered. The `queued → research` transition `continue`s inside
+`advanceTasks` before `promptForTaskPhase` is reached, so the worker's only instruction to write a
+research note is `worker-brief.md`, handed to it at dispatch. Either:
+
+- give `research.md` a `{{research_path}}` placeholder and deliver it on entry to the row, or
+- keep the instruction in `worker-brief.md` and accept that the row has no prompt of its own.
+
+Either is defensible; leaving it undecided is not, because `research` is then the one design row whose
+prompt and predicate are not pinned to the same path by any test. Whichever you choose, extend
+`test/tasks.test.ts`'s "a design row prompt names the artifact path its own predicate will check" to
+include `'research'`.
+
+Related: `worker-brief.md` lists the artifact paths **relative**, while the predicates stat the
+**absolute** worktree path. Those agree only because the worker's cwd is its worktree. Say so in the
+brief, or render the absolute paths.
+
 - [ ] **Step 2: Write the four worker review prompts**
 
 `spec-review.md`, `plan-review.md`, `pr-review-intent.md`, `pr-review-quality.md`. Each one must contain, verbatim enough for `table.test.ts` to grep:
