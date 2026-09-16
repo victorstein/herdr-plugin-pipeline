@@ -19,9 +19,17 @@ import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
-import type { AgentStatus } from '../lib/types'
+import type { AgentStatus, Run } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
+
+/**
+ * No in-place migration: a v4 run mid-`plan` has an orchestrator holding work no
+ * worker can inherit. `hpipe status` tells the human to abort it.
+ */
+export function isCurrentSchemaRun(run: Run): boolean {
+  return run.schema_version === 2
+}
 
 /**
  * One settle window per tick, not one per pane. Six workers at ACTOR_SETTLE_MS
@@ -104,9 +112,10 @@ async function main(): Promise<void> {
     try {
       const events = await drain(queueDir)
       const allRuns = await listRuns(stateDir, session)
-      const runs = config.REPOS_ALLOW.length === 0
+      const runs = (config.REPOS_ALLOW.length === 0
         ? allRuns
         : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
+      ).filter(isCurrentSchemaRun)
       const panes = await allOrchestratorPanes(stateDir, session)
 
       const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))

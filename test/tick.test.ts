@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyEvents, pickOneAdvance } from '../src/supervisor/tick'
-import { makeSettledIdleReader } from '../src/supervisor/main'
+import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 
@@ -139,6 +139,22 @@ test('worktree.created records the checkout path and adoption time', () => {
   applyEvents([run], events, 'personal', new Set())
   expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
   expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
+})
+
+test('a run without schema_version 2 is never advanced', () => {
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  ;(run as { schema_version?: number }).schema_version = undefined
+  const before = run.phase
+
+  expect(isCurrentSchemaRun(run)).toBe(false)
+  // Mirrors main.ts's own tick: only isCurrentSchemaRun runs ever reach
+  // pickOneAdvance, and only picked runs are handed to evaluateRun/advanceTasks —
+  // the two functions that ever mutate `phase`.
+  const eligible = [run].filter(isCurrentSchemaRun)
+  expect(pickOneAdvance(eligible)).toHaveLength(0)
+  expect(run.phase).toBe(before)
 })
 
 test('pickOneAdvance returns at most one candidate per orchestrator', () => {
