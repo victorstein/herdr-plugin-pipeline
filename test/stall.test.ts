@@ -1,13 +1,15 @@
 import { expect, test } from 'bun:test'
-import { stallCandidates, taskStallCandidates } from '../src/supervisor/stall'
+import { sendProbes, stallCandidates, taskStallCandidates } from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
+
+const ORCHESTRATOR_PANE = 'w1:p1'
 
 function runAt(phase: RunPhase, enteredAt: number): Run {
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   run.phase = phase
   run.phase_entered_at = enteredAt
-  run.orchestrator_pane = 'w1:p1'
+  run.orchestrator_pane = ORCHESTRATOR_PANE
   return run
 }
 
@@ -19,12 +21,23 @@ test('a verdict phase open past the threshold is a candidate', () => {
   expect(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, new Set())).toHaveLength(1)
 })
 
-test('execute is NEVER a stall candidate — it has no artifact by design', () => {
-  expect(stallCandidates([runAt('execute', LONG_AGO)], NOW, 15, new Set())).toHaveLength(0)
+test('execute is probed via the orchestrator when intake was never closed', () => {
+  const run = runAt('execute', LONG_AGO)
+  run.intake_closed = false
+  const out = stallCandidates([run], NOW, 15, new Set())
+  expect(out.map((c) => c.paneId)).toEqual([ORCHESTRATOR_PANE])
 })
 
-test('dispatch is not a candidate either', () => {
-  expect(stallCandidates([runAt('dispatch', LONG_AGO)], NOW, 15, new Set())).toHaveLength(0)
+test('dispatch is probed via the orchestrator too — its row is stallable', () => {
+  const run = runAt('dispatch', LONG_AGO)
+  expect(stallCandidates([run], NOW, 15, new Set()).map((c) => c.paneId))
+    .toEqual([ORCHESTRATOR_PANE])
+})
+
+test('a run phase whose row is not stallable is never a candidate', () => {
+  for (const phase of ['intake', 'escalated', 'done'] as const) {
+    expect(stallCandidates([runAt(phase, LONG_AGO)], NOW, 15, new Set())).toHaveLength(0)
+  }
 })
 
 test('a phase within the threshold is not a candidate', () => {
@@ -61,6 +74,9 @@ function runWithTasks(tasks: Task[]): Run {
   return run
 }
 
+const runWithTask = (over: Partial<Task>): Run =>
+  runWithTasks([mkTask({ phase_entered_at: LONG_AGO, ...over })])
+
 test('a task sitting in implement past the threshold with no PR is a candidate', () => {
   const run = runWithTasks([mkTask({})])
   expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
@@ -78,8 +94,8 @@ test('a task inside the threshold is not a candidate', () => {
   expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
 })
 
-test('only implement is probed — review and merge phases are owned elsewhere', () => {
-  for (const phase of ['pr-review-intent', 'merge', 'close', 'queued'] as const) {
+test('a task phase whose row is not stallable is never probed', () => {
+  for (const phase of ['queued', 'ci', 'merge', 'close', 'teardown', 'done'] as const) {
     const run = runWithTasks([mkTask({ phase })])
     expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
   }
@@ -89,4 +105,53 @@ test('a task already probed for this phase entry is not probed again', () => {
   const run = runWithTasks([mkTask({})])
   const probed = new Set([`${run.run_id}:t1:implement:${LONG_AGO}`])
   expect(taskStallCandidates([run], NOW, 45, probed)).toHaveLength(0)
+})
+
+test('a task stranded in blocked-on-files is probed via the orchestrator', () => {
+  const run = runWithTask({ phase: 'blocked-on-files', pane_id: null })
+  const out = taskStallCandidates([run], NOW, 15, new Set())
+  expect(out).toHaveLength(1)
+  expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+})
+
+test('a task waiting in blocked-on-decision is probed via the orchestrator', () => {
+  const run = runWithTask({ phase: 'blocked-on-decision', pane_id: 'w7:p1' })
+  const out = taskStallCandidates([run], NOW, 15, new Set())
+  expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+})
+
+test('a worker-owned artifact row is probed via the worker pane', () => {
+  const run = runWithTask({ phase: 'spec', pane_id: 'w7:p1' })
+  const out = taskStallCandidates([run], NOW, 15, new Set())
+  expect(out[0]?.paneId).toBe('w7:p1')
+})
+
+test('a worker row with no pane falls back to the orchestrator', () => {
+  const run = runWithTask({ phase: 'research', pane_id: null })
+  const out = taskStallCandidates([run], NOW, 15, new Set())
+  expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+})
+
+test('a probe that could not be sent stays eligible on the next tick', async () => {
+  const run = runAt('branch-review', LONG_AGO)
+  const probed = new Set<string>()
+
+  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: false }))
+  expect([...probed]).toEqual([])
+  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
+
+  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: true }))
+  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(0)
+})
+
+test('a run with no orchestrator pane is left pending, not marked probed', async () => {
+  const run = runAt('branch-review', LONG_AGO)
+  run.orchestrator_pane = null
+  const probed = new Set<string>()
+
+  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: true }))
+  expect([...probed]).toEqual([])
+
+  run.orchestrator_pane = ORCHESTRATOR_PANE
+  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
 })

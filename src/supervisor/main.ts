@@ -13,7 +13,8 @@ import {
   refreshBadges, shouldRetry,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
-import { stallCandidates, taskStallCandidates } from './stall'
+import { taskRow } from '../lib/phases'
+import { sendProbes, stallCandidates, taskStallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks } from './tasks'
@@ -214,34 +215,37 @@ async function main(): Promise<void> {
         }
       }
 
-      for (const candidate of stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed)) {
-        probed.add(candidate.key)
-        const path = artifactPathFor(candidate.run, null)
-        const text = await renderPrompt(
-          pluginRoot, 'stall-probe', {
-            run_id: candidate.run.run_id,
-            phase: candidate.run.phase,
-            minutes: String(candidate.minutes),
-            artifact_path: join(candidate.run.repo_root, path ?? 'the expected artifact'),
-          },
-        )
-        if (candidate.run.orchestrator_pane) {
-          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
-        }
-      }
+      await sendProbes(
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed), probed,
+        async (candidate) => {
+          const path = artifactPathFor(candidate.run, null)
+          const text = await renderPrompt(
+            pluginRoot, 'stall-probe', {
+              run_id: candidate.run.run_id,
+              phase: candidate.run.phase,
+              minutes: String(candidate.minutes),
+              artifact_path: join(candidate.run.repo_root, path ?? 'the expected artifact'),
+            },
+          )
+          return herdr.agentPrompt(candidate.paneId, text)
+        },
+      )
 
-      for (const candidate of taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed)) {
-        probed.add(candidate.key)
-        const text = await renderPrompt(pluginRoot, 'stall-probe', {
-          run_id: candidate.run.run_id,
-          phase: `implement (${candidate.task.task_id}, ${candidate.task.branch})`,
-          minutes: String(candidate.minutes),
-          artifact_path: `a PR for ${candidate.task.branch} (#${candidate.task.issue})`,
-        })
-        if (candidate.run.orchestrator_pane) {
-          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
-        }
-      }
+      await sendProbes(
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed), probed,
+        async (candidate) => {
+          const branch = `${candidate.task.branch} (#${candidate.task.issue})`
+          const text = await renderPrompt(pluginRoot, 'stall-probe', {
+            run_id: candidate.run.run_id,
+            phase: `${candidate.task.phase} (${candidate.task.task_id}, ${candidate.task.branch})`,
+            minutes: String(candidate.minutes),
+            artifact_path: taskRow(candidate.task.phase).signal === 'pr'
+              ? `a PR for ${branch}`
+              : `whatever clears ${candidate.task.phase} for ${branch}`,
+          })
+          return herdr.agentPrompt(candidate.paneId, text)
+        },
+      )
     } catch (error) {
       console.error('[pipeline] tick error:', error)
     }
