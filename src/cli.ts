@@ -1,19 +1,21 @@
 #!/usr/bin/env bun
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, slugify, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
 } from './lib/ledger'
-import { enterRunPhase, enterTaskPhase } from './lib/machine'
+import { enterTaskPhase } from './lib/machine'
+import { taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { sessionKey } from './lib/session'
 import { formatStatus } from './lib/status'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import type { RunPhase, Task, TaskPhase } from './lib/types'
+import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -36,43 +38,61 @@ export async function cmdStart(ctx: Ctx, input: {
     repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
   })
   run.orchestrator_pane = input.paneId
-  run.artifacts.spec = join(
-    'docs/superpowers/specs',
-    `${new Date().toISOString().slice(0, 10)}-${slugify(input.title)}-design.md`,
-  )
   await saveRun(ctx.stateDir, run)
   await writeOrchestrator(ctx.stateDir, ctx.session, input.repoKey, {
     pane_id: input.paneId, workspace_id: input.workspaceId,
     socket_path: input.socketPath, claimed_at: Date.now(),
   })
 
-  const text = await renderPrompt(ctx.pluginRoot, 'spec', {
-    run_id: run.run_id, title: run.title, spec_path: join(run.repo_root, run.artifacts.spec),
+  const text = await renderPrompt(ctx.pluginRoot, 'intake', {
+    run_id: run.run_id, title: run.title,
   })
   return ok(text, JSON.stringify({ run_id: run.run_id }))
 }
 
 export async function cmdTask(ctx: Ctx, input: {
-  branch: string; issue: number; surface: string; text: string
+  branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
 }): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
-  const run = runs.find((r) => r.phase === 'dispatch' || r.phase === 'execute')
-  if (!run) return fail('no run is in the dispatch or execute phase')
+  const run = runs.find(
+    (r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute',
+  )
+  if (!run) return fail('no run is in the intake, dispatch or execute phase')
+
+  // The argv parser defaults a missing --issue to 0 and a missing --branch to
+  // "". Without these checks a mistyped command mints a ghost task into a live
+  // run, and there is no command that removes one. Measured on a live run.
+  if (!Number.isInteger(input.issue) || input.issue <= 0) {
+    return fail(`--issue must be a positive issue number, got: ${input.issue || '(missing)'}`)
+  }
+  if (input.branch.trim().length === 0) return fail('--branch is required')
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
     return fail(`no agent definition at ${agentFile} — check --surface`)
   }
 
+  const date = new Date().toISOString().slice(0, 10)
+  const stem = `${date}-issue-${input.issue}`
+
   const task: Task = {
     task_id: `t${run.tasks.length + 1}`,
     branch: input.branch, issue: input.issue, surface: input.surface,
     depends_on: input.dependsOn, files: input.files,
-    keep_worktree: input.keepWorktree, text: input.text,
+    keep_worktree: input.keepWorktree,
     workspace_id: null, pane_id: null, agent_status: 'unknown',
-    phase: 'queued', pass: 1, phase_entered_at: Date.now(),
+    phase: 'queued', phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
+    checkout_path: null, registered_at: Date.now(), adopted_at: null,
+    artifacts: {
+      research: join('docs/superpowers/research', `${stem}-research.md`),
+      spec: join('docs/superpowers/specs', `${stem}-design.md`),
+      plan: join('docs/superpowers/plans', `${stem}-plan.md`),
+      verdicts: {},
+    },
+    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
   }
 
   // detectCycle skips ids it does not recognise, so a typo would otherwise pass
@@ -87,7 +107,9 @@ export async function cmdTask(ctx: Ctx, input: {
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
   run.tasks.push(task)
-  if (run.phase === 'dispatch') enterRunPhase(run, 'execute', 'first task registered')
+  // execute completes only once intake is closed and every task is terminal, so a
+  // task registered mid-run must reopen the gate or the run could complete underneath it.
+  run.intake_closed = false
   await saveRun(ctx.stateDir, run)
 
   const gate = gateStatus(task, run.tasks)
@@ -97,11 +119,41 @@ export async function cmdTask(ctx: Ctx, input: {
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
   // `queued` would make the next tick deliver the same prompt a second time.
-  enterTaskPhase(run, task, 'execute', 'dispatched at registration')
+  enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   return ok(`task_id: ${task.task_id}\n\n${prompt}`)
+}
+
+/**
+ * Read-only. Without it the only way to see a worker brief is to register a
+ * task, which mutates the run — so an orchestrator that loses its context has
+ * no way back to the text it is supposed to hand over. Measured on a live run.
+ */
+export async function cmdBrief(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
+  const task = run?.tasks.find((t) => t.task_id === input.taskId)
+  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+
+  return ok(await renderWorkerPrompt(ctx.pluginRoot, run, task))
+}
+
+export async function cmdDispatchDone(ctx: Ctx, input: { runId?: string }): Promise<CmdResult> {
+  const runs = await listRuns(ctx.stateDir, ctx.session)
+  const run = input.runId
+    ? runs.find((r) => r.run_id === input.runId)
+    : runs.find((r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute')
+  if (!run) {
+    return fail(input.runId
+      ? `no such run: ${input.runId}`
+      : 'no run is in the intake, dispatch or execute phase')
+  }
+
+  run.intake_closed = true
+  await saveRun(ctx.stateDir, run)
+  return ok(`intake closed for ${run.run_id}`)
 }
 
 export async function cmdRewind(ctx: Ctx, input: {
@@ -113,21 +165,111 @@ export async function cmdRewind(ctx: Ctx, input: {
   if (input.taskId) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
+
+    if (task.pending_answer !== null) {
+      run.history.push({
+        at: Date.now(), task_id: task.task_id, from: task.phase, to: input.phase,
+        why: `answer to ${task.pending_answer} discarded, undelivered`,
+      })
+      task.pending_answer = null
+    }
+
     task.phase = input.phase as TaskPhase
-    task.pass = 1
+    task.passes = {}
+    task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
     task.escalated_from = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
   } else {
     run.phase = input.phase as RunPhase
-    run.pass = 1
+    run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
+    // applyEvents binds a worktree only when workspace_id is null, so adopted_at is
+    // write-once — without clearing it here, rewinding to `dispatch` could never
+    // re-fire that row's edge and the rewind would be a one-way door.
+    if (input.phase === 'dispatch') {
+      for (const t of run.tasks) if (t.workspace_id !== null) t.adopted_at = null
+    }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
   }
 
   await saveRun(ctx.stateDir, run)
-  return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; pass reset to 1`)
+  return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
+}
+
+export async function cmdRelease(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
+  const task = run?.tasks.find((t) => t.task_id === input.taskId)
+  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+
+  // `escalated` is not `terminal` — it carries `escalated_from` so a human can
+  // rewind it — but it has stopped moving and is a legitimate release target too.
+  if (!taskRow(task.phase).terminal && task.phase !== 'escalated') {
+    return fail(`task ${input.taskId} is still in flight (${task.phase})`)
+  }
+
+  task.files = []
+  await saveRun(ctx.stateDir, run)
+  return ok(`released ${input.taskId}; files reservation cleared`)
+}
+
+export async function cmdDecide(ctx: Ctx, input: {
+  task: string; question: string; recommendation: string
+}): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.task))
+  const task = run?.tasks.find((t) => t.task_id === input.task)
+  if (!run || !task) return fail(`no such task: ${input.task}`)
+
+  if (input.recommendation.trim().length === 0) {
+    return fail('--recommend is required: a bare question pushes the call up to the orchestrator')
+  }
+
+  // decision_from records where the worker actually was; a second call while
+  // already blocked-on-decision would overwrite it with 'blocked-on-decision'
+  // itself, stranding the task with no phase to rewind back to.
+  if (task.phase === 'blocked-on-decision') {
+    return fail(`task ${input.task} already has an open decision: ${openDecisionFor(task)?.id}`)
+  }
+
+  task.decision_from = task.phase
+  const decision = openDecision(task, { question: input.question, recommendation: input.recommendation })
+  enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
+  await saveRun(ctx.stateDir, run)
+  return ok(`opened decision ${decision.id} on ${input.task}; task blocked-on-decision`)
+}
+
+export async function cmdAnswer(ctx: Ctx, input: {
+  task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
+}): Promise<CmdResult> {
+  const run = (await listRuns(ctx.stateDir, ctx.session))
+    .find((r) => r.tasks.some((t) => t.task_id === input.task))
+  const task = run?.tasks.find((t) => t.task_id === input.task)
+  if (!run || !task) return fail(`no such task: ${input.task}`)
+
+  if (input.by !== 'orchestrator' && input.by !== 'human') {
+    return fail(`--by must be 'orchestrator' or 'human', got: ${input.by}`)
+  }
+
+  if (task.phase !== 'blocked-on-decision') {
+    return fail(`task ${input.task} is not blocked on a decision (phase: ${task.phase})`)
+  }
+
+  let decision
+  try {
+    decision = answerDecision(task, input.decision, input.answer, input.by)
+  } catch {
+    return fail(`no such decision: ${input.decision}`)
+  }
+
+  // Delivery is a separate step (Task 20): writing the answer must not resume
+  // the task, or a slow worker's late file touch would complete the phase unread.
+  task.pending_answer = decision.id
+  task.delivery_attempts = 0
+  await saveRun(ctx.stateDir, run)
+  return ok(`recorded answer to ${decision.id} on ${input.task}; pending delivery`)
 }
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
@@ -239,16 +381,49 @@ async function dispatch(argv: string[]): Promise<number> {
         branch: flag(rest, 'branch') ?? '',
         issue: Number(flag(rest, 'issue') ?? '0'),
         surface: flag(rest, 'surface') ?? '',
-        text: flag(rest, 'text') ?? '',
+        notes: flag(rest, 'notes') ?? '',
         dependsOn: listFlag(rest, 'depends-on'),
         files: listFlag(rest, 'files'),
         keepWorktree: rest.includes('--keep-worktree'),
       })
       break
 
+    case 'brief':
+      out = await cmdBrief(ctx, { taskId: flag(rest, 'task') ?? '' })
+      break
+
+    case 'dispatch':
+      if (!rest.includes('--done')) {
+        console.error('usage: hpipe dispatch --done [--run <run-id>]')
+        return 1
+      }
+      out = await cmdDispatchDone(ctx, { runId: flag(rest, 'run') ?? undefined })
+      break
+
     case 'rewind':
       out = await cmdRewind(ctx, {
         runId: rest[0] ?? '', phase: rest[1] ?? '', taskId: flag(rest, 'task'),
+      })
+      break
+
+    case 'release':
+      out = await cmdRelease(ctx, { taskId: flag(rest, 'task') ?? '' })
+      break
+
+    case 'decide':
+      out = await cmdDecide(ctx, {
+        task: flag(rest, 'task') ?? '',
+        question: flag(rest, 'question') ?? '',
+        recommendation: flag(rest, 'recommend') ?? '',
+      })
+      break
+
+    case 'answer':
+      out = await cmdAnswer(ctx, {
+        task: flag(rest, 'task') ?? '',
+        decision: flag(rest, 'decision') ?? '',
+        answer: flag(rest, 'answer') ?? '',
+        by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
       })
       break
 
@@ -259,7 +434,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|status|drain|rewind|resume|abort|forget> …')
+      console.error('usage: hpipe <start|task|dispatch|status|drain|rewind|release|decide|answer|resume|abort|forget> …')
       return 1
   }
 

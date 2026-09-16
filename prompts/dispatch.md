@@ -1,34 +1,41 @@
-# Decompose and dispatch — run {{run_id}}
+# Dispatch — run {{run_id}}
 
-The plan at `{{plan_path}}` cleared review. Turn it into tasks and dispatch them.
+Tasks are registered. Your job now is to give each ready task a worktree and an agent, and to keep
+two agents off the same files.
 
-For each task:
+**When you are told a task is ready**, create its worktree and start the worker on it:
 
-1. **Open a GitHub issue** — one per task, no exceptions: `gh issue create`.
-2. **Register it:**
+    herdr worktree create --cwd {{repo_root}} --branch <branch> --base main
+    # capture .result.root_pane.pane_id from that response
+    herdr agent start <name> --kind claude --pane <root_pane_id> -- \
+      --dangerously-skip-permissions "<the worker brief you were given>"
 
-       hpipe task --branch <branch> --issue <n> --surface <surface> \
-                  [--depends-on <task_ids>] [--files <path-prefixes>] \
-                  --text "<the full task text>"
+**`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
+*focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
+start. Omitting it creates the worktree in whatever repo happens to be focused and launches the
+worker there, reading `gh issue view` against a different repo's issues. Measured on a live run.
 
-   `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
-   exists. Route by the surface the change touches, and make app tasks `--depends-on` any `core` task,
-   because the apps consume the built `dist`.
+`agent start` adopts the **existing** root pane — it does not create one, and there is no orphan pane
+to close. Do not pass `--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its
+0.9.0 signature. That prohibition is about `agent start` only — `worktree create` has `--cwd` and
+needs it.
 
-   `hpipe task` prints the task id. If the task is gated it prints `queued: waiting on …` instead of a
-   prompt — that is correct; you will be told when to dispatch it.
+Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
+issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
+for `{{hpipe}} decide`. Do not summarise it, do not add task text of your own: the issue body is the
+brief, and anything you say here instead of in the issue is lost.
 
-3. **When told a task is ready**, create its worktree and start the agent:
+**Still registering?** New tasks go in with an issue first, then:
 
-       herdr worktree create --branch <branch> --base main
-       # capture .result.root_pane.pane_id from that response
-       herdr agent start <name> --kind claude --pane <root_pane_id> -- \
-         --dangerously-skip-permissions "<the worker prompt you were given>"
+    {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
+               [--depends-on <task_ids>] [--files <path-prefixes>] \
+               [--notes "<batch context that does not belong in a public issue>"]
 
-   `agent start` adopts the **existing** root pane — it does not create one, and there is no orphan
-   pane to close. Do not pass `--cwd`, `--workspace`, or `--split`; they are not the 0.9.0 signature.
+There is no `--text` flag. Never run two agents against the same files in parallel — serialize them
+with `--files`, or with `--depends-on` when one needs the other's result.
 
-Never run two agents against the same files in parallel. When two tasks must touch one file,
-serialize them with `--depends-on`.
+**When the last task is registered:**
 
-Register every task, then stop.
+    {{hpipe}} dispatch --done
+
+Nothing infers that the batch is complete, and the run cannot finish until you say so.

@@ -12,6 +12,6 @@ This is one of the only two reasons to interrupt them, so make it worth the inte
 
 When they have answered, resume with:
 
-    hpipe rewind {{run_id}} {{phase}}{{task_flag}}
+    {{hpipe}} rewind {{run_id}} {{phase}}{{task_flag}}
 
 which resets the pass count for that phase.

@@ -11,10 +11,10 @@ let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ledger-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-test('newRun produces a unique suffixed id and spec phase', () => {
+test('newRun produces a unique suffixed id and opens at intake', () => {
   const a = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'chat meter' })
   const b = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'chat meter' })
-  expect(a.phase).toBe('spec')
+  expect(a.phase).toBe('intake')
   expect(a.run_id).not.toBe(b.run_id)
   expect(a.run_id).toContain('chat-meter')
 })
@@ -63,4 +63,11 @@ test('concurrent orchestrator claims for different repos in one session both per
 
   expect((await readOrchestrator(dir, 'personal', 'repo-a'))?.pane_id).toBe('w1:p1')
   expect((await readOrchestrator(dir, 'personal', 'repo-b'))?.pane_id).toBe('w2:p1')
+})
+
+test('a new run carries schema_version 2 and an open intake', () => {
+  const run = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+  expect(run.schema_version).toBe(2)
+  expect(run.intake_closed).toBe(false)
+  expect(run.passes).toEqual({})
 })

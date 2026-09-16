@@ -6,8 +6,8 @@ test('source is the plugin-qualified form herdr requires', () => {
 })
 
 test('builds status and branch badges', () => {
-  expect(buildBadges({ agent_status: 'working', branch: 'feat/x', phase: 'execute' }))
-    .toEqual({ status: 'working', branch: 'feat/x', phase: 'execute' })
+  expect(buildBadges({ agent_status: 'working', branch: 'feat/x', phase: 'implement' }))
+    .toEqual({ status: 'working', branch: 'feat/x', phase: 'implement' })
 })
 
 test('clamps a value longer than 80 characters', () => {

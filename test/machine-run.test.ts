@@ -1,94 +1,75 @@
 import { expect, test } from 'bun:test'
-import { advanceRun, enterRunPhase } from '../src/lib/machine'
+import { advanceRun, enterRunPhase, counterFor } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
-import type { Run } from '../src/lib/types'
+import type { Run, RunPhase } from '../src/lib/types'
 
-const mkRun = (): Run =>
-  newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+function fixture(phase: RunPhase): Run {
+  const run = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+  enterRunPhase(run, phase, 'test')
+  return run
+}
 
-test('spec advances to spec-review when the artifact is fresh and the actor is idle', () => {
-  const run = mkRun()
-  const next = advanceRun(run, { actorIdle: true, artifactFresh: true, verdict: null, maxPasses: 2 })
-  expect(next?.phase).toBe('spec-review')
+test('intake advances on a task registered after phase entry', () => {
+  const run = fixture('intake')
+  run.phase_entered_at = 1000
+  expect(advanceRun(run, {
+    actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2,
+    newestRegisteredAt: 2000, newestAdoptedAt: null, tasksAllTerminal: false,
+    anyTaskDone: false,
+  })?.phase).toBe('dispatch')
 })
 
-test('spec does not advance while the actor is working', () => {
-  const run = mkRun()
-  expect(advanceRun(run, { actorIdle: false, artifactFresh: true, verdict: null, maxPasses: 2 })).toBeNull()
+test('intake does NOT advance on a task registered before phase entry', () => {
+  const run = fixture('intake')
+  run.phase_entered_at = 3000
+  expect(advanceRun(run, {
+    actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2,
+    newestRegisteredAt: 2000, newestAdoptedAt: null, tasksAllTerminal: false,
+    anyTaskDone: false,
+  })).toBeNull()
 })
 
-test('spec does not advance without a fresh artifact', () => {
-  const run = mkRun()
-  expect(advanceRun(run, { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 })).toBeNull()
+test('execute waits for intake_closed even when every task is terminal', () => {
+  const run = fixture('execute')
+  run.intake_closed = false
+  expect(advanceRun(run, {
+    actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
+    newestRegisteredAt: null, newestAdoptedAt: null,
+    tasksAllTerminal: true, anyTaskDone: true,
+  })).toBeNull()
 })
 
-test('a CLEAR spec review advances to plan', () => {
-  const run = enterRunPhase(mkRun(), 'spec-review', 'test')
-  const next = advanceRun(run, {
+test('execute goes to branch-review when intake is closed and a task is done', () => {
+  const run = fixture('execute')
+  run.intake_closed = true
+  expect(advanceRun(run, {
+    actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
+    newestRegisteredAt: null, newestAdoptedAt: null,
+    tasksAllTerminal: true, anyTaskDone: true,
+  })?.phase).toBe('branch-review')
+})
+
+test('execute escalates when no task reached done', () => {
+  const run = fixture('execute')
+  run.intake_closed = true
+  expect(advanceRun(run, {
+    actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
+    newestRegisteredAt: null, newestAdoptedAt: null,
+    tasksAllTerminal: true, anyTaskDone: false,
+  })?.phase).toBe('escalated')
+})
+
+test('branch-review escalates at MAX_PASSES on its own counter', () => {
+  const run = fixture('branch-review')
+  const s = {
     actorIdle: true, artifactFresh: true,
-    verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 }, maxPasses: 2,
-  })
-  expect(next?.phase).toBe('plan')
-})
-
-test('a BLOCKER spec review returns to spec and increments pass', () => {
-  const run = enterRunPhase(mkRun(), 'spec-review', 'test')
-  const next = advanceRun(run, {
-    actorIdle: true, artifactFresh: true,
-    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 2,
-  })
-  expect(next?.phase).toBe('spec')
-  expect(next?.pass).toBe(2)
-})
-
-test('exhausting MAX_PASSES escalates and records where from', () => {
-  const run = enterRunPhase(mkRun(), 'spec-review', 'test')
-  run.pass = 2
-  const next = advanceRun(run, {
-    actorIdle: true, artifactFresh: true,
-    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 2,
-  })
-  expect(next?.phase).toBe('escalated')
-  expect(next?.escalated_from).toBe('spec-review')
-})
-
-test('LIVELOCK: re-entered spec does not re-advance on the stale artifact', () => {
-  // The spec file still exists from pass 1, but its mtime predates this phase entry.
-  const run = enterRunPhase(mkRun(), 'spec', 'blocker on pass 1')
-  expect(advanceRun(run, { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 })).toBeNull()
-})
-
-test('a cleared branch-review finishes the run', () => {
-  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
-  const next = advanceRun(run, {
-    actorIdle: true, artifactFresh: true,
-    verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 }, maxPasses: 2,
-  })
-  expect(next?.phase).toBe('done')
-})
-
-test('a blocked branch-review loops on itself, since no producer phase remains', () => {
-  const run = enterRunPhase(mkRun(), 'branch-review', 'test')
-  const next = advanceRun(run, {
-    actorIdle: true, artifactFresh: true,
-    verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, maxPasses: 3,
-  })
-  expect(next?.phase).toBe('branch-review')
-  expect(next?.pass).toBe(2)
-})
-
-test('dispatch and execute never advance on artifact signals alone', () => {
-  for (const phase of ['dispatch', 'execute'] as const) {
-    const run = enterRunPhase(mkRun(), phase, 'test')
-    expect(advanceRun(run, {
-      actorIdle: true, artifactFresh: true, verdict: null, maxPasses: 2,
-    })).toBeNull()
+    verdict: { verdict: 'BLOCKER' as const, blockers: 1, majors: 0 }, maxPasses: 2,
+    newestRegisteredAt: null, newestAdoptedAt: null,
+    tasksAllTerminal: false, anyTaskDone: false,
   }
-})
-
-test('enterRunPhase stamps phase_entered_at and appends history', () => {
-  const before = Date.now() - 1
-  const run = enterRunPhase(mkRun(), 'plan', 'spec review cleared')
-  expect(run.phase_entered_at).toBeGreaterThan(before)
-  expect(run.history.at(-1)).toMatchObject({ to: 'plan', why: 'spec review cleared' })
+  advanceRun(run, s)
+  expect(run.phase).toBe('branch-review')
+  expect(counterFor(run, 'branch-review')).toBe(1)
+  advanceRun(run, s)
+  expect(run.phase).toBe('escalated')
 })

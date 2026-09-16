@@ -9,16 +9,46 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
-  artifactPathFor, type DigestInput, evaluateRun, nextDelivery, promptForRunPhase, refreshBadges, shouldRetry,
+  absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
+  refreshBadges, shouldRetry,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
-import { stallCandidates, taskStallCandidates } from './stall'
+import { taskRow } from '../lib/phases'
+import { sendProbes, stallCandidates, taskStallCandidates } from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
-import { advanceTasks } from './tasks'
+import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+import type { AgentStatus, Run } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
+
+/**
+ * No in-place migration: a v4 run mid-`plan` has an orchestrator holding work no
+ * worker can inherit. `hpipe status` tells the human to abort it.
+ */
+export function isCurrentSchemaRun(run: Run): boolean {
+  return run.schema_version === 2
+}
+
+/**
+ * One settle window per tick, not one per pane. Six workers at ACTOR_SETTLE_MS
+ * serially would not fit inside TICK_MS. Reads are memoised per tick so a pane
+ * consulted by several rows is polled once.
+ */
+export function makeSettledIdleReader(
+  panes: string[], settleMs: number, status: (p: string) => Promise<AgentStatus>,
+): (paneId: string) => Promise<boolean> {
+  const results = new Map<string, Promise<boolean>>()
+  for (const pane of panes) {
+    results.set(pane, (async () => {
+      if (!isAgentReady(await status(pane))) return false
+      await Bun.sleep(settleMs)
+      return isAgentReady(await status(pane))
+    })())
+  }
+  return async (paneId: string) => (await results.get(paneId)) ?? false
+}
 
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
@@ -74,7 +104,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  let attempts = 0
+  const attempts = new Map<string, number>()
   let lastCiPollMs = 0
   const probed = new Set<string>()
 
@@ -82,9 +112,10 @@ async function main(): Promise<void> {
     try {
       const events = await drain(queueDir)
       const allRuns = await listRuns(stateDir, session)
-      const runs = config.REPOS_ALLOW.length === 0
+      const runs = (config.REPOS_ALLOW.length === 0
         ? allRuns
         : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
+      ).filter(isCurrentSchemaRun)
       const panes = await allOrchestratorPanes(stateDir, session)
 
       const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))
@@ -109,29 +140,50 @@ async function main(): Promise<void> {
         await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
       }
 
-      const digests: DigestInput[] = []
-      for (const run of pickOneAdvance(runs)) {
+      const advancing = pickOneAdvance(runs)
+      const actorPanes = [...new Set(
+        advancing
+          .flatMap((r) => [r.orchestrator_pane, ...r.tasks.map((t) => t.pane_id)])
+          .filter((p): p is string => p !== null),
+      )]
+      const liveIdle = makeSettledIdleReader(
+        actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane),
+      )
+
+      const pending: PendingPrompt[] = []
+      for (const run of advancing) {
+        const addPending = (
+          paneId: string | null, text: string, eventLines: string[], subject: string,
+          phaseNote?: string,
+        ) => {
+          if (text.length === 0 && eventLines.length === 0) return
+          if (paneId === null) {
+            console.error(`[pipeline] run ${run.run_id}: dropping prompt for ${subject} — no pane`)
+            return
+          }
+          pending.push({
+            paneId, run, text, events: eventLines, phaseNote,
+            isOrchestrator: paneId === run.orchestrator_pane,
+          })
+        }
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
           const runGh = ghFor(run.repo_root)
-          const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
-
-          const actorIdle = run.orchestrator_pane !== null &&
-            isAgentReady(await herdr.agentStatus(run.orchestrator_pane))
+          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle)
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
-            actorIdle,
+            liveIdle,
             maxPasses: config.MAX_PASSES,
+            fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
             issueView: (issue) => runGh.issueView(issue),
             verdictFor: async (r, t) => {
-              const relative = artifactPathFor(r, t)
-              if (!relative) return null
-              const absolute = join(r.repo_root, relative)
+              const absolute = absoluteArtifactPath(r, t)
+              if (!absolute) return null
               if (!(await isFresh(absolute, t.phase_entered_at))) return null
               if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
               return parseVerdict(absolute)
@@ -140,65 +192,80 @@ async function main(): Promise<void> {
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
           })
 
-          if (run.phase !== runPhaseBefore) {
-            const entered = await promptForRunPhase(run, config)
-            if (entered.length > 0) taskPrompts.push(entered)
+          // After advanceTasks, so a task resumed this tick gets a full tick to
+          // settle before its phase is evaluated — the same grace every other
+          // transition in the driver gets.
+          const answerDeps: AnswerDeps = {
+            pluginRoot,
+            promptRetryMax: config.PROMPT_RETRY_MAX,
+            send: (paneId, text) => herdr.agentPrompt(paneId, text),
           }
+          await deliverPendingAnswers(run, answerDeps)
+          await announceDecisions(run, answerDeps)
+
+          const enteredRunPhase = run.phase === runPhaseBefore
+            ? ''
+            : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
           const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
-          const combined = [nextPrompt, ...taskPrompts].filter((p) => p.length > 0).join('\n\n---\n\n')
-          if (lines.length > 0 || combined.length > 0) {
-            digests.push({ run, eventLines: lines, phaseNote, nextPrompt: combined })
+          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`, phaseNote)
+          for (const prompt of taskPrompts) {
+            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
           }
+          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`)
           await saveRun(stateDir, run)
         } catch (error) {
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
         }
       }
 
-      const delivery = nextDelivery(digests)
-      if (delivery) {
+      for (const delivery of deliveriesFor(pending)) {
         const sent = await herdr.agentPrompt(delivery.paneId, delivery.text)
-        if (!sent.ok) {
-          attempts += 1
-          if (!shouldRetry(sent.code, attempts, config.PROMPT_RETRY_MAX)) {
-            console.error(`[pipeline] giving up on delivery: ${sent.code}`)
-            attempts = 0
-          }
+        if (sent.ok) {
+          attempts.delete(delivery.paneId)
+          continue
+        }
+        const failures = (attempts.get(delivery.paneId) ?? 0) + 1
+        if (shouldRetry(sent.code, failures, config.PROMPT_RETRY_MAX)) {
+          attempts.set(delivery.paneId, failures)
         } else {
-          attempts = 0
+          console.error(`[pipeline] giving up on delivery to ${delivery.paneId}: ${sent.code}`)
+          attempts.delete(delivery.paneId)
         }
       }
 
-      for (const candidate of stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed)) {
-        probed.add(candidate.key)
-        const path = artifactPathFor(candidate.run, null)
-        const text = await renderPrompt(
-          pluginRoot, 'stall-probe', {
+      await sendProbes(
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed), probed,
+        async (candidate) => {
+          const path = absoluteArtifactPath(candidate.run, null)
+          const text = await renderPrompt(
+            pluginRoot, 'stall-probe', {
+              run_id: candidate.run.run_id,
+              phase: candidate.run.phase,
+              minutes: String(candidate.minutes),
+              artifact_path: path ?? 'the expected artifact',
+            },
+          )
+          return herdr.agentPrompt(candidate.paneId, text)
+        },
+      )
+
+      await sendProbes(
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed), probed,
+        async (candidate) => {
+          const branch = `${candidate.task.branch} (#${candidate.task.issue})`
+          const text = await renderPrompt(pluginRoot, 'stall-probe', {
             run_id: candidate.run.run_id,
-            phase: candidate.run.phase,
+            phase: `${candidate.task.phase} (${candidate.task.task_id}, ${candidate.task.branch})`,
             minutes: String(candidate.minutes),
-            artifact_path: join(candidate.run.repo_root, path ?? 'the expected artifact'),
-          },
-        )
-        if (candidate.run.orchestrator_pane) {
-          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
-        }
-      }
-
-      for (const candidate of taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed)) {
-        probed.add(candidate.key)
-        const text = await renderPrompt(pluginRoot, 'stall-probe', {
-          run_id: candidate.run.run_id,
-          phase: `execute (${candidate.task.task_id}, ${candidate.task.branch})`,
-          minutes: String(candidate.minutes),
-          artifact_path: `a PR for ${candidate.task.branch} (#${candidate.task.issue})`,
-        })
-        if (candidate.run.orchestrator_pane) {
-          await herdr.agentPrompt(candidate.run.orchestrator_pane, text)
-        }
-      }
+            artifact_path: taskRow(candidate.task.phase).signal === 'pr'
+              ? `a PR for ${branch}`
+              : `whatever clears ${candidate.task.phase} for ${branch}`,
+          })
+          return herdr.agentPrompt(candidate.paneId, text)
+        },
+      )
     } catch (error) {
       console.error('[pipeline] tick error:', error)
     }
@@ -206,4 +273,4 @@ async function main(): Promise<void> {
   }
 }
 
-await main()
+if (import.meta.main) await main()

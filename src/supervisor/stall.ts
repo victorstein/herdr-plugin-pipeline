@@ -1,10 +1,28 @@
-import { ARTIFACT_RUN_PHASES } from '../lib/machine'
+import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import type { Run, Task } from '../lib/types'
 
-export interface StallCandidate { run: Run; key: string; minutes: number }
+export interface StallCandidate {
+  run: Run
+  key: string
+  minutes: number
+  paneId: string
+  taskId: string | null
+}
 
 export function stallKey(run: Run): string {
   return `${run.run_id}:${run.phase}:${run.phase_entered_at}`
+}
+
+/**
+ * A row whose actor has no pane of its own is stranded until someone outside it
+ * acts, so the table points it at the orchestrator. A worker row can also end up
+ * paneless — a dispatch prompt that never landed leaves no pane to nudge — and
+ * the same fallback keeps the probe reaching someone.
+ */
+function probePaneFor(run: Run, row: PhaseRow<string>, taskPane: string | null): string | null {
+  if (row.probeTarget === 'orchestrator') return run.orchestrator_pane
+  if (row.actor === 'worker') return taskPane ?? run.orchestrator_pane
+  return run.orchestrator_pane
 }
 
 export function stallCandidates(
@@ -13,8 +31,12 @@ export function stallCandidates(
   const out: StallCandidate[] = []
 
   for (const run of runs) {
-    if (!ARTIFACT_RUN_PHASES.has(run.phase)) continue
-    if (!run.orchestrator_pane) continue
+    const row = runRow(run.phase)
+    if (!row.stallable) continue
+    if (row.stallWhen && !row.stallWhen(run)) continue
+
+    const paneId = probePaneFor(run, row, null)
+    if (!paneId) continue
 
     const minutes = (now - run.phase_entered_at) / 60_000
     if (minutes < thresholdMinutes) continue
@@ -22,33 +44,37 @@ export function stallCandidates(
     const key = stallKey(run)
     if (alreadyProbed.has(key)) continue
 
-    out.push({ run, key, minutes: Math.floor(minutes) })
+    out.push({ run, key, minutes: Math.floor(minutes), paneId, taskId: null })
   }
 
   return out
 }
 
-export interface TaskStallCandidate { run: Run; task: Task; key: string; minutes: number }
+export interface TaskStallCandidate {
+  run: Run
+  task: Task
+  key: string
+  minutes: number
+  paneId: string
+  taskId: string
+}
 
 export function taskStallKey(run: Run, task: Task): string {
   return `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
 }
 
-/**
- * `execute` is the only task phase worth probing: every other phase is either
- * orchestrator-owned (and covered by the run-level probe's actor gate) or
- * driven by an external service. A worker whose pane hangs without emitting
- * `pane.exited` would otherwise go unnoticed indefinitely.
- */
 export function taskStallCandidates(
   runs: Run[], now: number, thresholdMinutes: number, alreadyProbed: Set<string>,
 ): TaskStallCandidate[] {
   const out: TaskStallCandidate[] = []
 
   for (const run of runs) {
-    if (!run.orchestrator_pane) continue
     for (const task of run.tasks) {
-      if (task.phase !== 'execute') continue
+      const row = taskRow(task.phase)
+      if (!row.stallable) continue
+
+      const paneId = probePaneFor(run, row, task.pane_id)
+      if (!paneId) continue
 
       const minutes = (now - task.phase_entered_at) / 60_000
       if (minutes < thresholdMinutes) continue
@@ -56,9 +82,22 @@ export function taskStallCandidates(
       const key = taskStallKey(run, task)
       if (alreadyProbed.has(key)) continue
 
-      out.push({ run, task, key, minutes: Math.floor(minutes) })
+      out.push({ run, task, key, minutes: Math.floor(minutes), paneId, taskId: task.task_id })
     }
   }
 
   return out
+}
+
+/**
+ * The key carries `phase_entered_at`, so a candidate marked probed is never
+ * retried for that phase entry — marking one the send failed on would drop the
+ * probe silently and for good.
+ */
+export async function sendProbes<C extends { key: string }>(
+  candidates: C[], probed: Set<string>, send: (candidate: C) => Promise<{ ok: boolean }>,
+): Promise<void> {
+  for (const candidate of candidates) {
+    if ((await send(candidate)).ok) probed.add(candidate.key)
+  }
 }

@@ -25,7 +25,13 @@ export function toQueuedEvent(
     // `JSON.parse("null")` succeeds and returns null, so guarding the parse
     // alone is not enough — reading a field off it would throw out of a hook.
     if (parsed === null || typeof parsed !== 'object') return null
-    raw = parsed as RawEvent
+    // herdr wraps every payload as {event, data:{...}} — measured live on 0.9.0.
+    // Reading the fields off the envelope yields undefined for all of them, which
+    // enqueues a bare {kind, session, at} that matches no task and binds nothing.
+    const envelope = parsed as { data?: unknown }
+    raw = (envelope.data !== null && typeof envelope.data === 'object'
+      ? envelope.data
+      : parsed) as RawEvent
   } catch {
     return null
   }

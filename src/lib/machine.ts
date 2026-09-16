@@ -1,5 +1,24 @@
+import { type PhaseRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
+
+interface HasPasses { passes: Record<string, number | undefined> }
+
+export function counterFor(record: HasPasses, phase: string): number {
+  return record.passes[phase] ?? 0
+}
+
+/**
+ * Monotone by construction. Nothing in this module decrements or deletes a
+ * counter — only `hpipe rewind` clears the map. Two earlier drafts reset on a
+ * forward transition and each time deleted a bound: the review loop in one, the
+ * shipped CI retry budget in the other.
+ */
+export function bumpCounter(record: HasPasses, phase: string): number {
+  const next = counterFor(record, phase) + 1
+  record.passes[phase] = next
+  return next
+}
 
 /**
  * An agent has finished its turn. herdr reports `done` for "idle and not yet
@@ -17,44 +36,10 @@ export interface RunSignals {
   artifactFresh: boolean
   verdict: VerdictResult | null
   maxPasses: number
-}
-
-/** Phases whose completion signal is an artifact file. */
-export const ARTIFACT_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
-  'spec', 'spec-review', 'plan', 'plan-review', 'branch-review',
-])
-
-/** A run in one of these needs no further automatic advancement. */
-export const COMPLETED_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>(['done'])
-
-/**
- * A run in one of these must not hold an orchestrator pane slot: neither clears
- * `orchestrator_pane`, and both need a human (`hpipe rewind`/`abort`) to leave,
- * so either would starve the next run started in that same terminal.
- */
-export const PANE_RELEASING_RUN_PHASES: ReadonlySet<RunPhase> =
-  new Set<RunPhase>(['done', 'escalated'])
-
-const REVIEW_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
-  'spec-review', 'plan-review', 'branch-review',
-])
-
-const ON_CLEAR: Partial<Record<RunPhase, RunPhase>> = {
-  spec: 'spec-review',
-  'spec-review': 'plan',
-  plan: 'plan-review',
-  'plan-review': 'dispatch',
-  'branch-review': 'done',
-}
-
-const ON_BLOCKER: Partial<Record<RunPhase, RunPhase>> = {
-  'spec-review': 'spec',
-  'plan-review': 'plan',
-  // Unlike its siblings, branch-review routes to itself: by this point every
-  // task is merged and torn down, so there is no producer phase to return to.
-  // The orchestrator patches the branch directly and writes a fresh review,
-  // and MAX_PASSES still bounds the loop.
-  'branch-review': 'branch-review',
+  newestRegisteredAt: number | null
+  newestAdoptedAt: number | null
+  tasksAllTerminal: boolean
+  anyTaskDone: boolean
 }
 
 export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
@@ -65,31 +50,41 @@ export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
   return run
 }
 
-export function advanceRun(run: Run, signals: RunSignals): Run | null {
-  if (!ARTIFACT_RUN_PHASES.has(run.phase)) return null
-  if (!signals.actorIdle || !signals.artifactFresh) return null
+export function advanceRun(run: Run, s: RunSignals): Run | null {
+  switch (run.phase) {
+    case 'intake': {
+      if (!s.actorIdle) return null
+      if (s.newestRegisteredAt === null || s.newestRegisteredAt <= run.phase_entered_at) return null
+      return enterRunPhase(run, 'dispatch', 'a task was registered')
+    }
 
-  if (!REVIEW_PHASES.has(run.phase)) {
-    const next = ON_CLEAR[run.phase]
-    return next ? enterRunPhase(run, next, 'actor idle + artifact fresh') : null
+    case 'dispatch': {
+      // Edge, not level: `hpipe rewind <run> dispatch` clears `adopted_at` on
+      // bound tasks so this can re-fire. Without that this row is a one-way door.
+      if (s.newestAdoptedAt === null || s.newestAdoptedAt <= run.phase_entered_at) return null
+      return enterRunPhase(run, 'execute', 'a worktree was adopted')
+    }
+
+    case 'execute': {
+      if (!run.intake_closed || !s.tasksAllTerminal) return null
+      return s.anyTaskDone
+        ? enterRunPhase(run, 'branch-review', 'all tasks settled')
+        : enterRunPhase(run, 'escalated', 'every task settled without one reaching done')
+    }
+
+    case 'branch-review': {
+      if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
+      if (s.verdict.verdict === 'CLEAR') return enterRunPhase(run, 'done', 'review cleared')
+      const count = bumpCounter(run, 'branch-review')
+      if (count >= s.maxPasses) {
+        return enterRunPhase(run, 'escalated', `${count} passes without clearing`)
+      }
+      return enterRunPhase(run, 'branch-review', `review returned BLOCKER (pass ${count})`)
+    }
+
+    default:
+      return null
   }
-
-  if (!signals.verdict) return null
-
-  if (signals.verdict.verdict === 'CLEAR') {
-    const next = ON_CLEAR[run.phase]
-    return next ? enterRunPhase(run, next, 'review cleared') : null
-  }
-
-  if (run.pass >= signals.maxPasses) {
-    return enterRunPhase(run, 'escalated', `${run.pass} passes without clearing`)
-  }
-
-  const back = ON_BLOCKER[run.phase]
-  if (!back) return null
-  enterRunPhase(run, back, `review returned BLOCKER (pass ${run.pass})`)
-  run.pass += 1
-  return run
 }
 
 export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: string): Task {
@@ -102,7 +97,6 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
 
 export interface TaskSignals {
   actorIdle: boolean
-  workerIdle: boolean
   artifactFresh: boolean
   verdict: VerdictResult | null
   prNumber: number | null
@@ -111,70 +105,87 @@ export interface TaskSignals {
   mergedAtMs?: number
   issueClosed: boolean
   closedAtMs?: number
+  filesClear: boolean
   ciBucket: CiBucket | null
   maxPasses: number
 }
 
-const TASK_REVIEW_PHASES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  'task-review-spec', 'task-review-quality',
-])
+function advanceLoopingRow(
+  run: Run, task: Task, row: PhaseRow<TaskPhase>, cleared: boolean,
+  maxPasses: number, headSha: string | null,
+): Task | null {
+  if (cleared) {
+    return enterTaskPhase(run, task, row.onClear as TaskPhase, 'cleared')
+  }
+  const count = bumpCounter(task, row.phase)
+  if (count >= maxPasses) {
+    return enterTaskPhase(run, task, 'escalated', `${count} passes at ${row.phase}`)
+  }
+  enterTaskPhase(run, task, row.onBlocker as TaskPhase, `returned (pass ${count})`)
+  if (task.phase === 'implement') task.head_sha_at_entry = headSha
+  return task
+}
 
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
   switch (task.phase) {
-    case 'execute': {
-      // Edge, not level: the PR must have moved since this phase was entered.
-      const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
-      if (!s.workerIdle || s.prNumber === null || !moved) return null
-      task.pr = s.prNumber
-      return enterTaskPhase(run, task, 'task-review-spec', `PR #${s.prNumber} at ${s.headSha}`)
+    case 'research':
+    case 'spec':
+    case 'plan': {
+      if (!s.actorIdle || !s.artifactFresh) return null
+      return enterTaskPhase(
+        run, task, taskRow(task.phase).onClear as TaskPhase, 'actor idle + artifact fresh',
+      )
     }
 
-    case 'task-review-spec':
-    case 'task-review-quality': {
+    case 'implement': {
+      const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
+      if (!s.actorIdle || s.prNumber === null || !moved) return null
+      task.pr = s.prNumber
+      return enterTaskPhase(run, task, 'pr-review-intent', `PR #${s.prNumber} at ${s.headSha}`)
+    }
+
+    case 'spec-review':
+    case 'plan-review':
+    case 'pr-review-intent':
+    case 'pr-review-quality': {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
-
-      if (s.verdict.verdict === 'CLEAR') {
-        const next: TaskPhase = task.phase === 'task-review-spec' ? 'task-review-quality' : 'ci'
-        return enterTaskPhase(run, task, next, 'review cleared')
-      }
-
-      if (task.pass >= s.maxPasses) {
-        return enterTaskPhase(run, task, 'escalated', `${task.pass} passes without clearing`)
-      }
-
-      enterTaskPhase(run, task, 'execute', `review returned BLOCKER (pass ${task.pass})`)
-      task.pass += 1
-      task.head_sha_at_entry = s.headSha
-      return task
+      return advanceLoopingRow(
+        run, task, taskRow(task.phase), s.verdict.verdict === 'CLEAR',
+        s.maxPasses, s.headSha,
+      )
     }
 
     case 'ci': {
-      if (s.ciBucket === 'pass') return enterTaskPhase(run, task, 'merge', 'CI green')
-      if (s.ciBucket === 'fail') {
-        // CI retries draw on the same budget as review retries. Without this the
-        // task cycles execute → review → ci → execute forever, bypassing the one
-        // safety valve the module has.
-        if (task.pass >= s.maxPasses) {
-          return enterTaskPhase(run, task, 'escalated', `CI still red after ${task.pass} passes`)
-        }
-        enterTaskPhase(run, task, 'execute', 'CI red')
-        task.pass += 1
-        task.head_sha_at_entry = s.headSha
-        return task
-      }
-      return null
+      if (s.ciBucket !== 'pass' && s.ciBucket !== 'fail') return null
+      return advanceLoopingRow(
+        run, task, taskRow('ci'), s.ciBucket === 'pass', s.maxPasses, s.headSha,
+      )
     }
 
     case 'merge': {
       if (!s.merged) return null
       if (s.mergedAtMs === undefined || s.mergedAtMs <= task.phase_entered_at) return null
+      task.merged_at_ms = s.mergedAtMs
+      task.issue_closed_at_entry = s.issueClosed
       return enterTaskPhase(run, task, 'close', 'PR merged')
     }
 
     case 'close': {
       if (!s.issueClosed) return null
-      if (s.closedAtMs === undefined || s.closedAtMs <= task.phase_entered_at) return null
+      // The edge is "closed by the merge that should have caused it", NOT "closed
+      // after this phase began". GitHub auto-closes on merge, so closedAt always
+      // predates phase entry and the v4 comparison was unsatisfiable.
+      const closedByMerge =
+        task.merged_at_ms !== null &&
+        s.closedAtMs !== undefined &&
+        s.closedAtMs >= task.merged_at_ms
+      if (!task.issue_closed_at_entry && !closedByMerge) return null
       return enterTaskPhase(run, task, 'teardown', `issue #${task.issue} closed`)
+    }
+
+    case 'blocked-on-files': {
+      if (!s.filesClear) return null
+      return enterTaskPhase(run, task, 'implement', 'no overlapping files in flight')
     }
 
     default:

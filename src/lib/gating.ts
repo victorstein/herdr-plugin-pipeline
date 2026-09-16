@@ -1,21 +1,10 @@
+import { taskRow } from './phases'
 import type { Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
 const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
 const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'failed', 'orphaned', 'blocked-on-failure', 'escalated',
-])
-
-/**
- * File ownership asks a DIFFERENT question than dependency satisfaction, so it
- * gets its own set. `escalated` and `failed` both leave a worktree holding
- * unmerged work, and nothing ever tears an escalated task down — releasing its
- * files would let a second task be dispatched onto them. `orphaned` is excluded
- * because it is only reachable after merge, so that code has already landed.
- */
-const HOLDS_FILES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  'execute', 'task-review-spec', 'task-review-quality',
-  'ci', 'merge', 'close', 'teardown', 'failed', 'escalated',
 ])
 
 export type GateState =
@@ -31,8 +20,12 @@ export function filesOverlap(a: string[], b: string[]): boolean {
   return a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)))
 }
 
-function isInFlight(task: Task): boolean {
-  return HOLDS_FILES.has(task.phase)
+export function isInFlight(task: Task): boolean {
+  const rule = taskRow(task.phase).holdsFiles
+  if (rule === 'inherit') {
+    return task.decision_from !== null && taskRow(task.decision_from).holdsFiles === true
+  }
+  return rule === true
 }
 
 export function gateStatus(task: Task, all: Task[]): GateState {
@@ -50,12 +43,31 @@ export function gateStatus(task: Task, all: Task[]): GateState {
   })
   if (pending.length > 0) return { state: 'waiting', on: pending }
 
-  const colliding = all
-    .filter((t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files))
-    .map((t) => t.task_id)
-  if (colliding.length > 0) return { state: 'waiting', on: colliding }
-
   return { state: 'ready' }
+}
+
+export function filesClearFor(task: Task, all: Task[]): boolean {
+  return !all.some(
+    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
+  )
+}
+
+/**
+ * One pass in task_id order, at most one release per overlapping group. Without
+ * the running set, two tasks freed by the same teardown both read "nothing
+ * overlaps" on the same tick and both enter `implement`.
+ */
+export function releasableFromFiles(all: Task[]): Task[] {
+  const waiting = all
+    .filter((t) => t.phase === 'blocked-on-files')
+    .sort((a, b) => a.task_id.localeCompare(b.task_id))
+  const released: Task[] = []
+  for (const t of waiting) {
+    if (!filesClearFor(t, all)) continue
+    if (released.some((r) => filesOverlap(r.files, t.files))) continue
+    released.push(t)
+  }
+  return released
 }
 
 /** Kahn's algorithm. Returns the ids still in the graph when progress stops. */

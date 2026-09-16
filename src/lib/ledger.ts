@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { COMPLETED_RUN_PHASES } from './machine'
+import { runRow } from './phases'
 import { readJson, writeJson } from './store'
 import type { Orchestrator, Run, SessionKey } from './types'
 
@@ -28,14 +28,16 @@ export function newRun(input: {
     repo_key: input.repoKey,
     repo_root: input.repoRoot,
     title: input.title,
-    phase: 'spec',
-    pass: 1,
+    phase: 'intake',
     phase_entered_at: Date.now(),
     escalated_from: null,
     orchestrator_pane: null,
-    artifacts: { spec: null, plan: null, verdicts: {} },
+    artifacts: { verdicts: {} },
     tasks: [],
     history: [],
+    schema_version: 2,
+    intake_closed: false,
+    passes: {},
   }
 }
 
@@ -63,7 +65,7 @@ export async function activeRunForRepo(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<Run | null> {
   const runs = await listRuns(stateDir, session)
-  return runs.find((r) => r.repo_key === repoKey && !COMPLETED_RUN_PHASES.has(r.phase)) ?? null
+  return runs.find((r) => r.repo_key === repoKey && !runRow(r.phase).terminal) ?? null
 }
 
 export async function runForWorkspace(

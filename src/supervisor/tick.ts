@@ -1,4 +1,6 @@
-import { enterTaskPhase, PANE_RELEASING_RUN_PHASES } from '../lib/machine'
+import { abandonDecisions } from '../lib/decisions'
+import { enterTaskPhase } from '../lib/machine'
+import { runRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 export interface WakeLine {
@@ -35,6 +37,8 @@ export function applyEvents(
       const found = findTask(runs, (t) => t.branch === event.branch && t.workspace_id === null)
       if (found) {
         found.task.workspace_id = event.workspace_id
+        found.task.checkout_path = event.checkout_path ?? null
+        found.task.adopted_at = Date.now()
         changed = true
       }
       continue
@@ -53,6 +57,9 @@ export function applyEvents(
 
     if (event.kind === 'pane.agent_detected') {
       if (event.released === true) {
+        // A dead pane can never deliver or answer, so its open question is
+        // stranded — closing it keeps `hpipe status` and the stall probe honest.
+        if (task.phase === 'blocked-on-decision') abandonDecisions(task)
         enterTaskPhase(run, task, 'failed', 'agent released')
         wake.push({ run, task, text: `${task.branch} (#${task.issue}, ${task.task_id}) agent released` })
       } else if (event.pane_id) {
@@ -63,6 +70,7 @@ export function applyEvents(
     }
 
     if (event.kind === 'pane.exited') {
+      if (task.phase === 'blocked-on-decision') abandonDecisions(task)
       enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
       wake.push({
         run, task,
@@ -98,7 +106,7 @@ export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
-    if (PANE_RELEASING_RUN_PHASES.has(run.phase)) continue
+    if (runRow(run.phase).releasesPane === true) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)

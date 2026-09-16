@@ -1,14 +1,23 @@
 import { expect, test } from 'bun:test'
-import { advanceTasks } from '../src/supervisor/tasks'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
+import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
-  depends_on: [], files: [], keep_worktree: false, text: 'do it',
+  depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
-  phase: 'queued', pass: 1, phase_entered_at: 0, escalated_from: null,
-  head_sha_at_entry: null, pr: null, ci: null, ...over,
+  phase: 'queued', phase_entered_at: 0, escalated_from: null,
+  head_sha_at_entry: null, pr: null, ci: null,
+  checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
+  artifacts: { research: null, spec: null, plan: null, verdicts: {} },
+  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+  ...over,
 })
 
 function mkRun(tasks: Task[]): Run {
@@ -21,8 +30,9 @@ function mkRun(tasks: Task[]): Run {
 
 const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   pluginRoot: process.cwd(),
-  actorIdle: true,
+  liveIdle: async () => true,
   maxPasses: 2,
+  fileSettleMs: 0,
   prForBranch: async () => null,
   prView: async () => null,
   issueView: async () => null,
@@ -32,16 +42,56 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   ...over,
 })
 
-test('an unblocked queued task moves to execute and yields a dispatch prompt', async () => {
+test('an unblocked queued task is dispatched and yields a dispatch prompt', async () => {
   const run = mkRun([mkTask({})])
   const prompts = await advanceTasks(run, deps())
-  expect(run.tasks[0]?.phase).toBe('execute')
-  expect(prompts.join('\n')).toContain('feat/x')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('feat/x')
+})
+
+test('an opened gate dispatches into the design loop, not straight to implement', async () => {
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'queued' })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('advanceTasks releases a blocked-on-files task once its sibling settles', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'done', files: ['a/'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('implement')
+})
+
+test('a worker row reads the worker pane live, not the cached agent_status', async () => {
+  const run = mkRun([mkTask({ phase: 'spec', pane_id: 'w7:p1', agent_status: 'idle' })])
+  const reads: string[] = []
+  await advanceTasks(run, deps({
+    liveIdle: async (pane: string) => { reads.push(pane); return false },
+  }))
+  expect(reads).toEqual(['w7:p1'])
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('an orchestrator row reads the orchestrator pane', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pane_id: 'w7:p1' })])
+  run.orchestrator_pane = 'w1:p1'
+  const reads: string[] = []
+  await advanceTasks(run, deps({
+    liveIdle: async (pane: string) => { reads.push(pane); return true },
+  }))
+  expect(reads).toEqual(['w1:p1'])
+})
+
+test('a task with no pane is skipped, not errored', async () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: null })])
+  await expect(advanceTasks(run, deps())).resolves.toBeDefined()
+  expect(run.tasks[0]?.phase).toBe('research')
 })
 
 test('a gated queued task stays queued and yields nothing', async () => {
   const run = mkRun([
-    mkTask({ task_id: 't1', phase: 'execute' }),
+    mkTask({ task_id: 't1', phase: 'implement' }),
     mkTask({ task_id: 't2', depends_on: ['t1'] }),
   ])
   const prompts = await advanceTasks(run, deps())
@@ -58,40 +108,40 @@ test('a queued task whose dependency failed becomes blocked-on-failure', async (
   expect(run.tasks[1]?.phase).toBe('blocked-on-failure')
 })
 
-test('an idle worker with a fresh PR advances to task-review-spec', async () => {
-  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+test('an idle worker with a fresh PR advances to pr-review-intent', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
   expect(run.tasks[0]?.pr).toBe(42)
 })
 
-test('LIVELOCK: a task re-entering execute does not advance on the same sha', async () => {
-  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'same', pr: 42 })])
+test('LIVELOCK: a task re-entering implement does not advance on the same sha', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'same', pr: 42 })])
   await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'same' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('execute')
+  expect(run.tasks[0]?.phase).toBe('implement')
 })
 
 test('a cleared task review advances to the second stage', async () => {
-  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+  const run = mkRun([mkTask({ phase: 'pr-review-intent' })])
   await advanceTasks(run, deps({
     verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
   }))
-  expect(run.tasks[0]?.phase).toBe('task-review-quality')
+  expect(run.tasks[0]?.phase).toBe('pr-review-quality')
 })
 
-test('task phases are not evaluated while the orchestrator is busy', async () => {
-  const run = mkRun([mkTask({ phase: 'task-review-spec' })])
+test('orchestrator-owned task phases are not evaluated while the orchestrator is busy', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
   await advanceTasks(run, deps({
-    actorIdle: false,
-    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+    liveIdle: async () => false,
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('task-review-spec')
+  expect(run.tasks[0]?.phase).toBe('merge')
 })
 
 test('a merged PR advances to close, and a closed issue to teardown', async () => {
@@ -114,24 +164,22 @@ test('teardown removes the worktree and completes the task', async () => {
   }))
   expect(removed).toEqual(['w7'])
   expect(run.tasks[0]?.phase).toBe('done')
-  expect(run.phase).toBe('branch-review')
 })
 
-test('entering task-review-spec yields the stage-one review prompt', async () => {
-  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'idle', head_sha_at_entry: 'old' })])
+test('entering pr-review-intent yields that row\'s review prompt', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   const prompts = await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(prompts.join('\n')).toContain('Stage 1 review')
-  expect(prompts.join('\n')).toContain('#1')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('pr-review-intent')
 })
 
 test('entering merge yields the merge prompt', async () => {
   const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
   const prompts = await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('merge')
-  expect(prompts.join('\n')).toContain('Ready to merge')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('Ready to merge')
 })
 
 test('a red CI yields the ci-red prompt carrying the failure detail', async () => {
@@ -139,21 +187,124 @@ test('a red CI yields the ci-red prompt carrying the failure detail', async () =
   const prompts = await advanceTasks(run, deps({
     ciDetail: async () => '- build (fail) https://example/run/1',
   }))
-  expect(run.tasks[0]?.phase).toBe('execute')
-  expect(prompts.join('\n')).toContain('CI is red')
-  expect(prompts.join('\n')).toContain('build (fail)')
+  expect(run.tasks[0]?.phase).toBe('implement')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('CI is red')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('build (fail)')
 })
 
 test('an escalated task yields the escalation prompt naming its task flag', async () => {
-  const run = mkRun([mkTask({ phase: 'task-review-quality', pass: 2 })])
+  const run = mkRun([mkTask({ phase: 'pr-review-quality', passes: { 'pr-review-quality': 1 } })])
   const prompts = await advanceTasks(run, deps({
     verdictFor: async () => ({ verdict: 'BLOCKER', blockers: 1, majors: 0 }),
   }))
   expect(run.tasks[0]?.phase).toBe('escalated')
-  expect(prompts.join('\n')).toContain('--task t1')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('--task t1')
+})
+
+test('a worker-owned phase addresses its prompt to the worker pane, not the orchestrator', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  const prompts = await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(prompts[0]?.paneId).toBe('w7:p1')
+})
+
+test('an orchestrator-owned phase addresses its prompt to the orchestrator pane', async () => {
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass' })])
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('merge')
+  expect(prompts[0]?.paneId).toBe('w1:p1')
+})
+
+test('a dispatch prompt is addressed to the orchestrator — a queued task has no pane yet', async () => {
+  const run = mkRun([mkTask({ pane_id: null })])
+  const prompts = await advanceTasks(run, deps())
+  expect(prompts[0]?.paneId).toBe('w1:p1')
 })
 
 test('a phase that advances nothing yields no prompt', async () => {
-  const run = mkRun([mkTask({ phase: 'execute', agent_status: 'working' })])
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'working' })])
   expect(await advanceTasks(run, deps())).toHaveLength(0)
+})
+
+test('close prompts only when the issue is still open', async () => {
+  const open = mkRun([mkTask({ phase: 'close', pr: 42 })])
+  expect(await promptForTaskPhase(open, open.tasks[0]!, deps(), 'merge')).not.toBe('')
+
+  const closed = mkRun([mkTask({ phase: 'close', pr: 42, issue_closed_at_entry: true })])
+  expect(await promptForTaskPhase(closed, closed.tasks[0]!, deps(), 'merge')).toBe('')
+})
+
+const designArtifacts = (): Task['artifacts'] => ({
+  research: join('docs/superpowers/research', '2026-01-01-issue-1-research.md'),
+  spec: join('docs/superpowers/specs', '2026-01-01-issue-1-design.md'),
+  plan: join('docs/superpowers/plans', '2026-01-01-issue-1-plan.md'),
+  verdicts: {},
+})
+
+function worktreeWith(relative: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'hpipe-design-'))
+  mkdirSync(join(dir, dirname(relative)), { recursive: true })
+  writeFileSync(join(dir, relative), 'findings\n')
+  return dir
+}
+
+test('a design artifact row advances when its artifact is fresh in the worktree', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: dir, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('a design artifact row does not advance on a file that predates phase entry', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: Date.now() + 60_000, checkout_path: dir, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('a design review row reads its verdict from the worktree', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('entering a design row delivers that row prompt to the worker pane', async () => {
+  const artifacts = designArtifacts()
+  const dir = worktreeWith(artifacts.research as string)
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: dir, artifacts,
+  })])
+
+  const prompts = await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]?.paneId).toBe('w7:p1')
+  expect(prompts[0]?.text.length).toBeGreaterThan(0)
+})
+
+test('a design row prompt names the artifact path its own predicate will check', async () => {
+  for (const phase of ['research', 'spec', 'spec-review', 'plan', 'plan-review'] as const) {
+    const run = mkRun([mkTask({
+      phase, checkout_path: '/r/.worktrees/feat-x', artifacts: designArtifacts(),
+    })])
+    const task = run.tasks[0] as Task
+
+    const watched = absoluteArtifactPath(run, task)
+    expect(watched).not.toBeNull()
+    expect(await promptForTaskPhase(run, task, deps(), 'research')).toContain(watched as string)
+  }
 })
