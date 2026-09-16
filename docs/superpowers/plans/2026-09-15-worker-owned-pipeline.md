@@ -1284,6 +1284,13 @@ export function releasableFromFiles(all: Task[]): Task[] {
 
 Remove the overlap branch from `gateStatus` — it now only checks `depends_on`.
 
+**Tighten `filesClear` to required while you are here.** Task 9 declared it `filesClear?: boolean`
+because making it required would have added a dozen type errors to an already-red build. That was the
+right call then and the wrong shape now: an optional signal means a caller that forgets it yields
+`undefined`, which is falsy, so the task sits in `blocked-on-files` forever with nothing reporting
+why. Once `gatherSignals` populates it, make it required so a missing wire is a compile error rather
+than a silent stall.
+
 Wire it into the tick in the same commit: `advanceTasks` computes `filesClear` for a
 `blocked-on-files` task by calling `releasableFromFiles(run.tasks)` **once per tick** and checking
 membership — not by calling `filesClearFor` per task, which would let a whole overlapping group
