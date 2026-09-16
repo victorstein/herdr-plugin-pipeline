@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.1.0...v1.2.0) (2026-09-16)
+
+
+### Features
+
+* move design work into per-issue worker agents ([#4](https://github.com/victorstein/herdr-plugin-pipeline/issues/4)) ([6d3b840](https://github.com/victorstein/herdr-plugin-pipeline/commit/6d3b840d0b64a0734663ac453723f91b4398ed15))
+
 ## [1.1.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.0.0...v1.1.0) (2026-09-15)
 
 
