@@ -2529,6 +2529,12 @@ PRs and the per-task specs those PRs carry instead.
 
 - [ ] **Step 5: Revise `prompts/dispatch.md`** — drop plan decomposition, keep `worktree create` + `agent start`, and add the `hpipe dispatch --done` line so every registration path also carries the closing path.
 
+  It still instructs the orchestrator to run `hpipe task … --text "<the full task text>"`, **a flag that
+  no longer exists** — Task 23 replaced it. Rewrite that block: open the issue first and let its body
+  be the brief, then register with `--issue` and optionally `--notes` for batch context that does not
+  belong in a public issue. An orchestrator following the current text would get a hard CLI error on
+  its first registration.
+
 - [ ] **Step 6: Add the prompt-content invariant to `test/table.test.ts`**
 
 The spec requires this in three places and no task ever writes it. Add to `table.test.ts`:
