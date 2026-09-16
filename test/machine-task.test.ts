@@ -232,3 +232,56 @@ test('re-entry to implement re-captures head_sha_at_entry', () => {
   expect(task.phase).toBe('implement')
   expect(task.head_sha_at_entry).toBe('ccc')
 })
+
+test('merge records merged_at_ms and whether the issue was already closed', () => {
+  const { run, task } = fixture('merge')
+  task.phase_entered_at = 1000
+  advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
+    merged: true, mergedAtMs: 2000, issueClosed: false, ciBucket: null, maxPasses: 2,
+  })
+  expect(task.phase).toBe('close')
+  expect(task.merged_at_ms).toBe(2000)
+  expect(task.issue_closed_at_entry).toBe(false)
+})
+
+test('close completes on an auto-closed issue, where closedAt predates phase entry', () => {
+  const { run, task } = fixture('close')
+  task.merged_at_ms = 2000
+  task.phase_entered_at = 3000
+  const next = advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
+    merged: true, issueClosed: true, closedAtMs: 2001, ciBucket: null, maxPasses: 2,
+  })
+  expect(next?.phase).toBe('teardown')
+})
+
+test('close completes when the issue was already closed before the merge', () => {
+  const { run, task } = fixture('close')
+  task.merged_at_ms = 2000
+  task.issue_closed_at_entry = true
+  const next = advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
+    merged: true, issueClosed: true, closedAtMs: 500, ciBucket: null, maxPasses: 2,
+  })
+  expect(next?.phase).toBe('teardown')
+})
+
+test('close does not complete on an issue that is still open', () => {
+  const { run, task } = fixture('close')
+  task.merged_at_ms = 2000
+  expect(advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
+    merged: true, issueClosed: false, ciBucket: null, maxPasses: 2,
+  })).toBeNull()
+})
+
+test('blocked-on-files advances only when no sibling holds overlapping files', () => {
+  const { run, task } = fixture('blocked-on-files')
+  const base = {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: null, headSha: null,
+    merged: false, issueClosed: false, ciBucket: null, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
+  expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
+})

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { advanceTasks } from '../src/supervisor/tasks'
+import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -160,4 +160,12 @@ test('an escalated task yields the escalation prompt naming its task flag', asyn
 test('a phase that advances nothing yields no prompt', async () => {
   const run = mkRun([mkTask({ phase: 'execute', agent_status: 'working' })])
   expect(await advanceTasks(run, deps())).toHaveLength(0)
+})
+
+test('close prompts only when the issue is still open', async () => {
+  const open = mkRun([mkTask({ phase: 'close', pr: 42 })])
+  expect(await promptForTaskPhase(open, open.tasks[0]!, deps(), 'merge')).not.toBe('')
+
+  const closed = mkRun([mkTask({ phase: 'close', pr: 42, issue_closed_at_entry: true })])
+  expect(await promptForTaskPhase(closed, closed.tasks[0]!, deps(), 'merge')).toBe('')
 })

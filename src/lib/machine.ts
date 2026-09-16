@@ -129,6 +129,7 @@ export interface TaskSignals {
   mergedAtMs?: number
   issueClosed: boolean
   closedAtMs?: number
+  filesClear?: boolean
   ciBucket: CiBucket | null
   maxPasses: number
 }
@@ -188,13 +189,27 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'merge': {
       if (!s.merged) return null
       if (s.mergedAtMs === undefined || s.mergedAtMs <= task.phase_entered_at) return null
+      task.merged_at_ms = s.mergedAtMs
+      task.issue_closed_at_entry = s.issueClosed
       return enterTaskPhase(run, task, 'close', 'PR merged')
     }
 
     case 'close': {
       if (!s.issueClosed) return null
-      if (s.closedAtMs === undefined || s.closedAtMs <= task.phase_entered_at) return null
+      // The edge is "closed by the merge that should have caused it", NOT "closed
+      // after this phase began". GitHub auto-closes on merge, so closedAt always
+      // predates phase entry and the v4 comparison was unsatisfiable.
+      const closedByMerge =
+        task.merged_at_ms !== null &&
+        s.closedAtMs !== undefined &&
+        s.closedAtMs >= task.merged_at_ms
+      if (!task.issue_closed_at_entry && !closedByMerge) return null
       return enterTaskPhase(run, task, 'teardown', `issue #${task.issue} closed`)
+    }
+
+    case 'blocked-on-files': {
+      if (!s.filesClear) return null
+      return enterTaskPhase(run, task, 'implement', 'no overlapping files in flight')
     }
 
     default:

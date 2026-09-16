@@ -30,7 +30,7 @@ const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', '
  * state machine advances once an artifact exists but nothing ever asks the
  * orchestrator to produce one, so every task phase stalls.
  */
-async function promptForTaskPhase(
+export async function promptForTaskPhase(
   run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
 ): Promise<string> {
   const common = {
@@ -50,7 +50,7 @@ async function promptForTaskPhase(
     case 'merge':
       return renderPrompt(deps.pluginRoot, 'merge', common)
     case 'close':
-      return renderPrompt(deps.pluginRoot, 'close', common)
+      return task.issue_closed_at_entry ? '' : renderPrompt(deps.pluginRoot, 'close', common)
     case 'execute':
       // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
       // review does not, because the review file already says what to fix.
