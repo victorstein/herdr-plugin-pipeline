@@ -1,9 +1,66 @@
+import { openDecisionFor } from './decisions'
+import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
+import { taskRow } from './phases'
 import type { Run, SessionKey } from './types'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
   pid?: number
+}
+
+function ageMinutes(sinceMs: number): number {
+  return Math.max(0, Math.floor((Date.now() - sinceMs) / 60000))
+}
+
+/** Task-level warnings that only make sense once a run is on the current schema. */
+function taskWarnings(run: Run): string[] {
+  const lines: string[] = []
+
+  for (const task of run.tasks) {
+    const open = openDecisionFor(task)
+    if (open) {
+      lines.push(
+        `  ⚠ ${task.task_id} blocked on an open decision (${ageMinutes(open.asked_at)}m): ${open.question}`,
+      )
+    }
+
+    if (task.pending_answer !== null) {
+      const decision = task.decisions.find((d) => d.id === task.pending_answer)
+      if (decision) {
+        lines.push(
+          `  ⚠ ${task.task_id} decision ${decision.id} answered but undelivered ` +
+          `(${task.delivery_attempts} delivery attempts) — a fresh \`hpipe answer\` re-arms delivery`,
+        )
+      }
+    }
+
+    if (task.phase === 'blocked-on-files') {
+      const holders = run.tasks.filter(
+        (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
+      )
+      for (const holder of holders) {
+        lines.push(
+          `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
+          `\`hpipe release --task ${holder.task_id}\` is the only way out`,
+        )
+      }
+    }
+  }
+
+  return lines
+}
+
+function intakeWarning(run: Run): string[] {
+  if (run.phase !== 'execute' || run.intake_closed || run.tasks.length === 0) return []
+  const allTerminal = run.tasks.every(
+    (t) => taskRow(t.phase).terminal === true || t.phase === 'escalated',
+  )
+  if (!allTerminal) return []
+  return [
+    '  ⚠ every task is settled but intake was never closed — ' +
+    'run `hpipe dispatch --done` to let this run advance',
+  ]
 }
 
 export function formatStatus(
@@ -36,6 +93,14 @@ export function formatStatus(
       lines.push(`  ⚠ orchestrator pane ${run.orchestrator_pane} is gone — run the plugin's`)
       lines.push(`    "claim" action from the pane that should drive this run`)
     }
+
+    if (run.schema_version !== 2) {
+      lines.push(
+        `  ⚠ run ${run.run_id} was started by an earlier plugin version and cannot be ` +
+        `advanced — hpipe abort ${run.run_id} to release the repo.`,
+      )
+    }
+
     for (const task of run.tasks) {
       const bits = [
         `  ${task.task_id}`,
@@ -47,6 +112,11 @@ export function formatStatus(
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
       lines.push(bits.join(' '))
+    }
+
+    if (run.schema_version === 2) {
+      lines.push(...intakeWarning(run))
+      lines.push(...taskWarnings(run))
     }
   }
 

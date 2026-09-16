@@ -20,7 +20,7 @@ export function filesOverlap(a: string[], b: string[]): boolean {
   return a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)))
 }
 
-function isInFlight(task: Task): boolean {
+export function isInFlight(task: Task): boolean {
   const rule = taskRow(task.phase).holdsFiles
   if (rule === 'inherit') {
     return task.decision_from !== null && taskRow(task.decision_from).holdsFiles === true
