@@ -7,13 +7,14 @@ import {
   activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, slugify, writeOrchestrator,
 } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
+import { taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { sessionKey } from './lib/session'
 import { formatStatus } from './lib/status'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import type { RunPhase, Task, TaskPhase } from './lib/types'
+import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -132,6 +133,18 @@ export async function cmdRewind(ctx: Ctx, input: {
 
   await saveRun(ctx.stateDir, run)
   return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
+}
+
+export async function cmdRelease(stateDir: string, run: Run, taskId: string): Promise<void> {
+  const task = run.tasks.find((t) => t.task_id === taskId)
+  if (!task) throw new Error(`no such task: ${taskId}`)
+  // `escalated` is not `terminal` — it carries `escalated_from` so a human can
+  // rewind it — but it has stopped moving and is a legitimate release target too.
+  if (!taskRow(task.phase).terminal && task.phase !== 'escalated') {
+    throw new Error(`task ${taskId} is still in flight (${task.phase})`)
+  }
+  task.files = []
+  await saveRun(stateDir, run)
 }
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
@@ -256,6 +269,20 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
+    case 'release': {
+      const taskId = flag(rest, 'task') ?? ''
+      const owner = (await listRuns(ctx.stateDir, ctx.session))
+        .find((r) => r.tasks.some((t) => t.task_id === taskId))
+      if (!owner) { out = fail(`no such task: ${taskId}`); break }
+      try {
+        await cmdRelease(ctx.stateDir, owner, taskId)
+        out = ok(`released ${taskId}; files reservation cleared`)
+      } catch (err) {
+        out = fail(err instanceof Error ? err.message : String(err))
+      }
+      break
+    }
+
     case 'status': out = await cmdStatus(ctx); break
     case 'drain': out = await cmdDrain(ctx); break
     case 'abort': out = await cmdAbort(ctx, { runId: rest[0] ?? '' }); break
@@ -263,7 +290,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|status|drain|rewind|resume|abort|forget> …')
+      console.error('usage: hpipe <start|task|status|drain|rewind|release|resume|abort|forget> …')
       return 1
   }
 
