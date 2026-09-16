@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
-import { advanceRun, counterFor, isAgentReady } from '../lib/machine'
+import { advanceRun, counterFor } from '../lib/machine'
 import { runRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
@@ -105,24 +105,25 @@ export function taskSignalsFor(run: Run) {
 }
 
 /**
- * Evaluates one run. The actor must read idle both now and again after
- * ACTOR_SETTLE_MS — a momentary screen-detection misclassification will have
- * flipped back to working or blocked by then. This wait is its own explicit
- * sleep on config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
+ * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
+ * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
+ * momentary screen-detection misclassification will have flipped back to
+ * working or blocked by then. That double-check rides its own explicit sleep on
+ * config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
  * FILE_SETTLE_MS delay: the two settle windows guard unrelated subjects (file
  * write completion vs. screen-scrape flicker) and are independently tunable,
  * so conflating them would silently under- or over-wait whenever an operator
  * sets them to different values.
  */
 export async function evaluateRun(
-  run: Run, herdr: Herdr, gh: Gh, config: Config,
+  run: Run, gh: Gh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
   if (!pane) return stay
 
   const signal = runRow(run.phase).signal
-  const actorIdle = isAgentReady(await herdr.agentStatus(pane))
+  const actorIdle = await liveIdle(pane)
 
   let artifactFresh = false
   let verdict: VerdictResult | null = null
@@ -136,9 +137,6 @@ export async function evaluateRun(
 
     if (!(await isFresh(absolute, run.phase_entered_at))) return stay
     if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return stay
-
-    await Bun.sleep(config.ACTOR_SETTLE_MS)
-    if (!isAgentReady(await herdr.agentStatus(pane))) return stay
 
     artifactFresh = true
     verdict = await parseVerdict(absolute)

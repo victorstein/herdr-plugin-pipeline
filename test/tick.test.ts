@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import { makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
-import type { QueuedEvent, Run, Task } from '../src/lib/types'
+import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'tick-')) })
@@ -139,4 +140,49 @@ test('an escalated run does not starve a later run sharing its pane', () => {
   const picked = pickOneAdvance([stuck, active])
   expect(picked).toHaveLength(1)
   expect(picked[0]?.phase).toBe('intake')
+})
+
+test('settle windows for distinct panes run concurrently, not serially', async () => {
+  const settleMs = 200
+  const status = async () => 'idle' as const
+  const idle = makeSettledIdleReader(['w1:p1', 'w7:p1', 'w8:p1'], settleMs, status)
+  const started = Date.now()
+  await Promise.all(['w1:p1', 'w7:p1', 'w8:p1'].map((p) => idle(p)))
+  // Serial would be ~600ms. Concurrent is ~200ms. Generous slack for CI.
+  expect(Date.now() - started).toBeLessThan(settleMs * 2)
+})
+
+test('a pane consulted by several rows is polled once, not once per row', async () => {
+  const reads: string[] = []
+  const status = async (pane: string) => { reads.push(pane); return 'idle' as const }
+  const idle = makeSettledIdleReader(['w7:p1'], 10, status)
+
+  expect(await idle('w7:p1')).toBe(true)
+  expect(await idle('w7:p1')).toBe(true)
+  expect(reads).toEqual(['w7:p1', 'w7:p1'])
+})
+
+test('a pane that reads idle then working is not ready', async () => {
+  const statuses: AgentStatus[] = ['idle', 'working']
+  const status = async () => statuses.shift() ?? 'working'
+  const idle = makeSettledIdleReader(['w7:p1'], 10, status)
+
+  expect(await idle('w7:p1')).toBe(false)
+  expect(statuses).toHaveLength(0)
+})
+
+test('a pane outside the tick\'s roster is not ready rather than a crash', async () => {
+  const idle = makeSettledIdleReader(['w7:p1'], 10, async () => 'idle' as const)
+  expect(await idle('w9:p1')).toBe(false)
+})
+
+test('panes awaited one after another still share a single settle window', async () => {
+  // advanceTasks consults liveIdle row by row, so eager construction — not
+  // Promise.all at the call site — is what keeps the windows overlapping.
+  const settleMs = 200
+  const panes = ['w1:p1', 'w7:p1', 'w8:p1']
+  const idle = makeSettledIdleReader(panes, settleMs, async () => 'idle' as const)
+  const started = Date.now()
+  for (const pane of panes) expect(await idle(pane)).toBe(true)
+  expect(Date.now() - started).toBeLessThan(settleMs * 2)
 })

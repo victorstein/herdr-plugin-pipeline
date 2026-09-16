@@ -18,8 +18,28 @@ import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+import type { AgentStatus } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
+
+/**
+ * One settle window per tick, not one per pane. Six workers at ACTOR_SETTLE_MS
+ * serially would not fit inside TICK_MS. Reads are memoised per tick so a pane
+ * consulted by several rows is polled once.
+ */
+export function makeSettledIdleReader(
+  panes: string[], settleMs: number, status: (p: string) => Promise<AgentStatus>,
+): (paneId: string) => Promise<boolean> {
+  const results = new Map<string, Promise<boolean>>()
+  for (const pane of panes) {
+    results.set(pane, (async () => {
+      if (!isAgentReady(await status(pane))) return false
+      await Bun.sleep(settleMs)
+      return isAgentReady(await status(pane))
+    })())
+  }
+  return async (paneId: string) => (await results.get(paneId)) ?? false
+}
 
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
@@ -110,8 +130,18 @@ async function main(): Promise<void> {
         await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
       }
 
+      const advancing = pickOneAdvance(runs)
+      const actorPanes = [...new Set(
+        advancing
+          .flatMap((r) => [r.orchestrator_pane, ...r.tasks.map((t) => t.pane_id)])
+          .filter((p): p is string => p !== null),
+      )]
+      const liveIdle = makeSettledIdleReader(
+        actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane),
+      )
+
       const pending: PendingPrompt[] = []
-      for (const run of pickOneAdvance(runs)) {
+      for (const run of advancing) {
         const addPending = (
           paneId: string | null, text: string, eventLines: string[], subject: string,
           phaseNote?: string,
@@ -130,12 +160,12 @@ async function main(): Promise<void> {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
           const runGh = ghFor(run.repo_root)
-          const { nextPrompt, phaseNote } = await evaluateRun(run, herdr, runGh, config)
+          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle)
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
-            liveIdle: async (pane) => isAgentReady(await herdr.agentStatus(pane)),
+            liveIdle,
             maxPasses: config.MAX_PASSES,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
@@ -219,4 +249,4 @@ async function main(): Promise<void> {
   }
 }
 
-await main()
+if (import.meta.main) await main()
