@@ -190,3 +190,14 @@ test('the registration and adoption signals are the newest of each, or null', ()
   expect(taskSignalsFor(mkRun()).newestRegisteredAt).toBeNull()
   expect(taskSignalsFor(mkRun()).newestAdoptedAt).toBeNull()
 })
+
+test('the digest keeps evaluateRun\'s transition note, not just the current phase', () => {
+  const run = mkRun()
+  const out = deliveriesFor([
+    {
+      paneId: 'w1:p1', run, text: 'review the branch', isOrchestrator: true,
+      events: [], phaseNote: ' → branch-review (from execute)',
+    },
+  ])
+  expect(out[0]?.text).toContain('(from execute)')
+})

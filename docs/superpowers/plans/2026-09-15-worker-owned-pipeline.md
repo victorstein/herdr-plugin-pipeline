@@ -1695,6 +1695,14 @@ git commit -m "feat: one concurrent settle window per tick across all actor pane
 
 ### Task 16: Stall probes for the actorless rows
 
+> **Carried from Task 13.** Both stall-probe loops at the bottom of the tick call
+> `probed.add(candidate.key)` **before** checking `if (candidate.run.orchestrator_pane)`, so a probe
+> for a run with no orchestrator pane is marked probed and then silently never sent — and because the
+> key includes `phase_entered_at`, it is never retried for that phase entry either. That is the same
+> silent-drop class as the delivery bug Task 13 fixed. Mark probed only after a successful send, and
+> add a test that a paneless run still has its candidate pending on the next tick.
+
+
 **Files:**
 - Modify: `src/supervisor/stall.ts`
 - Test: `test/stall.test.ts`
@@ -2730,4 +2738,5 @@ git commit -m "docs: live smoke runbook for the worker-owned pipeline"
 | --- | --- |
 | Whether a Claude Code review subagent perturbs its worker pane's `agent_status` | Both adversarial rounds tried and failed to settle it statically. herdr's detection manifest carries a dedicated `background_agents_working` rule, which is evidence a backgrounded subagent is handled specially, but the claude integration on this machine is v7 and reports no state, so status is entirely screen-scraped. The prompt-level await is the mitigation; the verdict-file predicate is the independent guard. Measure it in Task 29 Step 3.5. |
 | Whether `ACTOR_SETTLE_MS` fits inside `TICK_MS` with six workers | Settles run concurrently (Task 15), so the arithmetic should hold, but it is measured, not proved. `hpipe status` reports tick overrun. |
+| A failed `agent prompt` still loses that prompt | v4's §Event transport claims delivery is "retried with backoff across ticks"; `main.ts` has never implemented re-send, and Task 13 preserved those semantics per-pane rather than changing them. Task 20 adds genuine re-delivery for decision answers only, because an unread answer corrupts the audit trail. For ordinary phase prompts the stall probe is the backstop: the phase simply sits until probed. Fixing it properly means tracking per-phase delivery state, which is a design change beyond this plan. Measure on the live run — if prompts are lost often enough to matter, it earns its own spec. |
 | Whether re-planning after `blocked-on-files` is needed | The spec chose a re-read instruction over a full re-plan cycle. If live runs show plans going stale against a sibling's landed change, revisit. |

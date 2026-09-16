@@ -36,6 +36,8 @@ export interface PendingPrompt {
   text: string
   isOrchestrator: boolean
   events: string[]
+  /** `evaluateRun`'s " → to (from X)"; the transition is why the digest arrived. */
+  phaseNote?: string
 }
 
 /**
@@ -62,7 +64,8 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
     const text = first.isOrchestrator
       ? buildDigest({
           run: first.run, eventLines: events,
-          phaseNote: ` → ${first.run.phase}`, nextPrompt: body,
+          phaseNote: group.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
+          nextPrompt: body,
         })
       : body
     out.push({ paneId, text, run: first.run })

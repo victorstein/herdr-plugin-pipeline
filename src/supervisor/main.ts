@@ -112,14 +112,17 @@ async function main(): Promise<void> {
 
       const pending: PendingPrompt[] = []
       for (const run of pickOneAdvance(runs)) {
-        const addPending = (paneId: string | null, text: string, eventLines: string[], subject: string) => {
+        const addPending = (
+          paneId: string | null, text: string, eventLines: string[], subject: string,
+          phaseNote?: string,
+        ) => {
           if (text.length === 0 && eventLines.length === 0) return
           if (paneId === null) {
             console.error(`[pipeline] run ${run.run_id}: dropping prompt for ${subject} — no pane`)
             return
           }
           pending.push({
-            paneId, run, text, events: eventLines,
+            paneId, run, text, events: eventLines, phaseNote,
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
@@ -158,7 +161,7 @@ async function main(): Promise<void> {
 
           await refreshBadges(run, herdr, pluginId)
           const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
-          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`)
+          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`, phaseNote)
           for (const prompt of taskPrompts) {
             addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
           }
