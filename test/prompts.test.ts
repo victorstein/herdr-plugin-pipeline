@@ -105,3 +105,12 @@ test('every action declared in the manifest has a script on disk', async () => {
     expect(existsSync(join(ROOT, path as string)), `${path} is declared but missing`).toBe(true)
   }
 })
+
+test('the plugin manifest version matches version.txt', async () => {
+  // release-please's `simple` type bumps version.txt; the manifest is only kept
+  // in step once stein-infra adds extra-files. Until then this catches drift.
+  const manifest = await Bun.file(join(ROOT, 'herdr-plugin.toml')).text()
+  const declared = /^version = "([^"]+)"/m.exec(manifest)?.[1]
+  const canonical = (await Bun.file(join(ROOT, 'version.txt')).text()).trim()
+  expect(declared, 'herdr-plugin.toml version is stale against version.txt').toBe(canonical)
+})

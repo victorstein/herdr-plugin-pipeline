@@ -55,7 +55,9 @@ write *that checkout's* schema into state the installed supervisor is driving. W
 which is the normal state of a repo you develop in, you get one of two failures: a phase the installed
 table lacks makes `taskRow()` throw on the next tick, visible only in the supervisor pane; or a bumped
 `schema_version` makes the run **silently invisible** to the supervisor, which just stops advancing it.
-`bin/hpipe` asks herdr which copy is installed at call time, so one codebase writes the ledger.
+`bin/hpipe` asks herdr which copy is installed at call time, so one codebase writes the ledger — and
+it follows the plugin if you ever switch between `plugin install` and `plugin link`, which move the
+root.
 
 **Then restart the herdr session you want it in.** Linking registers the plugin globally for your
 user, but its startup hook only runs when a server boots — so on an already-running session nothing
