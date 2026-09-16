@@ -55,7 +55,7 @@ export async function cmdStart(ctx: Ctx, input: {
 }
 
 export async function cmdTask(ctx: Ctx, input: {
-  branch: string; issue: number; surface: string; text: string
+  branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
 }): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
@@ -69,18 +69,26 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`no agent definition at ${agentFile} — check --surface`)
   }
 
+  const date = new Date().toISOString().slice(0, 10)
+  const stem = `${date}-issue-${input.issue}`
+
   const task: Task = {
     task_id: `t${run.tasks.length + 1}`,
     branch: input.branch, issue: input.issue, surface: input.surface,
     depends_on: input.dependsOn, files: input.files,
-    keep_worktree: input.keepWorktree, text: input.text,
+    keep_worktree: input.keepWorktree,
     workspace_id: null, pane_id: null, agent_status: 'unknown',
     phase: 'queued', phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: null, registered_at: Date.now(), adopted_at: null,
-    artifacts: { research: null, spec: null, plan: null, verdicts: {} },
+    artifacts: {
+      research: join('docs/superpowers/research', `${stem}-research.md`),
+      spec: join('docs/superpowers/specs', `${stem}-design.md`),
+      plan: join('docs/superpowers/plans', `${stem}-plan.md`),
+      verdicts: {},
+    },
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
   }
 
   // detectCycle skips ids it does not recognise, so a typo would otherwise pass
@@ -95,6 +103,9 @@ export async function cmdTask(ctx: Ctx, input: {
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
   run.tasks.push(task)
+  // execute completes only once intake is closed and every task is terminal, so a
+  // task registered mid-run must reopen the gate or the run could complete underneath it.
+  run.intake_closed = false
   await saveRun(ctx.stateDir, run)
 
   const gate = gateStatus(task, run.tasks)
@@ -320,7 +331,7 @@ async function dispatch(argv: string[]): Promise<number> {
         branch: flag(rest, 'branch') ?? '',
         issue: Number(flag(rest, 'issue') ?? '0'),
         surface: flag(rest, 'surface') ?? '',
-        text: flag(rest, 'text') ?? '',
+        notes: flag(rest, 'notes') ?? '',
         dependsOn: listFlag(rest, 'depends-on'),
         files: listFlag(rest, 'files'),
         keepWorktree: rest.includes('--keep-worktree'),

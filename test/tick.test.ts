@@ -13,7 +13,7 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
-  depends_on: [], files: [], keep_worktree: false, text: '',
+  depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
   phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,

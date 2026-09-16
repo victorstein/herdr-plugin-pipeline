@@ -7,7 +7,7 @@ function fixture(phase: TaskPhase): { run: Run; task: Task } {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
   const task: Task = {
     task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
-    depends_on: [], files: [], keep_worktree: false, text: 'do it',
+    depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
     phase, phase_entered_at: Date.now(), escalated_from: null,
     head_sha_at_entry: 'aaa', pr: 5, ci: null,

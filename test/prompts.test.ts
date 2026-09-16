@@ -7,7 +7,7 @@ const REVIEW_PROMPTS = [
   'spec-review', 'plan-review', 'task-review-spec', 'task-review-quality', 'branch-review',
 ]
 const ALL = [
-  'spec', 'plan', 'dispatch', 'task', 'ci-red', 'merge', 'close',
+  'spec', 'plan', 'dispatch', 'task', 'worker-brief', 'ci-red', 'merge', 'close',
   'escalate', 'stall-probe', 'digest', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement',
   'pr-review-intent', 'pr-review-quality',

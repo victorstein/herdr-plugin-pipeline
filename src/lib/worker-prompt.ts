@@ -8,12 +8,15 @@ export async function renderWorkerPrompt(
   const dependsOnCore = task.depends_on.some(
     (id) => run.tasks.find((t) => t.task_id === id)?.surface === 'core',
   )
-  return renderPrompt(pluginRoot, 'task', {
+  return renderPrompt(pluginRoot, 'worker-brief', {
     branch: task.branch,
     issue: String(task.issue),
     surface: task.surface,
     agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
-    task_text: task.text,
+    notes: task.notes,
+    research_path: task.artifacts.research ?? '',
+    spec_path: task.artifacts.spec ?? '',
+    plan_path: task.artifacts.plan ?? '',
     dist_note: dependsOnCore
       ? '> `@repo/core` changed on `main` since this branch was cut. Run ' +
         '`pnpm install && pnpm turbo build --filter=@repo/core` before your first edit and again ' +

@@ -48,7 +48,6 @@ export interface Task {
   depends_on: string[]
   files: string[]
   keep_worktree: boolean
-  text: string
   workspace_id: string | null
   pane_id: string | null
   agent_status: AgentStatus

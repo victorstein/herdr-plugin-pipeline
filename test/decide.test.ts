@@ -11,7 +11,7 @@ import type { Run, Task, TaskPhase } from '../src/lib/types'
 function taskFixture(phase: TaskPhase): Task {
   return {
     task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
-    depends_on: [], files: [], keep_worktree: false, text: '',
+    depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
     phase, phase_entered_at: Date.now(), escalated_from: null,
     head_sha_at_entry: null, pr: null, ci: null,
@@ -73,7 +73,7 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
-  keep_worktree: false, text: '', workspace_id: null, pane_id: null,
+  keep_worktree: false, workspace_id: null, pane_id: null,
   agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,

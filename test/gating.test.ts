@@ -6,7 +6,7 @@ import type { Task } from '../src/lib/types'
 
 const task = (over: Partial<Task>): Task => ({
   task_id: 't', branch: 'b', issue: 1, surface: 'core',
-  depends_on: [], files: [], keep_worktree: false, text: '',
+  depends_on: [], files: [], keep_worktree: false,
   workspace_id: null, pane_id: null, agent_status: 'unknown',
   phase: 'queued', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
