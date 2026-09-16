@@ -57,7 +57,7 @@ So: **inside Milestone 2, run the specific test file named in the task. At each 
 | M2 — The machine | 5–10 | Full suite green, old phase names gone from `src/` |
 | M3 — Gating and delivery | 11–16 | Full suite green |
 | M4 — The decision channel | 17–22 | Full suite green |
-| M5 — Prompts, intake, migration | 23, **23a**, 24–29 | Full suite green + the live smoke run |
+| M5 — Prompts, intake, migration | 23, **23a**, 24, **24a**, 25–29 | Full suite green + the live smoke run |
 
 **Task 23a was added mid-execution**, after Task 14 routed dispatch into `research` and revealed that
 nothing in the original 29 tasks ever taught the supervisor to evaluate the five design rows. The
@@ -2610,6 +2610,90 @@ Expected: PASS
 ```bash
 git add prompts/ test/prompts.test.ts
 git commit -m "feat: the worker-owned prompt set"
+```
+
+---
+
+### Task 24a: Deliver the decision prompt
+
+**Second task missing from the original plan**, found by Task 24. `prompts/decision.md` exists and the
+`blocked-on-decision` row names it, but nothing in `src/` renders it. `cmdDecide` performs the
+transition inside the CLI, so `advanceTasks` never sees the phase entry and `promptForTaskPhase` has
+no arm for it. **The orchestrator is therefore never told a decision is open** — the triage step the
+whole channel exists for. Only `hpipe status` and the stall probe surface it, and both require the
+human to go looking.
+
+The supervisor cannot key off "the task just entered this phase" here, because it did not observe the
+entry. It needs durable per-decision state, which the `Decision` record is the natural home for.
+
+**Files:** `src/lib/types.ts`, `src/lib/decisions.ts`, `src/supervisor/tasks.ts`, `test/decide.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test('an open decision is announced to the orchestrator exactly once', async () => {
+  const run = blockedWithOpenDecision()
+  const sent: Array<{ paneId: string; text: string }> = []
+  const deps = { ...answerDeps(), send: async (paneId, text) => { sent.push({ paneId, text }); return { ok: true } } }
+
+  await announceDecisions(run, deps)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]?.paneId).toBe(run.orchestrator_pane)
+  expect(sent[0]?.text).toContain('ship or wait?')
+
+  await announceDecisions(run, deps)
+  expect(sent).toHaveLength(1)
+})
+
+test('a failed announcement is retried next tick', async () => {
+  // send fails -> prompted_at stays null -> a second call tries again
+})
+
+test('an answered decision is not announced', async () => {
+  // pending_answer set, answer recorded -> no send
+})
+```
+
+- [ ] **Step 2: Run them and watch them fail** — `announceDecisions` does not exist.
+
+- [ ] **Step 3: Implement**
+
+Add `prompted_at: number | null` to `Decision` in `src/lib/types.ts`, defaulting to `null` in
+`openDecision`. Then in `src/supervisor/tasks.ts`, mirroring `deliverPendingAnswers`:
+
+```ts
+export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<void> {
+  if (run.orchestrator_pane === null) return
+  for (const task of run.tasks) {
+    if (task.phase !== 'blocked-on-decision') continue
+    const decision = openDecisionFor(task)
+    if (!decision || decision.prompted_at !== null) continue
+
+    const text = await renderPrompt(deps.pluginRoot, 'decision', {
+      task_id: task.task_id, decision_id: decision.id,
+      phase: task.decision_from ?? '', question: decision.question,
+      recommendation: decision.recommendation,
+      branch: task.branch, issue: String(task.issue),
+    })
+
+    const result = await deps.send(run.orchestrator_pane, text)
+    if (result.ok) decision.prompted_at = Date.now()
+  }
+}
+```
+
+Stamping only on success is the same rule as the stall probe's: a failed send must stay eligible, or
+the question is lost silently.
+
+Call it from the tick beside `deliverPendingAnswers`.
+
+- [ ] **Step 4: Gate** — `bun test` and `bun run typecheck; echo "exit: $?"` both clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ test/
+git commit -m "feat: announce an open decision to the orchestrator"
 ```
 
 ---
