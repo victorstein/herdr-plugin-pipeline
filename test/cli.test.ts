@@ -24,13 +24,13 @@ afterEach(() => {
   rmSync(repoDir, { recursive: true, force: true })
 })
 
-test('start opens a run and prints the spec prompt', async () => {
+test('start opens a run and prints the intake prompt', async () => {
   const out = await cmdStart(ctx(), {
     title: 'chat meter', repoKey: 'k', repoRoot: repoDir, socketPath: '/s',
     paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(out.ok).toBe(true)
-  expect(out.text).toContain('Write the spec')
+  expect(out.text).toContain('intake')
   expect((await activeRunForRepo(dir, 'personal', 'k'))?.title).toBe('chat meter')
 })
 
@@ -101,18 +101,18 @@ test('task rejects a dependency id that names no task', async () => {
   expect(bad.text).toContain('t7')
 })
 
-test('rewind resets the pass count for the phase it rewinds to', async () => {
+test('rewind clears the counters for the phase it rewinds to', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.phase = 'escalated'
-  run.escalated_from = 'spec-review'
-  run.pass = 2
+  run.escalated_from = 'branch-review'
+  run.passes['branch-review'] = 2
   await saveRun(dir, run)
 
-  const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: null })
+  const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'branch-review', taskId: null })
   expect(out.ok).toBe(true)
   const after = await activeRunForRepo(dir, 'personal', 'k')
-  expect(after?.phase).toBe('spec')
-  expect(after?.pass).toBe(1)
+  expect(after?.phase).toBe('branch-review')
+  expect(after?.passes).toEqual({})
 })
 
 test('the spec path carries the whole title, not a fragment of the run id', async () => {

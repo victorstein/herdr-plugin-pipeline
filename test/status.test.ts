@@ -13,7 +13,7 @@ test('names all four supervisor states', () => {
 })
 
 test('lists a run with its phase', () => {
-  expect(formatStatus([mkRun()], { state: 'live' }, 'personal')).toContain('spec')
+  expect(formatStatus([mkRun()], { state: 'live' }, 'personal')).toContain('intake')
 })
 
 test('says so plainly when there are no runs', () => {

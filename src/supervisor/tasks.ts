@@ -1,7 +1,8 @@
 import { join } from 'node:path'
 import { gateStatus } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
-import { advanceTask, enterTaskPhase, isAgentReady } from '../lib/machine'
+import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
+import { TASK_ROWS } from '../lib/phases'
 import type { VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -23,7 +24,9 @@ export interface TaskDeps {
   ciDetail: (pr: number | null) => Promise<string>
 }
 
-const ORCHESTRATOR_OWNED = new Set(['task-review-spec', 'task-review-quality', 'merge', 'close'])
+const ORCHESTRATOR_OWNED: ReadonlySet<TaskPhase> = new Set(
+  TASK_ROWS.filter((r) => r.actor === 'orchestrator').map((r) => r.phase),
+)
 
 /**
  * The task-level counterpart to deliver.ts's promptForRunPhase. Without it the
@@ -38,20 +41,20 @@ export async function promptForTaskPhase(
     branch: task.branch,
     issue: String(task.issue),
     pr: task.pr === null ? 'unknown' : String(task.pr),
-    pass: String(task.pass),
+    pass: String(counterFor(task, task.phase)),
     verdict_path: join(run.repo_root, artifactPathFor(run, task) ?? ''),
   }
 
   switch (task.phase) {
-    case 'task-review-spec':
-      return renderPrompt(deps.pluginRoot, 'task-review-spec', common)
-    case 'task-review-quality':
-      return renderPrompt(deps.pluginRoot, 'task-review-quality', common)
+    case 'pr-review-intent':
+      return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
+    case 'pr-review-quality':
+      return renderPrompt(deps.pluginRoot, 'pr-review-quality', common)
     case 'merge':
       return renderPrompt(deps.pluginRoot, 'merge', common)
     case 'close':
       return task.issue_closed_at_entry ? '' : renderPrompt(deps.pluginRoot, 'close', common)
-    case 'execute':
+    case 'implement':
       // Re-entry from a red CI needs the failing checks; re-entry from a BLOCKER
       // review does not, because the review file already says what to fix.
       return cameFrom === 'ci'
@@ -59,13 +62,15 @@ export async function promptForTaskPhase(
             ...common, ci_failure: await deps.ciDetail(task.pr),
           })
         : ''
-    case 'escalated':
+    case 'escalated': {
+      const from = task.escalated_from ?? cameFrom
       return renderPrompt(deps.pluginRoot, 'escalate', {
         run_id: run.run_id,
-        phase: task.escalated_from ?? cameFrom,
-        pass: String(task.pass),
+        phase: from,
+        pass: String(counterFor(task, from)),
         task_flag: ` --task ${task.task_id}`,
       })
+    }
     default:
       return ''
   }
@@ -97,7 +102,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
       }
       if (gate.state !== 'ready') continue
 
-      enterTaskPhase(run, task, 'execute', 'gate opened')
+      enterTaskPhase(run, task, 'implement', 'gate opened')
       prompts.push(
         `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
@@ -126,7 +131,6 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<string[]> 
 async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
   const base = {
     actorIdle: deps.actorIdle,
-    workerIdle: isAgentReady(task.agent_status),
     artifactFresh: false,
     verdict: null as VerdictResult | null,
     prNumber: task.pr,
@@ -140,7 +144,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
   }
 
   switch (task.phase) {
-    case 'execute': {
+    case 'implement': {
       const pr = task.pr ?? (await deps.prForBranch(task.branch))
       if (pr === null) return base
       // Persist on discovery, not on the phase transition: otherwise every tick
@@ -149,8 +153,8 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps) {
       const view = await deps.prView(pr)
       return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
     }
-    case 'task-review-spec':
-    case 'task-review-quality': {
+    case 'pr-review-intent':
+    case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)
       return { ...base, artifactFresh: verdict !== null, verdict }
     }

@@ -1,12 +1,14 @@
 import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
-import { ARTIFACT_RUN_PHASES, advanceRun, isAgentReady } from '../lib/machine'
-import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+import { advanceRun, counterFor, isAgentReady } from '../lib/machine'
+import { runRow } from '../lib/phases'
+import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Run, Task } from '../lib/types'
+import { SETTLED } from './teardown'
 
 export interface DigestInput {
   run: Run
@@ -47,16 +49,25 @@ export function shouldRetry(code: string | undefined, attempts: number, max: num
 /** Artifact path for the phase the run or task is currently in. */
 export function artifactPathFor(run: Run, task: Task | null): string | null {
   if (task) {
-    const key = `${task.task_id}-${task.phase}-${task.pass}`
+    const key = `${task.task_id}-${task.phase}-${counterFor(task, task.phase)}`
     return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${key}.md`)
   }
-  if (run.phase === 'spec') return run.artifacts.spec
-  // `cmdStart` seeds `artifacts.spec` but never `artifacts.plan`, so without this fallback the
-  // `plan` phase deadlocks: `evaluateRun` bails on a null path and never checks the file, while
-  // `promptForRunPhase` has always told the orchestrator to write to this same default.
-  if (run.phase === 'plan') return run.artifacts.plan ?? join('docs/superpowers/plans', 'plan.md')
-  const key = `${run.phase}-${run.pass}`
+  const key = `${run.phase}-${counterFor(run, run.phase)}`
   return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${run.run_id}-${key}.md`)
+}
+
+export function taskSignalsFor(run: Run) {
+  const adopted = run.tasks
+    .map((t) => t.adopted_at)
+    .filter((at): at is number => at !== null)
+  return {
+    newestRegisteredAt: run.tasks.length > 0
+      ? Math.max(...run.tasks.map((t) => t.registered_at))
+      : null,
+    newestAdoptedAt: adopted.length > 0 ? Math.max(...adopted) : null,
+    tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => SETTLED.has(t.phase)),
+    anyTaskDone: run.tasks.some((t) => t.phase === 'done'),
+  }
 }
 
 /**
@@ -72,36 +83,39 @@ export function artifactPathFor(run: Run, task: Task | null): string | null {
 export async function evaluateRun(
   run: Run, herdr: Herdr, gh: Gh, config: Config,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
+  const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
-  if (!pane) return { advanced: false, nextPrompt: '', phaseNote: '' }
+  if (!pane) return stay
 
-  if (!ARTIFACT_RUN_PHASES.has(run.phase)) return { advanced: false, nextPrompt: '', phaseNote: '' }
+  const signal = runRow(run.phase).signal
+  const actorIdle = isAgentReady(await herdr.agentStatus(pane))
 
-  if (!isAgentReady(await herdr.agentStatus(pane))) {
-    return { advanced: false, nextPrompt: '', phaseNote: '' }
+  let artifactFresh = false
+  let verdict: VerdictResult | null = null
+
+  if (signal === 'artifact' || signal === 'verdict') {
+    if (!actorIdle) return stay
+
+    const relative = artifactPathFor(run, null)
+    if (!relative) return stay
+    const absolute = join(run.repo_root, relative)
+
+    if (!(await isFresh(absolute, run.phase_entered_at))) return stay
+    if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return stay
+
+    await Bun.sleep(config.ACTOR_SETTLE_MS)
+    if (!isAgentReady(await herdr.agentStatus(pane))) return stay
+
+    artifactFresh = true
+    verdict = await parseVerdict(absolute)
   }
 
-  const relative = artifactPathFor(run, null)
-  if (!relative) return { advanced: false, nextPrompt: '', phaseNote: '' }
-  const absolute = join(run.repo_root, relative)
-
-  const fresh = await isFresh(absolute, run.phase_entered_at)
-  if (!fresh) return { advanced: false, nextPrompt: '', phaseNote: '' }
-  if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) {
-    return { advanced: false, nextPrompt: '', phaseNote: '' }
-  }
-
-  await Bun.sleep(config.ACTOR_SETTLE_MS)
-  if (!isAgentReady(await herdr.agentStatus(pane))) {
-    return { advanced: false, nextPrompt: '', phaseNote: '' }
-  }
-
-  const verdict = await parseVerdict(absolute)
   const before = run.phase
   const advanced = advanceRun(run, {
-    actorIdle: true, artifactFresh: true, verdict, maxPasses: config.MAX_PASSES,
+    actorIdle, artifactFresh, verdict, maxPasses: config.MAX_PASSES,
+    ...taskSignalsFor(run),
   })
-  if (!advanced) return { advanced: false, nextPrompt: '', phaseNote: '' }
+  if (!advanced) return stay
 
   const nextPrompt = await promptForRunPhase(run, config)
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
@@ -114,22 +128,22 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
   const verdictPath = join(run.repo_root, artifactPathFor(run, null) ?? 'review.md')
 
   const common = {
-    run_id: run.run_id, title: run.title, pass: String(run.pass),
+    run_id: run.run_id, title: run.title,
+    pass: String(counterFor(run, run.phase)),
     spec_path: specPath, plan_path: planPath, verdict_path: verdictPath,
   }
 
   switch (run.phase) {
-    case 'spec': return renderPrompt(pluginRoot, 'spec', common)
-    case 'spec-review': return renderPrompt(pluginRoot, 'spec-review', common)
-    case 'plan': return renderPrompt(pluginRoot, 'plan', common)
-    case 'plan-review': return renderPrompt(pluginRoot, 'plan-review', common)
+    case 'intake': return renderPrompt(pluginRoot, 'intake', common)
     case 'dispatch': return renderPrompt(pluginRoot, 'dispatch', common)
     case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', common)
-    case 'escalated':
+    case 'escalated': {
+      const from = run.escalated_from ?? run.phase
       return renderPrompt(pluginRoot, 'escalate', {
-        run_id: run.run_id, phase: run.escalated_from ?? run.phase,
-        pass: String(run.pass), task_flag: '',
+        run_id: run.run_id, phase: from,
+        pass: String(counterFor(run, from)), task_flag: '',
       })
+    }
     default: return ''
   }
 }

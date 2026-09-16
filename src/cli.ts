@@ -6,7 +6,7 @@ import { Herdr } from './lib/herdr'
 import {
   activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, slugify, writeOrchestrator,
 } from './lib/ledger'
-import { enterRunPhase, enterTaskPhase } from './lib/machine'
+import { enterTaskPhase } from './lib/machine'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
@@ -46,7 +46,7 @@ export async function cmdStart(ctx: Ctx, input: {
     socket_path: input.socketPath, claimed_at: Date.now(),
   })
 
-  const text = await renderPrompt(ctx.pluginRoot, 'spec', {
+  const text = await renderPrompt(ctx.pluginRoot, 'intake', {
     run_id: run.run_id, title: run.title, spec_path: join(run.repo_root, run.artifacts.spec),
   })
   return ok(text, JSON.stringify({ run_id: run.run_id }))
@@ -57,8 +57,10 @@ export async function cmdTask(ctx: Ctx, input: {
   dependsOn: string[]; files: string[]; keepWorktree: boolean
 }): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
-  const run = runs.find((r) => r.phase === 'dispatch' || r.phase === 'execute')
-  if (!run) return fail('no run is in the dispatch or execute phase')
+  const run = runs.find(
+    (r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute',
+  )
+  if (!run) return fail('no run is in the intake, dispatch or execute phase')
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
@@ -71,7 +73,7 @@ export async function cmdTask(ctx: Ctx, input: {
     depends_on: input.dependsOn, files: input.files,
     keep_worktree: input.keepWorktree, text: input.text,
     workspace_id: null, pane_id: null, agent_status: 'unknown',
-    phase: 'queued', pass: 1, phase_entered_at: Date.now(),
+    phase: 'queued', phase_entered_at: Date.now(),
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: null, registered_at: Date.now(), adopted_at: null,
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
@@ -90,7 +92,6 @@ export async function cmdTask(ctx: Ctx, input: {
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
   run.tasks.push(task)
-  if (run.phase === 'dispatch') enterRunPhase(run, 'execute', 'first task registered')
   await saveRun(ctx.stateDir, run)
 
   const gate = gateStatus(task, run.tasks)
@@ -100,7 +101,7 @@ export async function cmdTask(ctx: Ctx, input: {
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
   // `queued` would make the next tick deliver the same prompt a second time.
-  enterTaskPhase(run, task, 'execute', 'dispatched at registration')
+  enterTaskPhase(run, task, 'implement', 'dispatched at registration')
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
@@ -117,20 +118,20 @@ export async function cmdRewind(ctx: Ctx, input: {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
     task.phase = input.phase as TaskPhase
-    task.pass = 1
+    task.passes = {}
     task.phase_entered_at = Date.now()
     task.escalated_from = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
   } else {
     run.phase = input.phase as RunPhase
-    run.pass = 1
+    run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
   }
 
   await saveRun(ctx.stateDir, run)
-  return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; pass reset to 1`)
+  return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
 }
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {

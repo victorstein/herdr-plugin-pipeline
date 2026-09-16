@@ -191,7 +191,7 @@ async function main(): Promise<void> {
         probed.add(candidate.key)
         const text = await renderPrompt(pluginRoot, 'stall-probe', {
           run_id: candidate.run.run_id,
-          phase: `execute (${candidate.task.task_id}, ${candidate.task.branch})`,
+          phase: `implement (${candidate.task.task_id}, ${candidate.task.branch})`,
           minutes: String(candidate.minutes),
           artifact_path: `a PR for ${candidate.task.branch} (#${candidate.task.issue})`,
         })

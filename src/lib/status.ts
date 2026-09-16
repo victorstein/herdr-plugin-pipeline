@@ -1,3 +1,4 @@
+import { counterFor } from './machine'
 import type { Run, SessionKey } from './types'
 
 export interface StatusSupervisor {
@@ -26,7 +27,10 @@ export function formatStatus(
 
   for (const run of runs) {
     lines.push('')
-    lines.push(`${run.run_id}  [${run.phase}] pass ${run.pass}  ${run.title}`)
+    const passes = counterFor(run, run.phase)
+    lines.push(
+      `${run.run_id}  [${run.phase}]${passes > 0 ? ` pass ${passes}` : ''}  ${run.title}`,
+    )
     if (run.orchestrator_pane) lines.push(`  orchestrator: ${run.orchestrator_pane}`)
     if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {
       lines.push(`  ⚠ orchestrator pane ${run.orchestrator_pane} is gone — run the plugin's`)

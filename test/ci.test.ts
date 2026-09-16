@@ -7,7 +7,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
   depends_on: [], files: [], keep_worktree: false, text: '',
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
-  phase: 'ci', pass: 1, phase_entered_at: 0, escalated_from: null,
+  phase: 'ci', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: 5, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
@@ -41,7 +41,7 @@ test('unknown never overwrites a known bucket', async () => {
 })
 
 test('only tasks in the ci phase with a PR are polled', async () => {
-  const run = mkRun([mkTask({ phase: 'execute' }), mkTask({ task_id: 't2', pr: null })])
+  const run = mkRun([mkTask({ phase: 'implement' }), mkTask({ task_id: 't2', pr: null })])
   let polls = 0
   await ciTransitions([run], async () => { polls++; return 'pass' })
   expect(polls).toBe(0)

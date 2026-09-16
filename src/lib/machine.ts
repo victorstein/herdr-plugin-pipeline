@@ -36,44 +36,10 @@ export interface RunSignals {
   artifactFresh: boolean
   verdict: VerdictResult | null
   maxPasses: number
-}
-
-/** Phases whose completion signal is an artifact file. */
-export const ARTIFACT_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
-  'spec', 'spec-review', 'plan', 'plan-review', 'branch-review',
-])
-
-/** A run in one of these needs no further automatic advancement. */
-export const COMPLETED_RUN_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>(['done'])
-
-/**
- * A run in one of these must not hold an orchestrator pane slot: neither clears
- * `orchestrator_pane`, and both need a human (`hpipe rewind`/`abort`) to leave,
- * so either would starve the next run started in that same terminal.
- */
-export const PANE_RELEASING_RUN_PHASES: ReadonlySet<RunPhase> =
-  new Set<RunPhase>(['done', 'escalated'])
-
-const REVIEW_PHASES: ReadonlySet<RunPhase> = new Set<RunPhase>([
-  'spec-review', 'plan-review', 'branch-review',
-])
-
-const ON_CLEAR: Partial<Record<RunPhase, RunPhase>> = {
-  spec: 'spec-review',
-  'spec-review': 'plan',
-  plan: 'plan-review',
-  'plan-review': 'dispatch',
-  'branch-review': 'done',
-}
-
-const ON_BLOCKER: Partial<Record<RunPhase, RunPhase>> = {
-  'spec-review': 'spec',
-  'plan-review': 'plan',
-  // Unlike its siblings, branch-review routes to itself: by this point every
-  // task is merged and torn down, so there is no producer phase to return to.
-  // The orchestrator patches the branch directly and writes a fresh review,
-  // and MAX_PASSES still bounds the loop.
-  'branch-review': 'branch-review',
+  newestRegisteredAt: number | null
+  newestAdoptedAt: number | null
+  tasksAllTerminal: boolean
+  anyTaskDone: boolean
 }
 
 export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
@@ -84,31 +50,39 @@ export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
   return run
 }
 
-export function advanceRun(run: Run, signals: RunSignals): Run | null {
-  if (!ARTIFACT_RUN_PHASES.has(run.phase)) return null
-  if (!signals.actorIdle || !signals.artifactFresh) return null
+export function advanceRun(run: Run, s: RunSignals): Run | null {
+  switch (run.phase) {
+    case 'intake': {
+      if (!s.actorIdle) return null
+      if (s.newestRegisteredAt === null || s.newestRegisteredAt <= run.phase_entered_at) return null
+      return enterRunPhase(run, 'dispatch', 'a task was registered')
+    }
 
-  if (!REVIEW_PHASES.has(run.phase)) {
-    const next = ON_CLEAR[run.phase]
-    return next ? enterRunPhase(run, next, 'actor idle + artifact fresh') : null
+    case 'dispatch': {
+      if (s.newestAdoptedAt === null || s.newestAdoptedAt <= run.phase_entered_at) return null
+      return enterRunPhase(run, 'execute', 'a worktree was adopted')
+    }
+
+    case 'execute': {
+      if (!run.intake_closed || !s.tasksAllTerminal) return null
+      return s.anyTaskDone
+        ? enterRunPhase(run, 'branch-review', 'all tasks settled')
+        : enterRunPhase(run, 'escalated', 'every task settled without one reaching done')
+    }
+
+    case 'branch-review': {
+      if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
+      if (s.verdict.verdict === 'CLEAR') return enterRunPhase(run, 'done', 'review cleared')
+      const count = bumpCounter(run, 'branch-review')
+      if (count >= s.maxPasses) {
+        return enterRunPhase(run, 'escalated', `${count} passes without clearing`)
+      }
+      return enterRunPhase(run, 'branch-review', `review returned BLOCKER (pass ${count})`)
+    }
+
+    default:
+      return null
   }
-
-  if (!signals.verdict) return null
-
-  if (signals.verdict.verdict === 'CLEAR') {
-    const next = ON_CLEAR[run.phase]
-    return next ? enterRunPhase(run, next, 'review cleared') : null
-  }
-
-  if (run.pass >= signals.maxPasses) {
-    return enterRunPhase(run, 'escalated', `${run.pass} passes without clearing`)
-  }
-
-  const back = ON_BLOCKER[run.phase]
-  if (!back) return null
-  enterRunPhase(run, back, `review returned BLOCKER (pass ${run.pass})`)
-  run.pass += 1
-  return run
 }
 
 export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: string): Task {

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { runTeardown } from '../src/supervisor/teardown'
+import { runTeardown, SETTLED } from '../src/supervisor/teardown'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -7,7 +7,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
   depends_on: [], files: [], keep_worktree: false, text: '',
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
-  phase: 'teardown', pass: 1, phase_entered_at: 0, escalated_from: null,
+  phase: 'teardown', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: 5, ci: 'pass',
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
@@ -51,14 +51,8 @@ test('is idempotent — an already-done task is not torn down twice', async () =
   expect(calls).toBe(0)
 })
 
-test('the last task done moves the run to branch-review', async () => {
-  const run = mkRun([mkTask({ task_id: 't1', phase: 'done' }), mkTask({ task_id: 't2' })])
-  await runTeardown([run], async () => true)
-  expect(run.phase).toBe('branch-review')
-})
-
-test('a still-running sibling keeps the run in execute', async () => {
-  const run = mkRun([mkTask({ task_id: 't1', phase: 'execute' }), mkTask({ task_id: 't2' })])
-  await runTeardown([run], async () => true)
-  expect(run.phase).toBe('execute')
+test('SETTLED counts escalated, which is not terminal but has stopped moving', () => {
+  expect(SETTLED.has('escalated')).toBe(true)
+  expect(SETTLED.has('done')).toBe(true)
+  expect(SETTLED.has('implement')).toBe(false)
 })

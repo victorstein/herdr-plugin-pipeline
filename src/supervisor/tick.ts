@@ -1,4 +1,5 @@
-import { enterTaskPhase, PANE_RELEASING_RUN_PHASES } from '../lib/machine'
+import { enterTaskPhase } from '../lib/machine'
+import { runRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 export interface WakeLine {
@@ -98,7 +99,7 @@ export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
-    if (PANE_RELEASING_RUN_PHASES.has(run.phase)) continue
+    if (runRow(run.phase).releasesPane === true) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)

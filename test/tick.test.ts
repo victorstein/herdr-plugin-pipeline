@@ -14,7 +14,7 @@ const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
   depends_on: [], files: [], keep_worktree: false, text: '',
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
-  phase: 'execute', pass: 1, phase_entered_at: 0, escalated_from: null,
+  phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
@@ -95,8 +95,8 @@ test('worktree.created binds a workspace to the matching branch', () => {
 
 test('pickOneAdvance returns at most one candidate per orchestrator', () => {
   const run = mkRun([
-    mkTask({ task_id: 't1', phase: 'task-review-spec' }),
-    mkTask({ task_id: 't2', phase: 'task-review-quality' }),
+    mkTask({ task_id: 't1', phase: 'pr-review-intent' }),
+    mkTask({ task_id: 't2', phase: 'pr-review-quality' }),
   ])
   run.orchestrator_pane = 'w1:p1'
   const picked = pickOneAdvance([run])
@@ -109,14 +109,14 @@ test('a finished run does not starve a later run sharing its orchestrator pane',
   finished.orchestrator_pane = 'w1:p1'
 
   const active = mkRun([])
-  active.phase = 'spec'
+  active.phase = 'intake'
   active.orchestrator_pane = 'w1:p1'
 
   // listRuns sorts deterministically, so without a phase filter the finished run
   // wins the pane forever and its successor is never evaluated.
   const picked = pickOneAdvance([finished, active])
   expect(picked).toHaveLength(1)
-  expect(picked[0]?.phase).toBe('spec')
+  expect(picked[0]?.phase).toBe('intake')
 })
 
 test('two runs on different panes are both picked', () => {
@@ -133,10 +133,10 @@ test('an escalated run does not starve a later run sharing its pane', () => {
   stuck.orchestrator_pane = 'w1:p1'
 
   const active = mkRun([])
-  active.phase = 'spec'
+  active.phase = 'intake'
   active.orchestrator_pane = 'w1:p1'
 
   const picked = pickOneAdvance([stuck, active])
   expect(picked).toHaveLength(1)
-  expect(picked[0]?.phase).toBe('spec')
+  expect(picked[0]?.phase).toBe('intake')
 })

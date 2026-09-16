@@ -53,7 +53,6 @@ export interface Task {
   pane_id: string | null
   agent_status: AgentStatus
   phase: TaskPhase
-  pass: number
   phase_entered_at: number
   escalated_from: TaskPhase | null
   head_sha_at_entry: string | null
@@ -87,7 +86,6 @@ export interface Run {
   repo_root: string
   title: string
   phase: RunPhase
-  pass: number
   phase_entered_at: number
   escalated_from: RunPhase | null
   orchestrator_pane: string | null

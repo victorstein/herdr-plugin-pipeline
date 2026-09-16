@@ -43,9 +43,16 @@ export const RUN_ROWS: readonly PhaseRow<RunPhase>[] = [
     onClear: 'execute', prompt: 'dispatch', stallable: true },
   { phase: 'execute', signal: 'gate',
     onClear: 'branch-review', stallable: true, probeTarget: 'orchestrator' },
+  // Unlike the other review rows, this one loops back onto itself: by the time
+  // it runs every task is merged and torn down, so there is no producer phase
+  // to return to. The orchestrator patches the branch directly, and the counter
+  // still bounds the loop.
   { phase: 'branch-review', actor: 'orchestrator', signal: 'verdict',
     onClear: 'done', onBlocker: 'branch-review', counter: 'branch-review',
     prompt: 'branch-review', stallable: true },
+  // Both release the orchestrator pane: neither clears `orchestrator_pane`, and
+  // both need a human (`hpipe rewind`/`abort`) to leave, so either would
+  // otherwise starve the next run started in that same terminal.
   { phase: 'escalated', actor: 'human', signal: 'manual',
     returnsTo: 'escalated_from', prompt: 'escalate', releasesPane: true },
   { phase: 'done', signal: 'manual', terminal: true, releasesPane: true },
@@ -110,6 +117,10 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   { phase: 'escalated', actor: 'human', signal: 'manual',
     returnsTo: 'escalated_from', prompt: 'escalate', holdsFiles: true },
 
+  // `failed` and `escalated` both leave a worktree holding unmerged work, and
+  // nothing ever tears an escalated task down — releasing their files would let
+  // a second task be dispatched onto them. `orphaned` is only reachable after
+  // merge, so that code has already landed and its files are free.
   { phase: 'failed', signal: 'manual', terminal: true, holdsFiles: true },
   { phase: 'orphaned', signal: 'manual', terminal: true, holdsFiles: false },
   { phase: 'blocked-on-failure', signal: 'manual', terminal: true, holdsFiles: false },

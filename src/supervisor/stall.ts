@@ -1,4 +1,4 @@
-import { ARTIFACT_RUN_PHASES } from '../lib/machine'
+import { runRow } from '../lib/phases'
 import type { Run, Task } from '../lib/types'
 
 export interface StallCandidate { run: Run; key: string; minutes: number }
@@ -13,7 +13,8 @@ export function stallCandidates(
   const out: StallCandidate[] = []
 
   for (const run of runs) {
-    if (!ARTIFACT_RUN_PHASES.has(run.phase)) continue
+    const signal = runRow(run.phase).signal
+    if (signal !== 'artifact' && signal !== 'verdict') continue
     if (!run.orchestrator_pane) continue
 
     const minutes = (now - run.phase_entered_at) / 60_000
@@ -35,7 +36,7 @@ export function taskStallKey(run: Run, task: Task): string {
 }
 
 /**
- * `execute` is the only task phase worth probing: every other phase is either
+ * `implement` is the only task phase worth probing: every other phase is either
  * orchestrator-owned (and covered by the run-level probe's actor gate) or
  * driven by an external service. A worker whose pane hangs without emitting
  * `pane.exited` would otherwise go unnoticed indefinitely.
@@ -48,7 +49,7 @@ export function taskStallCandidates(
   for (const run of runs) {
     if (!run.orchestrator_pane) continue
     for (const task of run.tasks) {
-      if (task.phase !== 'execute') continue
+      if (task.phase !== 'implement') continue
 
       const minutes = (now - task.phase_entered_at) / 60_000
       if (minutes < thresholdMinutes) continue

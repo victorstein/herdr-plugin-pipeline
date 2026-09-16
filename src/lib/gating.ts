@@ -1,21 +1,10 @@
+import { taskRow } from './phases'
 import type { Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
 const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
 const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'failed', 'orphaned', 'blocked-on-failure', 'escalated',
-])
-
-/**
- * File ownership asks a DIFFERENT question than dependency satisfaction, so it
- * gets its own set. `escalated` and `failed` both leave a worktree holding
- * unmerged work, and nothing ever tears an escalated task down — releasing its
- * files would let a second task be dispatched onto them. `orphaned` is excluded
- * because it is only reachable after merge, so that code has already landed.
- */
-const HOLDS_FILES: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  'execute', 'task-review-spec', 'task-review-quality',
-  'ci', 'merge', 'close', 'teardown', 'failed', 'escalated',
 ])
 
 export type GateState =
@@ -32,7 +21,11 @@ export function filesOverlap(a: string[], b: string[]): boolean {
 }
 
 function isInFlight(task: Task): boolean {
-  return HOLDS_FILES.has(task.phase)
+  const rule = taskRow(task.phase).holdsFiles
+  if (rule === 'inherit') {
+    return task.decision_from !== null && taskRow(task.decision_from).holdsFiles === true
+  }
+  return rule === true
 }
 
 export function gateStatus(task: Task, all: Task[]): GateState {

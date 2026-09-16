@@ -11,10 +11,10 @@ let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ledger-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-test('newRun produces a unique suffixed id and spec phase', () => {
+test('newRun produces a unique suffixed id and opens at intake', () => {
   const a = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'chat meter' })
   const b = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'chat meter' })
-  expect(a.phase).toBe('spec')
+  expect(a.phase).toBe('intake')
   expect(a.run_id).not.toBe(b.run_id)
   expect(a.run_id).toContain('chat-meter')
 })
