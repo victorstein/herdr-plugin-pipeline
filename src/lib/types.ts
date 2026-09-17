@@ -41,6 +41,22 @@ export interface Decision {
   prompted_at: number | null
 }
 
+/**
+ * Stall-ladder state for ONE phase entry of ONE record. Absent, or stamped with
+ * an `at`/`run_at` that no longer match, reads as zero — so any code that
+ * re-stamps `phase_entered_at` re-arms the ladder without knowing it exists.
+ */
+export interface StallState {
+  /** The record's `phase_entered_at` this state belongs to. */
+  at: number
+  /** The run's `phase_entered_at` this state belongs to. */
+  run_at: number
+  /** When the last rung was climbed — a sent probe or a deferral. The due anchor. */
+  last_probe_at: number
+  probes: number
+  holds: number
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -76,6 +92,7 @@ export interface Task {
   decision_from: TaskPhase | null
   pending_answer: string | null
   delivery_attempts: number
+  stall?: StallState
   notes: string
 }
 
@@ -100,6 +117,7 @@ export interface Run {
   schema_version: number
   intake_closed: boolean
   passes: Partial<Record<RunPhase, number>>
+  stall?: StallState
 }
 
 export interface HistoryEntry {

@@ -6,15 +6,17 @@ import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/
 import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
-import { renderPrompt } from '../lib/render'
+import { hpipeCommand, renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, shouldRetry,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
-import { taskRow } from '../lib/phases'
-import { sendProbes, stallCandidates, taskStallCandidates } from './stall'
+import {
+  applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
+  taskStallCandidates,
+} from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
@@ -106,7 +108,6 @@ async function main(): Promise<void> {
 
   const attempts = new Map<string, number>()
   let lastCiPollMs = 0
-  const probed = new Set<string>()
 
   for (;;) {
     try {
@@ -235,36 +236,59 @@ async function main(): Promise<void> {
         }
       }
 
-      await sendProbes(
-        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed), probed,
-        async (candidate) => {
-          const path = absoluteArtifactPath(candidate.run, null)
-          const text = await renderPrompt(
-            pluginRoot, 'stall-probe', {
-              run_id: candidate.run.run_id,
-              phase: candidate.run.phase,
-              minutes: String(candidate.minutes),
-              artifact_path: path ?? 'the expected artifact',
-            },
-          )
-          return herdr.agentPrompt(candidate.paneId, text)
-        },
-      )
-
-      await sendProbes(
-        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed), probed,
-        async (candidate) => {
-          const branch = `${candidate.task.branch} (#${candidate.task.issue})`
+      const hpipe = hpipeCommand(pluginRoot)
+      // One binding, so the cap the candidates are built with, the cap the
+      // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
+      const probeMax = config.STALL_PROBE_MAX
+      const stallDeps: StallDeps = {
+        probeMax,
+        now: () => Date.now(),
+        agentStatus: (paneId) => herdr.agentStatus(paneId),
+        persist: (run) => saveRun(stateDir, run),
+        probe: async (c) => {
+          const awaiting = stallAwaiting(c.run, c.task, hpipe)
           const text = await renderPrompt(pluginRoot, 'stall-probe', {
-            run_id: candidate.run.run_id,
-            phase: `${candidate.task.phase} (${candidate.task.task_id}, ${candidate.task.branch})`,
-            minutes: String(candidate.minutes),
-            artifact_path: taskRow(candidate.task.phase).signal === 'pr'
-              ? `a PR for ${branch}`
-              : `whatever clears ${candidate.task.phase} for ${branch}`,
+            run_id: c.run.run_id,
+            phase: c.task
+              ? `${c.task.phase} (${c.task.task_id}, ${c.task.branch})`
+              : c.run.phase,
+            minutes: String(c.minutes),
+            awaiting: awaiting.clause,
+            ladder: ladderFor(c, probeMax),
           })
-          return herdr.agentPrompt(candidate.paneId, text)
+          return herdr.agentPrompt(c.paneId, text)
         },
+        escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
+          run_id: c.run.run_id,
+          phase: from,
+          minutes: String(c.minutes),
+          probes: String(c.probes),
+          awaiting_short: stallAwaiting(c.run, c.task, hpipe).short,
+          task_flag: c.task ? ` --task ${c.task.task_id}` : '',
+        }),
+        sendEscalation: async (c, text) => {
+          const pane = c.run.orchestrator_pane
+          if (pane === null) {
+            console.error(
+              `[pipeline] run ${c.run.run_id}: escalated but no orchestrator pane to tell`,
+            )
+            return
+          }
+          const sent = await herdr.agentPrompt(pane, text)
+          if (!sent.ok) {
+            console.error(
+              `[pipeline] run ${c.run.run_id}: escalation prompt to ${pane} failed (${sent.code})` +
+              ' — the transition is already recorded; `hpipe status` shows it',
+            )
+          }
+        },
+      }
+
+      await applyStalls(
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
+      )
+      await applyStalls(
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probeMax), stallDeps,
       )
     } catch (error) {
       console.error('[pipeline] tick error:', error)

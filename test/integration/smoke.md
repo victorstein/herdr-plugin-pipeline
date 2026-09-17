@@ -306,6 +306,21 @@ bug.
 
 ---
 
+### 4c. The stall ladder
+
+A phase that goes quiet is probed every `TASK_STALL_MINUTES` (45) for a task, `STALL_MINUTES` (15)
+for a run, measured from the **last probe** rather than from phase entry — so a supervisor restart
+produces one probe per stalled record, not a burst. After `STALL_PROBE_MAX` (3) unanswered probes a
+row whose signal the probed actor produces itself (`research`, `spec`, the four review rows,
+`implement`, and the run's `branch-review`) is moved to `escalated` and reported by `hpipe status`.
+
+`blocked-on-files`, `blocked-on-decision`, and the run's `dispatch` and `execute` are probed but
+**never** escalated — they are waiting correctly, on a sibling task or on you, and escalating them
+would cascade their dependents to `blocked-on-failure`. Their probe says so.
+
+If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
+`STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.
+
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 
 **The question.** During `spec-review`, `plan-review`, `pr-review-intent` and `pr-review-quality`,
@@ -474,6 +489,7 @@ from the orchestrator pane.
 | A task is stuck in `blocked-on-files` behind a holder that will never finish | Get the holder terminal first (`hpipe rewind … --task <holder>` to a phase it can finish, or let it fail), then `hpipe release --task <holder>`. `release` refuses while the holder is in flight, and only accepts a terminal or `escalated` task. |
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which resets that phase's pass count. |
+| A phase was escalated by the stall ladder | `hpipe status` shows `⚠ … escalated from <phase> … needs a human`. Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. |
 | The whole run is wrong and you want out | `hpipe abort <run_id>` — leaves worktrees and branches alone, releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was. |
 | The orchestrator pane died or changed id | `hpipe status` flags it (`⚠ orchestrator pane … is gone`). Run the plugin's `claim` action from the pane that should drive the run. |
 | The supervisor died | `hpipe status` reports `supervisor: none\|stale`. Reopen with `herdr plugin action invoke stein.pipeline.supervisor`. Nothing advances until it is back; no state is lost. |

@@ -148,3 +148,39 @@ test('a stuck holder is still reported as needing release', () => {
   ]
   expect(formatStatus([run], { state: 'live' }, 'personal')).toContain('hpipe release --task t1')
 })
+
+test('an escalated task is called out as needing a human', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'escalated', escalated_from: 'implement',
+                        phase_entered_at: Date.now() - 47 * 60_000 })]
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain('t1 escalated from implement')
+  expect(out).toContain('47m')
+  expect(out).toContain('hpipe rewind')
+})
+
+test('a healthy task gets no escalation warning', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'implement' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('needs a human')
+})
+
+test('an escalated run is called out too', () => {
+  const run = mkRun()
+  run.phase = 'escalated'
+  run.escalated_from = 'branch-review'
+  run.phase_entered_at = Date.now() - 12 * 60_000
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain('escalated from branch-review')
+  expect(out).toContain('needs a human')
+})
+
+test('an ABORTED run is not reported as escalated', () => {
+  // cmdAbort overloads escalated_from: it sets it and then parks the run in
+  // `done` (src/cli.ts:298-299). Keying on escalated_from !== null would warn
+  // about every aborted run.
+  const run = mkRun()
+  run.escalated_from = 'execute'
+  run.phase = 'done'
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('needs a human')
+})
