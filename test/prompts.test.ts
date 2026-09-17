@@ -124,3 +124,25 @@ test('the stall escalation prompt carries its own variables, not escalate.md\'s'
   expect(text).not.toContain('review passes')
   expect(text).not.toContain('{{pass}}')
 })
+
+test('the stall probe asserts nothing about the shape of what it is waiting for', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'stall-probe.md')).text()
+  expect(text).toContain('{{awaiting}}')
+  expect(text).toContain('{{ladder}}')
+  // The defect this issue was filed over: the template asserted the value was a
+  // filesystem path, which is false for seven of the nine signals.
+  expect(text).not.toContain('appeared at')
+  expect(text).not.toContain('path above')
+  expect(text).not.toContain('{{artifact_path}}')
+  expect(text).not.toContain('will not ask again')
+})
+
+test('a rendered probe leaves no placeholder behind', async () => {
+  const { renderPrompt } = await import('../src/lib/render')
+  const text = await renderPrompt(ROOT, 'stall-probe', {
+    run_id: 'r1', phase: 'implement', minutes: '45',
+    awaiting: 'This phase is waiting for a pushed PR for fix/x (#1).',
+    ladder: 'This is probe 1 of 3.',
+  })
+  expect(text).not.toContain('{{')
+})

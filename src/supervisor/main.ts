@@ -252,9 +252,6 @@ async function main(): Promise<void> {
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
             ladder: ladderFor(c, config.STALL_PROBE_MAX),
-            // Transitional: the template still names {{artifact_path}} until
-            // step 11. `render` ignores bag keys the template does not use.
-            artifact_path: awaiting.clause,
           })
           return herdr.agentPrompt(c.paneId, text)
         },
