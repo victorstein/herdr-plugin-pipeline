@@ -3,8 +3,9 @@
 **Date:** 2026-09-17
 **Issue:** #9 — hardcoded artifact paths make workers write artifacts the supervisor never sees
 **Research:** `docs/superpowers/research/2026-09-17-issue-9-research.md` (commit `417684d`)
-**Status:** Design v2. All of pass 0's 1 BLOCKER and 5 MAJORs applied; both MINORs applied.
-Review: `docs/superpowers/reviews/issue-9-spec-review-0.md` (`VERDICT: BLOCKER`).
+**Status:** Design v3. Pass 0 (`VERDICT: BLOCKER`, 1 blocker / 5 majors / 2 minors) and pass 1
+(`VERDICT: CLEAR`, 3 majors / 2 minors) both fully applied.
+Reviews: `docs/superpowers/reviews/issue-9-spec-review-{0,1}.md`.
 **Files this task owns** (`t1.files` in the run ledger): `src/cli.ts`, `src/lib/worker-prompt.ts`,
 `src/supervisor/tasks.ts`, `src/supervisor/deliver.ts`, `prompts/worker-brief.md`.
 
@@ -28,6 +29,28 @@ Review: `docs/superpowers/reviews/issue-9-spec-review-0.md` (`VERDICT: BLOCKER`)
 > repeatedly: **it reasoned about the artifact from the supervisor's clock instead of from the
 > thing the artifact actually is — a commit on a branch.** Every timestamp-derived fix for this
 > class has a next edge case; the branch-content question has none.
+
+> **Pass 1 returned `CLEAR` and audited every pass-0 disposition as genuine.** Its three MAJORs
+> were all internal-consistency defects in v2's own new text, and all three are applied below. The
+> sharpest — and the one worth naming, because it is the *same class of error as v1's blocker* — is
+> that v2 gated adoption on `!isFresh` while its own §Problem stated two paragraphs earlier that
+> `isFresh` cannot distinguish missing from stale. v1 reasoned about the artifact from the clock;
+> v2 removed the clock from the mechanism but left it in the *gate*. v3 gates on absence.
+>
+> The second is the one fix in v2 that was adopted from pass 0 rather than re-derived: the brief's
+> replacement sentence was shipped along with pass 0's assertion that it was true, and it was not.
+> A review's proposed wording is a proposal, not a verified fact — the same standard v2 applied when
+> it declined pass 0's `max(phase_entered_at, adopted_at)` fix now applies to its wording fix.
+
+## What changed from v2, by pass-1 finding
+
+| Finding | Disposition |
+|---|---|
+| **MAJOR 1** — adoption gated on `!isFresh`, so it fires on present-but-stale artifacts (every `onBlocker` re-entry) | **Accepted.** Gate is now absence. §C1 wiring, **A5**, tests T11 |
+| **MAJOR 2** — C2's replacement sentence still falsified by C1; spec asserted twice that it was not | **Accepted.** Sentence changed to a true one; the truth-claim deleted; **A10** rewritten to own the choice |
+| **MAJOR 3** — `console.error` trigger specified three ways; §C1's version fires every tick; contradicts A1 | **Accepted.** Post-filter ≥2 only, deduped per phase entry. **A13**, §flow step 6, test T3 |
+| **MINOR 1** — `git diff` consumed as machine data with no `quotePath`/rename pinning | **Accepted, with one correction.** `-z` alone subsumes `core.quotePath` (verified); only `diff.renames=true` needs pinning. **A12**, tests T12-T13 |
+| **MINOR 2** — test files sit outside the declared `t1.files` | **Accepted.** Named explicitly under §Testing strategy |
 
 ## What changed from v1, by finding
 
@@ -139,7 +162,8 @@ export async function adoptableArtifact(
 
 1. `checkoutPath === null` → `null`. Adoption is a worktree-scoped repair (**A7**).
 2. `git -C <checkoutPath> rev-parse --verify --quiet main` non-zero → `null` (**A3**).
-3. `git -C <checkoutPath> diff --name-only --diff-filter=A main...HEAD -- docs/`.
+3. `git -c diff.renames=true -C <checkoutPath> diff -z --name-only --diff-filter=A main...HEAD
+   -- docs/`, split on `NUL`. **A12** covers both flags.
 4. Drop any path under `docs/superpowers/reviews/` (**A6**).
 5. Drop any path in `claimed`.
 6. Exactly one survivor → return it (a repo-relative path, which is what `task.artifacts` stores).
@@ -185,6 +209,10 @@ Exactly one candidate in each case. All three would have been adopted; all three
 `docs: move … to the path the supervisor stats` commits, and the hand-run `ls` that found them,
 would not have happened.
 
+*(These transcripts predate **A12** and omit `-z` and `-c diff.renames=true`. Neither changes the
+result here: `diff.renames=true` is git's default, and `-z` alters only output framing, not which
+paths are selected. They are left as run.)*
+
 **Wiring**, in `gatherSignals` (`src/supervisor/tasks.ts:202-210`), which today reads:
 
 ```ts
@@ -200,11 +228,27 @@ would not have happened.
     }
 ```
 
-The `if (!actorIdle) return base` guard stays first and is load-bearing for cost: the `git diff`
-only ever runs against an idle worker whose canonical artifact is absent. On a hit, the path is
-written to `task.artifacts[slot]` and the phase advances. On a miss with a non-empty raw candidate
-list, one `console.error` naming the count and the paths, mirroring
-`src/supervisor/main.ts:160-163`'s `dropping prompt for <subject> — no pane`.
+The `if (!actorIdle) return base` guard stays first and is load-bearing for cost. **Adoption is
+then gated on the canonical path being *absent*, not on `!isFresh`** — the two are not the same, and
+conflating them is what pass 1's MAJOR 1 caught. `isFresh` is `statSync(...).mtimeMs > phaseEnteredAt`
+in a `try` (`src/lib/predicates.ts:10-20`), so it is false for a *stale* file exactly as much as for
+a missing one, which §Problem already says. Every `onBlocker` re-entry produces a stale canonical
+artifact: `spec-review` returns to `spec` and `plan-review` to `plan`
+(`src/lib/phases.ts:97,102-103`), and `enterTaskPhase` re-stamps `task.phase_entered_at`
+(`src/lib/machine.ts:94`). Gating on `!isFresh` would therefore run the scan through every revision
+loop and could adopt a stray committed doc over an `artifacts.spec` that was already correct —
+A5's unrecoverable branch, through a door the design means to keep shut. So:
+
+```ts
+      if (!(await isFresh(absolute, task.phase_entered_at))) {
+        if (existsSync(absolute)) return base          // stale, not missing — never adopt
+        // …adoption path…
+      }
+```
+
+On a hit, the path is written to `task.artifacts[slot]` and the phase advances. On a miss with **two
+or more survivors after filtering**, one `console.error` naming the task, the slot and the
+candidates — deduplicated per phase entry (**A13**).
 
 **Adoption is recorded, not merely accepted.** `task.artifacts[slot]` is mutated and the caller
 saves the run (`src/supervisor/main.ts:217`), so every later citation resolves to the real file:
@@ -230,9 +274,10 @@ exists to catch. v2 keeps the firmness and corrects only the false clause:
 > Those paths are relative to this worktree, which is your cwd. Write them exactly as given, stem
 > and all — do not re-derive them from the conventions you see in `docs/`. The stem carries the
 > issue number, and every later phase cites the path by name. An artifact written anywhere else
-> does not complete the phase.
+> does not satisfy this phase's contract.
 
-True before and after C1, and it does not mention recovery. **A10.**
+**A10** owns why this is the right sentence — and why v1's "does not complete the phase", which pass
+0 proposed and v1 shipped unexamined, was not.
 
 `src/lib/worker-prompt.ts` is unchanged in v2: the `./` prefix v1 proposed is dropped, as A7 of v1
 predicted it would be.
@@ -251,14 +296,17 @@ corrected wording.
 1. Row is `research`/`spec`/`plan`. Actor not idle → `base`. *(No git call.)*
 2. Canonical absolute path fresh and settled → `artifactFresh: true`. *(No git call. Happy path
    unchanged.)*
-3. **[C1]** Canonical path not fresh → `adoptableArtifact(task.checkout_path, claimed)`, where
-   `claimed` is every non-null path in `task.artifacts.{research,spec,plan}`. *(Not verdicts — see
-   **A6**.)*
+3. **[C1]** Canonical path not fresh **and not present** → `adoptableArtifact(task.checkout_path,
+   claimed)`, where `claimed` is every non-null path in `task.artifacts.{research,spec,plan}`.
+   *(Not verdicts — see **A6**.)* Present-but-stale → `base`, no scan (**A5**).
 4. Exactly one survivor, and it passes `isSettled` → `task.artifacts[slot] = candidate`, return
    `artifactFresh: true`.
 5. Zero survivors → `base`. Identical to today.
-6. Two or more survivors → `base`, **plus** one `console.error` naming the task, the slot and the
-   candidates.
+6. Two or more survivors **after filtering** → `base`, **plus** one `console.error` naming the
+   task, the slot and the candidates, at most once per phase entry (**A13**). The count that matters
+   is post-filter: the *raw* `git diff` list is never empty in `spec` or `plan`, because the research
+   note is always an added path on the branch, so logging on a non-empty raw list would fire every
+   tick of every spec and plan phase.
 7. `advanceTask` advances the row; `promptForTaskPhase` renders the next prompt from the **adopted**
    value (`src/supervisor/tasks.ts:92-95`); `src/supervisor/main.ts:217` saves the run.
 
@@ -279,8 +327,10 @@ name.
 | `git diff` exits non-zero | `null` | `src/lib/gh.ts:44-46` (`okCodes`) |
 | `main` does not resolve in the worktree | `null` (**A3**) | — |
 | `checkout_path` is null | `null` (**A7**) | — |
+| Canonical path present but stale | no adoption, keep waiting | **A5**; every `onBlocker` re-entry |
 | Zero candidates | no adoption, keep waiting | today's behaviour |
-| Two or more candidates | **no adoption**, keep waiting, one log line | fail closed; **A5** |
+| Two or more candidates after filtering | **no adoption**, keep waiting, one log line per phase entry | fail closed; **A5**, **A13** |
+| A pre-existing doc was `git mv`d on the branch | not a candidate, provided rename detection is on | **A12** |
 | Adopted file deleted later | next tick's canonical stat fails, fallback re-runs | adoption is a value, not a latch |
 | Worker has not committed | not a candidate (**A4**) | — |
 
@@ -320,9 +370,15 @@ and all three measured failures had committed — which is why the corrective re
 read. The canonical `isFresh` check still fires on an uncommitted file at the right path, so the
 happy path is not made stricter.
 
-**A5 — "Exactly one" is the right threshold.** Two candidates means the supervisor cannot tell which
-is the artifact; guessing advances the phase on the wrong file and propagates it into the spec, both
-reviews and the PR. Waiting is recoverable; a wrong adoption is not.
+**A5 — "Exactly one" is the right threshold, and adoption requires the canonical path to be
+*absent*.** Two candidates means the supervisor cannot tell which is the artifact; guessing advances
+the phase on the wrong file and propagates it into the spec, both reviews and the PR. Waiting is
+recoverable; a wrong adoption is not. The same logic forces the absence gate rather than an
+`!isFresh` gate: on every `onBlocker` re-entry the canonical artifact is present and instantly stale
+(`src/lib/phases.ts:97,102-103`, `src/lib/machine.ts:94`), and a design that scanned then could
+replace a correct `artifacts.spec` with a stray doc the worker happened to commit while revising.
+The cost of the absence gate is a real miss: a worker who, on re-entry, writes the revised spec to a
+*different* path gets no adoption and stalls as today. Fail-closed, deliberately.
 
 **A6 — `docs/superpowers/reviews/` is excluded by name, not by `claimed`.** v1 said `claimed`
 contained "every recorded verdict"; MAJOR 2 established that nothing in `src/` ever writes
@@ -352,9 +408,15 @@ mean either reaching into them or inventing a third surface. The log line is hon
 gap is recorded in §Non-goals with a recommended follow-up rather than left implied.
 *A reviewer or the human may reasonably call this the wrong half of MAJOR 5 to take.*
 
-**A10 — The brief is corrected, not softened (MAJOR 4).** Advance warning scored 3/3 against the
-brief's 3/6. v2 keeps the firm register and deletes only the sentence C1 makes untrue, and does not
-tell the worker a fallback exists.
+**A10 — The brief states the contract, not the mechanism.** Advance warning scored 3/3 against the
+brief's 3/6, so the firm register stays (pass 0's MAJOR 4). But pass 1's MAJOR 2 was right that v1's
+replacement — *"does not complete the phase"* — is falsified by C1 in precisely the population C1
+exists for, in the same way and for the same reason as the clause it replaced; v1 carried pass 0's
+proposed wording and its truth-claim across without re-deriving either, the one fix in v2 that was
+adopted rather than verified. *"Does not satisfy this phase's contract"* is true whether or not
+adoption fires: the contract is the named path, and adoption is a repair the supervisor may attempt,
+not a second correct answer. The brief deliberately does not mention that repair, because
+advertising the fallback to the agent the fallback exists to catch is exactly what MAJOR 4 forbade.
 
 **A11 — Directory derivation is dropped entirely (MINOR 1).** v1's C1 resolved the artifact
 directory from the repo's layout. It prevents zero measured failures (the filenames deviated too);
@@ -363,6 +425,35 @@ no-op in berean-os, where `research/` now exists — created by the very run tha
 — so candidate order `['research','notes']` resolves there forever. It buys nothing in either repo
 anyone has looked at. **This declines the letter of issue #9's first direction**, on the evidence
 that the direction does not address the failure. Reviving it is ~15 lines if the human wants it.
+
+**A12 — The `git diff` is spelled for machine consumption (pass 1 MINOR 1).** Two ambient-config
+dependencies, both reproduced in a scratch repo. Without `-z`, a non-ASCII path comes back C-quoted:
+
+    $ git diff --name-only --diff-filter=A main...HEAD -- docs/
+    "docs/superpowers/notes/caf\303\251-se\303\261or.md"
+
+That string becomes the "exactly one survivor", `isSettled` fails on it, and the feature silently
+does nothing for any repo whose docs carry an accent — fail-closed but invisible. `-z` alone fixes
+it (verified: `-z` emits raw UTF-8 NUL-terminated regardless of `core.quotePath`), so the explicit
+`core.quotePath=false` the review suggested is not needed. Rename detection is the second and it
+fails **open**: with `diff.renames=false` in a user's gitconfig, a pre-existing doc moved with
+`git mv` reappears as `A` and becomes a spurious lone candidate that is a real settled file —
+
+    $ git -c diff.renames=false diff -z --name-only --diff-filter=A main...HEAD -- docs/ | tr '\0' '\n'
+    docs/superpowers/notes/café-señor.md
+    docs/superpowers/research/moved.md        # ← moved, not added
+
+— so `-c diff.renames=true` is pinned explicitly rather than inherited.
+
+**A13 — The log line is deduplicated per phase entry.** A1 rejects "keep the plugin's path
+authoritative and report loudly" partly because reporting needs per-phase-entry dedup state on a 1s
+tick (`src/lib/config.ts:23`); an undeduped log line would contradict that and, since
+`TASK_STALL_MINUTES` is 45 (`src/lib/config.ts:27`), emit ~2700 identical lines before the first
+probe. The dedup is a module-level `Set<string>` in `src/supervisor/tasks.ts` keyed by
+`${task_id}:${phase}:${phase_entered_at}`, mirroring how `sendProbes` keys `alreadyProbed`
+(`src/supervisor/stall.ts:62-64`). It is process-local and not a `Task` field, so A1's objection —
+which is about *persisted* state — does not apply. `src/supervisor/main.ts:160-163` is cited as the
+precedent for the log's *shape*, not its cadence; that one is per-delivery.
 
 ---
 
@@ -382,7 +473,7 @@ design — which is the property that makes it worth writing.
 |---|---|---|
 | T1 | Real worktree, ≥3 pre-existing committed docs, one extra note committed at a non-canonical path | Adopted; phase advances; `artifacts.research` is the real path |
 | T2 | Same, but the pre-existing docs are `touch`ed after the worker's commit | Still adopted (proves mtime-independence) |
-| T3 | Two non-canonical docs committed on the branch | No adoption; phase stays; one log line |
+| T3 | Two non-canonical docs committed on the branch | No adoption; phase stays; **exactly one** log line across several ticks (**A13**) |
 | T4 | No commits on the branch | No adoption; phase stays |
 | T5 | Only a verdict file under `docs/superpowers/reviews/` added | No adoption (**A6**) |
 | T6 | `checkout_path: null` with a valid candidate present | No adoption (**A7**) |
@@ -390,6 +481,9 @@ design — which is the property that makes it worth writing.
 | T8 | `spec` phase, research note already recorded in `artifacts.research` | Research note not re-adopted; the spec is |
 | T9 | Canonical path present and fresh | Adoption never consulted; `artifacts.research` untouched *(regression guard on the happy path)* |
 | T10 | Worktree with no `main` ref | No adoption (**A3**) |
+| T11 | `spec` re-entered from `spec-review`: canonical spec present but stale, one stray doc committed | **No adoption**; `artifacts.spec` untouched (**A5**, pass 1 MAJOR 1) |
+| T12 | A pre-existing doc `git mv`d on the branch, no other new doc | No adoption — rename, not add (**A12**) |
+| T13 | Candidate path contains non-ASCII characters | Adopted; the stored path is raw UTF-8, not C-quoted (**A12**) |
 
 **Unchanged and must stay green:** `test/cli-commands.test.ts:159-176`, which asserts the hardcoded
 layout. v1 changed that layout; v2 does not touch `src/cli.ts`'s artifact block at all, so the test
@@ -400,7 +494,16 @@ brief no longer claims the supervisor stats those paths *and nothing else*.
 `test/prompts.test.ts` is not the place — it asserts prompt files exist and are well formed
 (`test/prompts.test.ts:16-19`), not what they render to.
 
-**Whole-suite gate:** `bun test` (351 pass / 0 fail at `7e45f40`) and `bun run typecheck` clean
+**Files this touches outside the declared set (pass 1 MINOR 2).** The plan will edit
+`test/tasks.test.ts` and `test/cli-commands.test.ts`. Neither is in `t1.files`, which names source
+and one prompt; test files are not listed for either task in this run, so the convention here is
+that `--files` declares the implementation surface and its tests follow it. `t2`'s set
+(`src/supervisor/stall.ts`, `src/supervisor/main.ts`, `prompts/stall-probe.md`,
+`src/lib/status.ts`) has no test file in common with these two, so the overlap gate
+(`src/lib/machine.ts:186-187`, `src/lib/phases.ts:105-106`) is not at risk. Named here so the
+expectation is explicit rather than assumed.
+
+**Whole-suite gate:** `bun test` (351 pass / 0 fail at `8d32361`) and `bun run typecheck` clean
 before the PR.
 
 **Not covered by tests, stated plainly:** that a real worker, given C2's wording, writes to the
