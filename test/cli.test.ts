@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
-import { cmdRewind, cmdStart, cmdTask } from '../src/cli'
+import { cmdRewind, cmdStart, cmdTask, listFlag } from '../src/cli'
 
 let dir: string
 let repoDir: string
@@ -137,4 +137,21 @@ test('the run id carries the whole title, not a fragment of it', async () => {
 
   const run = await activeRunForRepo(dir, 'personal', 'k')
   expect(run?.run_id).toContain('add-a-titlecase-helper')
+})
+
+test('listFlag splits one value on commas and drops the empties', () => {
+  expect(listFlag(['--files', 'a/,,b/ '], 'files')).toEqual(['a/', 'b/'])
+})
+
+test('listFlag accumulates every occurrence of a repeated flag', () => {
+  expect(listFlag(['--files', 'a/', '--files', 'b/'], 'files')).toEqual(['a/', 'b/'])
+})
+
+test('listFlag returns nothing when the flag is absent or carries no value', () => {
+  expect(listFlag(['--surface', 'core'], 'files')).toEqual([])
+  expect(listFlag(['--surface', 'core', '--files'], 'files')).toEqual([])
+})
+
+test('listFlag keeps a value that looks like a flag, for cmdTask to reject', () => {
+  expect(listFlag(['--files', '--surface', 'core'], 'files')).toEqual(['--surface'])
 })

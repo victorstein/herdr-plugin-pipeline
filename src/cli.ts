@@ -337,9 +337,20 @@ function flag(argv: string[], name: string): string | null {
   return i === -1 ? null : (argv[i + 1] ?? null)
 }
 
-function listFlag(argv: string[], name: string): string[] {
-  const raw = flag(argv, name)
-  return raw ? raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0) : []
+// Exported for its tests: `dispatch` is module-private, so this is the only
+// reachable seam on the argv layer where the --files bug lived.
+export function listFlag(argv: string[], name: string): string[] {
+  const entries: string[] = []
+  // Every occurrence contributes. `flag` is indexOf-based, so the previous
+  // single-lookup form silently dropped a repeated --files and everything it
+  // declared, with no diagnostic anywhere. Measured on a live run.
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== `--${name}`) continue
+    const raw = argv[i + 1]
+    if (raw === undefined) continue
+    entries.push(...raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0))
+  }
+  return entries
 }
 
 async function repoContext(): Promise<{ repoKey: string; repoRoot: string } | null> {
