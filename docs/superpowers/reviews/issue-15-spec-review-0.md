@@ -1,407 +1,373 @@
-# Adversarial review — issue #15 design, pass 0
+# Adversarial spec review — issue #15, pass 0 (narrowed scope)
 
-Target: `docs/superpowers/specs/2026-09-17-issue-15-design.md` (639 lines, at `0504b17`).
-Against: `gh issue view 15`, `docs/superpowers/research/2026-09-17-issue-15-research.md`,
-and the code in this worktree.
+Target: `docs/superpowers/specs/2026-09-17-issue-15-design.md` (labelled "Pass 2"), reviewed against
+`gh issue view 15` including the **Scope narrowed — 2026-09-17** ruling, and
+`docs/superpowers/research/2026-09-17-issue-15-research.md`.
 
-Baseline re-verified here, not taken on trust:
+Numbered pass 0 because the ruling reset the scope: dead/unreachable pane detection is now **#24**
+and `DeliveryBudget` is **#25**. I verified both issues exist (`gh issue view 24` → "Stop delivering
+into a pane that cannot answer, without freezing the run"; `gh issue view 25` → "Bound the
+supervisor's send paths with a delivery budget"), and I grepped the spec for residue of the removed
+features — `livePanes`, `paneList`, `DeliveryBudget`, `accepts`, A11/A12/A14/A17/A19 appear only in
+the disposition table, the Scope "out of scope" line, and the `*Deleted:*` line. **Nothing removed
+is quietly retained.** No finding below asks for #24 or #25 back.
+
+Baseline re-verified independently in this worktree:
 
 ```
-$ bun test        → 351 pass, 0 fail, 767 expect() calls, 33 files [6.25s]
-$ bun run typecheck → tsc --noEmit, no output, exit 0
-$ bun --version   → 1.3.14      $ herdr --version → herdr 0.9.0
-$ ls docs/superpowers/reviews/ → 2026-09-13-design-adversarial-{1,2,3}.md,
-                                 2026-09-15-worker-owned-adversarial-{1,2}.md
+$ bun test    → 351 pass, 0 fail, 767 expect() calls, 33 files
+$ bun run typecheck → tsc --noEmit, clean
 ```
 
-The research note's §1–§4 citations all resolve. The spec's `file:line` citations are, with two
-exceptions noted in MINOR 2 and MINOR 4, accurate — `phases.ts:54-59`, `:64`, `:70-71`, `:92-131`;
-`stall.ts:12-14`, `:22-26`, `:62-64`, `:83`, `:92-103`; `machine.ts:7-9`, `:30-32`, `:45-51`,
-`:90-96`, `:113-127`; `deliver.ts:78-81`, `:84-102`; `cli.ts:177-194`; `herdr.ts:68-71`, `:77-82`;
-`tick.ts:105-112` were each re-read. P3 and P3b are correctly diagnosed: `artifactPathFor(run,
-null)` (`deliver.ts:92-93`) has no null return path, so `absoluteArtifactPath(run, null)` cannot be
-null and `main.ts:247`'s `?? 'the expected artifact'` is indeed dead. The problem statement is
-sound. The remedy is where this falls down.
+The spec's claim at spec:13 is accurate.
 
 ---
 
-## BLOCKER 1 — the persisted counter is never persisted, so the ladder never advances and the probe becomes a 1 Hz loop
+## What I re-verified from the pass-1 dispositions
 
-**Claim.** A4 (spec:117): "The probe counter is persisted on the run/task record, replacing the
-in-process `probed` set." A5 (spec:213-236) builds the whole no-timestamp scheduling argument on
-that counter surviving a tick, and Error handling (spec:530) says a rejected probe "stays due and is
-retried next tick", implying an accepted one does not.
+The "What changed from pass 1" table (spec:19-31) claims a disposition for each surviving finding. I
+checked every one that is not simply moot:
 
-**Problem.** Nothing in the design writes the counter to the ledger on the probe path.
-`applyStalls` mutates in memory only —
+- **MAJOR 6 (`cmdResume`) — genuinely fixed and now verifiable.** `grep -rn "phase_entered_at = " src/`
+  returns exactly the five sites the spec prints at spec:317-320: `cli.ts:180`, `cli.ts:186`,
+  `cli.ts:317`, `machine.ts:49`, `machine.ts:94`. The enumeration is exhaustive as claimed. The
+  restated failure mode is correct: `cmdAbort` stores `run.escalated_from = run.phase` (`cli.ts:298`),
+  `cmdResume` restores it and restamps `phase_entered_at` (`cli.ts:313-317`) touching no counter, and
+  run `escalated` is `releasesPane: true` (`phases.ts:70-71`) so `pickOneAdvance` skips it
+  (`tick.ts:109`).
+- **MINOR 11 — all three fixed.** `main.ts:113` is `drain(queueDir)` and `main.ts:114` is
+  `listRuns`; the spec cites `:114`. The Files table (spec:63-75) now names `config.ts`,
+  `stall-escalate.md` and `phases.test.ts`. The research note is marked superseded at spec:8-11.
+- **MINOR 10 — fixed correctly.** `worktree` is the signal of run `dispatch` (`phases.ts:54`) **and**
+  task `teardown` (`phases.ts:124`); the table splits them (spec:269-270) and the contradicting
+  sentence is gone.
+- **A18's set is executably correct.** Filtering `TASK_ROWS`/`RUN_ROWS` by `stallable` and by
+  `signal ∈ {artifact,verdict,pr}` against `phases.ts:89-141` and `:51-73` reproduces spec:203-205
+  exactly: nine escalating rows, four probe-only. A21's literal arrays (spec:481-489) match
+  `phases.ts` row for row.
+- **A5's diff-honesty numbers are exact.** `grep -rl "delivery_attempts: 0" test/ | wc -l` → `11`;
+  `grep -rn … | wc -l` → `13`.
+- **P3b is correctly diagnosed.** `artifactPathFor(run, null)` cannot return null — it falls through
+  to `join('docs/superpowers/reviews', …)` at `deliver.ts:92-93` — so `main.ts:247`'s
+  `?? 'the expected artifact'` is dead code, and `dispatch`/`execute` probes today name an invented
+  review path. The `verdict`-row fix is also right: `promptForRunPhase` computes `verdict_path` from
+  the same `absoluteArtifactPath(run, null)` (`deliver.ts:168`), so a `branch-review` probe will name
+  the exact path the orchestrator was told to write.
+- **The A4 persistence argument holds.** `listRuns` `readJson`s each file fresh every tick
+  (`ledger.ts:48-62`), `saveRun` serialises the whole `Run` including `tasks` (`ledger.ts:44-46`),
+  and the candidate's `task` is the same object inside `c.run.tasks` (`stall.ts:71-86`).
 
-```
-spec:478   if ((await deps.probe(c)).ok) bumpStallProbes(c.task ?? c.run)   // A6
-```
-
-— and the only save in the tick is guarded on escalation:
-
-```
-spec:498   if (anything escalated) await saveRun(stateDir, run)      // see Error handling
-```
-
-But the `Run` objects the stall block mutates are rebuilt from disk on every tick.
-`main.ts:113` calls `listRuns(stateDir, session)`, which `readJson`s each file fresh
-(`src/lib/ledger.ts:48-62`). The only `saveRun` that could carry a bump is `main.ts:217`, which is
-*inside* the `for (const run of advancing)` loop and therefore runs **before** the stall block at
-`main.ts:238-268`. There is no `saveRun` after it — the tick ends at `main.ts:268`, falls into the
-`catch` at `:269-271` and sleeps.
-
-Consequence, at the shipped defaults: `stall_probes` reads `0` on every tick, so
-`stallProbesFor(record) >= probeMax` (spec:466) is never true → `action` is always `'probe'`; and
-the due predicate `now - phase_entered_at >= threshold × (stallProbesFor(record) + 1)` (spec:465)
-is satisfied from 45 minutes onward forever. A stalled task is therefore probed **once per
-`TICK_MS`, i.e. once per second, indefinitely, and never escalates**. That is strictly worse than
-the single probe #15 complains about, and it defeats Goal 1 (spec:87-89) entirely. A16
-(spec:128) has already deleted the in-process `probed` set that is today's only dedupe, so there is
-no fallback.
-
-Note the design *knows* this shape is possible — it says so about failed sends at spec:248-250 —
-but does not notice that the success path has the same property.
-
-**Fix.** Persist on the probe path. Either give `StallDeps` a `persist: (run: Run) => Promise<void>`
-and call it after any accepted probe, or have `applyStalls` return the mutated `Run`s and change
-spec:498 to `for (const run of touched) await saveRun(stateDir, run)`. Then add the regression test
-the design is missing: bump, re-load the run through `listRuns`, and assert it produces **no**
-candidate until `2 × threshold`.
+One disposition is **not** as clean as claimed, and one whole class of interaction was never
+examined. Those are BLOCKER 1 and MAJOR 4 below.
 
 ---
 
-## BLOCKER 2 — the ladder escalates `blocked-on-files` and `blocked-on-decision`, which are waiting correctly, and A7 cannot hold either
+## BLOCKER 1 — the ladder has no run-phase guard, so it probes and now **escalates** tasks inside aborted and terminal runs, destroying the documented `hpipe abort` / `hpipe resume` contract
 
-**Claim.** The classification applies `action: 'escalate'` to every candidate once the counter caps
-(spec:466), and the A13 table explicitly enumerates `blocked-on-files` and `blocked-on-decision` as
-probe targets (spec:358-359). A7 (spec:119) is offered as the guard against escalating an actor
-that is legitimately busy.
+**Claim.** spec:384-386: "Unchanged through `main.ts:236`. Then the two `applyStalls` calls replace
+the two `sendProbes` calls at `main.ts:238-268`." spec:334-339 keeps steps 1-3 of candidate
+selection "unchanged from today": `row.stallable`, `row.stallWhen`, `probePaneFor`. spec:502-503
+lists a live-verification step for abort/resume, but only for the **run** counter: "`hpipe abort` a
+run at the cap, then `hpipe resume`: it must probe again, not escalate 60 minutes later in silence".
 
-**Problem.** `stallable` was chosen as "worth a nudge", not "worth killing the task", and the design
-promotes it to the latter without re-examining the rows.
+**Problem.** `taskStallCandidates` has no guard on the *run's* phase. It iterates `run.tasks`
+directly and gates only on `taskRow(task.phase).stallable` (`stall.ts:71-86`), and the supervisor
+feeds it `runs` — every current-schema run in the session — not `advancing` (`main.ts:254-255` vs
+`main.ts:143`). `cmdAbort` sets `run.phase = 'done'` and touches **nothing else**
+(`cli.ts:292-302`): tasks keep their live phases, which is the whole point of "worktrees and
+branches left alone. Undo: `hpipe resume`" (`cli.ts:301`, documented at `smoke.md:477`).
 
-- `blocked-on-files` is `stallable: true, probeTarget: 'orchestrator', holdsFiles: false`
-  (`src/lib/phases.ts:105-106`). It clears only when a *sibling* releases the files:
-  `case 'blocked-on-files': if (!s.filesClear) return null` (`src/lib/machine.ts:186-189`). A
-  sibling legitimately in `implement` for more than three hours is ordinary, not a stall — and it
-  forces the waiter to `escalated`, which is in `TERMINAL_BAD` (`src/lib/gating.ts:6-8`), so every
-  dependent gates to `blocked-on-failure` (`gating.ts:34-38`); and `escalated` is
-  `holdsFiles: true` (`phases.ts:131`), so the waiter now blocks *other* siblings too. A task that
-  was correctly parked becomes a cascading failure.
-- `blocked-on-decision` is `stallable: true, holdsFiles: 'inherit'` (`phases.ts:126-129`). It waits
-  on a human answer. Escalating it at three hours is the overnight case this very issue is about —
-  and the response cascades every dependent to `blocked-on-failure` for the crime of the human
-  being asleep.
+Today that costs one wasted prompt per task per phase entry, because `alreadyProbed` bounds it at
+one (`stall.ts:83`, `:101`) and the probe mutates no state. The ladder removes that bound (**A16**,
+spec:153) and replaces it with a persisted counter and a **state transition**. So after this change,
+an aborted run's live tasks are:
 
-A7 cannot protect either, because the pane it reads is not the actor it means. `probePaneFor`
-routes both rows to `run.orchestrator_pane` (`src/supervisor/stall.ts:23-25`), which
-`test/stall.test.ts:128-138` pins:
+1. probed every `TASK_STALL_MINUTES` **forever** for A18-excluded rows, into a pane the human
+   deliberately walked away from — and `abort` "releases the repo for a new `hpipe start`"
+   (`smoke.md:477`), so `run.orchestrator_pane` on the dead run is very likely the same terminal the
+   *new* run is now driving from (`orchestrator_pane` is never cleared — the only writers are
+   `cli.ts:40`, `actions/claim.ts:32`, `orchestrator.ts:55`);
+2. for the nine escalation-eligible rows, **moved to `escalated`** three thresholds later — 180
+   minutes at the shipped `TASK_STALL_MINUTES: 45` (`config.ts:27`).
+
+That second one is unrecoverable by the documented undo. `cmdResume` restores only `run.phase` and
+`run.phase_entered_at` (`cli.ts:313-317`); it does not walk `run.tasks`. So `hpipe abort` followed by
+`hpipe resume` four hours later returns a run whose tasks are all `escalated`, each with
+`escalated_from` stamped (`machine.ts:92`), each `holdsFiles: true` (`phases.ts:131`), each in
+`TERMINAL_BAD` so every dependent gates to `blocked-on-failure` (`gating.ts:6-8`, `:34-38`) — and the
+only way back is one `hpipe rewind … --task` per task. `smoke.md:477` promises `resume` "puts it back
+where it was". After this change that is false.
+
+This is not hypothetical. The incident ledger this issue was filed from is still on disk and is in
+exactly this state:
 
 ```
-test('a task stranded in blocked-on-files is probed via the orchestrator', …)
-  expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
-test('a task waiting in blocked-on-decision is probed via the orchestrator', …)
-  expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+$ python3 -c "…" /Volumes/stein/.local/state/herdr/plugins/stein.pipeline/runs/personal/berean-os-20260916-berean-os-issue-batch-ujku.json
+run phase done
+t1 done ... t3 merge ... t6 plan-review
+history: … 09-16 21:44 run execute->done : aborted from execute
 ```
 
-So `deps.agentStatus(c.paneId)` (spec:481) reads the orchestrator's status, which says nothing
-about whether the file-holding sibling is working or whether the human has answered.
+`t6` sits in `plan-review` — `stallable: true`, `signal: 'verdict'`, therefore escalation-eligible
+under A18 — inside a run whose phase is `done` because a human aborted it. Ship the ladder and a
+supervisor started on the `personal` session probes `t6` every 45 minutes and escalates it.
 
-This is the same false-alarm class the repo already paid for once — `stallWhen` exists on `execute`
-precisely because "`execute` is probed 15 minutes into every run … which is the false alarm v4's
-third review round removed" (`phases.ts:32-38`). The design has no `escalateWhen` analogue and does
-not consider that probe-eligibility and escalation-eligibility are different questions.
+The spec's own precedent argues against this: `pickOneAdvance` exists precisely to stop a
+pane-releasing run from consuming the driver (`tick.ts:99-115`), and the spec cites that skip twice
+(spec:88-89, spec:502-503) without noticing the stall block never had it.
 
-**Fix (needs the human's call).** Escalate only rows whose completion signal is produced by the
-actor being probed — `signal` in `{'artifact', 'verdict', 'pr'}`. Keep probing `blocked-on-files`
-and `blocked-on-decision` unchanged and surface them through A15-style warnings instead;
-`status.ts:21-26` and `:38-55` already render both conditions, so the human-visible half of Goal 1
-is available without a destructive transition. This is a scope decision, not an inline edit: it
-changes which rows the issue's "mark the task escalated" applies to.
-
----
-
-## BLOCKER 3 — P2's causal story does not survive arithmetic, and the issue's actual direction 2 is not implemented
-
-**Claim.** spec:47-53: "Deleting resets the count to zero, so the next tick starts at 1 again.
-'Giving up' is a five-tick cycle repeated forever at `TICK_MS` (1000ms, `config.ts:23`) —
-**consistent with the 33 further deliveries the issue reports**." Goal 2 (spec:90) is then restated
-as "The supervisor stops re-delivering into a pane it has already given up on."
-
-**Problem.** It is not consistent, by two independent measures.
-
-1. *Rate.* `TICK_MS` defaults to `1000` (`src/lib/config.ts:23`). The incident ran 13 hours ≈
-   46,800 ticks. A five-tick failure cycle repeated forever would produce ≈ 46,800 send attempts
-   and ≈ 9,360 `[pipeline] giving up on delivery to …` lines, not 33 deliveries.
-2. *Trigger.* A delivery is only attempted when that tick produced text. `addPending` returns early
-   on `if (text.length === 0 && eventLines.length === 0)` (`src/supervisor/main.ts:159`) and
-   `deliveriesFor` re-checks the same condition (`src/supervisor/deliver.ts:51`). In a fully
-   stalled run `nextPrompt` is `''`, no task transitions, and `wake` is empty on ticks where no
-   event drained — so most ticks enqueue nothing and the reset bug is never even exercised.
-
-33 deliveries over 13 hours is ~1 per 24 minutes: the signature of 33 *successful*, event-driven
-digests into a pane that was alive while the agent inside it was rate-limited. `herdr agent prompt`
-against a live pane succeeds; `DeliveryBudget` (spec:A11) only ever sees failures, so it would not
-have fired once during the incident and would not have prevented it.
-
-Meanwhile the issue's direction 2 asks for something the design declines: "Notice a dead
-orchestrator pane and stop delivering into it (`formatStatus` already detects the gone-pane case at
-`src/lib/status.ts:99`; the supervisor does not act on it)." The design does not act on it either —
-NG4 and A17 (spec:100, :123, and the A17 paragraph) accept a dead orchestrator as an unaddressed
-limitation. The liveness fact is already in hand: `rebindOrchestrator` calls `herdr.paneList()`
-every tick (`src/lib/orchestrator.ts:46-48`) and, when it cannot resolve a replacement, keeps the
-stale id on purpose (`orchestrator.ts:39-42`, `:52-53`). Nothing consumes that "the recorded pane is
-not in the live list" fact in the supervisor.
-
-**Fix.** Keep the `attempts.delete` correction — `main.ts:234` is a genuine bug — but stop citing it
-as the incident's cause, because the numbers say it is not. Then implement direction 2 with the
-signal the issue names: when `rebindOrchestrator` finds `run.orchestrator_pane` absent from
-`paneList()` **and** cannot resolve a replacement, record that on the run, suppress deliveries and
-probes for it, and surface it in `hpipe status` the way `status.ts:99-102` already words it. If
-that is genuinely out of scope for this task, say so explicitly and get the human to agree to
-shipping #15 with half of it unfixed — do not restate the goal so that the unaddressed half
-disappears.
-
----
-
-## MAJOR 4 — A13's `{{hpipe}}` inside the `{{awaiting}}` value never renders
-
-**Claim.** spec:362: run `execute` → `` `hpipe dispatch --done to close intake` — rendered via
-`{{hpipe}}` ``. Reassured at spec:372-374: "`render` throws on any placeholder no caller resolves
-(`render.ts:11`), so a missed one fails loudly at delivery rather than shipping through."
-
-**Problem.** `render` is a single `String.replace` pass with a function replacer:
+**Fix.** Guard candidate selection on the run's row, matching `pickOneAdvance` exactly — in both
+`stallCandidates` and `taskStallCandidates`:
 
 ```ts
-// src/lib/render.ts:8-14
-export function render(template: string, vars: Record<string, string>): string {
-  return template.replace(PLACEHOLDER, (_match, name: string) => {
-    const value = vars[name]
-    if (value === undefined) throw new Error(`unresolved template placeholder: ${name}`)
-    return value
-  })
-}
+if (runRow(run.phase).releasesPane === true) continue   // `done` and `escalated`
 ```
 
-Replacement text produced by the callback is **not** re-scanned. A `{{hpipe}}` that arrives inside
-the value of `awaiting` is therefore emitted verbatim, and the throw at `:11` does not fire because
-it only inspects placeholders present in the *template*. The orchestrator would receive:
+`phases.ts:70-72` gives `releasesPane: true` to both run `escalated` and run `done`, so one predicate
+covers the aborted run, the completed run and the escalated run. Add it to the Data-and-control-flow
+section as an explicit step 0, add the assumption to the table, and add two tests to
+`test/stall.test.ts`: *an aborted run's live tasks produce no candidates* and *a run in `escalated`
+produces no task candidates*. Then extend live-verification step 5 to assert the task half too:
+abort a run with a task mid-`implement`, wait past `TASK_STALL_MINUTES × (probeMax + 1)`, and confirm
+the task is still in `implement` and `hpipe resume` restores the run intact.
+
+---
+
+## MAJOR 2 — the prompt rewrite replaces the placeholder but leaves the two sentences that consume it, so the exact defect the issue addendum names survives for seven of the nine `{{awaiting}}` rows
+
+**Claim.** spec:259-260: "`stallAwaiting(run, task, hpipe)` replaces `{{artifact_path}}` with
+`{{awaiting}}`". spec:295: "`prompts/stall-probe.md:7`'s *'it will not ask again for this phase'* is
+deleted." The Scope's prompt item is spec:48 — "`prompts/stall-probe.md`, including `:7`" — and the
+only prompt assertions in the testing strategy (spec:473-476) are that the file no longer contains
+`will not ask again` and does contain `{{awaiting}}` and `{{ladder}}`.
+
+**Problem.** The template's other two lines are never touched:
 
 ```
-    {{hpipe}} dispatch --done to close intake
+prompts/stall-probe.md:3   This phase has been open {{minutes}} minutes and nothing has appeared at:
+prompts/stall-probe.md:5       {{artifact_path}}
+prompts/stall-probe.md:9-10 …If you finished but wrote the file somewhere else, move it to the path above.
 ```
 
-`test/prompts.test.ts:68-76` ("no prompt hardcodes the hpipe binary") reads only `prompts/*.md`, so
-a string living in `src/supervisor/stall.ts` escapes it in both directions — neither the literal
-`hpipe` nor the unrendered `{{hpipe}}` is caught.
-
-**Fix.** Give the helper the rendered command: `stallAwaiting(run, task, hpipe: string)`, called
-with `hpipeCommand(pluginRoot)` (`render.ts:28-38`) — `pluginRoot` is already in scope at both call
-sites. Or drop the binary from that sentence. Add a test asserting the fully rendered stall-probe
-text contains no `{{`.
-
----
-
-## MAJOR 5 — A7 reads the wrong pane, and its cost claim is off by four orders of magnitude
-
-**Claim.** A7 (spec:119): "held while a live `agent status` read on **the actor's pane** returns
-`working`". spec:264-265: "It costs one extra herdr call per record per phase entry, only at the
-moment of escalation."
-
-**Problem, two parts.**
-
-*Wrong pane.* `c.paneId` is `probePaneFor`'s result, which collapses a paneless worker onto the
-orchestrator: `if (row.actor === 'worker') return taskPane ?? run.orchestrator_pane`
-(`src/supervisor/stall.ts:24`), pinned by `test/stall.test.ts:146-151` ("a worker row with no pane
-falls back to the orchestrator"). A worker whose dispatch prompt never landed — one of the cases
-the fallback comment at `stall.ts:16-21` was written for — would have its escalation gated on an
-unrelated agent's status. The spec is internally inconsistent here too: A14 (spec:391) reads
-`task.pane_id` for the tail while A7 (spec:481) reads `c.paneId` for the guard, two different panes
-for the same "actor".
-
-*Cost.* A held candidate consumes nothing (`continue`, spec:481), stays due, and is re-evaluated on
-the next tick — at `TICK_MS = 1000`, that is one `herdr agent get` **per second per held
-candidate**, not one per phase entry. A worker legitimately working ten hours past the three-hour
-cap costs ≈ 36,000 calls. The tick already has a batched, settled status reader for exactly this
-(`makeSettledIdleReader`, `main.ts:145-147`) and the stall path bypasses it.
-
-**Fix.** Gate on the actor's own pane (`task.pane_id ?? c.paneId`, or apply the guard only when the
-candidate's pane belongs to the row's actor), and route the read through the tick's `liveIdle` /
-settled reader or memoise per pane per tick. Correct the cost sentence to match.
-
----
-
-## MAJOR 6 — Goal 2 is not achieved: the three highest-frequency channels bypass `DeliveryBudget`
-
-**Claim.** A11 (spec:123, and the A11 section): "`accepts` is consulted before each send." A6's
-consequence, spec:248-250: "while sends keep failing, the record stays due and is retried every
-tick. That is today's behaviour … and is what **P2**'s fix bounds at the delivery layer rather than
-here."
-
-**Problem.** P2's fix does not bound it, because the probe path never enters the delivery layer.
-Probes call herdr directly today — `return herdr.agentPrompt(candidate.paneId, text)`
-(`main.ts:251`, `:267`) — and the design keeps that: "`probe` renders `stall-probe` … and calls
-`herdr.agentPrompt`" (spec:501-503). The escalation send is the same (spec:504-507). Neither passes
-through `deliveriesFor` or `DeliveryBudget`, so after this change a dead pane still receives an
-unbounded 1 Hz probe stream.
-
-A third channel is worse and is not mentioned at all: `announceDecisions`
-(`src/supervisor/tasks.ts:293-309`) sends straight to `run.orchestrator_pane` with **no cap of any
-kind** — `decision.prompted_at` is stamped only on success, so a failing send retries every tick
-forever. `deliverPendingAnswers` (`tasks.ts:258-287`) is the only sibling that is bounded, by the
-persisted `delivery_attempts`.
-
-**Fix.** Pass the budget into `StallDeps` and check `budget.accepts(paneId)` before the probe and
-escalation sends; give `announceDecisions` the same guard or a persisted attempt counter. Then
-Goal 2 (spec:90) is actually true of the supervisor rather than of one of four send sites.
-
----
-
-## MAJOR 7 — run `dispatch` now escalates a healthy run at 60 minutes, and freezes its tasks silently
-
-**Claim.** A2/A3 (spec:114-115) apply one `STALL_PROBE_MAX` to both levels; the table at spec:190
-gives run escalation at 60 minutes. The consequence for `dispatch` is never examined.
-
-**Problem.** `dispatch` is unconditionally `stallable: true` with no `stallWhen`
-(`src/lib/phases.ts:54-55`), unlike `execute`, whose `stallWhen` exists specifically because this
-class of row generated false alarms (`phases.ts:32-38`, `:56-59`). Today a slow dispatch costs one
-nudge at 15 minutes. Under this design the run is moved to `escalated` at 60 minutes — a row with
-`releasesPane: true` (`phases.ts:70-71`), so `pickOneAdvance` skips it forever
-(`src/supervisor/tick.ts:105-112`) and only `hpipe rewind` restarts it. An orchestrator taking an
-hour to register and adopt worktrees for a six-task batch — the size of the run this issue was
-found on — loses the run. A7 does not help: it holds only while the orchestrator reads `working`,
-and an orchestrator waiting on a human reads `idle`.
-
-The freeze is also silent for the tasks. The stall block iterates `runs`, not `advancing`
-(`main.ts:238`, `:254`), so once the run is escalated its tasks stop being advanced by
-`advanceTasks` but keep being probed and will themselves be escalated at their own cap — with no
-status line explaining that the *run*, not the task, stopped.
-
-**Fix.** Either exempt run `dispatch` from escalation inside `stall.ts` (it is held by this task;
-`phases.ts` is not, so no NG2 violation), or give the run level its own cap so the run cannot
-escalate out from under tasks that are still moving (run 60m vs task 180m as specified is exactly
-that inversion). Add a status warning naming an escalated run, not only an escalated task, to A15.
-
----
-
-## MAJOR 8 — the test plan understates A16's blast radius and mis-cites `table.test.ts` as the NG2 guard
-
-**Claim.** spec:565: "three existing tests reference the deleted key format (`:66`, `:72`, `:124`)
-and are rewritten". spec:570-571: "every existing pane-resolution test (`:128-151`, `:165-175`)
-still passes unchanged — the `probePaneFor` contract is untouched". spec:598-599: "`test/table.test.ts`
-— unchanged and must stay green; it is the guard that **NG2** was honoured (no row gained or lost
-`stallable`)."
-
-**Problem.**
-
-*Blast radius.* A16 deletes the `alreadyProbed` parameter, and the new signature's fourth argument
-is `probeMax: number` (spec:459-460). Every existing call passes a `Set`:
+Line 5 becomes `{{awaiting}}`, and per the spec's own table (spec:262-272) `{{awaiting}}` is a real
+filesystem path for exactly two rows — `artifact` and `verdict`. The other seven entries are English
+sentences: `a pushed PR for <branch> (#<issue>)`, `another task to release the files this one
+declared`, `an answer to the open decision`, `a worktree adopted for a dispatched task`, `this task's
+worktree to be removed`, `<hpipe> dispatch --done to close intake`, `whatever clears <phase>`. So
+`implement` — the single most common worker row, `signal: 'pr'` (`phases.ts:109`) — still renders:
 
 ```
-$ grep -c "new Set()" test/stall.test.ts                                   → 15
-$ grep -c "stallCandidates(\|taskStallCandidates(" test/stall.test.ts      → 24
-$ grep -c "^test(" test/stall.test.ts                                      → 20
+This phase has been open 45 minutes and nothing has appeared at:
+
+    a pushed PR for fix/15-stall-escalation (#15)
+
+… If you finished but wrote the file somewhere else, move it to the path above.
 ```
 
-`new Set()` is not assignable to `number`, so every one of those call sites is a compile error —
-including `:128-151` and `:165-175`. `:165-175` additionally calls `sendProbes`, which A16 deletes.
-"Still passes unchanged" is false for the entire file; the honest statement is that all 20 tests
-are rewritten.
+That is verbatim the defect the issue's 2026-09-17 addendum raises and the ruling put in scope: *"It
+tells a worker that misfiled its artifact to move the file to the path above, and the path above is a
+sentence."* P3 fixes the *value* for artifact rows; the sentence that consumes the value is still
+wrong for everything else, including a row the spec escalates on. `blocked-on-decision` is worse
+still: "nothing has appeared at: / an answer to the open decision", addressed to the orchestrator.
 
-*Wrong guard.* `test/table.test.ts` contains exactly one assertion touching `stallable`:
+The spec is elsewhere scrupulous about the prompt not asserting something false — spec:295-297
+deletes `:7` and then adds a second reason it must not claim answering stops the clock. The same
+standard was not applied one line up or four lines down.
 
-```
-test/table.test.ts:30-35
-  test('every stallable row resolves to a pane or names a probe target', () => {
-    … if (!row.stallable) continue
-    expect(hasPane || row.probeTarget !== undefined, …).toBe(true)
-```
-
-It iterates only rows that *are* stallable and asserts a pane is reachable. It stays green if a row
-gains `stallable` (as long as it has an actor pane or a `probeTarget`) and stays green if a row
-loses it. It is not a guard that "no row gained or lost `stallable`".
-
-**Fix.** State that `test/stall.test.ts` is rewritten wholesale. If NG2 is to be guarded by a test,
-add an explicit assertion of the stallable phase sets to `table.test.ts` — e.g. compare
-`TASK_ROWS.filter(r => r.stallable).map(r => r.phase)` against a literal list — and cite that as the
-guard.
-
----
-
-## MINOR 9 — A5's "13 test files" miscounts its own evidence
-
-spec:228-230 argues for an optional field because "13 test files construct `Task` object literals
-(`grep -rn "delivery_attempts: 0" test/ | wc -l` → 13)". `grep -rn … | wc -l` counts matching
-*lines*, not files:
+**Fix.** Compose the whole waiting clause at the call site, not just its object, exactly as **A25**
+already does for `{{ladder}}`. Give `stallAwaiting` a second return channel — a boolean `isPath`, or
+have it return the full sentence — and restructure the template to two placeholders:
 
 ```
-$ grep -rln "delivery_attempts: 0" test/ | wc -l   → 11
-$ grep -rn  "delivery_attempts: 0" test/ | wc -l   → 13
+This phase has been open {{minutes}} minutes. {{awaiting}}
+
+{{ladder}}
+
+If you are waiting on the human, say so now rather than waiting silently.
 ```
 
-11 files, 13 literals. The conclusion is unaffected; the number cited as evidence is wrong. Fix the
-sentence or the command.
+where `{{awaiting}}` is either ``Nothing has appeared at:\n\n    <abs path>\n\nIf you finished but
+wrote the file somewhere else, move it there.`` for `artifact`/`verdict`, or ``This phase is waiting
+for <sentence>.`` otherwise. Add the regression to `test/prompts.test.ts`/`test/stall.test.ts`: the
+rendered `pr`-row probe contains neither "appeared at" nor "path above".
 
 ---
 
-## MINOR 10 — `orchestrator.ts` citations do not resolve as written
+## MAJOR 3 — A7's hold is unbounded, and NG1 is declined on a justification A7 falsifies: in the one case where a richer liveness signal would decide differently, the ladder decides nothing, forever
 
-The A11/A17 paragraphs and the research note cite `orchestrator.ts:30`, `:38-41`, `:43-60`, `:47`
-alongside `deliver.ts`, `stall.ts`, `tasks.ts` and `main.ts`, all of which live in
-`src/supervisor/`. There is no `src/supervisor/orchestrator.ts`; the file is `src/lib/orchestrator.ts`
-(`ls src/supervisor` → `ci.ts deliver.ts main.ts stall.ts tasks.ts teardown.ts tick.ts`). The line
-numbers are right once the path is corrected (`:30` is the `agentPanes.length !== 1` bail, `:43` is
-`rebindOrchestrator`, `:47` is the `paneList()` read). Qualify the path.
+**Claim.** spec:131-132: "**NG1** richer liveness (git-dirty) — #15 direction 3, declined; **the
+ladder decides the same either way**." spec:428 (error table): "Held actor never stops reporting
+`working` | **Never escalates**; re-checked once per `threshold` | A live pane with a running agent. A
+dead one emits `pane.exited` → `failed` (`tick.ts:72-81`)." spec:526-528: "**What would have helped
+the incident is the ladder in this spec**, via the tasks: a rate-limited agent reports something
+other than `working`, so **A7** does not hold it and it escalates at 180m."
+
+**Problem, three parts.**
+
+*The non-goal's justification is falsified by the assumption.* The hold at spec:373-377 suppresses
+the escalation branch — transition included — for as long as `agentStatus(actorPaneId) === 'working'`,
+with no cap and no configurable bound. The scenario in which git-dirty liveness would change the
+answer is precisely "the pane claims to be working and nothing is being produced" — an agent wedged
+mid-tool-call, or a CLI sitting on an auto-retry countdown. In that scenario the ladder does not
+"decide the same either way"; it decides *nothing*, indefinitely, which is the 13-hour silence #15
+exists to end. NG1's one-line dismissal is the only justification the spec offers for declining
+direction 3 of the issue, and it does not survive A7.
+
+*The load-bearing empirical claim is uncited.* spec:527 asserts that a rate-limited agent reports
+something other than `working`. Nothing in the spec, the research note, or the repo supports it — I
+searched the research note for `usage limit`, `rate limit` and `working` and the only hit is an
+unrelated quote of `stall-probe.md:7`. The installed `herdr 0.9.0` documents no status taxonomy
+(`herdr agent get --help` prints three lines: "Show an agent / Usage: herdr agent get <target> /
+Arguments: <target>"), and `Herdr.agentStatus` just forwards whatever `agent get` returns
+(`herdr.ts:68-71`). The incident ledger is suggestive in the wrong direction: `t2`'s last recorded
+`agent_status` is `"working"` while its phase is `done`. If the premise is wrong, then the ladder's
+own closing argument — that it would have prevented the incident it was filed for — is wrong with it.
+
+*No test, unit or live, exercises the hold.* Live verification is called "not optional" (spec:492)
+because "DI with fakes hides wiring bugs", and steps 1-5 (spec:496-503) cover probing, persistence,
+status, A18 exclusion and abort/resume. None of them parks an actor reporting `working` past the cap.
+The unit list does cover A20's cadence (spec:454), but against a fake `agentStatus` — which is
+exactly the class of coverage this repo's history says does not settle the question.
+
+**Fix.** Two changes, both inline:
+
+1. Bound the holds. `stall_holds` already exists and already persists; gate on it the same way
+   `stall_probes` is gated — escalate once `stall_holds >= probeMax` regardless of reported status,
+   or add `STALL_HOLD_MAX` beside `STALL_PROBE_MAX` in `config.ts`. At the shipped defaults that puts
+   a permanently-`working` worker at 45 × (3 + 3 + 1) = 315 minutes rather than never. Record the
+   trade in the assumption table: a false escalation costs a `TERMINAL_BAD` cascade
+   (`gating.ts:6-8`), which is the cost A18 was narrowed to avoid, so the orchestrator should
+   confirm the number.
+2. Rewrite NG1's justification to what is actually true — the ladder does *not* decide the same
+   either way under A7; direction 3 is declined because the bounded hold makes the residual
+   acceptable — and add live-verification step 6: hold a pane at `working` past the cap and record
+   what `herdr agent get` reports for an agent at a usage limit.
+
+---
+
+## MAJOR 4 — `src/cli.ts` is declared by task t1 (#9) in the live ledger; the spec records its basis as the ruling's "unheld" and never re-checks it
+
+**Claim.** Files table, spec:69: `| `src/cli.ts` | A23 ruling — `cmdRewind` **and** `cmdResume` (see
+conflict below) |`. The ruling the row points at says: "Plus, under the 2026-09-17 ruling, the
+**unheld** `src/cli.ts` (`cmdRewind` only), `src/lib/types.ts`, `src/lib/machine.ts` and
+`test/cli-commands.test.ts`." The spec's Open decisions (spec:547-551) escalates only the
+`cmdRewind`-vs-`cmdResume` half of that sentence.
+
+**Problem.** The live ledger contradicts the word "unheld":
+
+```
+$ …/runs/pipeline/herdr-plugin-pipeline-20260917-bug-fixing-and-enhancements-qc13.json
+t1 fix/9-artifact-paths  #9  plan-review
+   ['src/cli.ts', 'src/lib/worker-prompt.ts', 'src/supervisor/tasks.ts',
+    'src/supervisor/deliver.ts', 'prompts/worker-brief.md']
+t2 fix/15-stall-escalation #15 spec-review
+   ['src/supervisor/stall.ts', 'src/supervisor/main.ts', 'prompts/stall-probe.md',
+    'src/lib/status.ts']
+```
+
+`src/cli.ts` is in t1's `files`, alongside `src/supervisor/deliver.ts`. Pass-1's BLOCKER 2 was
+exactly "the live ledger shows `deliver.ts` is declared by the sibling task t1 (#9)", and this spec's
+response was to re-verify holdings and make `deliver.ts` import-only (spec:22, spec:77-79). The same
+ledger line, read once more, also names `cli.ts` — and the spec records it as unheld-by-ruling
+without checking. (The rest of the ruling's grant *is* clean: `types.ts`, `machine.ts`, `config.ts`
+and every test file appear in neither task's `files`, so spec:70-75 is otherwise accurate.)
+
+The consequence is not a certain merge conflict — #9's artifact-path work most plausibly touches the
+`Task` literal at `cli.ts:79-96`, while this change touches `cli.ts:178-187` and `:313-317` — and the
+spec does carry a real mitigation at spec:504-508 ("A real conflict in `src/cli.ts` … is a stop and
+an `hpipe decide`"). The defect is that the record is wrong and the orchestrator's grant rests on a
+false premise, in the one dimension this pipeline's `files` declarations exist to police
+(`gating.ts:19-29`, `status.ts:38-55`).
+
+**Fix.** Change the Files-table basis for `src/cli.ts` from "A23 ruling" to "**declared by t1 (#9)**
+in the live ledger; granted by the A23 ruling on a stated 'unheld' premise the ledger contradicts —
+see the Pre-PR gate", and fold it into the existing Open decision so the orchestrator confirms the
+grant knowingly rather than re-confirming only the `cmdRewind`/`cmdResume` half. No code change.
 
 ---
 
-## MINOR 11 — A13's "switch on `row.signal`" is not what the table describes
+## MINOR 5 — A22's "unconditional" is contradicted by the spec's own hold branch
 
-spec:365-367: "This is a `switch` on `row.signal`, not on the phase name, so **NG2**/#19 making four
-more rows stallable does not require touching it — those rows' signals (`ci`, `merged`, `closed`,
-`worktree`) fall through to the default." But the table at spec:361 maps run `dispatch`, whose
-signal *is* `worktree` (`phases.ts:54`), to "a worktree adopted for a dispatched task". A switch on
-signal alone would hand a stallable task `teardown` (`signal: 'worktree'`, `phases.ts:124`) that
-same sentence when #19 lands. The table's first column already distinguishes run from task, so the
-implementation is fine; the prose describing it is not.
+spec:191-193 states the rule as a blockquote: "The `escalated` transition and its `persist` happen
+**unconditionally**. Only the *send* of `stall-escalate` may be skipped or fail." The pseudocode
+eleven paragraphs later does not do that: spec:373-377 `continue`s out of the escalate branch on
+`agentStatus === 'working'`, skipping the transition and the persist. The intended meaning — "not
+gated on the delivery channel", which is what pass-1's MAJOR 4 was about — is defensible, but A22 is
+a labelled assumption an implementer will try to honour literally, and read literally it deletes A7.
+Reword to: "Once the escalate branch is reached, the transition and its `persist` are unconditional;
+only the *send* may be skipped or fail. The A7 hold is a decision not to escalate **yet**, taken
+before the branch, and is the sole condition on the transition."
+
+## MINOR 6 — "the only `saveRun` in the loop" is false; there are two
+
+spec:180-181: "the only `saveRun` in the loop (`main.ts:217`) runs *before* the stall block
+(`main.ts:238-268`)". `main.ts:136` — `if (changed) for (const run of runs) await saveRun(stateDir, run)`
+— is also inside the `for (;;)` loop. The conclusion is unaffected (both precede the stall block), but
+the sentence is the load-bearing evidence for the persistence fix and should be exact: "both
+`saveRun` sites in the loop (`main.ts:136`, `:217`) run before the stall block".
+
+## MINOR 7 — `dispatch` is not alone among run rows in lacking `stallWhen`
+
+spec:211: "which is also why `dispatch`, alone among run rows in having no `stallWhen`, cannot
+escalate a healthy run." `branch-review` has no `stallWhen` either (`phases.ts:64-66`); only `execute`
+carries one (`phases.ts:58-59`). The distinction the sentence is reaching for is that `dispatch` is
+the only *unguarded* run row that A18 also excludes — which matters, because `branch-review` is
+unguarded **and** escalation-eligible, so a run whose orchestrator is legitimately mid-review
+escalates at 60 minutes unless A7 holds it. Say that instead; it is the more useful observation and
+it is true.
+
+## MINOR 8 — A15 surfaces escalated **tasks** only, while the ladder also escalates **runs**
+
+The Goal (spec:127-129) promises an escalated record is "surfaced in `hpipe status`". A15 (spec:152,
+spec:403-412) adds a warning inside `taskWarnings` (`status.ts:17-59`), which loops `run.tasks` only.
+A run escalated by the ladder out of `branch-review` at 60 minutes gets no ⚠ and no recovery hint —
+just `run_id [escalated] title` from `status.ts:95-97` — while being frozen, because
+`pickOneAdvance` skips it (`tick.ts:109`). Pre-existing for `advanceRun`-driven escalations, but the
+ladder makes it a routine outcome. Add the mirror line beside `intakeWarning` (`status.ts:61-71`):
+`⚠ run escalated from branch-review 62m ago — needs a human; \`hpipe rewind <run> branch-review\` resumes it`,
+using `run.escalated_from` (`types.ts:95`), and assert it in `test/status.test.ts`.
+
+## MINOR 9 — `prompts/stall-escalate.md` is named four times and specified nowhere
+
+spec:74, spec:150 (A10), spec:392 and spec:473 all reference the new prompt; none gives its content
+or its variable bag. Contrast `probe`, whose bag is spelled out at spec:384-386 — the escalate line
+at spec:390-392 says only "render `stall-escalate`". `render` throws on any placeholder the bag does
+not resolve (`render.ts:11`), and `test/prompts.test.ts:68-76` will require it to use `{{hpipe}}`
+rather than a literal, so the shape is not free. State the bag (`run_id`, `phase`, `task_flag`,
+`minutes`, `probes`) and one sentence on how it differs from the existing `escalate.md`
+(`prompts/escalate.md:1-17`), which is rendered only on an `advanceLoopingRow` transition
+(`tasks.ts:78-86`) and whose "This phase hit {{pass}} review passes without clearing" is wrong for a
+stall.
 
 ---
 
-## MINOR 12 — the `cmdRewind` test has no run-side counterpart to sit beside
+## What is right, and should survive
 
-spec:589-591: "`cmdRewind` resets `stall_probes` for both a task and a run, asserted beside the
-existing `delivery_attempts` assertion." `delivery_attempts` is a `Task` field only
-(`src/lib/types.ts:78`), and `cmdRewind`'s run branch resets `passes`, `phase_entered_at` and
-`escalated_from` but never `delivery_attempts` (`src/cli.ts:184-194`). There is no existing run-side
-assertion to place the new one next to. Reword, and make sure the run-side reset is actually added
-at `cli.ts:185-187`.
+Checked, not padding:
 
----
-
-## What is right, and should survive a revision
-
-Not padding — these are load-bearing and were checked:
-
-- P1, P3 and P3b are all real and correctly cited. `absoluteArtifactPath(run, null)` genuinely
-  cannot return null (`deliver.ts:92-93` ends in a `join`), so `main.ts:247`'s fallback is dead and
-  `dispatch`/`execute` probes genuinely name an invented `docs/superpowers/reviews/` path.
-- A1's reuse of `escalated` is well argued, and the three consequences listed are each verifiable
-  (`phases.ts:130-131`, `gating.ts:6-8`, `teardown.ts:25`) — the objection in BLOCKER 2 is about
-  *which rows* reach it, not about the phase choice.
-- A2's rejection of exponential backoff is correct and well evidenced: 11.25 h to escalate against a
-  13 h incident is not a fix.
-- A5's refusal to bump `schema_version` is right; `isCurrentSchemaRun` is a hard `=== 2`
-  (`main.ts:30-32`) and `readJson` does no validation (`store.ts:5-13`), so an absent optional field
-  reads 0 cleanly.
-- A10's reasons for a separate `stall-escalate.md` check out, including the two
-  `test/prompts.test.ts` constraints (`:10-14`, `:21-24`, `:68-76`).
-- A16's argument for deleting the keys is right in substance; only its stated test cost is wrong.
-- The "Live verification — not optional" section is exactly the right instinct for this repo.
-
----
+- **A18's narrowing is the correct call and is fully verified** against `phases.ts`, including the
+  reasons for excluding `blocked-on-files` (clears only when a sibling releases, `machine.ts:186-189`)
+  and `blocked-on-decision` (waits on a human). The `stallWhen` precedent at `phases.ts:32-39` is the
+  right one to cite, and the observation that excluded rows lose nothing human-visible checks out
+  (`status.ts:21-26`, `:38-55`).
+- **A24's two-counter split genuinely resolves pass-1's MINOR 8.** The due rule
+  `threshold × (probes + holds + 1)` yields a constant cadence (probe *k* falls at *k* × threshold),
+  so A2's "constant, not exponential" is preserved, and the reason string counts only sends.
+- **A20's cost arithmetic is right.** 10 h at `TICK_MS: 1000` (`config.ts:23`) is ~36,000 `agent get`
+  calls; counting the hold reduces it to one per threshold.
+- **The A7 `actorPaneFor` fix is correct.** All nine escalation-eligible rows are `actor: 'worker'`
+  or `'orchestrator'`, so the function always resolves the right pane, and the `!== 'working'` gate
+  rather than `isAgentReady` (`machine.ts:30-32`) correctly keeps `blocked` escalatable.
+- **The superseded-premises arithmetic is correct.** 13 h at `TICK_MS: 1000` is ≈46,800 ticks, not
+  33; 33 over 780 minutes is one per ~24 minutes; and `deliveriesFor` only fires when the tick
+  produced text (`main.ts:159`, `deliver.ts:53`). The research note's causal claim really is wrong,
+  and saying so explicitly is the right call.
+- **A21 is the right guard for NG2**, and the reasoning about why `table.test.ts:30-37` is
+  insufficient is exact — `merge` has `actor: 'orchestrator'`, so adding `stallable: true` to it
+  would pass that test unchanged.
+- **The escalated-task / `blocked-on-files` interaction is handled**, not ignored: `status.ts:47-52`
+  already offers `hpipe release --task <holder>` as the escape when the holder is `escalated`.
 
 VERDICT: BLOCKER
-BLOCKERS: 3
-MAJORS: 5
+BLOCKERS: 1
+MAJORS: 3
