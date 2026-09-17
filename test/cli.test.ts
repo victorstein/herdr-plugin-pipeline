@@ -200,3 +200,24 @@ test('task rejects a --files entry that is a flag, not a path prefix', async () 
   expect(bad.text).toContain('the value after --files is missing')
   expect((await activeRunForRepo(dir, 'personal', 'k'))?.tasks).toEqual([])
 })
+
+test('task echoes the file set it recorded while gated', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  // t1 is dispatched into `research`, which is not terminal, so t2 stays gated and
+  // the `queued:` return is the one that runs.
+  await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false })
+  const t2 = await cmdTask(c, {
+    branch: 'feat/api', issue: 2, surface: 'api', notes: '',
+    dependsOn: ['t1'], files: ['src/lib/gating.ts', 'src/cli.ts'], keepWorktree: false,
+  })
+
+  expect(t2.ok).toBe(true)
+  expect(t2.text).toContain('task_id: t2')
+  expect(t2.text).toContain('files: src/lib/gating.ts, src/cli.ts')
+  expect(t2.text).toContain('queued: waiting on t1')
+})

@@ -132,9 +132,15 @@ export async function cmdTask(ctx: Ctx, input: {
   run.intake_closed = false
   await saveRun(ctx.stateDir, run)
 
+  // The recorded set, printed back. A malformed --files is otherwise invisible:
+  // the only other place task.files reaches a human is the blocked-on-files
+  // warning in status.ts, which speaks only once overlap has already fired — so a
+  // declaration that matches nothing is silent by construction.
+  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
+
   const gate = gateStatus(task, run.tasks)
   if (gate.state !== 'ready') {
-    return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
+    return ok(`task_id: ${task.task_id}\n${filesLine}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
