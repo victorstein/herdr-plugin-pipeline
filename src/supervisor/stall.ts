@@ -197,3 +197,17 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   }
   return sentence(`whatever clears ${phase}`)
 }
+
+/**
+ * The ladder sentence, composed here rather than templated, because a bare
+ * "probe N of M" is false for every row escalation excludes: those keep being
+ * probed past the cap and are never escalated.
+ */
+export function ladderFor(c: { probes: number; escalatable: boolean }, probeMax: number): string {
+  if (!c.escalatable) {
+    return 'This is a standing nudge — this phase is not escalated automatically, and clears ' +
+      'when whatever it is waiting for arrives.'
+  }
+  return `This is probe ${c.probes + 1} of ${probeMax}. After ${probeMax} unanswered probes ` +
+    'this phase is escalated to the human and stops moving on its own.'
+}

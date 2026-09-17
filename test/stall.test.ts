@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  bumpStall, sendProbes, stallAwaiting, stallCandidates, stallStateFor, taskStallCandidates,
+  bumpStall, ladderFor, sendProbes, stallAwaiting, stallCandidates, stallStateFor,
+  taskStallCandidates,
 } from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
@@ -314,4 +315,15 @@ test('an unrecognised signal falls back to naming the phase', () => {
     short: 'whatever clears ci',
     clause: 'This phase is waiting for whatever clears ci.',
   })
+})
+
+test('an escalating row is told its position and the bound', () => {
+  expect(ladderFor({ probes: 1, escalatable: true }, 3)).toBe(
+    'This is probe 2 of 3. After 3 unanswered probes this phase is escalated to the human ' +
+    'and stops moving on its own.')
+})
+
+test('an excluded row is never promised a bound it does not have', () => {
+  expect(ladderFor({ probes: 8, escalatable: false }, 3)).not.toContain('of 3')
+  expect(ladderFor({ probes: 8, escalatable: false }, 3)).toContain('standing nudge')
 })
