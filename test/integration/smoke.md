@@ -88,6 +88,26 @@ Now let the orchestrator do intake for real: it files **two** GitHub issues, one
 registers both. The registration must give the two tasks **overlapping `--files`** — that is the
 setup for §3 and the whole reason this run uses two tasks.
 
+First, one deliberately malformed registration, **typed by hand, before the orchestrator registers
+anything** — this is the check that `--files` is validated at all, and it is supposed to fail:
+
+```bash
+hpipe task --branch smoke/bad --issue 999 --surface <surface> --files "src/lib src/lib/config.ts"
+```
+
+`--issue 999` never reaches GitHub — `hpipe task` only requires a positive integer — so this step needs
+no issue of its own and must not borrow one of the two below.
+
+**Expect:** exit 1, `--files is comma-separated; this entry contains whitespace: "src/lib
+src/lib/config.ts"`, and a `→ --files src/lib,src/lib/config.ts` suggestion. Nothing is registered.
+
+**Failure looks like:** the command succeeding and printing `task_id: t1`. That is the finding, and it
+cannot be repaired in place — no command removes a task, so this ghost takes `t1` and pushes the two
+real tasks below to `t2`/`t3`, breaking §3's assertions, which name `t1` and `t2` literally. Run
+`hpipe abort <run_id>`, restart from §2, and report it.
+
+Now the two real registrations, which the orchestrator runs:
+
 ```bash
 hpipe task --branch smoke/one --issue <n1> --surface <surface> --files src/lib
 hpipe task --branch smoke/two --issue <n2> --surface <surface> --files src/lib/config.ts
@@ -97,10 +117,11 @@ hpipe task --branch smoke/two --issue <n2> --surface <surface> --files src/lib/c
 prefix-overlapping pair works; do not use `--depends-on` here, which would serialize the tasks for
 a different reason and hide the collision you are here to see.
 
-**Observe:** each `hpipe task` prints `task_id: t1` / `task_id: t2` followed by the rendered worker
-brief. Both should print a brief, not `queued: waiting on …` — with no `--depends-on` the
-dependency gate is open for both, and the file collision is resolved much later, at
-`blocked-on-files`, not at registration.
+**Observe:** each `hpipe task` prints `task_id: t1` / `task_id: t2`, then a `files:` line echoing what
+it recorded — `files: src/lib` and `files: src/lib/config.ts` — and then the rendered worker brief.
+Both should print a brief, not `queued: waiting on …` — with no `--depends-on` the dependency gate is
+open for both, and the file collision is resolved much later, at `blocked-on-files`, not at
+registration. The two tasks must come out as `t1` and `t2`; §3 names those ids literally.
 
 Then close intake:
 
