@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.5](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.4...v1.2.5) (2026-09-17)
+
+
+### Bug Fixes
+
+* **cli:** validate and echo --files at registration ([#39](https://github.com/victorstein/herdr-plugin-pipeline/issues/39)) ([2006802](https://github.com/victorstein/herdr-plugin-pipeline/commit/200680298da5ba4d963d20e1c65f56fbd3aa4f8a)), closes [#10](https://github.com/victorstein/herdr-plugin-pipeline/issues/10)
+
 ## [1.2.4](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.3...v1.2.4) (2026-09-17)
 
 
