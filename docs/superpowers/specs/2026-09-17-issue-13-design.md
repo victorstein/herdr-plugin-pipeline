@@ -33,16 +33,25 @@ written to `task.agent_status` at `src/supervisor/tick.ts:85` and consumed only 
 
 The divergence is not theoretical. The berean-os ledger, still on disk at
 `~/.local/state/herdr/plugins/stein.pipeline/runs/personal/berean-os-20260916-berean-os-issue-batch-ujku.json`,
-has it frozen for 2 of its 6 tasks at rest:
+has it frozen for **4 of its 6 tasks** at rest — read 2026-09-17 14:12 local, and dated because the
+file is still being appended to (§Ledger drift, research note):
 
 ```
-t2 fix/28-bookmark-save-budget  #28 [done]  agent_status=working
-t3 fix/37-gate-screen-rotation  #37 [merge] agent_status=done
+t2 fix/28-bookmark-save-budget   #28 [done]                agent_status=working
+t3 fix/37-gate-screen-rotation   #37 [merge]               agent_status=done
+t4 refactor/38-remove-qr-display #38 [blocked-on-decision] agent_status=done
+t6 refactor/31-unused-i18n-keys  #31 [plan-review]         agent_status=done
 ```
 
 `t3` is the issue's failure mode exactly: a line reading `t3 … done` for a task parked in `merge`,
-unmerged. That run's `history` holds **79 transitions over 20h01m** against the ~50 digests the
-issue counts, so the majority of digests carried no transition at all.
+unmerged — and parked there since 2026-09-16T22:47:27.752Z, ~21h at the time of this read.
+
+The volume argument is **not** a digest-to-transition ratio: that run logged 79 transitions between
+its first and its abort (20h01m) against ~50 digests, which if anything is more than one transition
+per digest. It is that only the **3 run-level** transitions can reach the digest at all —
+`phase_note` is composed from `evaluateRun`'s run transition
+(`src/supervisor/deliver.ts:67`, `:236`) — so **all 76 task-level transitions are invisible to the
+digest by construction**.
 
 Three things the orchestrator needs are absent from the line, and all three are already on the
 record:

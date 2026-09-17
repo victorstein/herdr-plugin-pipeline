@@ -86,21 +86,35 @@ empty `nextPrompt` slot.
 **1. `agent_status` is not phase completion.** Directly observable in the
 berean-os ledger at
 `~/.local/state/herdr/plugins/stein.pipeline/runs/personal/berean-os-20260916-berean-os-issue-batch-ujku.json`
-— for 2 of its 6 tasks the two disagree at rest:
+— read 2026-09-17 14:12 local, **4 of its 6 tasks** disagree at rest:
 
 ```
-t2 fix/28-bookmark-save-budget  #28 [done]  agent_status=working
-t3 fix/37-gate-screen-rotation  #37 [merge] agent_status=done
+t2 fix/28-bookmark-save-budget   #28 [done]                agent_status=working
+t3 fix/37-gate-screen-rotation   #37 [merge]               agent_status=done
+t4 refactor/38-remove-qr-display #38 [blocked-on-decision] agent_status=done
+t6 refactor/31-unused-i18n-keys  #31 [plan-review]         agent_status=done
 ```
+
+(t1 and t5 are the two that agree: `[done]` with `agent_status=done`.)
 
 t3 is the issue's failure mode frozen in the ledger: a line reading `t3 done`
-while the task sits in `merge`, unmerged.
+while the task sits in `merge`, unmerged — and it has sat there since
+2026-09-16T22:47:27.752Z, roughly 21 hours at the time of this read.
 
-**2. Volume.** The same run's `history` holds **79 transitions over 20h01m**
-(2026-09-16T07:43:26Z → 2026-09-17T03:44:34Z): 76 task-level, 3 run-level.
-Against the ~50 digests the issue counts, a majority of digests carried no
-transition at all — and of the 3 run-level transitions, only those put anything
-in `phase_note` or `next_prompt`.
+**2. Volume.** *(Read 2026-09-17 14:12 local; this ledger is still being written
+— see the drift note below.)* The run's `history` holds **79 transitions between
+its first and its abort** (2026-09-16T07:43:26.580Z → 2026-09-17T03:44:34.471Z,
+20h01m): 76 task-level, 3 run-level. Only the 3 run-level ones can reach the
+digest at all, because `phase_note` is composed from `evaluateRun`'s run
+transition (`src/supervisor/deliver.ts:67`, `:236`); **all 76 task transitions
+are invisible to the digest by construction**. That, not a digest-to-transition
+ratio, is the volume argument.
+
+> **Drift note.** This ledger is not frozen. Re-read at 14:12 local it holds
+> **80** entries, the 80th being `t4 done -> blocked-on-decision` at
+> 2026-09-17T20:05:44.516Z — appended today, to a run that was aborted
+> yesterday. Any count taken from this file must be dated, which is why the
+> reads above and below now are.
 
 ## What the digest cannot say today
 
