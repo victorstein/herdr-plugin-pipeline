@@ -3,9 +3,11 @@
 **Date:** 2026-09-17
 **Issue:** #13 — the orchestrator digest carries no phase, no age, and no next action
 **Research:** `docs/superpowers/research/2026-09-17-issue-13-research.md` (commit `2caa714`)
-**Status:** Design **v3**. Pass 0 `BLOCKER` (1/1/6) and pass 1 `BLOCKER` (1/2/4) both fully applied.
-Reviews: `docs/superpowers/reviews/issue-13-spec-review-pass0-preserved.md`,
-`docs/superpowers/reviews/issue-13-spec-review-1.md`.
+**Status:** Design **v4**. Three review passes, all findings applied — pass 0 `BLOCKER` (1/1/6),
+pass 1 `BLOCKER` (1/2/4), pass 2 **`CLEAR`** (0/2/5, fixed inline). Reviews:
+`docs/superpowers/reviews/issue-13-spec-review-pass0-preserved.md`,
+`…/issue-13-spec-review-1.md`, `…/issue-13-spec-review-0.md` (pass 2 — the path was recycled by the
+counter reset, which is why the pass-0 file carries a `-preserved` suffix).
 **Governing ruling:** the orchestrator's **Scope ruling of 2026-09-17** on issue #13, which upholds
 pass 1's BLOCKER 1 in full and settles what closes this issue. §Resolution records it.
 **Declared file set** (`t2.files` in the live run ledger): `src/supervisor/tick.ts`,
@@ -40,6 +42,26 @@ reduced to what it can honestly carry.
 > the ledger.
 >
 > **v3 keeps C3 and drops the claim.** The parked-task gap is **#19**'s, named in §Non-goals.
+
+## What changed from v3, by pass-2 finding
+
+Pass 2 returned `CLEAR` and audited all fifteen prior dispositions as genuine. Its two MAJORs are
+**new defects in v3, not missed fixes**, and both are applied here.
+
+| Finding | Disposition |
+|---|---|
+| **MAJOR 1** — rung 6 ships a false sentence for `blocked-on-files` when the holder is `failed`/`escalated` | **Accepted, preferred option.** New rung 6 renders `` YOUR move: `<hpipe> release --task <holder>` ``, mirroring `src/lib/status.ts:55-60`. The §Non-goals bullet that declined this is **withdrawn**, not left standing. **A17**, T9b/T9c |
+| **MAJOR 2** — the footer reaches only one of three orchestrator-pane pendings | **Accepted.** Computed once per run and attached to all three `addPending` calls; `deliveriesFor`'s `group.find` still renders it once. Flow step 10, T23c |
+| **MINOR 1** — the ruling's correction 1 landed in A9, not A10 | **Accepted.** The new-coverage sentence is now in **A10**, where the ruling put it, cross-referenced to A9/A16 |
+| **MINOR 2** — A12 omits that the tail is the pane's *current* screen | **Accepted.** A12 now states it and bounds it at one tick |
+| **MINOR 3** — the wake-producing test count is five, not four | **Accepted.** v1–v3 all said four; `test/tick.test.ts:34-42` pushes too |
+| **MINOR 4** — inline finding tags collide across passes | **Accepted.** Every tag is now `[pass N …]`; verified none bare remain |
+| **MINOR 5** — the footer's join is underspecified | **Accepted.** The exact joined shape is specified and T23b pins the `nextPrompt: ''` case |
+
+> **Why MAJOR 1 is the one worth reading twice.** v3 rejected `stallAwaiting` because reusing it
+> would ship a false sentence for `queued` — and then shipped one of its own for
+> `blocked-on-files`, in the component that replaced it. The test table pinned the false sentence as
+> correct (T9). A design's stated principle does not enforce itself; only a case that can fail does.
 
 ## What changed from v2, by pass-1 finding
 
@@ -214,11 +236,17 @@ orchestrator owns, on digests that are already being sent. It is a strict improv
   writes it, so no decision is surfaced. The age format is settled by copying status's (**A4**),
   and one latent defect found in it is handed over rather than fixed (**A13**).
 - **A concrete command for each orchestrator-owned row** (`merge`, `close`). **A7**.
-- **Surfacing a `blocked-on-files` deadlock's escape hatch.** `src/lib/status.ts:46-62` composes it
-  from `filesOverlap`/`isInFlight` (`src/lib/gating.ts:19-29`); duplicating that predicate is not
-  worth it, and the case is **already covered**: `blocked-on-files` is `stallable: true` with
-  `probeTarget: 'orchestrator'` (`src/lib/phases.ts:105-106`), so the ladder nudges the
-  orchestrator at `TASK_STALL_MINUTES`. #14 is the right owner.
+- ~~**Surfacing a `blocked-on-files` deadlock's escape hatch.**~~ **Withdrawn in v4 — this is now
+  rung 6 (§C2, A17).** v3 declined it on two grounds and both were wrong. *"Duplicating that
+  predicate is not worth it"*: nothing is duplicated — `filesOverlap` and `isInFlight` are already
+  `export`ed (`src/lib/gating.ts:19`, `:23`), and `gating.ts` imports only `./phases` and `./types`,
+  so `tick.ts` can import them with no cycle. *"Already covered by the ladder"*: `blocked-on-files`
+  is `stallable` (`src/lib/phases.ts:105-106`), but its signal `files` is **not** in
+  `ESCALATING_SIGNALS` (`src/supervisor/stall.ts:22` — `{'artifact','verdict','pr'}`), so it is
+  probed up to `STALL_PROBE_MAX` and then goes permanently quiet without escalating, and the probe's
+  own sentence (`src/supervisor/stall.ts:198-202`) never names the escape hatch either. For the
+  first `TASK_STALL_MINUTES` the digest would have actively contradicted the truth, and afterwards
+  it would have been the only thing still speaking, still wrong.
 - **Touching `src/supervisor/stall.ts`.** Reusing `stallAwaiting` was v1's first design and was
   dropped on evidence — §Rejected alternatives, **A8**.
 - **Editing `test/integration/smoke.md`, and the prose it leaves stale.** The orchestrator's
@@ -275,7 +303,7 @@ export interface WakeLine {
 same handler, so a `pane.exited` line reports `implement → failed` rather than `failed → failed`
 (`src/supervisor/tick.ts:63`, `:74` both force `failed` before pushing).
 
-**[MAJOR 1]** The driver's blocked-tail loop moves off the stale cache. Today
+**[pass 0 MAJOR 1]** The driver's blocked-tail loop moves off the stale cache. Today
 `src/supervisor/main.ts:125` gates on `line.task?.agent_status === 'blocked'` — the very field
 `src/supervisor/tasks.ts:17-22` calls *"the badge and wake cache [that] can be stale by a whole
 turn"*, and which `applyEvents` overwrites on every applied status event
@@ -325,7 +353,7 @@ did not. An age on a transition would always read `0m` — every in-tick mutator
 The `agent:` prefix is the point: `[merge 41m] agent:done` cannot be read as "merge completed"
 (**A2**).
 
-`<action>` is an **ordered ladder, first match wins**. **[MAJOR 2]** It is extracted as its own
+`<action>` is an **ordered ladder, first match wins**. **[pass 1 MAJOR 2]** It is extracted as its own
 exported function — `actionFor(run, task, hpipe): string` — because §C3's footer needs the identical
 ladder for the `escalated` row. One implementation, two callers, so the two can never drift and the
 exhaustiveness guard covers both:
@@ -337,13 +365,27 @@ exhaustiveness guard covers both:
 | 3 | `phase === 'escalated'` | ``needs a human: `<hpipe> rewind <run_id> <escalated_from ?? '<phase>'> --task <task_id>` `` |
 | 4 | `row.actor === 'orchestrator'` (`merge`, `close`, `blocked-on-decision`) | `YOUR move` |
 | 5 | `row.actor === 'worker'` (the eight producer rows) | `worker's move` |
-| 6 | otherwise — no actor, non-terminal (`queued`, `blocked-on-files`, `ci`, `teardown`) | `nothing for you — the supervisor is driving` |
+| 6 | `phase === 'blocked-on-files'` **and** an overlapping holder is `terminal` or `escalated` | ``YOUR move: `<hpipe> release --task <holder>` `` |
+| 7 | otherwise — no actor, non-terminal (`queued`, `blocked-on-files` with a live holder, `ci`, `teardown`) | `nothing for you — the supervisor is driving` |
 
-**[MINOR 4]** Rung 1 was the bare word `done` in v1, which restated the phase box and ended the line
+**[pass 1 MAJOR 1 / this pass]** Rung 6 is new. v3 folded `blocked-on-files` into the catch-all and
+told the orchestrator *"nothing for you — the supervisor is driving"*. When the task holding the
+overlapping files is `failed` or `escalated` that is **false, permanently**: `blocked-on-files` exits
+only through `machine.ts:186-189` (`if (!s.filesClear) return null`), `filesClearFor`
+(`src/lib/gating.ts:49-53`) is false while any overlapping task `isInFlight`, and `isInFlight`
+(`src/lib/gating.ts:23-28`) is `true` for both `failed` and `escalated` (both carry
+`holdsFiles: true`, `src/lib/phases.ts:131`, `:137`). The orchestrator is the only actor who can
+clear it, via `hpipe release`. Shipping the catch-all there would reproduce, one rung down and in
+the new component, the exact defect this design rejects `stallAwaiting` over (§Rejected
+alternatives). The clause mirrors `src/lib/status.ts:55-60`, which already computes
+`const stuck = taskRow(holder.phase).terminal || holder.phase === 'escalated'` and prints the same
+command — the same way rung 3 mirrors `status.ts:23-25`. See **A17**.
+
+**[pass 0 MINOR 4]** Rung 1 was the bare word `done` in v1, which restated the phase box and ended the line
 in the exact token the issue was filed over (`[teardown → done] agent:done — done`). It now answers
 the actor question, like every other rung.
 
-**[MINOR 2]** Rung 3 **mirrors** `src/lib/status.ts:23-25` — the same invocation and the same
+**[pass 0 MINOR 2]** Rung 3 **mirrors** `src/lib/status.ts:23-25` — the same invocation and the same
 `escalated_from ?? '<phase>'` fallback — but renders the CLI through `hpipeCommand(pluginRoot)`
 (`src/lib/render.ts:28-38`) instead of the literal `hpipe` that `status.ts:25` hardcodes. **That
 single divergence is the entire reason `describeWake` takes a third parameter and why flow step 6
@@ -411,8 +453,21 @@ export function parkedFooter(
 ```
 
 `covered` is the set of `task_id`s that already have a line in this digest, so a task never appears
-twice. Ordering is by `task_id`, stable. It returns `''` when nothing qualifies, and the empty string
-is never appended. Each line reuses `describeWake`'s phase box and `actionFor`'s clause verbatim.
+twice. Ordering is by `task_id`, stable. It returns `''` when nothing qualifies.
+
+**[pass 2 MINOR 5] The joined shape is specified, not left to the renderer.** `parkedFooter` returns
+the heading and its lines with **no leading newline of its own**; `buildDigest` appends it as a
+separate array element after `nextPrompt` and **drops empty slots before joining**:
+
+```ts
+return [header, '', `${n} events:`, ...eventLines, '', nextPrompt, footer]
+  .filter((part, i) => i < 5 || part.length > 0)   // keep the fixed head, drop empty tail slots
+  .join('\n').trimEnd()
+```
+
+Without this an implementer following `src/supervisor/deliver.ts:23-30` literally gets one blank line
+before the footer when `nextPrompt` is non-empty and **three** when it is empty — which is the common
+case, since `nextPrompt` is `''` unless a run-level phase was entered. T23 covers it. Each line reuses `describeWake`'s phase box and `actionFor`'s clause verbatim.
 
 **[MAJOR 1] Wiring, with the field OPTIONAL.** `PendingPrompt` gains `footer?: string` mirroring
 `phaseNote?` (`src/supervisor/deliver.ts:39-40`), and **`DigestInput` gains `footer?: string`** —
@@ -427,6 +482,16 @@ compiling untouched.
 already uses for `phaseNote` at `src/supervisor/deliver.ts:67` — and `buildDigest` appends it after
 `nextPrompt`. Composition happens in `src/supervisor/main.ts`, the only place with both the run and
 `wake` (needed for `covered`); `deliver.ts`'s two functions stay pure string-joiners.
+
+**[pass 2 MAJOR 2] The tick a task enters `merge` is the acute case.** A task can reach an
+orchestrator-owned row with no herdr pane event at all: `ciTransitions`
+(`src/supervisor/main.ts:139-142`) only writes `task.ci` (`src/supervisor/ci.ts:19`), and
+`advanceTasks` then takes `ci → merge` off `ciBucket`. t3's own entry is exactly that shape —
+`pr-review-quality → ci` at 22:47:13.655Z and `ci → merge` 14s later at 22:47:27.752Z, from the CI
+poll rather than a pane event. On that tick `prompts/merge.md` is rendered to the orchestrator pane
+(`src/supervisor/tasks.ts:74`, `:175`) and pushed by `:215`; if `wake` held nothing for the run, v3's
+wiring contributed nothing to that digest — and the tick one task enters `merge` is precisely when
+*another* parked task most wants naming.
 
 What this deliberately does not do: **A10**.
 
@@ -473,10 +538,26 @@ Per tick, in `src/supervisor/main.ts`. Only steps marked **[C]** change.
    })
    ```
 
-10. **[C3]** `addPending(run.orchestrator_pane, nextPrompt, lines, …)` additionally carries
-    `footer: parkedFooter(run, covered, tickNow, hpipe)`, which is `''` on most ticks. Note the
-    ordering: `covered` must be filled by step 9 before this runs, or a task gets both an event line
-    and a footer line (test T26).
+10. **[C3]** The footer is computed **once per run** — `const footer = parkedFooter(run, covered,
+    tickNow, hpipe)`, `''` on most ticks — and attached to **every** orchestrator-pane `addPending`,
+    which means all three of them:
+
+    ```
+    main.ts:213  addPending(run.orchestrator_pane, nextPrompt, lines, …)          ← run phase + wake lines
+    main.ts:215  addPending(prompt.paneId, prompt.text, [], …)                    ← orchestrator when the row is non-worker
+    main.ts:217  addPending(run.orchestrator_pane, enteredRunPhase, [], …)        ← run phase entered
+    ```
+
+    `addPending` gains a `footer?: string` parameter for this. **[pass 2 MAJOR 2]** v3 attached it
+    only at `:213`, which is wrong: `:213` returns early at `src/supervisor/main.ts:160` whenever
+    `nextPrompt` and `lines` are both empty, and `:215`/`:217` can still produce a delivered digest —
+    `actorPane` (`src/supervisor/tasks.ts:117-119`) routes every non-worker row to
+    `run.orchestrator_pane`, and `addPending` sets `isOrchestrator: paneId === run.orchestrator_pane`
+    (`:167`), so `deliveriesFor` wraps it in a full digest (`src/supervisor/deliver.ts:64-69`). The
+    footer would have been discarded with the unsent pending while a digest went out without it.
+    `deliveriesFor`'s `group.find((p) => p.footer)` de-duplicates, so it still renders once.
+    Ordering is unchanged and still load-bearing: `covered` must be filled by step 9 first, or a task
+    gets both an event line and a footer line (T26).
 11. `deliveriesFor` → `buildDigest` (`:224`, `src/supervisor/deliver.ts:50-74`). **[C3]** Appends
     the footer; everything else unchanged.
 12. Stall ladder (`:239-292`). Unchanged apart from consuming the hoisted `hpipe`.
@@ -502,7 +583,7 @@ digest mentions t2 only, and t3 stays invisible for the remaining ~21h.
 ## Error handling
 
 `describeWake` and `parkedFooter` are pure, synchronous and allocate nothing beyond their strings;
-they perform no I/O. **[MINOR 5]** They are *not* claimed to be total — `taskRow` throws on an
+they perform no I/O. **[pass 2 MINOR 5]** They are *not* claimed to be total — `taskRow` throws on an
 unknown phase (`src/lib/phases.ts:145-149`). That throw is unreachable at `:212`, because
 `advanceTasks` already calls `taskRow(task.phase)` at `src/supervisor/tasks.ts:159` inside the same
 `try` and kills the tick first. Worth stating precisely, because the `catch` at
@@ -516,7 +597,7 @@ there loses the tick's `advanceTasks` **transitions** from the ledger, not merel
 | `escalated_from === null` on an `escalated` task | renders the literal `<phase>` | `src/lib/status.ts:25` does exactly this |
 | `detail` present but empty after trim | not attached | driver only sets it when `tail.trim().length > 0` (`src/supervisor/main.ts:127`) |
 | No task qualifies for the footer | `parkedFooter` returns `''`; nothing appended | the common case — measured max concurrent is 2, usually 0 (**A9**) |
-| A footer would be the digest's only content | **no digest is sent** | `addPending` returns first (`src/supervisor/main.ts:160`); `deliveriesFor` (`src/supervisor/deliver.ts:53`) is the backstop. Deliberate; the measured cost is **A10** — **[MINOR 4]** |
+| A footer would be the digest's only content | **no digest is sent** | `addPending` returns first (`src/supervisor/main.ts:160`); `deliveriesFor` (`src/supervisor/deliver.ts:53`) is the backstop. Deliberate; the measured cost is **A10** — **[pass 1 MINOR 4]** |
 | `escalated` task with `escalated_from === null` in the footer | rung 3's literal `<phase>`, as on an event line | one ladder, two callers (§C2) — **A16** |
 | `DigestInput.footer` absent | `input.footer ?? ''`; nothing appended | **A15**; the three existing `buildDigest` literals keep compiling |
 | `hpipeCommand` resolves to the absolute `bun run …` form | rendered verbatim into rung 3 | `src/lib/render.ts:28-38`; already true of the stall prompts |
@@ -547,7 +628,7 @@ one-line change if a reviewer disagrees. Pass 0 verified the stamping claim agai
 mutator and agreed.
 
 **A4 — Bare minutes, `Nm`, matching `src/lib/status.ts:12-14`; and a third private copy of the
-arithmetic is accepted.** **[MINOR 1]** The format question and the duplication question are
+arithmetic is accepted.** **[pass 0 MINOR 1]** The format question and the duplication question are
 separate and v1 answered only the first. On format: a 20-hour run renders `1204m`, which is ugly,
 and `Xh Ym` is declined anyway because **#14** is adding phase age to `hpipe status` in this same
 batch and two independently-invented formats for one quantity is worse than one ugly one. On
@@ -602,7 +683,7 @@ mechanism for one job.
 **A10 — The footer never causes a delivery; it only decorates one — and that leaves a measured gap
 this issue does not close.** `addPending` returns before the pending is ever built when `text` and
 `eventLines` are both empty (`src/supervisor/main.ts:160`), with `deliveriesFor` applying the same
-test as a backstop (`src/supervisor/deliver.ts:53`) **[MINOR 4]**. So in a window where nothing
+test as a backstop (`src/supervisor/deliver.ts:53`) **[pass 1 MINOR 4]**. So in a window where nothing
 wakes, a parked task is unreported.
 
 v2 sized that gap as *"~50 digests over 20h — roughly one per 24 minutes — so quiet windows long
@@ -627,18 +708,23 @@ digest design: `run.phase: 'done'` carries `releasesPane: true` (`src/lib/phases
 `pickOneAdvance` (`src/supervisor/tick.ts:109`) and `taskStallCandidates`
 (`src/supervisor/stall.ts:98`) both skip the run. It is not counted against C3 here.
 
+**New coverage, stated here because the ruling put it here [pass 2 MINOR 1].** Of the rows the
+footer covers, the genuinely new coverage is **`merge`** and **`escalated`** (**A9**, **A16**):
+`blocked-on-decision` is already `stallable: true` (`src/lib/phases.ts:129`) and probed by
+`taskStallCandidates` (`src/supervisor/stall.ts:101`), and `close` measured at 0/0/1/2m.
+
 **Conclusion, per the Scope ruling:** C3 is taken as the cheapest strict improvement *pending* #19,
 and this document does not claim it closes the parked-task gap. §Non-goals names #19 as the owner.
 The alternative — emitting unprompted digests on a 1s tick (`src/lib/config.ts:24`) — needs its own
 cadence and dedup state and would spam the orchestrator; #19 reuses the ladder instead.
 
-**A11 — One source file outside the declared `--files` set: `src/supervisor/main.ts`.** **[MINOR 3]**
+**A11 — One source file outside the declared `--files` set: `src/supervisor/main.ts`.** **[pass 0+1 MINOR 3]**
 v1 said "two" while also adding fourteen cases to `test/tick.test.ts`, which is not in `t2.files`
 either — naming one test file and not the other. The issue-9 convention settles it:
 *"`--files` declares the implementation surface and its tests follow it"*
 (`docs/superpowers/specs/2026-09-17-issue-9-design.md` §Testing strategy). So: one source file, plus
 **three** test files following the surface — `test/tick.test.ts`, `test/deliver.test.ts` (T21-T23,
-and the `footer` additions MAJOR 1 makes unnecessary) and `test/prompts.test.ts`. **[MINOR 3]** v2
+and the `footer` additions MAJOR 1 makes unnecessary) and `test/prompts.test.ts`. **[pass 1 MINOR 3]** v2
 fixed pass 0's count from two to one and then named two test files while adding cases to a third;
 naming all of them is the point of the convention, not the number. `deliver.ts` is
 in the declared set and **is** now edited (C3), unlike in v1. Gate re-verified: the sibling `t1`
@@ -652,12 +738,29 @@ The behaviour change is intended and narrow: today's gate fires per *task*, the 
 so a task that goes `blocked → idle` in one drain gets the tail on its `agent:blocked` line and not
 on its `agent:idle` line. Note the tail is read from `line.task.pane_id` at delivery time, so a
 pane that died between event and delivery yields an empty read and no tail — the existing
-`tail.trim().length > 0` guard already covers that.
+`tail.trim().length > 0` guard already covers that. **[pass 2 MINOR 2]** And the read is of the
+pane's **current** screen (`src/supervisor/main.ts:126`), taken after every event in the drain has
+been applied — so on the very `blocked → idle` ordering this fix is justified by, the
+`agent:blocked` line carries the pane as it looks once the block has cleared. Bounded by one tick
+(`TICK_MS` 1000ms, `src/lib/config.ts:24`); the alternative is no tail at all, which is today's
+behaviour. Worth stating because **A2** calls the tail "the most actionable text in any digest".
 
 **A13 — `src/lib/status.ts:25`'s hardcoded `hpipe` is a latent defect, handed to #14, not fixed
 here.** It renders `` `hpipe rewind …` `` literally, which is uninvokable for a GitHub-installed
 plugin per `src/lib/render.ts:19-22`. Real, out of this task's file set, and #14 is already in that
 file. Named so it is not lost.
+
+**A17 — `blocked-on-files` gets its own rung, and the deadlock's escape hatch is named.**
+**[pass 2 MAJOR 1]** The alternative considered was a truthful but actionless clause
+(*"waiting on another task's files"*), which satisfies honesty and still fails the ruling's *"what
+the orchestrator is expected to do"* bar in the one case where they must act. Rendering the release
+command costs two imports from `src/lib/gating.ts` — already `export`ed, and `gating.ts` imports only
+`./phases` and `./types`, so `tick.ts` gains no cycle — and reuses the `stuck` predicate
+`src/lib/status.ts:55` already computes. The cost is that `actionFor` now needs `run.tasks` to find
+holders, which it already receives. Deliberately narrow: the clause fires **only** when an
+overlapping holder is `terminal` or `escalated`, because `hpipe release` refuses an in-flight holder
+and offering it against a healthy one sends the orchestrator at a command that will bounce — the
+reason `src/lib/status.ts:51-54` gives for the same gate.
 
 **A14 — `task: Task | null` is kept rather than tightened.** All three `wake.push` sites are inside
 `const { run, task } = found`, so the null branch is unreachable. Narrowing to `Task` is tidier and
@@ -705,7 +808,9 @@ fixtures, `test/tick.test.ts:1-8`):
 | T6 | `phase: 'escalated'`, `escalated_from: 'implement'` | rung 3 contains `rewind <run_id> implement --task t1`; with `escalated_from: null`, the literal `<phase>`; and with `hpipe = 'bun run /p/src/cli.ts'`, **that** string and not `hpipe` (**MINOR 2**) |
 | T7 | `phase: 'merge'` / `'close'` / `'blocked-on-decision'` | rung 4 — `YOUR move` |
 | T8 | each of the eight `actor: 'worker'` rows | rung 5 — `worker's move` |
-| T9 | `phase: 'queued'` / `'blocked-on-files'` / `'ci'` / `'teardown'` | rung 6; and **never** the string `intake` (the falsehood **A8** avoids) |
+| T9 | `phase: 'queued'` / `'ci'` / `'teardown'`, and `'blocked-on-files'` with a **live** holder | rung 7; and **never** the string `intake` (the falsehood **A8** avoids) |
+| **T9b** | `blocked-on-files` with an overlapping holder in `failed`, then in `escalated` | rung 6 both times — contains `release --task <holder>` and the **rendered** `hpipe`, never `nothing for you` (**A17**) |
+| **T9c** | `blocked-on-files` whose only overlapping holder is healthy (`implement`) | rung 7 — the release clause must not fire on a task that will finish on its own |
 | T10 | **`applyEvents` with `blocked` then `idle` for one task in one call** | two lines; `wake[0].event === 'agent:blocked'`, `wake[1].event === 'agent:idle'`. Then the driver's gate attaches `detail` to the first and not the second (**MAJOR 1**, **A12**) |
 | T11 | `phase_entered_at` in the future | `0m`, never `-1m` |
 | T12 | `task: null` | run-level line, no crash *(characterisation — unreachable, **A14**)* |
@@ -733,11 +838,13 @@ fixtures, `test/tick.test.ts:1-8`):
 | T21 | `deliveriesFor` with an orchestrator pending carrying `footer` | the footer appears in the delivered text, after `nextPrompt` |
 | T22 | a **worker** pending carrying a `footer` | the footer does **not** appear — workers get no digest furniture (`src/supervisor/deliver.ts:62-70`) |
 | T23 | orchestrator pending with `footer: ''` | no trailing `also waiting on you:` heading, no stray blank lines |
+| **T23b** | `nextPrompt: ''` **and** a non-empty footer | **exactly one** blank line before `also waiting on you:` — the case v3 left unspecified (**pass 2 MINOR 5**) |
+| **T23c** | an orchestrator pending with empty `text`/`events`, plus a second orchestrator pending carrying only a task prompt | the footer still renders — pins **pass 2 MAJOR 2** |
 | **T27** | `buildDigest` called with **no** `footer` key at all | compiles and renders exactly as today — the `tsc` regression pass 1's MAJOR 1 found (**A15**) |
 
 **Exhaustiveness guard (the test worth writing).** One test iterates **every** phase in `TASK_ROWS`
 (`src/lib/phases.ts:89-141`), calls `actionFor`, and asserts the result is non-empty and matches one
-of the six known clauses; a second asserts `parkedFooter`'s membership agrees with
+of the **seven** known clauses (rung 6 is the one v3 was missing); a second asserts `parkedFooter`'s membership agrees with
 `!terminal && (actor === 'orchestrator' || phase === 'escalated')` for every row — including that
 `escalated` **is** a member, which is the regression pass 1's MAJOR 2 found. Because `describeWake`
 and `parkedFooter` share `actionFor` (§C2), one guard covers both callers. A row added with a new `actor`/`terminal` combination then fails here rather than shipping an
@@ -748,10 +855,13 @@ catches the class rather than the instance.
 
 - `test/prompts.test.ts:12` — `'digest'` removed from `ALL` (C4). Verify the guard bites by
   restoring the file and confirming `:21-24` alone goes red.
-- `test/tick.test.ts` — the four wake-producing tests at `:71`, `:80`, `:98`, `:114` discard
-  `applyEvents`' return value entirely and assert only on mutated task state; the only tests
-  touching `wake` are `:53-60` and `:62-69`, both `toHaveLength(0)`. Nothing reads `.text`, so all
-  compile unchanged. Pass 0 re-verified this. If one needs editing, C1's blast-radius claim is wrong
+- `test/tick.test.ts` — the **five** wake-producing tests at `:34`, `:71`, `:80`, `:98`, `:114` discard
+  `applyEvents`' return value (`:34` destructures `changed` only) and assert on mutated task state;
+  the only tests touching `wake` are `:53-60` and `:62-69`, both `toHaveLength(0)`. Nothing reads
+  `.text`, so all compile unchanged. **[pass 2 MINOR 3]** v1-v3 all said "four" and all three were
+  wrong: `:34-42` sends `agent_status: 'idle'` and lets `wakeOn` default to
+  `new Set(['blocked','done','idle'])` (`src/supervisor/tick.ts:27`), so it pushes too. The
+  conclusion is unaffected. Pass 0 re-verified this. If one needs editing, C1's blast-radius claim is wrong
   and that is a finding.
 
 **Unchanged and must stay green:** `test/deliver.test.ts:33-51`, `:53-81` and **`:121-130`** — the
