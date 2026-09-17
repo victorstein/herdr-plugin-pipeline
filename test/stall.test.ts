@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test'
-import { sendProbes, stallCandidates, taskStallCandidates } from '../src/supervisor/stall'
+import {
+  sendProbes, stallCandidates, stallStateFor, taskStallCandidates,
+} from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
@@ -172,4 +174,39 @@ test('a run with no orchestrator pane is left pending, not marked probed', async
 
   run.orchestrator_pane = ORCHESTRATOR_PANE
   expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
+})
+
+test('stall state reads as zero when absent, anchored at the later phase entry', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  expect(stallStateFor(run, task)).toEqual({
+    at: 900, run_at: 500, last_probe_at: 900, probes: 0, holds: 0,
+  })
+})
+
+test('the anchor is the LATER of the two entries — a run phase change re-arms the task', () => {
+  const run = runAt('branch-review', 9000)
+  const task = mkTask({ phase_entered_at: 900 })
+  expect(stallStateFor(run, task).last_probe_at).toBe(9000)
+})
+
+test('a stall state whose record stamp is stale reads as zero', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  task.stall = { at: 111, run_at: 500, last_probe_at: 111, probes: 3, holds: 0 }
+  expect(stallStateFor(run, task).probes).toBe(0)
+})
+
+test('a stall state whose RUN stamp is stale reads as zero', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  task.stall = { at: 900, run_at: 222, last_probe_at: 900, probes: 3, holds: 0 }
+  expect(stallStateFor(run, task).probes).toBe(0)
+})
+
+test('a stall state with both stamps matching is returned as stored', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  task.stall = { at: 900, run_at: 500, last_probe_at: 1234, probes: 2, holds: 1 }
+  expect(stallStateFor(run, task)).toEqual(task.stall)
 })

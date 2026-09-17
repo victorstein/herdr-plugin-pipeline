@@ -1,5 +1,5 @@
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
-import type { Run, Task } from '../lib/types'
+import type { Run, StallState, Task } from '../lib/types'
 
 export interface StallCandidate {
   run: Run
@@ -99,5 +99,23 @@ export async function sendProbes<C extends { key: string }>(
 ): Promise<void> {
   for (const candidate of candidates) {
     if ((await send(candidate)).ok) probed.add(candidate.key)
+  }
+}
+
+/**
+ * The ladder state for this phase entry, or a fresh one. BOTH stamps must
+ * match: `at` re-arms on the record's own phase entry, `run_at` on the run's —
+ * which is what makes `hpipe resume` re-arm a task's ladder even though
+ * `cmdResume` (`src/cli.ts:304-320`) never walks `run.tasks`.
+ */
+export function stallStateFor(run: Run, record: Run | Task): StallState {
+  const s = record.stall
+  if (s && s.at === record.phase_entered_at && s.run_at === run.phase_entered_at) return s
+  return {
+    at: record.phase_entered_at,
+    run_at: run.phase_entered_at,
+    last_probe_at: Math.max(record.phase_entered_at, run.phase_entered_at),
+    probes: 0,
+    holds: 0,
   }
 }
