@@ -9,6 +9,8 @@ import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './hel
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
+afterEach(cleanupFixtures)
+
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
@@ -249,8 +251,6 @@ test('a task with no checkout path falls back to repo_root', () => {
   task.artifacts.spec = 'docs/superpowers/specs/design.md'
   expect(absoluteArtifactPath(run, task)).toBe('/r/docs/superpowers/specs/design.md')
 })
-
-afterEach(cleanupFixtures)
 
 test('adoptableArtifacts returns docs this branch added, not what the worktree checked out', async () => {
   const worktree = repoWithWorktree([

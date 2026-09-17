@@ -1,12 +1,13 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
-import { cleanupFixtures, commitIn, repoWithWorktree } from './helpers/git-worktree'
+import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
+
+afterEach(cleanupFixtures)
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -246,7 +247,7 @@ const designArtifacts = (): Task['artifacts'] => ({
 })
 
 function worktreeWith(relative: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'hpipe-design-'))
+  const dir = tempDir('hpipe-design-')
   mkdirSync(join(dir, dirname(relative)), { recursive: true })
   writeFileSync(join(dir, relative), 'findings\n')
   return dir
@@ -309,8 +310,6 @@ test('a design row prompt names the artifact path its own predicate will check',
     expect(await promptForTaskPhase(run, task, deps(), 'research')).toContain(watched as string)
   }
 })
-
-afterEach(cleanupFixtures)
 
 test('a misfiled artifact is adopted from the branch and recorded on the task', async () => {
   const worktree = repoWithWorktree([
@@ -444,4 +443,32 @@ test('with no checkout the scan never falls back to the main checkout', async ()
   await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('research')
   expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('the supervisor default dedup set is what production actually uses', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
+  commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
+
+  // No `ambiguityLog` in deps, exactly as src/supervisor/main.ts builds them, so
+  // this is the only test that exercises the module-level default. Keyed on a
+  // task_id and phase_entered_at no other test uses, because that set is
+  // process-lifetime and shared across this file.
+  const run = mkRun([mkTask({
+    task_id: 'tdefault', phase: 'research', phase_entered_at: 7,
+    checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps())
+    await advanceTasks(run, deps())
+  } finally {
+    console.error = original
+  }
+
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
 })

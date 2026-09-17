@@ -462,9 +462,17 @@ authoritative and report loudly" partly because reporting needs per-phase-entry 
 tick (`src/lib/config.ts:23`); an undeduped log line would contradict that and, since
 `TASK_STALL_MINUTES` is 45 (`src/lib/config.ts:27`), emit ~2700 identical lines before the first
 probe. The dedup is a module-level `Set<string>` in `src/supervisor/tasks.ts` keyed by
-`${task_id}:${phase}:${phase_entered_at}`, mirroring how `sendProbes` keys `alreadyProbed`
-(`src/supervisor/stall.ts:62-64`). It is process-local and not a `Task` field, so A1's objection —
-which is about *persisted* state — does not apply. `src/supervisor/main.ts:160-163` is cited as the
+`${run_id}:${task_id}:${phase}:${phase_entered_at}` — the same key `taskStallKey` builds for
+`alreadyProbed` (`src/supervisor/stall.ts:62-64`), `run_id` included, because task ids are per-run
+and two live runs both hold a `t1`. Spelled out rather than imported, since `stall.ts` is issue
+#15's file and a shared helper would let this dedup change shape underneath it. It is process-local
+and not a `Task` field, so A1's objection — which is about *persisted* state — does not apply.
+
+*Amended after PR quality review:* v3 of this assumption omitted `run_id` and carried a comment
+explaining which collisions were tolerable. Including it is a smaller change than the comment was,
+and it makes the key match its sibling exactly. The module-level default is itself a compromise —
+`main()` owns `probed` and `attempts` and would ideally own this too, but `src/supervisor/main.ts`
+is in #15's file set, so `TaskDeps.ambiguityLog` stays optional and a test covers the default path. `src/supervisor/main.ts:160-163` is cited as the
 precedent for the log's *shape*, not its cadence; that one is per-delivery.
 
 ---

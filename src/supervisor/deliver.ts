@@ -81,16 +81,22 @@ export function shouldRetry(code: string | undefined, attempts: number, max: num
 }
 
 /** Artifact path for the phase the run or task is currently in. */
+// Verdicts land here as well as artifacts, and nothing ever populates
+// `artifacts.verdicts` — `artifactPathFor` reads it and no writer exists — so the
+// `claimed` set cannot exclude them and `adoptableArtifacts` filters by prefix
+// instead. Every completed branch carries three to five.
+const REVIEWS_DIR = 'docs/superpowers/reviews'
+
 export function artifactPathFor(run: Run, task: Task | null): string | null {
   if (task) {
     const row = taskRow(task.phase)
     if (row.artifact) return task.artifacts[row.artifact]
     const key = `${task.phase}-${counterFor(task, task.phase)}`
     return task.artifacts.verdicts[key]
-      ?? join('docs/superpowers/reviews', `issue-${task.issue}-${key}.md`)
+      ?? join(REVIEWS_DIR, `issue-${task.issue}-${key}.md`)
   }
   const key = `${run.phase}-${counterFor(run, run.phase)}`
-  return run.artifacts.verdicts[key] ?? join('docs/superpowers/reviews', `${run.run_id}-${key}.md`)
+  return run.artifacts.verdicts[key] ?? join(REVIEWS_DIR, `${run.run_id}-${key}.md`)
 }
 
 /** Task artifacts live in the worker's linked worktree; run artifacts in the main checkout. */
@@ -102,16 +108,12 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 }
 
 /** The branch every worker worktree is cut from; `prompts/dispatch.md` mandates `--base main`. */
-export const ARTIFACT_BASE_REF = 'main'
+const ARTIFACT_BASE_REF = 'main'
 
-// Verdicts are added on the branch under docs/ exactly like artifacts are, and
-// nothing ever populates `artifacts.verdicts` (read at :89 and :93, written
-// nowhere), so `claimed` cannot exclude them. Every completed branch carries 3-5.
-const REVIEWS_PREFIX = 'docs/superpowers/reviews/'
-
-// Bun.spawn throws synchronously on a missing binary or a cwd that doesn't exist,
-// and this runs inside the supervisor tick, so a spawn failure must degrade to a
-// non-ok result rather than crash the loop. Mirrors Gh.run in ../lib/gh.ts.
+// Bun.spawn throws synchronously on a missing binary, and this runs inside the
+// supervisor tick, so that must degrade to a non-ok result rather than crash the
+// loop — the same contract Gh.run holds. A bad `-C` path does not throw; git exits
+// non-zero and the caller's code check catches it.
 //
 // `diff.renames=true` is pinned rather than inherited: a user gitconfig disabling
 // rename detection turns a `git mv`d doc into a false `A` and therefore a false
@@ -158,7 +160,7 @@ export async function adoptableArtifacts(
   return diff.text
     .split('\0')
     .filter((path) => path.length > 0)
-    .filter((path) => !path.startsWith(REVIEWS_PREFIX))
+    .filter((path) => !path.startsWith(`${REVIEWS_DIR}/`))
     .filter((path) => !claimed.has(path))
 }
 
