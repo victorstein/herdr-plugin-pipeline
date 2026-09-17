@@ -1,27 +1,66 @@
-# Design — issue #15: re-probe, escalate, and stop talking to dead panes
+# Design — issue #15: re-probe, escalate, and stop talking to panes that cannot answer
 
-Pass 0. No review exists for this issue yet (`ls docs/superpowers/reviews/` holds only the
-2026-09-13 and 2026-09-15 design reviews), so nothing below is a revision.
+Pass 1. Revises the pass-0 spec against
+`docs/superpowers/reviews/issue-15-spec-review-0.md` (VERDICT: BLOCKER, 3 BLOCKERs / 5 MAJORs /
+4 MINORs). Every finding is dispositioned in **Revision log** below; nothing was silently dropped.
 
 Builds on `docs/superpowers/research/2026-09-17-issue-15-research.md`. Every claim about current
-behaviour is cited to `file:line` in this worktree at `f872bdc`; the research note carries the
-version and baseline evidence (bun 1.3.14, herdr 0.9.0, `bun test` → 351 pass / 0 fail,
-`tsc --noEmit` clean).
+behaviour is cited to `file:line` in this worktree; the research note carries the version and
+baseline evidence (bun 1.3.14, herdr 0.9.0, `bun test` → 351 pass / 0 fail, `tsc --noEmit` clean).
+
+---
+
+## Revision log — pass 1
+
+| Finding | Disposition |
+| --- | --- |
+| **BLOCKER 1** — the "persisted" counter is never persisted; probes become a 1 Hz loop that never escalates | **Accepted, fixed.** `StallDeps` gains `persist`; every accepted probe and every escalation writes the run. **A4** rewritten, **A22** added, regression test added. The reviewer was right and this was the design's worst defect: strictly worse than the behaviour #15 complains about. |
+| **BLOCKER 2** — the ladder escalates `blocked-on-files` and `blocked-on-decision`, which are waiting correctly | **Accepted, fixed.** New **A18**: escalation is narrowed to rows whose completion signal is produced by the actor being probed (`signal` ∈ `artifact`/`verdict`/`pr`). Probing is unchanged for every stallable row. Resolved here rather than via `hpipe decide` — see **Why this was not a `decide`**. |
+| **BLOCKER 3** — P2's causal story fails arithmetic, and the issue's direction 2 is unimplemented | **Accepted, both halves fixed.** The causal claim is withdrawn and replaced with what the numbers actually support (**P2** rewritten). Direction 2 is now implemented, inside `src/supervisor/main.ts` alone — new **A19**. The old **NG4**/**A17** "accepted limitation" is deleted. |
+| **MAJOR 4** — `{{hpipe}}` inside an `{{awaiting}}` value never renders | **Accepted, fixed.** `stallAwaiting` takes the rendered command; **A13** amended; a "no `{{` survives" test added. |
+| **MAJOR 5** — A7 reads the wrong pane; cost claim off by four orders of magnitude | **Accepted, fixed.** **A7** now reads the row actor's own pane, not `probePaneFor`'s. The cost is fixed structurally by **A20** (a hold consumes a slot), not by memoisation, so the corrected claim is one status read per `threshold` per held candidate. |
+| **MAJOR 6** — probes, escalations and `announceDecisions` bypass `DeliveryBudget` | **Accepted for the two send sites this task owns** (**A11** amended: the budget is passed into `StallDeps`). `announceDecisions` (`tasks.ts:293-309`) is a pre-existing unbounded retry in a file this task does not own; **NG6** records it as out of scope with a pointer. **A19** covers it for the gone-pane case, which is the case #15 names. |
+| **MAJOR 7** — run `dispatch` escalates a healthy run at 60m | **Accepted, fixed** — and fixed by **A18** alone: `dispatch`'s signal is `worktree` and `execute`'s is `gate` (`phases.ts:54`, `:56`), so neither is escalation-eligible. Verified below. |
+| **MAJOR 8** — A16's blast radius understated; `table.test.ts` mis-cited as the NG2 guard | **Accepted, fixed.** True blast radius stated; the NG2 guard is replaced with a real one (**A21**). |
+| **MINOR 9** — "13 test files" miscounts | **Accepted.** 11 files, 13 lines: `grep -rl "delivery_attempts: 0" test/ \| wc -l` → `11`; `grep -rn … \| wc -l` → `13`. |
+| **MINOR 10** — `orchestrator.ts` cited under the wrong directory | **Accepted.** It is `src/lib/orchestrator.ts` throughout. |
+| **MINOR 11** — "switch on `row.signal`" contradicts the table | **Accepted.** The **A13** table is now genuinely keyed on `row.signal`, with the run/task split expressed as which record the path is resolved against. |
+| **MINOR 12** — `cmdRewind`'s run branch has no `delivery_attempts` to sit beside | **Accepted.** `cli.ts:184-187` has no `delivery_attempts` line; the run-side reset is justified on its own terms. |
+
+**Why BLOCKER 2 and BLOCKER 3 were resolved here and not via `hpipe decide`.** The reviewer marked
+both as needing the human. Both dissolved once a narrower implementation was found, so there is no
+open question left to put to anyone:
+
+- BLOCKER 2 asked which rows `escalated` applies to. `stallWhen` (`phases.ts:32-39`) is the repo's
+  existing precedent for "probe-eligible is not the same question as X-eligible", so narrowing by
+  signal is an established pattern, not an invention, and it needs no `phases.ts` change.
+- BLOCKER 3 offered a choice between implementing direction 2 and getting agreement to ship half of
+  #15. A third option exists that the pass-0 spec missed: the gone-pane fact can be computed and
+  acted on entirely within `src/supervisor/main.ts`, which this task holds, by calling
+  `herdr.paneList()` once per tick exactly as `cli.ts:278` and `actions/status.ts:12` already do.
+  Implementing it is therefore neither a scope widening nor a partial ship.
+
+---
 
 ## Scope boundary
 
-`gh issue view 15` (re-read 2026-09-17, after the orchestrator's edit) fixes the holdings:
+`gh issue view 15` (re-read after the orchestrator's edit) plus the orchestrator's ruling of
+2026-09-17 fix the holdings.
 
-- **Held by this task:** `src/supervisor/main.ts`, `prompts/stall-probe.md`, and by extension the
-  stall machinery in `src/supervisor/stall.ts`.
-- **Not held:** `src/lib/phases.ts` — that is #19 ("ci, merge, close and teardown are not
-  stallable"). **No row in `TASK_ROWS` or `RUN_ROWS` changes here.** Which rows are probe-eligible
-  stays exactly as `phases.ts:89-141` defines it.
-- **Not held:** the artifact *path derivation* — #9 owns `src/cli.ts:88-92` and the question of
-  where artifacts live. This spec **calls** `absoluteArtifactPath` (`deliver.ts:97-102`); it does
-  not change what that function returns.
-- `src/cli.ts` is edited here only at `:177-194` (`cmdRewind`). #9's hunk is `:88-92`. Different
-  hunks, but flagged so the merge is expected.
+- **Held by this task:** `src/supervisor/main.ts`, `prompts/stall-probe.md`, and the stall
+  machinery in `src/supervisor/stall.ts`.
+- **Not held, not touched:** `src/lib/phases.ts` — that is #19. **No row in `TASK_ROWS` or
+  `RUN_ROWS` changes here**, and **A21** is the test that proves it.
+- **Not held, not touched:** artifact-path *derivation* — #9 owns `src/cli.ts:88-92`. This spec
+  calls `absoluteArtifactPath` (`deliver.ts:97-102`); it does not change what it returns.
+- **Unheld files this task nonetheless edits, under the orchestrator's ruling:** `src/cli.ts`
+  (`cmdRewind`, `:177-194`), `src/lib/types.ts`, `src/lib/machine.ts`,
+  `test/cli-commands.test.ts`. The pass-0 spec argued these were safe because the hunks are far
+  apart. **That reasoning is withdrawn** — distance between hunks is about the odds of a textual
+  conflict, not about ownership, and it is the reasoning that produced a broken file lock on the
+  run these issues came from. The ruling replaces it (**A23**).
+- `src/lib/types.ts` is the real collision risk, not `src/cli.ts`: **A5** adds a field to `Task`,
+  and #9's subject is the `artifacts` shape on that same interface.
 
 ---
 
@@ -31,31 +70,46 @@ Three defects, all verified in this worktree.
 
 ### P1 — one probe per phase entry, ever
 
-`taskStallKey` is `${run_id}:${task_id}:${phase}:${phase_entered_at}` (`stall.ts:62-64`), and
+`taskStallKey` is `${run_id}:${task_id}:${phase}:${phase_entered_at}` (`stall.ts:62-64`) and
 `taskStallCandidates` skips any key in `alreadyProbed` (`stall.ts:83`); the run-level equivalent
 skips at `stall.ts:45`. `sendProbes` adds the key on a successful send (`stall.ts:101`). The set
-backing `alreadyProbed` is a bare `Set<string>` created inside `main()` (`main.ts:109`) and never
+backing `alreadyProbed` is a bare `Set<string>` created inside `main()` (`main.ts:109`), never
 persisted — `saveRun` serialises the `Run` only (`ledger.ts:44-46`) and `Task` has no probe field
 (`types.ts:44-80`).
 
-So: one probe, then silence. There is no counter, no second probe, no escalation. On the berean-os
-run of 2026-09-16 that cost 13 hours of five workers sitting on uncommitted work.
+One probe, then silence. `prompts/stall-probe.md:7` states it to the agent as a feature: *"it will
+not ask again for this phase."*
 
-`prompts/stall-probe.md:7` states the defect to the agent as if it were a feature: *"it will not
-ask again for this phase."*
+### P2 — the supervisor keeps talking to a pane that cannot answer
 
-### P2 — the supervisor never stops talking to a dead orchestrator pane
+**The pass-0 causal claim is withdrawn.** It said `main.ts:234` was "consistent with the 33 further
+deliveries the issue reports". It is not, and the reviewer's arithmetic is correct:
 
-`main.ts:229-235`: on a failed delivery the per-pane failure count is incremented and, once
-`shouldRetry` (`deliver.ts:78-81`) returns false, the supervisor logs "giving up" and then calls
-`attempts.delete(delivery.paneId)` (`main.ts:234`). Deleting resets the count to zero, so the next
-tick starts at 1 again. "Giving up" is a five-tick cycle repeated forever at `TICK_MS` (1000ms,
-`config.ts:23`) — consistent with the 33 further deliveries the issue reports.
+- `TICK_MS` defaults to `1000` (`config.ts:23`). A five-tick failure cycle repeated across the
+  incident's 13 hours is ≈46,800 attempts and ≈9,360 `giving up` log lines, not 33.
+- A delivery is only attempted when the tick produced text: `addPending` returns early on
+  `text.length === 0 && eventLines.length === 0` (`main.ts:159`) and `deliveriesFor` re-checks the
+  same condition (`deliver.ts:51`). In a fully stalled run most ticks enqueue nothing.
 
-`rebindOrchestrator` does run every tick (`main.ts:170`) and re-points a run when it can
-disambiguate, but it deliberately keeps a stale pane id when it cannot (`orchestrator.ts:30`,
-`:38-41`). `formatStatus` names the condition (`status.ts:99-102`) but is only reached from the CLI
-and action paths (`cli.ts:278`, `actions/status.ts:12`), never from the supervisor.
+33 deliveries across 13 hours is ~1 per 24 minutes — the signature of 33 **successful**,
+event-driven digests into a pane that was **alive** while the agent inside it was rate-limited.
+That reframes the whole issue and is worth stating plainly: **the incident's orchestrator pane was
+not dead.** `herdr agent prompt` against a live pane succeeds, so a delivery-failure budget would
+not have fired once. What would have helped is the task-level ladder (**P1**), because a
+rate-limited agent reports something other than `working` and therefore escalates under **A7**.
+
+Two real defects remain under this heading, and they are different from each other:
+
+- **P2a — the retry budget resets itself.** `main.ts:229-235`: once `shouldRetry`
+  (`deliver.ts:78-81`) returns false, the supervisor logs "giving up" and then calls
+  `attempts.delete(delivery.paneId)` (`main.ts:234`), resetting the count to zero so the next tick
+  starts at 1. Genuine bug, fixed here, but **not** the incident's cause.
+- **P2b — the gone-pane fact is computed every tick and thrown away.** This is #15's direction 2 as
+  written. `rebindOrchestrator` calls `herdr.paneList()` (`src/lib/orchestrator.ts:46-48`) and,
+  when it cannot resolve a replacement, deliberately keeps the stale id
+  (`src/lib/orchestrator.ts:30`, `:38-41`). Its return value is discarded at `main.ts:170`.
+  `formatStatus` names the condition (`src/lib/status.ts:99-102`) but is reached only from
+  `cli.ts:278` and `actions/status.ts:12`, never from the supervisor.
 
 ### P3 — the task-level probe throws the artifact path away
 
@@ -73,60 +127,69 @@ finished but wrote the file somewhere else, move it to the path above" — where
 sentence. `absoluteArtifactPath(run, task)` already handles the task case by joining
 `task.checkout_path ?? run.repo_root` (`deliver.ts:100-101`).
 
-**P3b, found while verifying P3 and in scope because it lives in the same two files.** The
-run-level branch is wrong too, differently. `artifactPathFor(run, null)` has no null return — it
-falls through to `join('docs/superpowers/reviews', \`${run.run_id}-${key}.md\`)` for *any* run phase
-(`deliver.ts:92-93`). For `branch-review` that is right. For `dispatch` and `execute` — both
-`stallable` (`phases.ts:55`, `:56-59`) and both awaiting something that is not a file — it invents
-`docs/superpowers/reviews/<run_id>-dispatch-0.md` and tells the orchestrator nothing has appeared
-there. The `?? 'the expected artifact'` fallback at `main.ts:247` is therefore dead code.
+**P3b.** The run-level branch is wrong differently. `artifactPathFor(run, null)` has no null return
+— it falls through to `join('docs/superpowers/reviews', \`${run.run_id}-${key}.md\`)` for any run
+phase (`deliver.ts:92-93`). Right for `branch-review`; for `dispatch` and `execute` it invents
+`docs/superpowers/reviews/<run_id>-dispatch-0.md`. The `?? 'the expected artifact'` fallback at
+`main.ts:247` is dead code.
 
 ---
 
 ## Goal
 
-1. A stalled run or task is probed repeatedly on a fixed cadence, and after a bounded number of
-   unanswered probes is moved to `escalated` and surfaced in `hpipe status` as needing a human.
-2. The supervisor stops re-delivering into a pane it has already given up on.
+1. A stalled run or task is probed repeatedly on a fixed cadence and, **where escalation is
+   meaningful** (**A18**), is moved to `escalated` after a bounded number of unanswered probes and
+   surfaced in `hpipe status` as needing a human.
+2. When a run's orchestrator pane is confirmed absent from herdr's live pane list and cannot be
+   rebound, the supervisor stops sending to it — digests, probes, escalations and decision
+   announcements alike — and says so once.
 3. Every stall probe names the actual thing the phase is waiting for, or says plainly that what it
    waits for is not a file.
 
 ## Non-goals
 
-- **NG1 — a richer liveness signal.** #15's third direction ("uncommitted changes in the worktree
-  distinguish idle-with-work from idle-with-nothing"). Not done; see **A14**.
-- **NG2 — making `ci`/`merge`/`close`/`teardown`/`escalated` stallable.** That is #19 and requires
-  `phases.ts`, which this task does not hold.
+- **NG1 — a richer liveness signal.** #15's third direction. See **A14**.
+- **NG2 — making `ci`/`merge`/`close`/`teardown`/`escalated` stallable.** That is #19 and needs
+  `phases.ts`. **A21** is the guard.
 - **NG3 — changing where artifacts live.** That is #9.
-- **NG4 — an out-of-band channel to a human when the orchestrator pane is dead.** See **A17**.
 - **NG5 — persisting the delivery-retry budget.** See **A12**.
+- **NG6 — bounding `announceDecisions`.** `tasks.ts:293-309` stamps `prompted_at` only on success
+  (`:308`), so a failing send retries every tick with no cap of any kind — unlike its sibling
+  `deliverPendingAnswers`, which is bounded by the persisted `delivery_attempts` (`tasks.ts:260`).
+  Real defect, raised by MAJOR 6, in a file this task does not hold. **A19** removes the gone-pane
+  case, which is the case #15 describes; the live-pane-failing-send case wants its own issue. Not
+  fixed here, and named so the next reader does not mistake it for handled.
 
 ---
 
 ## Assumptions
 
-Every behavioural choice, labelled, so the review can attack each one on its own. Rationale follows
-inline in the sections that use them.
+| # | Assumption | Δ |
+| --- | --- | --- |
+| A1 | Escalation reuses the existing `escalated` phase; no new phase. | — |
+| A2 | The probe interval is **constant**, not exponential backoff. | — |
+| A3 | `STALL_PROBE_MAX` defaults to `3`. | — |
+| A4 | The counter is persisted **on every accepted probe**, via an injected `persist`. | **rewritten (B1)** |
+| A5 | The counter is an optional field read through an accessor; `schema_version` stays `2`. | — |
+| A6 | The counter increments only on a probe herdr accepted. | — |
+| A7 | Escalation is held while the **row actor's own pane** reports `working`. | **amended (M5)** |
+| A8 | Probes are not held on `working`. | — |
+| A9 | The escalation prompt is delivered to the orchestrator pane. | — |
+| A10 | A new `prompts/stall-escalate.md`, not a parameterised `escalate.md`. | — |
+| A11 | Delivery give-up is sticky per pane, and **the budget also guards probes and escalations**. | **amended (M6)** |
+| A12 | Give-up state stays in-process. | — |
+| A13 | `{{awaiting}}` replaces `{{artifact_path}}`, keyed on `row.signal`, **with the rendered `hpipe` passed in**. | **amended (M4, M11)** |
+| A14 | No git-dirty liveness; the escalation carries the worker's pane tail. | — |
+| A15 | `hpipe status` gains a warning line per escalated task. | — |
+| A16 | `stallKey`, `taskStallKey` and `alreadyProbed` are deleted. | — |
+| **A18** | **Escalation is narrowed to rows whose signal the probed actor itself produces.** | **new (B2, M7)** |
+| **A19** | **A run whose orchestrator pane is gone and unrebindable is skipped entirely for the tick.** | **new (B3)** |
+| **A20** | **A held escalation consumes a counter slot, so re-checks happen once per `threshold`.** | **new (M5)** |
+| **A21** | **A test pins the exact set of stallable phases, as the real NG2 guard.** | **new (M8)** |
+| **A22** | **The ledger write precedes every send, on the probe path as well as the escalation path.** | **new (B1)** |
+| **A23** | **Unheld files are edited only under the orchestrator's ruling; a rebase conflict is a stop.** | **new (ruling)** |
 
-| # | Assumption |
-| --- | --- |
-| A1 | Escalation reuses the existing `escalated` phase; no new phase is introduced. |
-| A2 | The probe interval is **constant**, not an exponential backoff, despite the issue's wording. |
-| A3 | `STALL_PROBE_MAX` defaults to `3`. |
-| A4 | The probe counter is persisted on the run/task record, replacing the in-process `probed` set. |
-| A5 | The counter is an **optional** field read through an accessor; `schema_version` stays `2`. |
-| A6 | The counter increments only on a probe that herdr accepted. |
-| A7 | Escalation is held while a live `agent status` read on the actor's pane returns `working`. |
-| A8 | Probes are **not** held on `working` — today's behaviour is preserved. |
-| A9 | The escalation prompt is delivered to the orchestrator pane, never to the worker's. |
-| A10 | A new `prompts/stall-escalate.md`, rather than parameterising `prompts/escalate.md`. |
-| A11 | Delivery give-up becomes sticky per pane, cleared by a later successful send to that pane. |
-| A12 | Give-up state stays in-process and is not persisted. |
-| A13 | `{{artifact_path}}` becomes `{{awaiting}}`, composed at the call site for both levels. |
-| A14 | No git-dirty liveness signal; the escalation carries the worker's pane tail instead. |
-| A15 | `hpipe status` gains a warning line for every task sitting in `escalated`. |
-| A16 | `stallKey`, `taskStallKey` and the `alreadyProbed` parameter are deleted. |
-| A17 | Run escalation is best-effort: if the orchestrator pane is unreachable, nothing is delivered. |
+*(A17 is deleted — it accepted the dead-orchestrator gap that **A19** now closes.)*
 
 ---
 
@@ -134,287 +197,233 @@ inline in the sections that use them.
 
 ### Modelled on
 
-`delivery_attempts` — named as the nearest existing example in the research note (§4) and the
-pattern this work mirrors field for field:
+`delivery_attempts` — the nearest existing example, named in the research note §4:
 
 | `delivery_attempts` | this work |
 | --- | --- |
 | persisted counter on `Task` (`types.ts:78`), initialised at `cli.ts:95` | `stall_probes` on `Task` and `Run` |
 | cap from config, `PROMPT_RETRY_MAX: 5` (`config.ts:13`, `:31`) | `STALL_PROBE_MAX: 3` |
-| plumbed through a `Deps` interface (`main.ts:198-202`, `tasks.ts:244-248`) | `StallDeps`, same shape |
+| plumbed through a `Deps` interface (`main.ts:198-202`, `tasks.ts:244-248`) | `StallDeps` |
 | checked, incremented, reset (`tasks.ts:260`, `:277`, `:282`) | same three sites |
+| **written to the ledger by the caller that owns the loop** (`main.ts:217`) | **A4/A22** |
 | surfaced in `hpipe status` (`status.ts:29-36`) | **A15** |
 | cleared by `hpipe rewind` (`cli.ts:179`) | same line |
 | documented for the operator (`test/integration/smoke.md:281`) | same section |
 
-The escalation transition itself is modelled on `advanceLoopingRow` (`machine.ts:113-127`):
-bump a monotone counter, and at the cap call `enterTaskPhase(run, task, 'escalated', …)`.
+The escalation transition is modelled on `advanceLoopingRow` (`machine.ts:113-127`). The injected-
+callback shape is modelled on `sendProbes` (`stall.ts:97-103`) and `AnswerDeps` (`tasks.ts:244-248`),
+which keeps `stall.ts` free of `Herdr` and `Gh` imports.
 
-The effectful half is modelled on `sendProbes` (`stall.ts:97-103`) and `AnswerDeps`
-(`tasks.ts:244-248`): `stall.ts` stays free of `Herdr` and `Gh` imports and takes its side effects
-as injected callbacks, so it remains unit-testable exactly as it is today.
+### A4, A22 — the counter is actually persisted (BLOCKER 1)
 
-### A1 — escalation reuses the existing `escalated` phase
+The pass-0 design bumped the counter in memory and saved only on escalation. That does not survive
+a tick: `main.ts:113` calls `listRuns`, which `readJson`s every run fresh
+(`ledger.ts:48-62`), and the only `saveRun` in the loop is `main.ts:217` — *inside* the
+`for (const run of advancing)` block, which runs before the stall block at `main.ts:238-268`. The
+tick then ends. So the counter would have read `0` on every tick: `action` never becomes
+`'escalate'`, the due predicate stays satisfied from `threshold` onward, and a stalled task is
+probed **once per `TICK_MS`** — once per second — forever. With **A16** having deleted the
+in-process set, there would have been no fallback. Strictly worse than the defect #15 reports.
 
-`escalated` already means "stopped on purpose, a human must act, resume with `hpipe rewind`". It
-carries `returnsTo: 'escalated_from'` (`phases.ts:130-131`), `enterTaskPhase` stamps
-`escalated_from` (`machine.ts:92`), `cmdRewind` clears it (`cli.ts:181`), and `hpipe release`
-accepts it as a legitimate target (`cli.ts:207-211`). Inventing a `stalled` phase would duplicate
-all of that and would require `phases.ts`, which **NG2** forbids.
-
-Three consequences, all pre-existing and all accepted:
-
-- `escalated` holds its files (`phases.ts:131`). For a stall this is **correct**: the worktree
-  holds uncommitted work — that is the whole premise of the issue — so releasing its file
-  reservation would let a sibling be dispatched onto overlapping paths. The comment at
-  `phases.ts:133-136` already argues exactly this.
-- `escalated` is in `TERMINAL_BAD` (`gating.ts:6-8`), so dependents gate to `blocked-on-failure`.
-  Recoverable: `cmdRewind` sets `task.phase` directly (`cli.ts:177`).
-- Nothing tears an escalated task's worktree down — `runTeardown` only acts on `phase === 'teardown'`
-  (`teardown.ts:25`). The human's `hpipe release` is the escape (`status.ts:47-52`).
-
-A run reaching `escalated` stops being advanced at all: the row is `releasesPane: true`
-(`phases.ts:70-71`) and `pickOneAdvance` skips such runs (`tick.ts:106-115`). That is the intended
-"stop and wait for a human".
-
-### A2, A3 — constant interval, `STALL_PROBE_MAX = 3`
-
-The issue says "re-probe on a backoff". This spec does **not** back off, and that divergence is the
-single most attackable choice here.
-
-With a constant interval the nth probe is due at `phase_entered_at + n × threshold`, which means
-**no timestamp needs storing** — the schedule is derived from `phase_entered_at`, already persisted
-(`types.ts:56`, `:94`), plus the counter. One field instead of two, and self-healing across a
-supervisor restart.
-
-Arithmetic, at the shipped defaults (`TASK_STALL_MINUTES: 45`, `STALL_MINUTES: 15`,
-`config.ts:26-27`) and `STALL_PROBE_MAX = 3`:
-
-| | probe 1 | probe 2 | probe 3 | escalate |
-| --- | --- | --- | --- | --- |
-| task | 45m | 90m | 135m | **180m (3h)** |
-| run | 15m | 30m | 45m | **60m (1h)** |
-
-Geometric backoff at factor 2 from the same base gives 45 / 135 / 315 / **675m ≈ 11.25h** to
-escalate a task. The incident this issue exists to prevent lasted 13 hours. An 11.25-hour
-escalation is not a fix. Backoff exists to avoid hammering a busy actor, and the interval is
-already 45 minutes; the predictability of `N × threshold` is worth more here than the saved turns.
-Two numbers tune it instead of three.
-
-### A4, A5 — the counter is persisted, and optional
-
-`Run` and `Task` each gain:
+`StallDeps` therefore carries a `persist`, and **A22** orders it:
 
 ```ts
-/** Stall probes herdr has accepted for the CURRENT phase entry. Reset on every phase entry. */
-stall_probes?: number
+persist: (run: Run) => Promise<void>   // saveRun(stateDir, run)
 ```
 
-Optional, and read through an accessor, exactly as `counterFor(record, phase)` returns
-`record.passes[phase] ?? 0` (`machine.ts:7-9`):
+called **after the mutation and before the next candidate**, on the probe path as well as the
+escalation path. Ledger-first mirrors `main.ts:132-136`: a crash loses a prompt, never a state
+transition.
+
+This is the finding the pass-1 test plan is built around: **bump, re-load through `listRuns`, and
+assert no candidate is produced until `2 × threshold`.** A test that only inspects the in-memory
+object cannot catch it, which is exactly why pass 0 shipped it.
+
+### A18 — escalation is narrowed to actor-produced signals (BLOCKER 2, MAJOR 7)
+
+`stallable` means "worth a nudge". It does not mean "worth killing the task". The pass-0 design
+promoted one to the other without re-reading the rows, and the consequences are severe because
+`escalated` is in `TERMINAL_BAD` (`gating.ts:6-8`), so dependents gate to `blocked-on-failure`
+(`gating.ts:34-38`), and is `holdsFiles: true` (`phases.ts:131`).
+
+A candidate is escalation-eligible only when `row.signal` ∈ `{'artifact', 'verdict', 'pr'}` — the
+signals the probed actor produces by its own action. Every other stallable row is probed exactly as
+today and never escalated. Verified against `phases.ts`:
+
+| row | signal | escalates? | why |
+| --- | --- | --- | --- |
+| task `research`/`spec`/`plan` | `artifact` (`:92`, `:94`, `:99`) | **yes** | the worker writes the file |
+| task `spec-review`/`plan-review`/`pr-review-intent`/`pr-review-quality` | `verdict` (`:96`, `:101`, `:111`, `:114`) | **yes** | the worker writes the verdict |
+| task `implement` | `pr` (`:109`) | **yes** | the worker pushes the PR |
+| run `branch-review` | `verdict` (`:64`) | **yes** | the orchestrator writes the verdict |
+| task `blocked-on-files` | `files` (`:105`) | no | clears when a **sibling** releases (`machine.ts:186-189`); a sibling legitimately in `implement` >3h is ordinary |
+| task `blocked-on-decision` | `manual` (`:126`) | no | waits on a **human**; escalating a sleeping human's queue cascades dependents to `blocked-on-failure` |
+| run `dispatch` | `worktree` (`:54`) | no | **this alone fixes MAJOR 7** — `dispatch` has no `stallWhen`, so it would otherwise escalate a healthy run at 60m |
+| run `execute` | `gate` (`:56`) | no | clears on `intake_closed` + all tasks terminal (`machine.ts:68-73`), neither of which the probed orchestrator produces by working |
+
+The human-visible half of Goal 1 is not lost for the excluded rows: `formatStatus` already renders
+the open-decision age and question (`status.ts:21-26`) and the files-blocked holder with its escape
+hatch (`status.ts:38-55`).
+
+The precedent for "eligible for one thing, not another" is `stallWhen` (`phases.ts:32-39`), which
+exists because *"`execute` is probed 15 minutes into every run … which is the false alarm v4's
+third review round removed"*. **A18** is the same lesson applied one level up, and needs no
+`phases.ts` change because it reads `row.signal`, which is already there.
+
+### A19 — act on the gone-pane fact (BLOCKER 3, direction 2)
+
+The supervisor computes liveness every tick and discards it. **A19** consumes it, entirely within
+`src/supervisor/main.ts`:
+
+1. Once per tick, before the advancing loop, `const livePanes = new Set((await herdr.paneList()).map((p) => p.pane_id))`
+   — the same one-liner as `cli.ts:278` and `actions/status.ts:12`.
+2. `rebindOrchestrator` keeps its existing per-run call (`main.ts:170`) and its existing return
+   value, which is still discarded; **`src/lib/orchestrator.ts` is not modified.**
+3. After the rebind has had its chance, a run whose `orchestrator_pane` is non-null and **not** in
+   `livePanes` is `continue`d: no `evaluateRun`, no `advanceTasks`, no `deliverPendingAnswers`, no
+   `announceDecisions`, no digest. It is also filtered out of the two `applyStalls` inputs.
+4. The condition is logged **once per run per transition into it**, not once per tick, using an
+   in-process `Set<string>` of run ids cleared when the pane reappears.
+
+Suppressing the whole run rather than each send site is what makes this cheap and total — it covers
+all four senders, including the `announceDecisions` gap of **NG6**, for the case #15 names. The
+recovery path is unchanged and already correct: `formatStatus` prints the gone-pane warning and
+tells the human to run `claim` (`status.ts:99-102`).
+
+**Cost:** one extra `herdr pane list` per tick. `rebindOrchestrator` already issues one per
+advancing run (`src/lib/orchestrator.ts:47`), so this is additive but bounded and constant.
+
+**Deliberate non-extension:** this does **not** try to detect a live pane holding a wedged agent —
+the incident's actual shape (**P2**). That case is the task ladder's job, via **A7**.
+
+### A7, A20 — the hold reads the right pane, at the right rate (MAJOR 5)
+
+Pass 0 gated on `c.paneId`, which is `probePaneFor`'s result and collapses a paneless worker onto
+the orchestrator (`stall.ts:24`, pinned by `test/stall.test.ts:146-151`). Gating a worker's
+escalation on an unrelated agent's status is wrong, and it contradicted **A14**, which reads
+`task.pane_id`. Both now use one pane:
 
 ```ts
-export function stallProbesFor(record: { stall_probes?: number }): number {
-  return record.stall_probes ?? 0
+// the pane of the actor that OWNS the row — not the pane the probe is routed to.
+function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
+  return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
 }
 ```
 
-`readJson` does no validation (`store.ts:5-13`), so a run already on disk simply deserialises
-without the key and reads `0`. **`schema_version` stays `2`** (`ledger.ts:38`) — bumping it would
-make every in-flight run un-advanceable via `isCurrentSchemaRun` (`main.ts:30-32`) and force the
-human to `hpipe abort`, which is a disproportionate price for a counter whose absent value is
-unambiguously zero.
+`null` means the owning actor has no pane at all, which for an escalation-eligible row means the
+worker is gone — escalate without a gate. `Herdr.agentStatus` returns `'unknown'` on any failure
+(`herdr.ts:68-71`), so an unreachable pane escalates rather than hanging.
 
-Optional rather than required is also what keeps the diff honest: 13 test files construct `Task`
-object literals (`grep -rn "delivery_attempts: 0" test/ | wc -l` → 13), and a required field would
-turn a behavioural change into a 13-file mechanical edit that hides it.
+The gate is `!== 'working'`, deliberately **not** `isAgentReady` (`machine.ts:30-32`), which is
+`idle || done` and would exclude `blocked` — and a blocked agent is precisely the one that needs a
+human.
 
-**Reset points** — the counter is scoped to one phase entry, so it resets wherever
-`phase_entered_at` is set:
+**A20 fixes the cost, structurally.** Pass 0 claimed "one extra herdr call per record per phase
+entry"; a held candidate stays due and would have been re-read every tick — ≈36,000 calls for a
+worker held ten hours. Instead, **a hold increments `stall_probes` without sending**. The next
+evaluation is then one `threshold` later by the same due formula, the action stays `escalate`
+(the counter only rises), and the cost is **one status read per `threshold` per held candidate** —
+at the defaults, one per 45 minutes. No memoisation needed, and the corrected sentence is now true.
 
-- `enterRunPhase` (`machine.ts:45-51`) and `enterTaskPhase` (`machine.ts:90-96`) — the two places
-  that own a phase entry.
-- `cmdRewind`, which sets `phase_entered_at` directly and bypasses both (`cli.ts:180`, `:186`).
-  It already resets `passes` and `delivery_attempts` on the same lines (`cli.ts:178-179`); this
-  joins them.
+### A11 — the budget guards every send this task owns (MAJOR 6)
 
-### A6 — increment only on an accepted send
-
-`sendProbes` already documents why (`stall.ts:92-96`): marking a probe the send failed on would
-drop it silently and for good. The same rule now guards escalation — a probe herdr rejected must
-not count toward the cap, because the agent never saw it. `test/stall.test.ts:153-163` pins the
-existing behaviour and extends to the counter.
-
-Consequence, preserved not introduced: while sends keep failing, the record stays due and is
-retried every tick. That is today's behaviour (the key is only added on `ok`, `stall.ts:101`) and
-is what **P2**'s fix bounds at the delivery layer rather than here.
-
-### A7, A8 — escalation is held while the actor is mid-turn
-
-A worker legitimately deep in `implement` for three hours must not be escalated. Before escalating,
-the supervisor reads the actor's live status and holds if it is `working`:
-
-```ts
-if ((await deps.agentStatus(candidate.paneId)) === 'working') continue  // hold; consume nothing
-```
-
-`Herdr.agentStatus` returns `'unknown'` on any failure (`herdr.ts:68-71`), so an unreachable pane
-escalates rather than hanging — which is the right default. The check is a **live** read rather
-than the cached `task.agent_status` (`types.ts:53`) because `tasks.ts:17-21` documents that the
-cached value is the badge/wake cache and can be stale by a whole turn. It costs one extra herdr
-call per record per phase entry, only at the moment of escalation.
-
-This is a narrow guard, not a solution. An agent that answers a probe returns to idle within one
-turn, so **answering a probe does not stop the clock** — only producing the phase's signal does.
-The probe prompt must therefore not claim otherwise (see **A13**).
-
-`isAgentReady` (`machine.ts:30-32`) is deliberately **not** reused: it is `idle || done`, which
-would exclude `blocked`, and a blocked agent is exactly the one that needs a human. The gate is
-`!== 'working'`, not `isAgentReady`.
-
-**A8:** probes themselves are ungated. Probing a working actor is what happens today and the prompt
-tells it to ignore the probe; adding a gate there would change behaviour this issue is not about.
-
-### A9, A10 — the escalation prompt, and where it goes
-
-`advanceTasks` only emits a prompt for a transition **it** made (`tasks.ts:163-170`), and
-`advanceTask` has no `escalated` case (`machine.ts:191-192` → `default: return null`), so
-`gatherSignals` returns `null` for an escalated task (`tasks.ts:239-240`) and the loop `continue`s
-at `:161`. A task moved to `escalated` by the stall block — which runs *after* `advanceTasks` in
-the tick (`main.ts:176` vs `:238`) — would therefore **never** get an escalation prompt at all.
-
-So the stall block renders and sends its own, exactly as it already does for `stall-probe`
-(`main.ts:242-250`). Because it is not routed through `promptForTaskPhase`, no "why did this
-escalate" field is needed on the record.
-
-**A9 — to the orchestrator.** `taskRow('escalated').actor === 'human'` (`phases.ts:130`), and
-`actorPane` maps a non-worker actor to `run.orchestrator_pane` (`tasks.ts:105-111`), so existing
-task escalations already land there; `announceDecisions` targets the same pane (`tasks.ts:294`,
-`:307`). Sending a "you have stopped" message to the stalled worker would be pointless.
-
-**A10 — a separate prompt file.** `prompts/escalate.md` is written for the review-pass case: "This
-phase hit {{pass}} review passes without clearing" and "Do not start another pass" (`escalate.md:3`,
-`:5`). Neither sentence is true of a stall. Parameterising it would mean threading a reason through
-`promptForTaskPhase` (`tasks.ts:78-86`) and `promptForRunPhase` (`deliver.ts:181-187`) and onto the
-record, for no gain — the stall block renders directly. `prompts/stall-escalate.md` must be added
-to `ALL` in `test/prompts.test.ts:10-14` or the "no orphan prompt files" test fails (`:21-24`), and
-must not contain the literal string `hpipe` (`:68-76`).
-
-### A11, A12 — sticky delivery give-up (P2)
-
-The inline block at `main.ts:223-236` is not exported and cannot be unit-tested. It is extracted
-into `deliver.ts` beside `shouldRetry` (`deliver.ts:76-81`), which is the precedent for pulling
-exactly this kind of predicate out of the loop:
+`main.ts:223-236` is extracted into `deliver.ts` beside `shouldRetry` (`deliver.ts:76-81`), which
+is the precedent for pulling this kind of predicate out of an untestable loop:
 
 ```ts
 export class DeliveryBudget {
-  private readonly failures = new Map<string, number>()
-  private readonly abandoned = new Set<string>()
-
-  /** True when this pane is still worth sending to. */
   accepts(paneId: string): boolean
-
-  /** Records the outcome. Returns 'ok' | 'retry' | 'abandoned' for the caller to log. */
-  record(paneId: string, sent: { ok: boolean; code?: string }, max: number): DeliveryOutcome
+  record(paneId: string, sent: { ok: boolean; code?: string }, max: number): 'ok' | 'retry' | 'abandoned'
 }
 ```
 
-`record` on success clears both maps for that pane; on failure it increments and, when
-`shouldRetry` returns false, moves the pane to `abandoned` **instead of** deleting its count
-(`main.ts:234` is the bug). `accepts` is consulted before each send, and "abandoned" is logged once
-on the transition rather than every fifth tick.
+`record` on success clears the pane; on failure it increments and, when `shouldRetry` returns
+false, moves the pane to `abandoned` **instead of deleting its count** — `main.ts:234` is the bug.
+`accepts` is consulted before each send and "abandoned" is logged once on the transition.
 
-No extra wiring is needed for recovery: `rebindOrchestrator` re-points `run.orchestrator_pane` to a
-**new** pane id (`orchestrator.ts:43-60`), and a new id is not in `abandoned`, so delivery resumes
-by itself.
+Amended per MAJOR 6: **the same budget instance is passed into `StallDeps`**, so probe and
+escalation sends check `accepts` too. Pass 0 left both calling `herdr.agentPrompt` directly
+(`main.ts:251`, `:267`), which would have left a dead pane receiving an unbounded probe stream.
 
-**A12 — not persisted.** The map is keyed by pane id and a supervisor restart may well face a
-different pane topology; re-arming delivery after a restart is correct. This mirrors `attempts`
-being loop-local today (`main.ts:107`).
+Recovery needs no wiring: `rebindOrchestrator` re-points to a **new** pane id
+(`src/lib/orchestrator.ts:43-60`), and a new id is not in `abandoned`.
 
-**A17 — the honest limitation.** When the orchestrator pane is dead, the orchestrator pane is also
-the only channel this plugin has to a human. A run whose probes and escalations cannot be delivered
-will not increment `stall_probes` (**A6**) and will not escalate. The recovery is out-of-band and
-already exists and already reads correctly: `formatStatus` prints the gone-pane warning and tells
-the human to run `claim` (`status.ts:99-102`), fed live panes from both entry points
-(`cli.ts:278`, `actions/status.ts:12`). Adding a second channel (herdr workspace badges via
-`workspaceReportTokens`, `herdr.ts:106-113`) is **NG4** — badges are per-task-workspace
-(`deliver.ts:192-201`) and a run with a dead orchestrator may have no workspace at all.
-
-### A13 — `{{awaiting}}` replaces `{{artifact_path}}` (P3, P3b)
-
-One helper serves both levels, and it is the only new path-shaped code:
+### A13 — `{{awaiting}}`, keyed on `row.signal` (P3, P3b, MAJOR 4, MINOR 11)
 
 ```ts
-// stall.ts — imports absoluteArtifactPath from './deliver'; does not change it.
-export function stallAwaiting(run: Run, task: Task | null): string
+export function stallAwaiting(run: Run, task: Task | null, hpipe: string): string
 ```
 
-| record | row | returns |
-| --- | --- | --- |
-| task | `signal === 'artifact'` (`research`/`spec`/`plan`, `phases.ts:92-100`) | `absoluteArtifactPath(run, task)` |
-| task | `signal === 'verdict'` (the four review rows, `phases.ts:96-116`) | `absoluteArtifactPath(run, task)` — the verdict path, `deliver.ts:88-90` |
-| task | `signal === 'pr'` (`implement`, `phases.ts:109`) | `a pushed PR for <branch> (#<issue>)` |
-| task | `blocked-on-files` (`signal: 'files'`, `phases.ts:105`) | `another task to release the files this one declared` |
-| task | `blocked-on-decision` (`signal: 'manual'`, `phases.ts:126`) | `an answer to the open decision` |
-| run | `branch-review` (`signal: 'verdict'`, `phases.ts:64`) | `absoluteArtifactPath(run, null)` |
-| run | `dispatch` (`signal: 'worktree'`, `phases.ts:54`) | `a worktree adopted for a dispatched task` |
-| run | `execute` (`signal: 'gate'`, `phases.ts:56`) | `hpipe dispatch --done to close intake` — rendered via `{{hpipe}}` |
-| either | anything else | `whatever clears <phase>` |
+Keyed on `row.signal`; the record the path resolves against is `task` when one is present and the
+run otherwise, which is the whole of the run/task split:
 
-This is a `switch` on `row.signal`, not on the phase name, so **NG2**/#19 making four more rows
-stallable does not require touching it — those rows' signals (`ci`, `merged`, `closed`,
-`worktree`) fall through to the default until #19 chooses to name them.
+| `row.signal` | returns |
+| --- | --- |
+| `artifact` | `absoluteArtifactPath(run, task)` |
+| `verdict` | `absoluteArtifactPath(run, task)` — the verdict path (`deliver.ts:88-93`) |
+| `pr` | `a pushed PR for <branch> (#<issue>)` |
+| `files` | `another task to release the files this one declared` |
+| `worktree` | `a worktree adopted for a dispatched task` |
+| `gate` | `<hpipe> dispatch --done to close intake` |
+| `manual` | `an answer to the open decision` |
+| anything else | `whatever clears <phase>` |
 
-`prompts/stall-probe.md` is rewritten: `{{artifact_path}}` → `{{awaiting}}`, the "nothing has
-appeared at" framing becomes signal-neutral, "move it to the path above" becomes conditional-free
-phrasing, and **`:7`'s "it will not ask again for this phase" is deleted** and replaced by the
-ladder: `This is probe {{probe}} of {{probe_max}}.` New placeholders are supplied at both call
-sites; `render` throws on any placeholder no caller resolves (`render.ts:11`), so a missed one
-fails loudly at delivery rather than shipping through.
+Keying on signal rather than phase means #19 making four more rows stallable requires no change
+here — `ci`, `merged`, `closed` and `worktree` fall through to the default until #19 names them.
 
-### A14 — pane tail instead of a git-dirty signal (NG1)
+**MAJOR 4's fix is the `hpipe` parameter.** Pass 0 wrote `{{hpipe}}` into the `gate` string and
+claimed `render` would catch a miss. It would not: `render` is a single `String.replace` pass whose
+replacement text is never re-scanned, and its throw inspects only placeholders present in the
+*template* (`render.ts:8-14`). A `{{hpipe}}` arriving inside a **value** ships verbatim.
+`test/prompts.test.ts:68-76` cannot catch it either — it reads only `prompts/*.md`. So the caller
+passes `hpipeCommand(pluginRoot)` (`render.ts:28-38`); `pluginRoot` is already in scope at both
+sites (`main.ts:97`).
 
-The issue's third direction asks for a liveness signal richer than "does the artifact exist".
-Nothing in `src/` reads git state — the only `git` subprocesses are
-`git rev-parse --show-toplevel` (`cli.ts:346`, `actions/claim.ts:14`) — so a dirty-worktree check
-means a new `Git` client (it would mirror `Gh`, `gh.ts:28-40`, so it is not an invented pattern)
-plus a per-record subprocess.
+`prompts/stall-probe.md` is rewritten: `{{artifact_path}}` → `{{awaiting}}`, the framing becomes
+signal-neutral, and **`:7`'s "it will not ask again for this phase" is deleted**, replaced by
+`This is probe {{probe}} of {{probe_max}}.` The prompt must not claim that *answering* stops the
+clock — under **A7** an agent that answers returns to idle within a turn, so only producing the
+signal does.
 
-It is not worth it here, for two reasons. First, the escalation ladder makes the signal much less
-load-bearing: a worker that is genuinely working produces its artifact or reads `working`
-(**A7**); one that is not gets escalated at 3h whether its worktree is dirty or clean. Dirtiness
-changes the *message*, not the *decision*. Second, a strictly better message is already available
-for free: `Herdr.paneRead` (`herdr.ts:77-82`), which `main.ts:124-129` already uses to attach
-`BLOCKED_TAIL_LINES` (default 8, `config.ts:32`) of a blocked worker's screen to a wake line.
+### A1, A2, A3, A5, A6, A8, A9, A10, A12, A14, A15 — unchanged
 
-So: **when escalating a task whose `pane_id` is non-null, attach the last `BLOCKED_TAIL_LINES`
-lines of its pane to the escalation prompt**, indented, mirroring `main.ts:126-128` exactly. The
-last eight lines of a worker's screen distinguish "usage limit reached", "waiting on a permission
-prompt" and "crashed" — which a boolean dirty flag cannot.
+Carried from pass 0; the reviewer confirmed A2, A5, A10 and A16's substance. In brief:
 
-### A15 — `hpipe status` surfaces it
+- **A1** reuses `escalated`: it already carries `returnsTo: 'escalated_from'`
+  (`phases.ts:130-131`), `enterTaskPhase` stamps it (`machine.ts:92`), `cmdRewind` clears it
+  (`cli.ts:181`), `hpipe release` accepts it (`cli.ts:207-211`).
+- **A2/A3**: constant interval; the nth probe is due at `phase_entered_at + n × threshold`, so no
+  timestamp is stored. Task: 45 / 90 / 135m, escalate at **180m**. Run: 15 / 30 / 45m, escalate at
+  **60m** — but only for `branch-review` now (**A18**). Geometric backoff at factor 2 gives 675m
+  ≈ 11.25h against a 13h incident, which is not a fix.
+- **A5**: `stall_probes?: number`, read via `stallProbesFor(record) => record.stall_probes ?? 0`,
+  mirroring `counterFor` (`machine.ts:7-9`). `readJson` does no validation (`store.ts:5-13`), so an
+  older run reads `0`. No `schema_version` bump — `isCurrentSchemaRun` is a hard `=== 2`
+  (`main.ts:30-32`) and bumping strands every in-flight run behind `hpipe abort`. Optional also
+  keeps the diff honest: **11 files / 13 lines** construct `Task` literals (MINOR 9).
+- **A14**: on escalating a task with a non-null `pane_id`, attach `BLOCKED_TAIL_LINES` (default 8,
+  `config.ts:32`) of its pane via `Herdr.paneRead` (`herdr.ts:77-82`), mirroring `main.ts:124-129`.
+- **A15**: `taskWarnings` (`status.ts:17-59`) gains, mirroring `status.ts:21-26`:
+  `⚠ t3 escalated from implement 47m ago — needs a human; \`hpipe rewind …\` resumes it`, using
+  `ageMinutes` (`status.ts:12-14`) and `escalated_from` (`types.ts:57`). Fires for every escalated
+  task, including ones escalated by `advanceLoopingRow` (`machine.ts:122`).
 
-#15's first direction ends "surface it in `hpipe status` as needing a human". Today an escalated
-task renders as an ordinary line, `[escalated]` among the other bits (`status.ts:111-121`), with no
-warning. `taskWarnings` (`status.ts:17-59`) gains, mirroring the open-decision line at `:21-26`:
+### A23 — unheld files (the orchestrator's ruling)
 
-```
-  ⚠ t3 escalated from implement 47m ago — needs a human; `hpipe rewind <run> implement --task t3` resumes it
-```
+`src/cli.ts`, `src/lib/types.ts`, `src/lib/machine.ts` and `test/cli-commands.test.ts` are edited
+here although unheld. The ruling, recorded so implementation cannot quietly drift from it:
 
-using the existing `ageMinutes` helper (`status.ts:12-14`) against `phase_entered_at`, and
-`task.escalated_from` (`types.ts:57`) for the origin phase. It fires for **every** escalated task,
-not only stall-escalated ones — a task escalated by `advanceLoopingRow` (`machine.ts:122`) is
-equally invisible today, and #19 observes the same gap from the other side.
-
-### A16 — the keys and the set are deleted
-
-`stallKey` (`stall.ts:12-14`), `taskStallKey` (`stall.ts:62-64`) and the `alreadyProbed` parameter
-on both candidate functions exist only to back the in-process set. With **A4** they are dead.
-Deleting them updates three tests that reference the key format directly
-(`test/stall.test.ts:66`, `:72`, `:124`). Keeping them as unused exports would leave two ways to
-express "has this been probed", which is how they would drift apart.
+1. **The `cmdRewind` change stays**, because dropping it leaves a rewound task carrying a stale
+   `stall_probes`. `cmdRewind` sets `phase_entered_at = Date.now()` directly (`cli.ts:180`,
+   `:186`), bypassing `enterTaskPhase`; without a reset the counter would already be at or past
+   `STALL_PROBE_MAX`, so the ladder would escalate on the first due tick instead of re-arming.
+   (MINOR 12: the task branch resets `passes` and `delivery_attempts` at `cli.ts:178-179`; the run
+   branch at `:184-187` has no `delivery_attempts` line, so the run-side reset stands on this
+   reason alone.)
+2. **t1's PR (#9) merges first.** Before opening this one: rebase on `main`, re-run `bun test` and
+   `bun run typecheck`, and state in the PR body that both were re-run post-rebase.
+3. **A real conflict in any of those four files is a stop** — `hpipe decide`, not a hand
+   resolution.
 
 ---
 
@@ -424,108 +433,106 @@ express "has this been probed", which is how they would drift apart.
 
 ```ts
 // types.ts — on both Run and Task
+/** Stall probes sent, plus escalation holds. Reset on every phase entry. */
 stall_probes?: number
 ```
 
-Written by the stall block only; read by the stall block and (indirectly, via phase) by
-`formatStatus`. Reset at `machine.ts:45-51`, `machine.ts:90-96`, `cli.ts:178-187`.
+Reset wherever `phase_entered_at` is set: `enterRunPhase` (`machine.ts:45-51`), `enterTaskPhase`
+(`machine.ts:90-96`), and `cmdRewind` (`cli.ts:177-194`), which bypasses both.
 
 ### Config
 
-`config.ts` gains `STALL_PROBE_MAX: number` in `Config` (`:4-20`), `3` in `DEFAULTS` (`:22-38`),
-and the key in `NUMERIC` (`:40-44`) — three edits, identical to `PROMPT_RETRY_MAX`.
+`STALL_PROBE_MAX: number` into `Config` (`config.ts:4-20`), `3` into `DEFAULTS` (`:22-38`), the key
+into `NUMERIC` (`:40-44`) — identical to `PROMPT_RETRY_MAX`.
 
 ### `stall.ts` — classification (pure)
 
 ```ts
 export type StallAction = 'probe' | 'escalate'
-
 export interface StallCandidate {
-  run: Run
-  task: Task | null          // null at the run level
+  run: Run; task: Task | null
   action: StallAction
-  probe: number              // 1-based: which probe this is, or MAX+1 when escalating
+  probe: number          // 1-based
   minutes: number
-  paneId: string
+  paneId: string         // where the probe is SENT   (probePaneFor)
+  actorPaneId: string | null  // whose status gates escalation (actorPaneFor)
 }
-
 export function stallCandidates(runs, now, thresholdMinutes, probeMax): StallCandidate[]
 export function taskStallCandidates(runs, now, thresholdMinutes, probeMax): StallCandidate[]
 ```
 
-Per record, unchanged from today except the last two steps:
+Per record — steps 1-3 unchanged from today:
 
-1. `row.stallable` — unchanged (`stall.ts:35` run, `:74` task). **No `phases.ts` change (NG2).**
-2. `row.stallWhen` for run rows — unchanged (`stall.ts:36`).
-3. `probePaneFor` — unchanged (`stall.ts:22-26`), including the worker→orchestrator fallback.
+1. `row.stallable` (`stall.ts:35` run, `:74` task). **No `phases.ts` change.**
+2. `row.stallWhen` for run rows (`stall.ts:36`).
+3. `probePaneFor` (`stall.ts:22-26`), including the worker→orchestrator fallback.
 4. **Due:** `now - phase_entered_at >= thresholdMinutes × (stallProbesFor(record) + 1)` minutes.
-5. **Action:** `stallProbesFor(record) >= probeMax ? 'escalate' : 'probe'`.
+5. **Action:** `'escalate'` when `stallProbesFor(record) >= probeMax` **and** `row.signal` ∈
+   `{'artifact','verdict','pr'}` (**A18**); otherwise `'probe'`.
+
+Note step 5's consequence: an excluded row at the cap produces `'probe'` forever, on a 45-minute
+cadence. That is intended — it is a nudge, and `hpipe status` carries the standing warning.
 
 ### `stall.ts` — application (injected effects)
 
-`sendProbes` is replaced by `applyStalls`, same DI shape:
-
 ```ts
 export interface StallDeps {
-  probe: (c: StallCandidate) => Promise<{ ok: boolean }>
+  accepts: (paneId: string) => boolean                        // A11
+  probe: (c: StallCandidate) => Promise<{ ok: boolean; code?: string }>
   escalate: (c: StallCandidate) => Promise<void>
   agentStatus: (paneId: string) => Promise<AgentStatus>
+  persist: (run: Run) => Promise<void>                        // A4 / A22
 }
 
 export async function applyStalls(candidates: StallCandidate[], deps: StallDeps): Promise<void> {
   for (const c of candidates) {
+    const record = c.task ?? c.run
+    if (!deps.accepts(c.paneId)) continue                     // A11
+
     if (c.action === 'probe') {
-      if ((await deps.probe(c)).ok) bumpStallProbes(c.task ?? c.run)   // A6
+      if ((await deps.probe(c)).ok) {                         // A6
+        bumpStallProbes(record)
+        await deps.persist(c.run)                             // A22 — BLOCKER 1
+      }
       continue
     }
-    if ((await deps.agentStatus(c.paneId)) === 'working') continue     // A7 — hold
-    await deps.escalate(c)
+
+    if (c.actorPaneId !== null && (await deps.agentStatus(c.actorPaneId)) === 'working') {
+      bumpStallProbes(record)                                 // A20 — hold consumes a slot
+      await deps.persist(c.run)
+      continue
+    }
+    await deps.escalate(c)                                    // persists internally, then sends
   }
 }
 ```
 
-`enterRunPhase` / `enterTaskPhase` are called inside the `escalate` callback in `main.ts`, keeping
-`stall.ts` free of a `machine.ts` import and matching how `deliverPendingAnswers` calls
-`enterTaskPhase` at its own layer (`tasks.ts:283`).
+`enterTaskPhase` / `enterRunPhase` are called inside the `escalate` callback in `main.ts`, keeping
+`stall.ts` free of a `machine.ts` import — the same layering as `deliverPendingAnswers`
+(`tasks.ts:283`).
 
 ### One tick, end to end
 
-Unchanged up to `main.ts:236`. Then:
-
 ```
-applyStalls(stallCandidates(runs, now, STALL_MINUTES, STALL_PROBE_MAX), runDeps)
-applyStalls(taskStallCandidates(runs, now, TASK_STALL_MINUTES, STALL_PROBE_MAX), taskDeps)
-if (anything escalated) await saveRun(stateDir, run)      // see Error handling
-```
-
-`probe` renders `stall-probe` with `{ run_id, phase, minutes, awaiting: stallAwaiting(run, task),
-probe, probe_max }` and calls `herdr.agentPrompt`.
-
-`escalate` does, in order: read the pane tail when `task.pane_id !== null` (**A14**), call
-`enterTaskPhase(run, task, 'escalated', 'N stall probes unanswered')` (which stamps
-`escalated_from`, `machine.ts:92`, and resets `stall_probes` per **A5**), `saveRun`, then render
-`stall-escalate` and send it to `run.orchestrator_pane` (**A9**). **The ledger write precedes the
-send**, mirroring `main.ts:132-136`: a crash between the two loses the prompt, not the transition,
-and `hpipe status` then shows the escalated task with **A15**'s warning.
-
-### Delivery (P2)
-
-`main.ts:223-236` becomes:
-
-```ts
-for (const delivery of deliveriesFor(pending)) {
-  if (!budget.accepts(delivery.paneId)) continue
-  const outcome = budget.record(
-    delivery.paneId, await herdr.agentPrompt(delivery.paneId, delivery.text),
-    config.PROMPT_RETRY_MAX,
-  )
-  if (outcome === 'abandoned') {
-    console.error(`[pipeline] abandoning delivery to ${delivery.paneId} — run \`hpipe status\``)
-  }
-}
+drain → listRuns → livePanes = paneList()                    // A19 step 1
+applyEvents → saveRun → CI poll → pickOneAdvance
+for (run of advancing):
+    rebindOrchestrator(run)                                  // unchanged, main.ts:170
+    if (run.orchestrator_pane && !livePanes.has(it)): log once, continue     // A19
+    … evaluateRun / advanceTasks / answers / decisions / badges / saveRun …  // unchanged
+deliveries: budget.accepts → agentPrompt → budget.record     // A11, P2a
+reachable = runs.filter(r => !r.orchestrator_pane || livePanes.has(r.orchestrator_pane))   // A19
+applyStalls(stallCandidates(reachable, now, STALL_MINUTES, MAX),      runDeps)
+applyStalls(taskStallCandidates(reachable, now, TASK_STALL_MINUTES, MAX), taskDeps)
 ```
 
-with `const budget = new DeliveryBudget()` replacing `const attempts = new Map()` (`main.ts:107`).
+`probe` renders `stall-probe` with `{ run_id, phase, minutes, awaiting: stallAwaiting(run, task,
+hpipeCommand(pluginRoot)), probe, probe_max }`.
+
+`escalate`, in order: read the pane tail when `task.pane_id !== null` (**A14**) →
+`enterTaskPhase(run, task, 'escalated', 'N stall probes unanswered')` (stamps `escalated_from`,
+`machine.ts:92`, and resets `stall_probes`) → **`saveRun`** → render `stall-escalate` → send to
+`run.orchestrator_pane` (**A9**). Ledger before send (**A22**).
 
 ---
 
@@ -533,107 +540,138 @@ with `const budget = new DeliveryBudget()` replacing `const attempts = new Map()
 
 | Failure | Behaviour | Why |
 | --- | --- | --- |
-| `agentPrompt` rejects a probe | `stall_probes` is not incremented; the record stays due and is retried next tick | **A6**; `stall.ts:92-96` already argues it |
-| `agentPrompt` rejects an escalation prompt | The phase transition **has already been persisted**; the prompt is lost | Ledger-first, `main.ts:132-136`. `hpipe status` shows it (**A15**) |
-| `agentStatus` call fails | Returns `'unknown'` (`herdr.ts:70`), which is `!== 'working'`, so escalation proceeds | Failing open beats sitting 13 hours |
-| `paneRead` for the tail fails | Returns `''` (`herdr.ts:81`); the escalation prompt ships without a tail | `main.ts:126` already guards on `tail.trim().length > 0` |
-| A record deserialised without `stall_probes` | Reads `0` via the accessor | **A5**; `readJson` does no validation (`store.ts:5-13`) |
-| `stallAwaiting` cannot resolve a path | Falls through to `whatever clears <phase>` | Same shape as today's fallback, `main.ts:264` |
-| A probe's pane is `null` | The candidate is never produced (`stall.ts:38-39`, `:76-77`) | Unchanged. `test/stall.test.ts:165-175` pins it |
-| An escalation would target an abandoned pane | Nothing is delivered; the transition still persists | **A17** |
-| `saveRun` throws inside the stall block | Caught by the tick's `try` (`main.ts:269-271`); the loop survives | Unchanged |
-| Two escalations in one tick | Each calls `saveRun` for its own run; the run object is shared per tick | Matches `main.ts:217` |
+| `agentPrompt` rejects a probe | Counter not incremented, nothing persisted; stays due, retried next tick | **A6**; `stall.ts:92-96` already argues it |
+| …and keeps rejecting | `DeliveryBudget` abandons the pane after `PROMPT_RETRY_MAX` | **A11** — pass 0 left this unbounded (MAJOR 6) |
+| `agentPrompt` rejects an escalation prompt | The transition is already persisted; the prompt is lost | **A22**. `hpipe status` shows it (**A15**) |
+| `agentStatus` fails | `'unknown'` (`herdr.ts:70`), which is `!== 'working'` → escalate | Failing open beats sitting 13 hours |
+| `actorPaneId` is `null` | Escalate without the gate | The owning actor has no pane; **A7** |
+| `paneRead` fails | `''` (`herdr.ts:81`); escalation ships without a tail | `main.ts:126` already guards on non-empty |
+| `paneList` fails | Returns `[]` (`herdr.ts:60`) → **every** run looks unreachable | **Named risk.** Guarded: **A19** suppresses only when `livePanes.size > 0`, mirroring `status.ts:99` |
+| Record has no `stall_probes` | Reads `0` | **A5**; `readJson` does no validation (`store.ts:5-13`) |
+| `stallAwaiting` cannot resolve a path | `whatever clears <phase>` | Same shape as today's fallback |
+| Probe pane is `null` | No candidate produced (`stall.ts:38-39`, `:76-77`) | Unchanged; `test/stall.test.ts:165-175` pins it |
+| `persist` throws | Caught by the tick's `try` (`main.ts:269-271`); counter lost, probe re-sent next tick | Duplicate nudge beats a lost transition |
 
-**Race worth naming.** `advanceTasks` runs earlier in the same tick (`main.ts:176`) and may have
-moved a task into a new phase. `taskStallCandidates` then reads the *new* `phase_entered_at`, so
-the task is not due and is not probed. Correct, and it is today's behaviour — the key at
-`stall.ts:63` embeds `phase_entered_at` for the same reason.
+**`paneList` returning `[]` is the one new failure mode this design introduces**, and it is why
+**A19** copies `status.ts:99`'s `livePanes.size > 0` guard rather than trusting an empty list. A
+herdr hiccup must not silently freeze every run.
+
+**Race, unchanged:** `advanceTasks` runs earlier in the same tick (`main.ts:176`) and may have
+reset `phase_entered_at`, so the task is not due and is not probed. Correct, and today's behaviour.
 
 ---
 
 ## Testing strategy
 
-Unit tests are `bun test`, colocated in `test/`, and the modules under change are already covered
-(`test/stall.test.ts`, 20 tests / 31 `expect()` calls). Baseline to hold: 351 pass, 0 fail,
-`tsc --noEmit` clean.
+Baseline to hold: 351 pass / 0 fail, `tsc --noEmit` clean.
 
-**`test/stall.test.ts`** — extend; three existing tests reference the deleted key format
-(`:66`, `:72`, `:124`) and are rewritten against `stall_probes`.
+**`test/stall.test.ts` — full rewrite of the call sites, not an extension (MAJOR 8).** Pass 0
+understated this. All 20 tests pass `alreadyProbed` positionally (`grep -c "new Set(" ` → `18`
+occurrences), and **A16** removes that parameter in favour of `probeMax: number`, so every test in
+the file changes signature. Three also assert the deleted key format (`:66`, `:72`, `:124`). New
+coverage:
 
-- probe 1 due at exactly `threshold`, not before (replaces `:60-61`, `:110-113`)
-- probe 2 due at `2 × threshold` and not at `threshold + 1m`
-- `action === 'escalate'` once `stall_probes === probeMax`, and not at `probeMax - 1`
-- a successful probe increments; a failed one does not, and the record stays due (extends `:153-163`)
-- escalation held when `agentStatus` → `'working'`; counter unchanged; escalate callback not called
-- escalation proceeds on `'idle'`, `'done'`, `'blocked'` and `'unknown'` (**A7**'s `!== 'working'`,
-  not `isAgentReady`)
-- every existing pane-resolution test (`:128-151`, `:165-175`) still passes unchanged — the
-  `probePaneFor` contract is untouched
-- `stallAwaiting`: an absolute path for each artifact row and each verdict row; a non-path sentence
-  for `implement`, `blocked-on-files`, `blocked-on-decision`, run `dispatch`, run `execute`; and
-  **a regression test that a task probe never renders the string `whatever clears research`** (P3)
-- **a regression test that a run probe in `dispatch` never names a `docs/superpowers/reviews/` path** (P3b)
-
-**`test/machine-task.test.ts` / `test/machine-run.test.ts`** — `enterTaskPhase` and `enterRunPhase`
-reset `stall_probes` to 0.
-
-**`test/cli-commands.test.ts`** — `cmdRewind` resets `stall_probes` for both a task and a run,
-asserted beside the existing `delivery_attempts` assertion.
-
-**`test/config.test.ts`** — `STALL_PROBE_MAX` defaults to 3 and parses from `config.env`, mirroring
-`:11-30`.
+- probe 1 due at exactly `threshold`; probe 2 at `2 × threshold` and not at `threshold + 1m`
+- **the BLOCKER 1 regression: bump → `persist` → re-load through `listRuns` → assert no candidate
+  until `2 × threshold`.** An in-memory-only assertion cannot catch this and is what let pass 0 ship
+- `action === 'escalate'` at `probeMax`, not at `probeMax - 1`
+- **A18**: `blocked-on-files`, `blocked-on-decision`, run `dispatch` and run `execute` are still
+  probed at the cap and **never** return `'escalate'`; `research`/`spec`/`plan`/the four review
+  rows/`implement`/run `branch-review` do
+- **A7**: the gate reads `actorPaneId`, and a paneless worker escalates rather than consulting the
+  orchestrator (the inverse of `test/stall.test.ts:146-151`, which still pins probe routing)
+- **A20**: a hold bumps the counter and persists, so the next check is one `threshold` later
+- escalation proceeds on `idle`, `done`, `blocked`, `unknown`; holds only on `working`
+- **A11**: a candidate whose pane the budget has abandoned produces no send
+- `stallAwaiting` per signal, and two regressions: **a task probe never renders
+  `whatever clears research`** (P3); **a run probe in `dispatch` never names a
+  `docs/superpowers/reviews/` path** (P3b)
+- **MAJOR 4**: the fully rendered stall-probe text contains no `{{`
 
 **`test/deliver.test.ts`** — `DeliveryBudget`: accepts until the cap; **stops accepting after it**
-(the regression test for `main.ts:234`); resumes after a successful send; a fresh pane id is
-accepted immediately; `shouldRetry`'s existing non-retryable codes abandon at once.
+(the `main.ts:234` regression); resumes after a success; a fresh pane id is accepted immediately.
 
-**`test/status.test.ts`** — the escalated-task warning renders with age and `escalated_from`, and
-does not render for a non-escalated task.
+**`test/main-*.test.ts` or `test/tick.test.ts`** — **A19**: a run whose `orchestrator_pane` is
+absent from a non-empty `livePanes` is skipped and produces no delivery, no probe and no decision
+announcement; with `livePanes` empty, nothing is suppressed.
 
-**`test/prompts.test.ts`** — add `stall-escalate` to `ALL` (`:10-14`); the existing "no orphan
-prompt files" (`:21-24`) and "no prompt hardcodes the hpipe binary" (`:68-76`) tests then cover the
-new file for free. Add: `stall-probe.md` no longer contains `will not ask again`, and contains
-`{{awaiting}}`, `{{probe}}`, `{{probe_max}}`.
+**`test/machine-task.test.ts` / `test/machine-run.test.ts`** — `enterTaskPhase` / `enterRunPhase`
+reset `stall_probes`.
 
-**`test/table.test.ts`** — unchanged and must stay green; it is the guard that **NG2** was honoured
-(no row gained or lost `stallable`).
+**`test/cli-commands.test.ts`** — `cmdRewind` resets `stall_probes` for a task and for a run.
 
-**Live verification — not optional.** This repo's own history is that DI with fakes hides wiring
-bugs: the previous live run surfaced startup and gating Criticals that the unit suite passed
-cleanly. Before this is called done, against a real herdr session:
+**`test/config.test.ts`** — `STALL_PROBE_MAX` defaults to 3 and parses (mirrors `:11-30`).
 
-1. Start a run, seed a task, and set `TASK_STALL_MINUTES=1`, `STALL_PROBE_MAX=2` in `config.env`.
-2. Confirm probes land at ~1m and ~2m with a **real absolute path** in the body, then an escalation
-   at ~3m carrying the worker's pane tail.
-3. Confirm `hpipe status` shows the ⚠ escalated line and that `hpipe rewind … --task` clears it and
-   re-arms the ladder.
-4. Kill the orchestrator pane mid-run and confirm the supervisor logs abandonment **once** and then
-   goes quiet, rather than cycling every five ticks.
+**`test/status.test.ts`** — the escalated-task warning renders with age and `escalated_from`.
 
-**Operator docs.** `test/integration/smoke.md` gains a stall-ladder subsection beside the existing
-`PROMPT_RETRY_MAX` paragraph (`:281`) and a row in the recovery table (`:473`).
+**`test/prompts.test.ts`** — add `stall-escalate` to `ALL` (`:10-14`); the orphan (`:21-24`) and
+no-literal-`hpipe` (`:68-76`) tests then cover it. Add: `stall-probe.md` no longer contains
+`will not ask again`, and contains `{{awaiting}}`, `{{probe}}`, `{{probe_max}}`.
+
+**`test/table.test.ts`** — unchanged, but **it is not the NG2 guard** (MAJOR 8). Its stallable test
+(`:30-37`) only asserts that a stallable row can be probed; adding `stallable: true` to `merge`
+would pass it. **A21** adds the real guard, to `test/phases.test.ts`:
+
+```ts
+test('the stallable set is exactly what #15 assumed — widening it belongs to #19', () => {
+  expect(TASK_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort()).toEqual([
+    'blocked-on-decision', 'blocked-on-files', 'implement', 'plan', 'plan-review',
+    'pr-review-intent', 'pr-review-quality', 'research', 'spec', 'spec-review',
+  ])
+  expect(RUN_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort())
+    .toEqual(['branch-review', 'dispatch', 'execute'])
+})
+```
+
+**Live verification — not optional.** This repo's history is that DI with fakes hides wiring bugs,
+and pass 0's BLOCKER 1 is that failure mode exactly: a design whose unit tests would all have passed
+while the feature did nothing. Against a real herdr session, with `TASK_STALL_MINUTES=1`,
+`STALL_PROBE_MAX=2`:
+
+1. Probes at ~1m and ~2m with a **real absolute path**, then escalation at ~3m with a pane tail.
+2. **Read the run JSON off disk between probes and confirm `stall_probes` is climbing.** This is the
+   BLOCKER 1 check and it cannot be done from the unit suite.
+3. `hpipe status` shows the ⚠ escalated line; `hpipe rewind … --task` clears it and re-arms.
+4. Park a task in `blocked-on-decision` past the cap and confirm it is **probed and never
+   escalated** (**A18**).
+5. Kill the orchestrator pane mid-run: the supervisor logs suppression **once**, then goes quiet —
+   no digests, no probes, no decision announcements (**A19**).
+
+**Pre-PR gate (A23).** After #9 merges: rebase on `main`, re-run `bun test` and `bun run typecheck`,
+state in the PR body that both were re-run post-rebase. A real conflict in `src/cli.ts`,
+`src/lib/types.ts`, `src/lib/machine.ts` or `test/cli-commands.test.ts` is a stop and an
+`hpipe decide`.
+
+**Operator docs.** `test/integration/smoke.md` gains a stall-ladder subsection beside the
+`PROMPT_RETRY_MAX` paragraph (`:281`) and a recovery-table row (`:473`).
 
 ---
 
 ## Rejected alternatives
 
-- **A new `stalled` phase.** Needs `phases.ts` (**NG2**), and duplicates `escalated`'s
-  `returnsTo`/`rewind`/`release` machinery (`phases.ts:130-131`, `cli.ts:181`, `cli.ts:207-211`).
-- **Exponential backoff.** 11.25 hours to escalate a task at the shipped defaults — see **A2**.
-- **Keeping the in-process `probed` set and adding a separate counter.** Two sources of truth for
-  "has this been probed", one of which dies on restart.
+- **A new `stalled` phase.** Needs `phases.ts` (**NG2**); duplicates `escalated`'s
+  `returnsTo`/`rewind`/`release` machinery.
+- **Exponential backoff.** 11.25h to escalate against a 13h incident (**A2**).
+- **Escalating every stallable row.** Pass 0's position; BLOCKER 2 shows it cascades a correctly
+  parked task to `blocked-on-failure` via `gating.ts:6-8`.
+- **Memoising the `agentStatus` read per tick** to fix MAJOR 5's cost. Still one call per second per
+  held pane. **A20** removes the repetition instead of caching it.
+- **Modifying `src/lib/orchestrator.ts` to return a liveness verdict.** Cleaner, but widens the file
+  set past the orchestrator's ruling; `paneList()` in `main.ts` gets the same fact from a file this
+  task holds (**A19**).
 - **Bumping `schema_version` to 3.** Strands every in-flight run behind `hpipe abort`
-  (`main.ts:30-32`, `status.ts:104-109`) for a field whose absent value is unambiguously 0.
+  (`main.ts:30-32`).
 - **Parameterising `escalate.md` with a `{{reason}}`.** Forces a reason field onto the record to
-  reach `promptForTaskPhase` (`tasks.ts:78-86`), which the stall block does not use at all.
-- **A `Git` client for worktree dirtiness.** **A14**/**NG1** — the pane tail is both cheaper and
-  more informative, and reuses `main.ts:124-129`.
-- **Gating probes (not just escalation) on `agent_status`.** Changes behaviour this issue is not
-  about, and the prompt already tells a working actor to ignore the probe (**A8**).
+  reach `promptForTaskPhase` (`tasks.ts:78-86`), which the stall block does not use.
+- **A `Git` client for worktree dirtiness.** **A14**/**NG1** — the pane tail is cheaper and more
+  informative, and reuses `main.ts:124-129`.
 
 ---
 
-## Open decision
+## Open decisions
 
-None. Every pattern this work needs already exists in the repo and is named above; no `hpipe decide`
-is warranted at this stage.
+None. BLOCKER 2 and BLOCKER 3 were both flagged by the reviewer as needing the human; both were
+resolved by finding a narrower implementation inside the files this task already holds, as recorded
+in the **Revision log**. If the human disagrees with **A18**'s exclusion list — the one place this
+spec narrows #15's literal wording — that is the decision to reverse, and it is a one-line change
+to the signal set.
