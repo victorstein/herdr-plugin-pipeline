@@ -1,4 +1,5 @@
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
@@ -103,7 +104,6 @@ export function taskStallCandidates(
   }
   return out
 }
-
 
 /**
  * The ladder state for this phase entry, or a fresh one. BOTH stamps must
@@ -218,8 +218,13 @@ export interface StallDeps {
   probeMax: number
   now: () => number
   probe: (c: StallCandidate) => Promise<{ ok: boolean }>
-  /** Performs the ledger transition AND persists it, then sends. Never gated. */
-  escalate: (c: StallCandidate) => Promise<void>
+  /**
+   * Rendered BEFORE the transition, so it describes the phase being left —
+   * `escalated`'s own row is `signal: 'manual'` and would describe nothing.
+   */
+  escalationText: (c: StallCandidate, from: string) => Promise<string>
+  /** Sends an already-rendered prompt. The transition is already persisted. */
+  sendEscalation: (c: StallCandidate, text: string) => Promise<void>
   agentStatus: (paneId: string) => Promise<AgentStatus>
   persist: (run: Run) => Promise<void>
 }
@@ -227,7 +232,7 @@ export interface StallDeps {
 /**
  * A bump is persisted immediately: `listRuns` re-reads every run from disk each
  * tick (`src/lib/ledger.ts:48-62`) and both `saveRun` sites in the tick
- * (`src/supervisor/main.ts:136`, `:217`) precede this block, so an unpersisted
+ * (`src/supervisor/main.ts:137`, `:218`) precede this block, so an unpersisted
  * bump is discarded and `last_probe_at` never advances — the rung-per-tick
  * burst again.
  */
@@ -255,6 +260,26 @@ export async function applyStalls(
       continue
     }
 
-    await deps.escalate(c)
+    await escalate(c, deps)
   }
+}
+
+/**
+ * The transition lives here, not in the caller's callback, so both branches are
+ * reachable from a test and the ordering is enforced by the code rather than by
+ * a comment: the text describes the phase being LEFT, and the ledger write
+ * precedes the send so a rejected prompt costs a prompt and never a transition.
+ * This mirrors `deliverPendingAnswers` (`src/supervisor/tasks.ts:283`), which
+ * calls `enterTaskPhase` in-module and injects only the send.
+ */
+async function escalate(c: StallCandidate, deps: StallDeps): Promise<void> {
+  const from = c.task ? c.task.phase : c.run.phase
+  const text = await deps.escalationText(c, from)
+  const why = `${c.probes} stall probes unanswered`
+
+  if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
+  else enterRunPhase(c.run, 'escalated', why)
+
+  await deps.persist(c.run)
+  await deps.sendEscalation(c, text)
 }

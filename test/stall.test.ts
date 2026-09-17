@@ -67,8 +67,6 @@ test('a phase within the threshold is not a candidate', () => {
   expect(stallCandidates([runAt('branch-review', NOW - 60_000)], NOW, 15, 3)).toHaveLength(0)
 })
 
-
-
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
@@ -115,7 +113,6 @@ test('a task phase whose row is not stallable is never probed', () => {
   }
 })
 
-
 test('a task stranded in blocked-on-files is probed via the orchestrator', () => {
   const run = runWithTask({ phase: 'blocked-on-files', pane_id: null })
   const out = taskStallCandidates([run], NOW, 15, 3)
@@ -140,8 +137,6 @@ test('a worker row with no pane falls back to the orchestrator', () => {
   const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
 })
-
-
 
 test('stall state reads as zero when absent, anchored at the later phase entry', () => {
   const run = runAt('branch-review', 500)
@@ -425,7 +420,8 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
     probeMax: 3,
     now: () => NOW,
     probe: async (c) => { sent.push(`probe:${c.task?.task_id ?? 'run'}`); return { ok: true } },
-    escalate: async (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
+    escalationText: async () => 'escalation text',
+    sendEscalation: async (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
     agentStatus: async () => 'idle',
     persist: async () => {},
   }
@@ -532,4 +528,66 @@ test('a paneless worker escalates without consulting anyone (A7, through applySt
   expect(deps.sent).toEqual(['escalate:t1'])
   expect(statusCalls).toBe(0)
   expect(stallStateFor(run, task).holds).toBe(0)
+})
+
+test('applyStalls performs the transition itself — task branch', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), mkDeps())
+
+  expect(task.phase).toBe('escalated')
+  expect(task.escalated_from).toBe('implement')
+  expect(run.history.at(-1)?.why).toBe('3 stall probes unanswered')
+})
+
+test('applyStalls performs the transition itself — run branch', async () => {
+  // The run branch had no coverage: with the transition injected, replacing it
+  // with an unconditional enterRunPhase left the whole suite green.
+  const run = runAt('branch-review', LONG_AGO)
+  run.stall = {
+    at: run.phase_entered_at, run_at: run.phase_entered_at,
+    last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+  await applyStalls(stallCandidates([run], NOW, 15, 3), mkDeps())
+
+  expect(run.phase).toBe('escalated')
+  expect(run.escalated_from).toBe('branch-review')
+  expect(run.history.at(-1)?.why).toBe('3 stall probes unanswered')
+})
+
+test('the escalation text is rendered BEFORE the transition overwrites the phase', async () => {
+  // Ordering hazard: `escalated`'s row has signal 'manual', so a description
+  // taken after the transition describes the wrong thing entirely.
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+
+  const seen: string[] = []
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), mkDeps({
+    escalationText: async (c, from) => { seen.push(`${from}|${c.task?.phase}`); return 'x' },
+  }))
+  expect(seen).toEqual(['implement|implement'])
+})
+
+test('the ledger is persisted before the escalation is sent', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+
+  const order: string[] = []
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), mkDeps({
+    persist: async (r) => { order.push(`persist:${r.tasks[0]?.phase}`) },
+    sendEscalation: async () => { order.push('send') },
+  }))
+  expect(order).toEqual(['persist:escalated', 'send'])
 })

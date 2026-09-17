@@ -12,7 +12,7 @@ import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, shouldRetry,
 } from './deliver'
-import { enterRunPhase, enterTaskPhase, isAgentReady } from '../lib/machine'
+import { isAgentReady } from '../lib/machine'
 import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates,
@@ -237,8 +237,11 @@ async function main(): Promise<void> {
       }
 
       const hpipe = hpipeCommand(pluginRoot)
+      // One binding, so the cap the candidates are built with, the cap the
+      // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
+      const probeMax = config.STALL_PROBE_MAX
       const stallDeps: StallDeps = {
-        probeMax: config.STALL_PROBE_MAX,
+        probeMax,
         now: () => Date.now(),
         agentStatus: (paneId) => herdr.agentStatus(paneId),
         persist: (run) => saveRun(stateDir, run),
@@ -251,46 +254,41 @@ async function main(): Promise<void> {
               : c.run.phase,
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
-            ladder: ladderFor(c, config.STALL_PROBE_MAX),
+            ladder: ladderFor(c, probeMax),
           })
           return herdr.agentPrompt(c.paneId, text)
         },
-        escalate: async (c) => {
-          const awaiting = stallAwaiting(c.run, c.task, hpipe)
-          const from = c.task ? c.task.phase : c.run.phase
-          const why = `${c.probes} stall probes unanswered`
-          // Ledger before send: a failed prompt costs a prompt, never the
-          // transition, which is what makes `hpipe status` the reliable surface.
-          if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
-          else enterRunPhase(c.run, 'escalated', why)
-          await saveRun(stateDir, c.run)
-
+        escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
+          run_id: c.run.run_id,
+          phase: from,
+          minutes: String(c.minutes),
+          probes: String(c.probes),
+          awaiting_short: stallAwaiting(c.run, c.task, hpipe).short,
+          task_flag: c.task ? ` --task ${c.task.task_id}` : '',
+        }),
+        sendEscalation: async (c, text) => {
           const pane = c.run.orchestrator_pane
           if (pane === null) {
             console.error(
-              `[pipeline] run ${c.run.run_id}: escalated ${from} but no orchestrator pane to tell`,
+              `[pipeline] run ${c.run.run_id}: escalated but no orchestrator pane to tell`,
             )
             return
           }
-          const text = await renderPrompt(pluginRoot, 'stall-escalate', {
-            run_id: c.run.run_id,
-            phase: from,
-            minutes: String(c.minutes),
-            probes: String(c.probes),
-            awaiting_short: awaiting.short,
-            task_flag: c.task ? ` --task ${c.task.task_id}` : '',
-          })
-          await herdr.agentPrompt(pane, text)
+          const sent = await herdr.agentPrompt(pane, text)
+          if (!sent.ok) {
+            console.error(
+              `[pipeline] run ${c.run.run_id}: escalation prompt to ${pane} failed (${sent.code})` +
+              ' — the transition is already recorded; `hpipe status` shows it',
+            )
+          }
         },
       }
 
       await applyStalls(
-        stallCandidates(runs, Date.now(), config.STALL_MINUTES, config.STALL_PROBE_MAX),
-        stallDeps,
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
       )
       await applyStalls(
-        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, config.STALL_PROBE_MAX),
-        stallDeps,
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probeMax), stallDeps,
       )
     } catch (error) {
       console.error('[pipeline] tick error:', error)
