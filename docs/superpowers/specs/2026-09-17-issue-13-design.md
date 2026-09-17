@@ -393,8 +393,9 @@ hoists `hpipe`.** v1 said "copied … not invented here", which an implementer c
 to drop the parameter and ship `hpipe rewind …` to an orchestrator with no `hpipe` on PATH — the
 exact failure `render.ts:19-22` documents. `status.ts`'s literal is a latent defect: **A13**.
 
-Rungs 1–6 are **exhaustive over `TASK_ROWS`**, verified by enumerating the table rather than reading
-it — all 20 rows classify, and pass 0 re-ran the enumeration independently and agreed.
+Rungs 1–7 are **exhaustive over `TASK_ROWS`**, verified by enumerating the table rather than reading
+it — all 20 rows classify, and passes 0 and 2 both re-ran the enumeration independently and agreed
+(on rungs 1–6 as they stood then; rung 6 here is new in v4 and splits what was the catch-all).
 
 `detail`, when present, is appended as today: `\n` then each tail line indented four spaces, under
 the `- ` bullet exactly as `src/supervisor/main.ts:128` renders it now.
@@ -425,7 +426,7 @@ also waiting on you:
 - t6 refactor/31-unused-i18n-keys (#31) [escalated 63m] — needs a human: `hpipe rewind <run> plan --task t6`
 ```
 
-**[MAJOR 2] Why `escalated` is in.** v2's predicate excluded it, which was backwards. `escalated` is
+**[pass 1 MAJOR 2] Why `escalated` is in.** v2's predicate excluded it, which was backwards. `escalated` is
 `actor: 'human'`, carries **no** `terminal` and **no** `stallable` (`src/lib/phases.ts:130-131`), so
 an escalated task: produces no wake line (its pane is hung — that is *why* the ladder escalated it);
 is skipped by `taskStallCandidates` (`src/supervisor/stall.ts:101`), so it is never re-probed; is
@@ -460,16 +461,25 @@ the heading and its lines with **no leading newline of its own**; `buildDigest` 
 separate array element after `nextPrompt` and **drops empty slots before joining**:
 
 ```ts
-return [header, '', `${n} events:`, ...eventLines, '', nextPrompt, footer]
-  .filter((part, i) => i < 5 || part.length > 0)   // keep the fixed head, drop empty tail slots
-  .join('\n').trimEnd()
+const tail = [input.nextPrompt, input.footer ?? ''].filter((t) => t.length > 0)
+return [
+  `[pipeline] run ${input.run.run_id}${input.phaseNote}`,
+  '',
+  `${input.eventLines.length} events:`,
+  ...input.eventLines,
+  ...tail.flatMap((t) => ['', t]),
+].join('\n').trimEnd()
 ```
+
+Each non-empty tail part brings exactly one blank line with it, so the output is byte-identical to
+today's whenever `footer` is absent. *(An earlier draft of this block filtered by a fixed index,
+`i < 5`, which is only correct when `eventLines.length === 2` — the head is variable-length.)*
 
 Without this an implementer following `src/supervisor/deliver.ts:23-30` literally gets one blank line
 before the footer when `nextPrompt` is non-empty and **three** when it is empty — which is the common
 case, since `nextPrompt` is `''` unless a run-level phase was entered. T23 covers it. Each line reuses `describeWake`'s phase box and `actionFor`'s clause verbatim.
 
-**[MAJOR 1] Wiring, with the field OPTIONAL.** `PendingPrompt` gains `footer?: string` mirroring
+**[pass 1 MAJOR 1] Wiring, with the field OPTIONAL.** `PendingPrompt` gains `footer?: string` mirroring
 `phaseNote?` (`src/supervisor/deliver.ts:39-40`), and **`DigestInput` gains `footer?: string`** —
 read as `input.footer ?? ''`. v2 specified it as required, which is a `tsc --noEmit` error at the
 three existing `buildDigest` object literals in `test/deliver.test.ts` (`:34`, `:47`, `:124`), and
