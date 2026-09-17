@@ -45,3 +45,19 @@ test('blocked-on-files holds no files and has no actor pane', () => {
   expect(taskRow('blocked-on-files').actor).toBeUndefined()
   expect(taskRow('blocked-on-files').probeTarget).toBe('orchestrator')
 })
+
+test('the stallable set is exactly what #15 assumed — widening it belongs to #19', () => {
+  expect(TASK_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort()).toEqual([
+    'blocked-on-decision', 'blocked-on-files', 'implement', 'plan', 'plan-review',
+    'pr-review-intent', 'pr-review-quality', 'research', 'spec', 'spec-review',
+  ])
+  expect(RUN_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort())
+    .toEqual(['branch-review', 'dispatch', 'execute'])
+})
+
+test('exactly the four probe-only rows are outside the escalating signals', () => {
+  const escalating = new Set(['artifact', 'verdict', 'pr'])
+  const probeOnly = [...RUN_ROWS, ...TASK_ROWS]
+    .filter((r) => r.stallable && !escalating.has(r.signal)).map((r) => r.phase)
+  expect(probeOnly).toEqual(['dispatch', 'execute', 'blocked-on-files', 'blocked-on-decision'])
+})
