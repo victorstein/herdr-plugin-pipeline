@@ -1,6 +1,6 @@
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { absoluteArtifactPath } from './deliver'
-import type { Run, StallState, Task } from '../lib/types'
+import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
 /**
  * A row whose actor has no pane of its own is stranded until someone outside it
@@ -107,18 +107,6 @@ export function taskStallCandidates(
   return out
 }
 
-/**
- * The key carries `phase_entered_at`, so a candidate marked probed is never
- * retried for that phase entry — marking one the send failed on would drop the
- * probe silently and for good.
- */
-export async function sendProbes<C extends { key: string }>(
-  candidates: C[], probed: Set<string>, send: (candidate: C) => Promise<{ ok: boolean }>,
-): Promise<void> {
-  for (const candidate of candidates) {
-    if ((await send(candidate)).ok) probed.add(candidate.key)
-  }
-}
 
 /**
  * The ladder state for this phase entry, or a fresh one. BOTH stamps must
@@ -227,4 +215,49 @@ export function ladderFor(c: { probes: number; escalatable: boolean }, probeMax:
   }
   return `This is probe ${c.probes + 1} of ${probeMax}. After ${probeMax} unanswered probes ` +
     'this phase is escalated to the human and stops moving on its own.'
+}
+
+export interface StallDeps {
+  probeMax: number
+  now: () => number
+  probe: (c: StallCandidate) => Promise<{ ok: boolean }>
+  /** Performs the ledger transition AND persists it, then sends. Never gated. */
+  escalate: (c: StallCandidate) => Promise<void>
+  agentStatus: (paneId: string) => Promise<AgentStatus>
+  persist: (run: Run) => Promise<void>
+}
+
+/**
+ * A bump is persisted immediately: `listRuns` re-reads every run from disk each
+ * tick (`src/lib/ledger.ts:48-62`) and both `saveRun` sites in the tick
+ * (`src/supervisor/main.ts:136`, `:217`) precede this block, so an unpersisted
+ * bump is discarded and `last_probe_at` never advances — the rung-per-tick
+ * burst again.
+ */
+export async function applyStalls(
+  candidates: StallCandidate[], deps: StallDeps,
+): Promise<void> {
+  for (const c of candidates) {
+    const record: Run | Task = c.task ?? c.run
+
+    if (c.action === 'probe') {
+      if ((await deps.probe(c)).ok) {
+        bumpStall(c.run, record, 'probes', deps.now())
+        await deps.persist(c.run)
+      }
+      continue
+    }
+
+    const { holds } = stallStateFor(c.run, record)
+    if (
+      holds < deps.probeMax && c.actorPaneId !== null &&
+      (await deps.agentStatus(c.actorPaneId)) === 'working'
+    ) {
+      bumpStall(c.run, record, 'holds', deps.now())
+      await deps.persist(c.run)
+      continue
+    }
+
+    await deps.escalate(c)
+  }
 }

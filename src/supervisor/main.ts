@@ -6,15 +6,17 @@ import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/
 import { drain } from '../lib/queue'
 import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
-import { renderPrompt } from '../lib/render'
+import { hpipeCommand, renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, shouldRetry,
 } from './deliver'
-import { isAgentReady } from '../lib/machine'
-import { taskRow } from '../lib/phases'
-import { sendProbes, stallCandidates, taskStallCandidates } from './stall'
+import { enterRunPhase, enterTaskPhase, isAgentReady } from '../lib/machine'
+import {
+  applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
+  taskStallCandidates,
+} from './stall'
 import { applyEvents, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
@@ -106,7 +108,6 @@ async function main(): Promise<void> {
 
   const attempts = new Map<string, number>()
   let lastCiPollMs = 0
-  const probed = new Set<string>()
 
   for (;;) {
     try {
@@ -235,40 +236,64 @@ async function main(): Promise<void> {
         }
       }
 
-      await sendProbes(
-        stallCandidates(runs, Date.now(), config.STALL_MINUTES, config.STALL_PROBE_MAX), probed,
-        async (candidate) => {
-          const path = absoluteArtifactPath(candidate.run, null)
-          const text = await renderPrompt(
-            pluginRoot, 'stall-probe', {
-              run_id: candidate.run.run_id,
-              phase: candidate.run.phase,
-              minutes: String(candidate.minutes),
-              artifact_path: path ?? 'the expected artifact',
-            },
-          )
-          return herdr.agentPrompt(candidate.paneId, text)
-        },
-      )
-
-      await sendProbes(
-        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, config.STALL_PROBE_MAX),
-        probed,
-        async (candidate) => {
-          // Transitional: task-level candidates always carry a task. Step 10
-          // deletes this callback entirely.
-          const task = candidate.task!
-          const branch = `${task.branch} (#${task.issue})`
+      const hpipe = hpipeCommand(pluginRoot)
+      const stallDeps: StallDeps = {
+        probeMax: config.STALL_PROBE_MAX,
+        now: () => Date.now(),
+        agentStatus: (paneId) => herdr.agentStatus(paneId),
+        persist: (run) => saveRun(stateDir, run),
+        probe: async (c) => {
+          const awaiting = stallAwaiting(c.run, c.task, hpipe)
           const text = await renderPrompt(pluginRoot, 'stall-probe', {
-            run_id: candidate.run.run_id,
-            phase: `${task.phase} (${task.task_id}, ${task.branch})`,
-            minutes: String(candidate.minutes),
-            artifact_path: taskRow(task.phase).signal === 'pr'
-              ? `a PR for ${branch}`
-              : `whatever clears ${task.phase} for ${branch}`,
+            run_id: c.run.run_id,
+            phase: c.task
+              ? `${c.task.phase} (${c.task.task_id}, ${c.task.branch})`
+              : c.run.phase,
+            minutes: String(c.minutes),
+            awaiting: awaiting.clause,
+            ladder: ladderFor(c, config.STALL_PROBE_MAX),
+            // Transitional: the template still names {{artifact_path}} until
+            // step 11. `render` ignores bag keys the template does not use.
+            artifact_path: awaiting.clause,
           })
-          return herdr.agentPrompt(candidate.paneId, text)
+          return herdr.agentPrompt(c.paneId, text)
         },
+        escalate: async (c) => {
+          const awaiting = stallAwaiting(c.run, c.task, hpipe)
+          const from = c.task ? c.task.phase : c.run.phase
+          const why = `${c.probes} stall probes unanswered`
+          // Ledger before send: a failed prompt costs a prompt, never the
+          // transition, which is what makes `hpipe status` the reliable surface.
+          if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
+          else enterRunPhase(c.run, 'escalated', why)
+          await saveRun(stateDir, c.run)
+
+          const pane = c.run.orchestrator_pane
+          if (pane === null) {
+            console.error(
+              `[pipeline] run ${c.run.run_id}: escalated ${from} but no orchestrator pane to tell`,
+            )
+            return
+          }
+          const text = await renderPrompt(pluginRoot, 'stall-escalate', {
+            run_id: c.run.run_id,
+            phase: from,
+            minutes: String(c.minutes),
+            probes: String(c.probes),
+            awaiting_short: awaiting.short,
+            task_flag: c.task ? ` --task ${c.task.task_id}` : '',
+          })
+          await herdr.agentPrompt(pane, text)
+        },
+      }
+
+      await applyStalls(
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, config.STALL_PROBE_MAX),
+        stallDeps,
+      )
+      await applyStalls(
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, config.STALL_PROBE_MAX),
+        stallDeps,
       )
     } catch (error) {
       console.error('[pipeline] tick error:', error)

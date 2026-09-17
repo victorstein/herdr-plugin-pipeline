@@ -1,9 +1,12 @@
 import { expect, test } from 'bun:test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
-  bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
-  taskStallCandidates,
+  applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
+  type StallDeps, taskStallCandidates,
 } from '../src/supervisor/stall'
-import { newRun } from '../src/lib/ledger'
+import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
@@ -409,4 +412,102 @@ test('the escalation gate is the row actor pane, not the probe pane (A7)', () =>
   expect(out.find((c) => c.task?.task_id === 't1')?.actorPaneId).toBe('w7:p1')
   expect(out.find((c) => c.task?.task_id === 't2')?.paneId).toBe(ORCHESTRATOR_PANE)
   expect(out.find((c) => c.task?.task_id === 't2')?.actorPaneId).toBeNull()
+})
+
+type TestDeps = StallDeps & { sent: string[] }
+
+// Annotated, not cast: `as` would defeat contextual typing and let
+// `agentStatus` widen from AgentStatus to string.
+const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
+  const sent: string[] = []
+  const base: TestDeps = {
+    sent,
+    probeMax: 3,
+    now: () => NOW,
+    probe: async (c) => { sent.push(`probe:${c.task?.task_id ?? 'run'}`); return { ok: true } },
+    escalate: async (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
+    agentStatus: async () => 'idle',
+    persist: async () => {},
+  }
+  return { ...base, ...over, sent }
+}
+
+test('an accepted probe bumps and persists; a rejected one does neither', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+
+  let persisted = 0
+  const bad = mkDeps({ probe: async () => ({ ok: false }), persist: async () => { persisted += 1 } })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), bad)
+  expect(stallStateFor(run, task).probes).toBe(0)
+  expect(persisted).toBe(0)
+
+  const good = mkDeps({ persist: async () => { persisted += 1 } })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), good)
+  expect(stallStateFor(run, task).probes).toBe(1)
+  expect(persisted).toBe(1)
+})
+
+test('a bump survives the ledger round trip that every tick performs', async () => {
+  // The fake `persist` above proves applyStalls CALLS it. This proves the state
+  // actually survives saveRun/listRuns — without which `last_probe_at` never
+  // advances across ticks and the rung-per-tick burst is back. A fake cannot
+  // show this: the object re-read above is the same one the bump mutated.
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
+  const run = runAt('execute', LONG_AGO)
+  run.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+  await applyStalls(
+    taskStallCandidates([run], NOW, 45, 3),
+    mkDeps({ persist: (r) => saveRun(dir, r) }),
+  )
+
+  const [reloaded] = await listRuns(dir, run.session)
+  expect(stallStateFor(reloaded!, reloaded!.tasks[0]!).probes).toBe(1)
+  expect(taskStallCandidates([reloaded!], NOW, 45, 3)).toHaveLength(0)
+})
+
+test('a working actor is deferred, counting holds and not probes', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+
+  const deps = mkDeps({ agentStatus: async () => 'working' })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(stallStateFor(run, task).holds).toBe(1)
+  expect(stallStateFor(run, task).probes).toBe(3)
+  // A20: a deferral moves the anchor, so the actor is re-consulted once per
+  // threshold rather than once per tick.
+  expect(stallStateFor(run, task).last_probe_at).toBe(NOW)
+})
+
+test('deferrals are bounded — past the cap it escalates anyway (A27)', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 3,
+  }
+
+  const deps = mkDeps({ agentStatus: async () => 'working' })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual(['escalate:t1'])
+})
+
+test('only `working` defers — blocked and unknown escalate', async () => {
+  for (const status of ['idle', 'done', 'blocked', 'unknown'] as const) {
+    const run = runAt('execute', LONG_AGO)
+    const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+    run.tasks = [task]
+    task.stall = {
+      at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+    }
+    const deps = mkDeps({ agentStatus: async () => status })
+    await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+    expect(deps.sent, `${status} must escalate`).toEqual(['escalate:t1'])
+  }
 })
