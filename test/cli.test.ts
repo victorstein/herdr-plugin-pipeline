@@ -155,3 +155,30 @@ test('listFlag returns nothing when the flag is absent or carries no value', () 
 test('listFlag keeps a value that looks like a flag, for cmdTask to reject', () => {
   expect(listFlag(['--files', '--surface', 'core'], 'files')).toEqual(['--surface'])
 })
+
+test('task rejects a --files entry containing whitespace and mints no task', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  // Set so the assertion below can prove the rejection returned before
+  // `run.intake_closed = false`. A fresh run already has it false.
+  started!.intake_closed = true
+  await saveRun(dir, started!)
+
+  const bad = await cmdTask(c, {
+    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    dependsOn: [], files: ['src/a.ts src/b.ts'], keepWorktree: false,
+  })
+
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('src/a.ts src/b.ts')
+  expect(bad.text).toContain('comma-separated')
+  expect(bad.text).toContain('--files src/a.ts,src/b.ts')
+
+  // There is no command that removes a task once minted, so the check has to run
+  // before the task literal is pushed — not merely before the prompt is returned.
+  const after = await activeRunForRepo(dir, 'personal', 'k')
+  expect(after?.tasks).toEqual([])
+  expect(after?.intake_closed).toBe(true)
+})

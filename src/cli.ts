@@ -73,6 +73,20 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`no agent definition at ${agentFile} — check --surface`)
   }
 
+  // A path prefix cannot contain whitespace. The shape this rejects is one quoted
+  // space-separated list in a single --files, which records one entry no sibling
+  // can prefix-match; filesOverlap then never fires and the gate reports "no
+  // overlapping files in flight" while two workers edit the same files.
+  // Measured on a live run.
+  for (const entry of input.files) {
+    if (/\s/.test(entry)) {
+      return fail(
+        `--files is comma-separated; this entry contains whitespace: "${entry}"\n` +
+        `  → --files ${entry.trim().split(/\s+/).join(',')}`,
+      )
+    }
+  }
+
   const date = new Date().toISOString().slice(0, 10)
   const stem = `${date}-issue-${input.issue}`
 
