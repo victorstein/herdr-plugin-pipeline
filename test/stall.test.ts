@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  bumpStall, ladderFor, sendProbes, stallAwaiting, stallCandidates, stallStateFor,
+  bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
   taskStallCandidates,
 } from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
@@ -21,14 +21,14 @@ const NOW = 1_000_000
 const LONG_AGO = NOW - 60 * 60 * 1000
 
 test('a verdict phase open past the threshold is a candidate', () => {
-  expect(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, new Set())).toHaveLength(1)
+  expect(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, 3)).toHaveLength(1)
 })
 
 test('execute is probed once every task is terminal but intake was never closed', () => {
   const run = runAt('execute', LONG_AGO)
   run.intake_closed = false
   run.tasks = [mkTask({ phase: 'done' })]
-  const out = stallCandidates([run], NOW, 15, new Set())
+  const out = stallCandidates([run], NOW, 15, 3)
   expect(out.map((c) => c.paneId)).toEqual([ORCHESTRATOR_PANE])
 })
 
@@ -38,43 +38,33 @@ test('a healthy execute with work still running is NOT probed', () => {
   const run = runAt('execute', LONG_AGO)
   run.intake_closed = false
   run.tasks = [mkTask({ phase: 'implement' }), mkTask({ task_id: 't2', phase: 'done' })]
-  expect(stallCandidates([run], NOW, 15, new Set())).toHaveLength(0)
+  expect(stallCandidates([run], NOW, 15, 3)).toHaveLength(0)
 })
 
 test('execute is not probed once intake is properly closed', () => {
   const run = runAt('execute', LONG_AGO)
   run.intake_closed = true
   run.tasks = [mkTask({ phase: 'done' })]
-  expect(stallCandidates([run], NOW, 15, new Set())).toHaveLength(0)
+  expect(stallCandidates([run], NOW, 15, 3)).toHaveLength(0)
 })
 
 test('dispatch is probed via the orchestrator too — its row is stallable', () => {
   const run = runAt('dispatch', LONG_AGO)
-  expect(stallCandidates([run], NOW, 15, new Set()).map((c) => c.paneId))
+  expect(stallCandidates([run], NOW, 15, 3).map((c) => c.paneId))
     .toEqual([ORCHESTRATOR_PANE])
 })
 
 test('a run phase whose row is not stallable is never a candidate', () => {
   for (const phase of ['intake', 'escalated', 'done'] as const) {
-    expect(stallCandidates([runAt(phase, LONG_AGO)], NOW, 15, new Set())).toHaveLength(0)
+    expect(stallCandidates([runAt(phase, LONG_AGO)], NOW, 15, 3)).toHaveLength(0)
   }
 })
 
 test('a phase within the threshold is not a candidate', () => {
-  expect(stallCandidates([runAt('branch-review', NOW - 60_000)], NOW, 15, new Set())).toHaveLength(0)
+  expect(stallCandidates([runAt('branch-review', NOW - 60_000)], NOW, 15, 3)).toHaveLength(0)
 })
 
-test('a phase already probed is not probed again', () => {
-  const run = runAt('branch-review', LONG_AGO)
-  const probed = new Set([`${run.run_id}:branch-review:${run.phase_entered_at}`])
-  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(0)
-})
 
-test('re-entering the same phase makes it probeable again', () => {
-  const run = runAt('branch-review', LONG_AGO)
-  const probed = new Set([`${run.run_id}:branch-review:12345`])
-  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
-})
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -90,7 +80,7 @@ const mkTask = (over: Partial<Task>): Task => ({
 })
 
 function runWithTasks(tasks: Task[]): Run {
-  const run = runAt('execute', NOW)
+  const run = runAt('execute', LONG_AGO)
   run.tasks = tasks
   return run
 }
@@ -100,82 +90,55 @@ const runWithTask = (over: Partial<Task>): Run =>
 
 test('a task sitting in implement past the threshold with no PR is a candidate', () => {
   const run = runWithTasks([mkTask({})])
-  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
+  expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(1)
 })
 
 test('a task that re-entered implement with an open PR is still probed', () => {
   // Re-entry from a blocker review or red CI: the PR exists and head_sha_at_entry
   // is the rejected sha, so a silent worker would otherwise never be noticed.
   const run = runWithTasks([mkTask({ pr: 42, head_sha_at_entry: 'rejected' })])
-  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(1)
+  expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(1)
 })
 
 test('a task inside the threshold is not a candidate', () => {
   const run = runWithTasks([mkTask({ phase_entered_at: NOW - 60_000 })])
-  expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+  expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
 })
 
 test('a task phase whose row is not stallable is never probed', () => {
   for (const phase of ['queued', 'ci', 'merge', 'close', 'teardown', 'done'] as const) {
     const run = runWithTasks([mkTask({ phase })])
-    expect(taskStallCandidates([run], NOW, 45, new Set())).toHaveLength(0)
+    expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
   }
 })
 
-test('a task already probed for this phase entry is not probed again', () => {
-  const run = runWithTasks([mkTask({})])
-  const probed = new Set([`${run.run_id}:t1:implement:${LONG_AGO}`])
-  expect(taskStallCandidates([run], NOW, 45, probed)).toHaveLength(0)
-})
 
 test('a task stranded in blocked-on-files is probed via the orchestrator', () => {
   const run = runWithTask({ phase: 'blocked-on-files', pane_id: null })
-  const out = taskStallCandidates([run], NOW, 15, new Set())
+  const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out).toHaveLength(1)
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
 })
 
 test('a task waiting in blocked-on-decision is probed via the orchestrator', () => {
   const run = runWithTask({ phase: 'blocked-on-decision', pane_id: 'w7:p1' })
-  const out = taskStallCandidates([run], NOW, 15, new Set())
+  const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
 })
 
 test('a worker-owned artifact row is probed via the worker pane', () => {
   const run = runWithTask({ phase: 'spec', pane_id: 'w7:p1' })
-  const out = taskStallCandidates([run], NOW, 15, new Set())
+  const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out[0]?.paneId).toBe('w7:p1')
 })
 
 test('a worker row with no pane falls back to the orchestrator', () => {
   const run = runWithTask({ phase: 'research', pane_id: null })
-  const out = taskStallCandidates([run], NOW, 15, new Set())
+  const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
 })
 
-test('a probe that could not be sent stays eligible on the next tick', async () => {
-  const run = runAt('branch-review', LONG_AGO)
-  const probed = new Set<string>()
 
-  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: false }))
-  expect([...probed]).toEqual([])
-  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
-
-  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: true }))
-  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(0)
-})
-
-test('a run with no orchestrator pane is left pending, not marked probed', async () => {
-  const run = runAt('branch-review', LONG_AGO)
-  run.orchestrator_pane = null
-  const probed = new Set<string>()
-
-  await sendProbes(stallCandidates([run], NOW, 15, probed), probed, async () => ({ ok: true }))
-  expect([...probed]).toEqual([])
-
-  run.orchestrator_pane = ORCHESTRATOR_PANE
-  expect(stallCandidates([run], NOW, 15, probed)).toHaveLength(1)
-})
 
 test('stall state reads as zero when absent, anchored at the later phase entry', () => {
   const run = runAt('branch-review', 500)
@@ -326,4 +289,124 @@ test('an escalating row is told its position and the bound', () => {
 test('an excluded row is never promised a bound it does not have', () => {
   expect(ladderFor({ probes: 8, escalatable: false }, 3)).not.toContain('of 3')
   expect(ladderFor({ probes: 8, escalatable: false }, 3)).toContain('standing nudge')
+})
+
+test('a run with no orchestrator pane produces no candidate at all', () => {
+  const run = runAt('branch-review', LONG_AGO)
+  run.orchestrator_pane = null
+  expect(stallCandidates([run], NOW, 15, 3)).toHaveLength(0)
+  run.orchestrator_pane = ORCHESTRATOR_PANE
+  expect(stallCandidates([run], NOW, 15, 3)).toHaveLength(1)
+})
+
+test('an aged record gets ONE probe, not one per tick — the P4 regression', () => {
+  // The pass-1 blocker: a record first observed 13 hours past its threshold was
+  // due for every rung at once and climbed one per tick at TICK_MS=1000.
+  const entered = NOW - 780 * 60_000
+  const run = runAt('execute', entered)
+  const task = mkTask({ phase: 'implement', phase_entered_at: entered })
+  run.tasks = [task]
+
+  let now = NOW
+  let probes = 0
+  for (let tick = 0; tick < 4; tick++) {
+    const out = taskStallCandidates([run], now, 45, 3)
+    if (out.length > 0) {
+      expect(out[0]?.action).toBe('probe')
+      bumpStall(run, task, 'probes', now)
+      probes += 1
+    }
+    now += 1000
+  }
+  expect(probes).toBe(1)
+})
+
+test('the next rung is due a threshold after the LAST probe, not after phase entry', () => {
+  const entered = NOW - 780 * 60_000
+  const run = runAt('execute', entered)
+  const task = mkTask({ phase: 'implement', phase_entered_at: entered })
+  run.tasks = [task]
+  bumpStall(run, task, 'probes', NOW)
+
+  expect(taskStallCandidates([run], NOW + 44 * 60_000, 45, 3)).toHaveLength(0)
+  expect(taskStallCandidates([run], NOW + 45 * 60_000, 45, 3)).toHaveLength(1)
+})
+
+test('escalation only at the cap, and only for actor-produced signals (A18)', () => {
+  const run = runAt('execute', LONG_AGO)
+  const impl = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  const decision = mkTask({
+    task_id: 't2', phase: 'blocked-on-decision', phase_entered_at: LONG_AGO,
+  })
+  run.tasks = [impl, decision]
+  impl.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+  decision.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 9, holds: 0,
+  }
+
+  const out = taskStallCandidates([run], NOW, 45, 3)
+  expect(out.find((c) => c.task?.task_id === 't1')?.action).toBe('escalate')
+  expect(out.find((c) => c.task?.task_id === 't2')?.action).toBe('probe')
+  expect(out.find((c) => c.task?.task_id === 't2')?.escalatable).toBe(false)
+})
+
+test('one below the cap is still a probe', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 2, holds: 0,
+  }
+  expect(taskStallCandidates([run], NOW, 45, 3)[0]?.action).toBe('probe')
+})
+
+test('tasks inside an aborted or escalated run are left alone (A26)', () => {
+  // cmdAbort sets run.phase = 'done' and deliberately leaves tasks live
+  // (src/cli.ts:292-302). Without this guard the ladder probes them forever
+  // and escalates them, breaking the documented abort/resume contract.
+  for (const phase of ['done', 'escalated'] as const) {
+    const run = runAt(phase, LONG_AGO)
+    run.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+    expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
+  }
+})
+
+test('the run level needs no such guard — neither row is stallable', () => {
+  for (const phase of ['done', 'escalated'] as const) {
+    expect(stallCandidates([runAt(phase, LONG_AGO)], NOW, 15, 3)).toHaveLength(0)
+  }
+})
+
+test('hpipe resume re-arms a task ladder without cmdResume touching tasks (A30)', () => {
+  const entered = NOW - 800 * 60_000
+  const run = runAt('execute', entered)
+  const task = mkTask({ phase: 'implement', phase_entered_at: entered })
+  run.tasks = [task]
+  task.stall = {
+    at: entered, run_at: entered, last_probe_at: NOW - 780 * 60_000, probes: 3, holds: 0,
+  }
+  expect(taskStallCandidates([run], NOW, 45, 3)[0]?.action).toBe('escalate')
+
+  // cmdResume's exact mutation (src/cli.ts:315-317): run only, tasks untouched.
+  run.phase = 'execute'
+  run.phase_entered_at = NOW
+  expect(task.stall!.at).toBe(entered)
+
+  expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
+  expect(taskStallCandidates([run], NOW + 45 * 60_000, 45, 3)[0]?.action).toBe('probe')
+})
+
+test('the escalation gate is the row actor pane, not the probe pane (A7)', () => {
+  const run = runAt('execute', LONG_AGO)
+  const worker = mkTask({ phase: 'implement', pane_id: 'w7:p1', phase_entered_at: LONG_AGO })
+  const paneless = mkTask({
+    task_id: 't2', phase: 'research', pane_id: null, phase_entered_at: LONG_AGO,
+  })
+  run.tasks = [worker, paneless]
+  const out = taskStallCandidates([run], NOW, 45, 3)
+  expect(out.find((c) => c.task?.task_id === 't1')?.actorPaneId).toBe('w7:p1')
+  expect(out.find((c) => c.task?.task_id === 't2')?.paneId).toBe(ORCHESTRATOR_PANE)
+  expect(out.find((c) => c.task?.task_id === 't2')?.actorPaneId).toBeNull()
 })

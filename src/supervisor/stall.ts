@@ -2,18 +2,6 @@ import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { absoluteArtifactPath } from './deliver'
 import type { Run, StallState, Task } from '../lib/types'
 
-export interface StallCandidate {
-  run: Run
-  key: string
-  minutes: number
-  paneId: string
-  taskId: string | null
-}
-
-export function stallKey(run: Run): string {
-  return `${run.run_id}:${run.phase}:${run.phase_entered_at}`
-}
-
 /**
  * A row whose actor has no pane of its own is stranded until someone outside it
  * acts, so the table points it at the orchestrator. A worker row can also end up
@@ -26,67 +14,96 @@ function probePaneFor(run: Run, row: PhaseRow<string>, taskPane: string | null):
   return run.orchestrator_pane
 }
 
+const MS_PER_MINUTE = 60_000
+
+/** Signals the probed actor produces by its own work. Only these escalate. */
+const ESCALATING_SIGNALS: ReadonlySet<string> = new Set(['artifact', 'verdict', 'pr'])
+
+export type StallAction = 'probe' | 'escalate'
+
+export interface StallCandidate {
+  run: Run
+  task: Task | null
+  action: StallAction
+  /** Probes SENT so far — never deferrals. Drives the ladder sentence and the reason string. */
+  probes: number
+  escalatable: boolean
+  /** Age in the current phase, for the prompt. */
+  minutes: number
+  /** Where the probe is SENT. Falls back to the orchestrator for a paneless worker. */
+  paneId: string
+  /** Whose status gates a deferral. NOT the fallback. */
+  actorPaneId: string | null
+  /** Transitional: `sendProbes` keys on this until step 10. Removed in step 12. */
+  key: string
+}
+
+/**
+ * The pane of the actor that OWNS the row, with no orchestrator fallback. A
+ * paneless worker yields `null`, meaning "the owner is gone, escalate without
+ * consulting anyone" — consulting `probePaneFor`'s fallback would gate a
+ * worker's escalation on an unrelated agent's status.
+ */
+function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
+  return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
+}
+
+function candidateFor(
+  run: Run, record: Run | Task, row: PhaseRow<string>, task: Task | null,
+  now: number, thresholdMinutes: number, probeMax: number,
+): StallCandidate | null {
+  const paneId = probePaneFor(run, row, task?.pane_id ?? null)
+  if (!paneId) return null
+
+  const state = stallStateFor(run, record)
+  // The anchor is the last rung climbed, NOT the phase entry: anchoring on age
+  // makes every rung due at once for a record first seen past its threshold.
+  if (now - state.last_probe_at < thresholdMinutes * MS_PER_MINUTE) return null
+
+  const escalatable = ESCALATING_SIGNALS.has(row.signal)
+  return {
+    run,
+    task,
+    action: escalatable && state.probes >= probeMax ? 'escalate' : 'probe',
+    probes: state.probes,
+    escalatable,
+    minutes: Math.floor((now - record.phase_entered_at) / MS_PER_MINUTE),
+    paneId,
+    actorPaneId: actorPaneFor(run, row, task),
+    key: `${run.run_id}:${task?.task_id ?? ''}:${record.phase_entered_at}`,
+  }
+}
+
 export function stallCandidates(
-  runs: Run[], now: number, thresholdMinutes: number, alreadyProbed: Set<string>,
+  runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
-
   for (const run of runs) {
     const row = runRow(run.phase)
     if (!row.stallable) continue
     if (row.stallWhen && !row.stallWhen(run)) continue
-
-    const paneId = probePaneFor(run, row, null)
-    if (!paneId) continue
-
-    const minutes = (now - run.phase_entered_at) / 60_000
-    if (minutes < thresholdMinutes) continue
-
-    const key = stallKey(run)
-    if (alreadyProbed.has(key)) continue
-
-    out.push({ run, key, minutes: Math.floor(minutes), paneId, taskId: null })
+    const c = candidateFor(run, run, row, null, now, thresholdMinutes, probeMax)
+    if (c) out.push(c)
   }
-
   return out
 }
 
-export interface TaskStallCandidate {
-  run: Run
-  task: Task
-  key: string
-  minutes: number
-  paneId: string
-  taskId: string
-}
-
-export function taskStallKey(run: Run, task: Task): string {
-  return `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
-}
-
 export function taskStallCandidates(
-  runs: Run[], now: number, thresholdMinutes: number, alreadyProbed: Set<string>,
-): TaskStallCandidate[] {
-  const out: TaskStallCandidate[] = []
-
+  runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
+): StallCandidate[] {
+  const out: StallCandidate[] = []
   for (const run of runs) {
+    // A run in a pane-releasing phase is not being driven — `pickOneAdvance`
+    // skips it for the same reason (`src/supervisor/tick.ts:109`), and
+    // `cmdAbort` parks a run in `done` with its tasks intact.
+    if (runRow(run.phase).releasesPane === true) continue
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-
-      const paneId = probePaneFor(run, row, task.pane_id)
-      if (!paneId) continue
-
-      const minutes = (now - task.phase_entered_at) / 60_000
-      if (minutes < thresholdMinutes) continue
-
-      const key = taskStallKey(run, task)
-      if (alreadyProbed.has(key)) continue
-
-      out.push({ run, task, key, minutes: Math.floor(minutes), paneId, taskId: task.task_id })
+      const c = candidateFor(run, task, row, task, now, thresholdMinutes, probeMax)
+      if (c) out.push(c)
     }
   }
-
   return out
 }
 

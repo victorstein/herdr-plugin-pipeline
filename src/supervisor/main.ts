@@ -236,7 +236,7 @@ async function main(): Promise<void> {
       }
 
       await sendProbes(
-        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probed), probed,
+        stallCandidates(runs, Date.now(), config.STALL_MINUTES, config.STALL_PROBE_MAX), probed,
         async (candidate) => {
           const path = absoluteArtifactPath(candidate.run, null)
           const text = await renderPrompt(
@@ -252,16 +252,20 @@ async function main(): Promise<void> {
       )
 
       await sendProbes(
-        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probed), probed,
+        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, config.STALL_PROBE_MAX),
+        probed,
         async (candidate) => {
-          const branch = `${candidate.task.branch} (#${candidate.task.issue})`
+          // Transitional: task-level candidates always carry a task. Step 10
+          // deletes this callback entirely.
+          const task = candidate.task!
+          const branch = `${task.branch} (#${task.issue})`
           const text = await renderPrompt(pluginRoot, 'stall-probe', {
             run_id: candidate.run.run_id,
-            phase: `${candidate.task.phase} (${candidate.task.task_id}, ${candidate.task.branch})`,
+            phase: `${task.phase} (${task.task_id}, ${task.branch})`,
             minutes: String(candidate.minutes),
-            artifact_path: taskRow(candidate.task.phase).signal === 'pr'
+            artifact_path: taskRow(task.phase).signal === 'pr'
               ? `a PR for ${branch}`
-              : `whatever clears ${candidate.task.phase} for ${branch}`,
+              : `whatever clears ${task.phase} for ${branch}`,
           })
           return herdr.agentPrompt(candidate.paneId, text)
         },
