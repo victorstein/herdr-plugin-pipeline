@@ -1,12 +1,56 @@
 # `--files` validation and echo — design (#10)
 
-Pass 0. Written against this worktree at `6c75122` (branch `fix/10-files-validation`), building on
-`docs/superpowers/research/2026-09-17-issue-10-research.md`. Every claim about current behaviour
-carries a `file:line` or the command that produced it.
+Pass 1. Written against this worktree at `f8b9a67` (branch `fix/10-files-validation`), building on
+`docs/superpowers/research/2026-09-17-issue-10-research.md` and answering
+`docs/superpowers/reviews/issue-10-spec-review-0.md` and the orchestrator's ownership ruling now at
+the bottom of `gh issue view 10`. Every claim about current behaviour carries a `file:line` or the
+command that produced it.
 
 **Modelled on** the validation block already in `cmdTask` (`src/cli.ts:62-74`, `102-107`) for the
-checks, `src/cli.ts:215` for the echo, and `test/cli.test.ts:78-115` for the rejection tests. No new
-pattern is introduced.
+checks, `src/cli.ts:215` for the echo, `test/cli.test.ts:78-115` for the rejection tests, and
+`test/helpers/git-worktree.ts` for the subprocess fixture C5 needs. No new pattern is introduced.
+
+## What changed from pass 0, by finding
+
+Review 0 returned `VERDICT: BLOCKER` — 1 BLOCKER, 3 MAJORs, 4 MINORs. I verified every finding
+against the code, the live ledger and the open issues before accepting it; all eight hold. Nothing
+was rejected.
+
+**BLOCKER 1 — `test/integration/smoke.md` claimed but owned by neither task.** Accepted, escalated as
+decision `d1`, and **ruled**: the file belongs to #10 for this batch (`gh issue view 10`, §Ownership
+ruling). So it is taken, not dropped — C4 now covers four files and C5 keeps the runbook as the live
+proof. The ruling's reasoning is that #10 *invalidates an assertion* at `smoke.md:100` while #13 only
+makes prose stale at `:164-165`, and that a single owner is the only resolution that removes the race
+rather than relying on "different hunks are safe", which this project overruled in batch 1. #13 is
+directed not to touch the file, and the staleness it leaves is deferred to this run's `branch-review`.
+
+**MAJOR 1 — the durable-state gap was handed to #23, which owns no part of it.** Accepted. `gh issue
+view 23 --json body -q .body | grep -in files` returns nothing; its scope is artifacts. A9 and the
+`hpipe status` non-goal now hand off to **#17** (which names `files` explicitly in
+`hpipe show --task <id>`, and cites this very bug as its motivation) and **#37** (whose third
+direction is the in-flight overlap warning in `hpipe status`). #23 survives only as the stated
+precedent for the *shape* of such a signal, which is how #37 itself cites it.
+
+**MAJOR 2 — the `test/prompts.test.ts` survey was a misread.** Accepted. That file is 148 lines and
+16 `test(` blocks, not the 34 lines and 3 tests I cited. The guard that matters is
+`test/prompts.test.ts:68-76`, which fails any prompt containing a literal `hpipe`, and it lands
+squarely on C4's one new-prose edit. C4 now carries that constraint explicitly, plus the two other
+guards over the files it touches.
+
+**MAJOR 3 — "the unit tests do cover the behaviour" was false for C3.** Accepted, and the most
+consequential of the three. `listFlag` is fed only by `dispatch`, which is module-private
+(`src/cli.ts:355`), so no unit test can prove `--files` reaches `cmdTask` through the rewritten
+parser — and the argv wiring is precisely where this bug lived. That sentence is deleted. The review
+offered two fixes and the ruling enables both, so **C5 takes both**: an automated subprocess test that
+runs on every `bun test`, and the runbook edit, now in scope rather than deferred. A11 argues why one
+is not a substitute for the other.
+
+**MINOR 1** — the "`status.ts` was rewritten by #15 two commits ago" clause is gone;
+`git show --stat 93f79b2 -- src/lib/status.ts` is `1 file changed, 19 insertions(+)` at `HEAD~5`.
+**MINOR 2** — thirteen `cmd*` exports, not fourteen (`grep -c "^export async function cmd" src/cli.ts`
+→ `13`). **MINOR 3** — the two runbook edits are now named separately in C4 and both are committed;
+nothing is left to the plan's discretion. **MINOR 4** — C4 now names the comma for `--depends-on` too,
+on the same lines.
 
 ## Problem
 
@@ -44,6 +88,8 @@ A malformed `--files` is impossible to leave a run in silently. Concretely, afte
    way no rule can catch is still visible in the same breath as `task_id:`.
 3. A repeated `--files` **accumulates** instead of discarding all but the first.
 4. The comma separator is **named** everywhere the flag is documented.
+5. All four are proven **through the argv path an operator actually types**, not only against the
+   exported function.
 
 The three berean-os failure shapes all land in (1). (2) is the backstop for the shapes a rule cannot
 know about — a valid prefix pointing at the wrong directory, or a set that is simply incomplete.
@@ -53,10 +99,14 @@ know about — a valid prefix pointing at the wrong directory, or a set that is 
 - **No change to `filesOverlap`, `filesClearFor` or `releasableFromFiles`** (`src/lib/gating.ts:19-70`).
   The gate's logic was never wrong; its input was. The declared-intent-heuristic contract at
   `src/lib/gating.ts:15-18` stands unchanged.
-- **No change to `hpipe status` output** (`src/lib/status.ts`). Making "the file set is suspicious"
-  a reportable state belongs with #23, which already owns the "absent/wrong artifact is a distinct
-  reportable state" problem; `src/lib/status.ts` was rewritten by #15 two commits ago. #10 reports at
-  registration, where the operator is still typing.
+- **No change to `hpipe status` or any read-back command.** Two open issues own the two halves of
+  this, and neither is #10: **#17** adds `hpipe show --task <id>` printing the recorded task
+  including `files` — its stated motivation is that "confirming the `--files` bug meant reading
+  plugin source and then hunting down the run's state file by hand" — and **#37**'s third direction
+  is to "surface it in `hpipe status` as a warning" when two in-flight tasks' working trees modify
+  the same path. #10 reports at registration, where the operator is still typing. (#23 is the
+  precedent for the *shape* of such a signal — a distinct reportable state for a missing artifact —
+  but its body never mentions files, so nothing here is handed to it.)
 - **No migration of ledgers already on disk.** The berean-os run's whitespace entry stays as it is.
   Validation is at registration only.
 - **No schema change.** `task.files` is already `string[]` (`src/lib/types.ts:66`), no `Task` or `Run`
@@ -67,12 +117,16 @@ know about — a valid prefix pointing at the wrong directory, or a set that is 
   to create, and are evaluated against sibling declarations, not the filesystem
   (`src/lib/gating.ts:15-21`). `--surface` is checked with `existsSync` (`src/cli.ts:71-74`) because
   an agent file must already exist; a prefix need not.
+- **Only §2 of the runbook is this task's business.** Under the ruling #10 owns
+  `test/integration/smoke.md`, but it owns it to repair what #10 breaks — the §2 assertion at
+  `:100` — not to rewrite it. The digest prose at `:164-165` that #13 will leave stale is explicitly
+  deferred to this run's `branch-review` phase by the same ruling, and C4 does not touch it.
 - **Sibling boundary.** `src/supervisor/tick.ts`, `src/supervisor/deliver.ts` and
   `prompts/digest.md` belong to #13 and are not touched.
 
 ## Architecture
 
-Four components: C1–C3 all in `src/cli.ts`, C4 across four documentation files.
+Five components: C1–C3 in `src/cli.ts`, C4 across four documentation files, C5 in `test/`.
 
 ### C1 (load-bearing) — reject an entry that cannot be a path prefix
 
@@ -126,22 +180,68 @@ every occurrence of `--<name>` and concatenate the values, keeping the comma spl
 empty-drop. `flag` itself is **not** changed: single-valued flags (`--branch`, `--surface`,
 `--issue`, `--notes`, `--task`, `--run`) keep first-wins semantics.
 
-### C4 — name the separator where the flag is documented
+### C4 — name the separator, and repair what C2 invalidates
 
-Four files, five edits, no logic:
+Four files, six edits, no logic. Every one is committed; nothing is left to the plan's discretion.
 
 | File | Line | Change |
 |---|---|---|
-| `prompts/intake.md` | 24 | `[--files <prefix,prefix>]`, and a sentence naming the comma in the §4 prose at 27-29 |
+| `prompts/intake.md` | 24 | `[--depends-on <id,id>] [--files <prefix,prefix>]` |
 | `prompts/intake.md` | 27-29 | extend the "prints the task id, and either …" sentence to cover the new `files:` line |
-| `prompts/dispatch.md` | 31 | `[--files <prefix,prefix>]` |
-| `README.md` | 80 | `[--files <prefix,prefix>]` |
-| `test/integration/smoke.md` | 100 | the runbook asserts `task_id: tN` is "followed by the rendered worker brief"; a `files:` line now sits between them |
+| `prompts/dispatch.md` | 31 | `[--depends-on <id,id>] [--files <prefix,prefix>]` |
+| `README.md` | 80 | `[--depends-on <id,id>] [--files <prefix,prefix>]` |
+| `test/integration/smoke.md` | 100 | **the assertion C2 invalidates**: it says each `hpipe task` prints `task_id: tN` "followed by the rendered worker brief". A `files:` line now sits between them, and §2's `--files src/lib` / `--files src/lib/config.ts` invocations make it `files: src/lib` and `files: src/lib/config.ts` |
+| `test/integration/smoke.md` | 92-93 | add the malformed invocation as an expected rejection, per the ruling's "add the malformed-`--files` rejection if your plan keeps it" — a space-separated value must print the C1 message and exit 1 before either task is minted |
 
-`prompts/intake.md:27-29` is the load-bearing one: it is the passage that tells the orchestrator what
-`hpipe task` prints, so it is the contract C2 extends. `test/prompts.test.ts:17-34` guards only the
-declared prompt set, orphan files and the review trailer, so none of this breaks a test — verified by
-reading that file.
+`prompts/intake.md:27-29` is the load-bearing prompt edit: it is the passage that tells the
+orchestrator what `hpipe task` prints, so it is the contract C2 extends.
+
+**Three test guards constrain these edits** — the pass-0 survey of `test/prompts.test.ts` was wrong,
+so here is the verified scope of that 148-line, 16-test file:
+
+- `test/prompts.test.ts:68-76` fails **any** prompt whose text contains a literal `hpipe` after
+  `{{hpipe}}` is stripped. The new prose in `prompts/intake.md` must therefore write
+  `` `{{hpipe}} task` ``, never `` `hpipe task` ``. This is the one guard C4 can actually trip.
+  (`test/integration/smoke.md` is not a prompt and is not in `ALL`, so its literal `hpipe` commands
+  stay as they are.)
+- `test/prompts.test.ts:60-66` asserts `prompts/dispatch.md` contains
+  `worktree create --cwd {{repo_root}}`; C4 does not touch line 31's neighbours, but the edit must
+  leave that string intact.
+- `test/prompts.test.ts:88-100` is two tests asserting four exact strings in `README.md`
+  (`bin/hpipe`, `There is nothing else to install`, `Install the hpipe shorthand`, and the absence of
+  `ln -s /path/to/herdr-plugin-pipeline/src/cli.ts`). None is line 80, verified
+  by reading them, but the README edit must not disturb them.
+
+### C5 (new in pass 1, mandatory) — prove it through the argv path, twice
+
+MAJOR 3 is correct that C1–C3 are unprovable by unit tests alone: the only `--files` argv site is
+`src/cli.ts:386`, inside `dispatch`'s `case 'task'`, and `dispatch`, `flag` and `listFlag` are all
+module-private (`grep -n "^export" src/cli.ts` lists 13 `cmd*` functions and 2 interfaces).
+`grep -rn "listFlag" test/` returns nothing today.
+
+**C5a — automated.** A new test executes the real CLI as a subprocess against a scratch state dir and
+asserts on stdout:
+
+1. `git init` a temp repo with `.claude/agents/core-dev.md`, using `tempDir()` and `git()` from
+   `test/helpers/git-worktree.ts`.
+2. `bun run src/cli.ts start "argv fixture"` with `cwd` = that repo.
+3. Four `task` invocations, each asserting real stdout:
+
+| argv | expected stdout |
+|---|---|
+| `--files src/a.ts,src/b.ts` | `files: src/a.ts, src/b.ts` |
+| `--files src/a.ts --files src/b.ts` | `files: src/a.ts, src/b.ts` (C3 through the real parser) |
+| `--files "src/a.ts src/b.ts"` | exit 1, message names the entry and the comma |
+| no `--files` | `files: none` |
+
+The subprocess environment is pinned: `HERDR_PLUGIN_STATE_DIR` to a `tempDir()`, `HERDR_SESSION` to a
+fixture name, and `HERDR_SOCKET_PATH` cleared. See A12 — getting this wrong would write into the live
+ledger this pipeline is running on, which is the one way this test could do real harm.
+
+**C5b — live.** The runbook edits in C4, which is where this repo says the behaviour is actually
+proven (`.claude/agents/plugin-dev.md` §"Where the behaviour is actually proven"). §2 of the runbook
+already registers two tasks with overlapping `--files` (`test/integration/smoke.md:88-100`), so the
+echo and the rejection land in a section that exists for exactly this.
 
 ## Data and control flow
 
@@ -153,17 +253,17 @@ Before (research §Current control flow), with the new steps marked:
    `--branch` non-empty (69) → `--surface` resolves (71-74) → **C1: every `--files` entry is a
    plausible prefix** → task literal (79-98) → `--depends-on` known (104) and acyclic (107).
 3. `run.tasks.push`, `intake_closed = false`, `saveRun` (109-113). Unchanged.
-4. `gateStatus` (115). Unchanged — the file gate is still not consulted at registration, by design
-   (`test/integration/smoke.md:100-103` documents that both tasks print a brief and the collision
-   resolves later at `blocked-on-files`).
+4. `gateStatus` (115). Unchanged — the file gate is still not consulted at registration, by design.
 5. Return `task_id:` **+ C2 `files:`** + either `queued: waiting on …` (117) or the brief (126).
 6. `task.files` is next read at `plan-review → implement` by `filesClearFor`
    (`src/lib/gating.ts:49-53`). Unchanged.
 
 Nothing machine-parses `cmdTask`'s stdout — `grep -rn "task_id:" src/ prompts/ test/ bin/` returns
-only the two producers in `src/cli.ts`, unrelated `history` writes, and `toContain` assertions in
-`test/cli.test.ts:58-62` (inside the test at 48). So inserting a line between `task_id:` and the brief is safe; the tests
-that assert on that text assert containment, not position.
+only the two producers in `src/cli.ts`, unrelated `history` writes, `toContain` assertions in
+`test/cli.test.ts:58-62`, and the runbook prose at `test/integration/smoke.md:100` that C4 repairs.
+Review 0 widened this check and confirmed every `.text` assertion in `test/cli-commands.test.ts`
+(lines 54, 114, 286, 301, 316, 317, 330, 331) is `toContain` / `not.toContain` as well, so no
+positional assertion exists anywhere in the suite.
 
 ## Error handling
 
@@ -194,7 +294,7 @@ invocations, which is the strongest argument against this choice. It is rejected
 the *declared* set differ from the *typed* set with no signal, which is the class of failure this
 issue exists to remove — the orchestrator would still never learn that it had typed the wrong
 syntax, and the next repo with a space in a path would be undeclarable. Rejection teaches the syntax
-once, at the moment it is typed. **The most attackable decision here.**
+once, at the moment it is typed. **The most attackable decision here.** Review 0 did not overturn it.
 
 **A2 — A path prefix containing whitespace is not worth supporting.** A1's cost: `--files "my dir/"`
 becomes impossible. Accepted because `--files` entries are prefixes of source paths in the repos
@@ -213,15 +313,16 @@ sites (`src/cli.ts:385-386`). `--depends-on t1 --depends-on t2` currently drops 
 starts before its dependency with no diagnostic — the same class of silent failure, and the
 `--depends-on` validation at `src/cli.ts:104` cannot see a value that was never parsed. The change is
 strictly more permissive and no existing test pins the old behaviour: `listFlag` is module-private
-and has no test file (`grep -n "^export" src/cli.ts` lists only the `cmd*` functions and two
-interfaces).
+and has no test file. Per MINOR 4, C4 now documents the comma for `--depends-on` on the same lines,
+so the two flags stop disagreeing about their own syntax.
 
 **A5 — `listFlag` gets exported for its tests rather than moved to `src/lib/`.**
 `.claude/agents/plugin-dev.md` assigns argv parsing to `src/cli.ts` ("every `hpipe` subcommand, argv
 parsing, and the task/run constructors"), so a new `src/lib/argv.ts` would contradict the scoped
 guide even though the "one test file per lib module" convention would otherwise favour it. Exporting
-is not a new pattern: `src/cli.ts` already exports fourteen `cmd*` functions precisely so
-`test/cli.test.ts` and `test/cli-commands.test.ts` can reach them.
+is not a new pattern: `src/cli.ts` already exports thirteen `cmd*` functions precisely so
+`test/cli.test.ts` and `test/cli-commands.test.ts` can reach them. **C5a is what makes this safe** —
+exporting the helper proves the helper, and only the subprocess test proves the wiring.
 
 **A6 — A valueless trailing `--files` is echoed, not rejected.** `hpipe task … --files` with nothing
 after it yields `[]` (measured), indistinguishable inside `cmdTask` from "the flag was never given",
@@ -242,17 +343,61 @@ measured to fail.
 `prompts/intake.md:24` remains the place that shows the input syntax. Stated because a reader could
 reasonably expect the echo to be copy-pasteable, and it deliberately is not.
 
-**A9 — Registration-time reporting is sufficient for #10; the durable-state signal stays with #23.**
-The research's sharpest finding is that the false all-clear was written to the ledger, which argues
-for a signal further downstream too. That signal spans `src/lib/status.ts` — rewritten by #15 and
-owned by #23 for exactly this kind of "make it a distinct reportable state" work. #10 delivers the
-registration-time gate; nothing here forecloses #23 adding a status-level check over the same field.
+**A9 (rewritten for MAJOR 1) — registration-time reporting is #10's whole share; the durable-state
+signal is #17's and #37's.** The research's sharpest finding is that the false all-clear was written
+to the ledger, which argues for a signal further downstream too. That signal is already owned, twice
+over: **#17** for the on-demand read-back (`hpipe show --task <id>`, which names `files` in its own
+scope and cites this bug as the reason it is needed), and **#37** for the proactive warning when two
+in-flight tasks touch the same path. Pass 0 handed this to #23, which owns the artifact case and
+whose body never mentions files — a real gap handed to an issue that would not have closed it, which
+is the very pattern #37 was filed to document. Nothing in C1–C5 forecloses either follow-up: they read
+the same `task.files` field, unchanged in shape.
+
+**A10 (rewritten in pass 1) — `test/integration/smoke.md` is taken under the ruling, and repaired
+only where C2 breaks it.** I opened decision `d1` rather than patching this inline, and the
+orchestrator ruled the file to #10 (`gh issue view 10`, §Ownership ruling). Two consequences worth
+attacking: the ledger declaration still reads
+`["src/cli.ts","prompts/intake.md","prompts/dispatch.md","README.md"]` and cannot be amended — there
+is no command that edits `task.files` (`src/cli.ts:213` only clears it) — so the grant lives in the
+issue and this spec, not in the gate, which is itself the live instance of #37 the ruling names. And
+the ruling is a licence to repair §2, not to own the document: C4 touches `:92-93` and `:100` and
+leaves `:164-165` to `branch-review`, per the same ruling.
+
+**A11 (new in pass 1) — one end-to-end proof is not enough; C5a and C5b answer different
+objections.** The ruling says keep the runbook as the end-to-end proof, and review 0 offered the
+subprocess test *or* the runbook. Both are taken because they fail differently: C5b runs against a
+real herdr session with a real supervisor, which is the only way to see what an operator sees, but it
+runs only when a human walks it; C5a runs on every `bun test` and is what stops C1–C3 regressing
+after this branch merges. Dropping C5a would leave the argv path — where this bug lived — with no
+automated coverage at all, which is the substance of MAJOR 3 and not something the ruling addresses.
+Dropping C5b would disobey the ruling and leave an assertion C2 falsifies sitting in the runbook.
+
+**A12 (new in pass 1) — C5a runs the checkout's `src/cli.ts`, and that is safe only because its
+environment is pinned.** `.claude/agents/plugin-dev.md` says "never run the checkout's `src/cli.ts`
+directly against live state", and `bin/hpipe:1-19` explains why: the CLI and supervisor share one
+ledger. The prohibition is about *shared state*, not about execution — so C5a must set
+`HERDR_PLUGIN_STATE_DIR` to a `tempDir()`, set `HERDR_SESSION` to a fixture name, and clear
+`HERDR_SOCKET_PATH`. **Inheriting the ambient environment is the hazard:** this pane runs with
+`HERDR_SESSION=pipeline`, and `sessionKey()` (`src/lib/session.ts:5-14`) prefers `HERDR_SESSION`, then
+parses `HERDR_SOCKET_PATH`, then falls back to `default` — so a subprocess that forgets these would
+register fixture tasks into the live run driving this very task. The plan must make the env explicit
+at the spawn site, and the test must assert the scratch state dir received the run.
+
+**A13 (new in pass 1) — C5a adds a test file that is in no task's declared `--files`, and that is not
+the same as BLOCKER 1.** My declared set covers `src/cli.ts` but no test path, so by the letter of
+#37's complaint C5a is an undeclared file too. It is nonetheless taken without escalation, because
+the tests for `src/cli.ts` are not a contested resource: #13 holds `src/supervisor/tick.ts`,
+`src/supervisor/deliver.ts` and `prompts/digest.md` and has no reason to touch a `cli` test, whereas
+`smoke.md` was a single shared runbook #37 records both tasks as wanting — which is the distinction
+that made one an escalation and the other routine. Stated explicitly so the next review can attack the
+distinction rather than have to find it. Whether C5a extends `test/cli.test.ts` or lands as a new
+`test/cli-argv.test.ts` is a plan-phase call; both are equally uncontested.
 
 ## Testing strategy
 
 TDD throughout: failing test, run it, minimum code, run it again.
 
-**New, in `test/cli.test.ts`** — modelled on `test/cli.test.ts:78-115`, whose three tests each assert
+**Unit, in `test/cli.test.ts`** — modelled on `test/cli.test.ts:78-115`, whose three tests each assert
 `ok === false` and that the message contains the offending token:
 
 1. `task rejects a --files entry containing whitespace` — `files: ['src/a.ts src/b.ts']`;
@@ -270,22 +415,25 @@ TDD throughout: failing test, run it, minimum code, run it again.
    newly exported helper, modelled on `test/session.test.ts`, which tests a single pure function
    with one `expect` per input shape.
 
+**End-to-end, C5a** — the four subprocess invocations tabulated above. This is the layer the unit
+tests cannot reach and the layer this bug lived in: on the berean-os run no pure function was wrong,
+the argv path handed `filesClearFor` garbage and `filesClearFor` was correct over it.
+`.claude/agents/plugin-dev.md` records that DI-faked unit tests "have passed clean over real defects
+twice", which is the reason C5a is mandatory rather than optional. Precedent for a spawning fixture:
+`test/helpers/git-worktree.ts:7-10` shells out to real `git` via `Bun.spawnSync` and is already
+imported by `test/deliver.test.ts:8` and `test/tasks.test.ts:8`.
+
+**Live, C5b** — the runbook edits in C4. `test/integration/smoke.md` is a hand-run runbook the unit
+suite cannot replace (`.claude/agents/plugin-dev.md` §"The shape of it"), and §2's two overlapping
+`--files` registrations are already the section where a reader would look for this.
+
 **Regression guard, already present:** `test/cli.test.ts:48-63` asserts `task_id: t1`,
 `queued: waiting on t1`, and that a gated task's text does *not* contain the brief. C2 must leave all
 three passing — that is the check that the echo was inserted, not substituted.
 
 **Baseline to hold:** `bun test` → 414 pass, 0 fail; `bun run typecheck` → clean. Both measured at
-`343dde4` before any change (research §Installed versions). CI here runs a PR-title lint only (#35),
-so both commands get run locally and the result stated in the PR body.
-
-**Not provable by the unit suite.** `.claude/agents/plugin-dev.md` warns that DI-faked unit tests
-have passed clean over real defects twice. Everything here is pure argv-and-string work inside one
-exported function with no herdr I/O, no pane delivery, no startup and no gating change, so the unit
-tests do cover the behaviour. The one thing they cannot cover is that the *operator* reads the echo,
-and `test/integration/smoke.md` is where that belongs: §2 of the runbook already registers two tasks
-with overlapping `--files` (lines 88-100) and is the natural place to assert the `files:` line
-appears, and to add the malformed invocation as an expected rejection. The plan phase decides whether
-that runbook edit is in scope.
+`343dde4` before any change and reproduced by review 0. CI here runs a PR-title lint only (#35), so
+both commands get run locally and the result stated in the PR body.
 
 ## Rejected alternatives
 
@@ -306,3 +454,11 @@ catch it. Rejected: it moves the diagnosis hours downstream of the typo, into
 (`src/lib/gating.ts:15-18`), and it would block a run over data the operator can no longer correct —
 there is no command that edits `task.files`, only `cmdRelease` which clears it wholesale
 (`src/cli.ts:213`).
+
+**Prove C1–C3 with unit tests only, and leave the runbook to cover the rest.** Pass 0's position,
+withdrawn under MAJOR 3. A hand-run markdown file is not a proof the next change can rely on; it is
+now C5b, one half of the coverage, not the whole of it.
+
+**Drop `test/integration/smoke.md` rather than escalate.** Pass 0's fallback, and what I recommended
+in `d1`. Overtaken by the ruling, which reasons that #10's claim is the stronger one because it
+invalidates an assertion rather than merely dating some prose.
