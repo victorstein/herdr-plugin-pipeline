@@ -34,8 +34,6 @@ export interface StallCandidate {
   paneId: string
   /** Whose status gates a deferral. NOT the fallback. */
   actorPaneId: string | null
-  /** Transitional: `sendProbes` keys on this until step 10. Removed in step 12. */
-  key: string
 }
 
 /**
@@ -70,7 +68,6 @@ function candidateFor(
     minutes: Math.floor((now - record.phase_entered_at) / MS_PER_MINUTE),
     paneId,
     actorPaneId: actorPaneFor(run, row, task),
-    key: `${run.run_id}:${task?.task_id ?? ''}:${record.phase_entered_at}`,
   }
 }
 
