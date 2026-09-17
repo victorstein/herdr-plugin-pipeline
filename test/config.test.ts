@@ -44,3 +44,9 @@ test('parses HPIPE_LINK=false as false', async () => {
   await Bun.write(join(dir, 'config.env'), 'HPIPE_LINK=false\n')
   expect((await loadConfig(dir)).HPIPE_LINK).toBe(false)
 })
+
+test('STALL_PROBE_MAX defaults to 3 and parses from config.env', async () => {
+  expect((await loadConfig(dir)).STALL_PROBE_MAX).toBe(3)
+  await Bun.write(join(dir, 'config.env'), 'STALL_PROBE_MAX=5\n')
+  expect((await loadConfig(dir)).STALL_PROBE_MAX).toBe(5)
+})
