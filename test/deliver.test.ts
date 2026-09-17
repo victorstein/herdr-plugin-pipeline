@@ -1,9 +1,15 @@
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
-  absoluteArtifactPath, artifactPathFor, buildDigest, deliveriesFor, shouldRetry, taskSignalsFor,
+  absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
+  shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
+import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
+
+afterEach(cleanupFixtures)
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -244,4 +250,77 @@ test('a task with no checkout path falls back to repo_root', () => {
   const task = mkTask({ phase: 'spec', checkout_path: null })
   task.artifacts.spec = 'docs/superpowers/specs/design.md'
   expect(absoluteArtifactPath(run, task)).toBe('/r/docs/superpowers/specs/design.md')
+})
+
+test('adoptableArtifacts returns docs this branch added, not what the worktree checked out', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/misfiled.md',
+  ])
+})
+
+test('adoptableArtifacts yields nothing without a checkout', async () => {
+  expect(await adoptableArtifacts(null, new Set())).toEqual([])
+})
+
+test('adoptableArtifacts yields nothing outside a git repo', async () => {
+  expect(await adoptableArtifacts(tempDir('hpipe-nogit-'), new Set())).toEqual([])
+})
+
+test('adoptableArtifacts yields nothing when the base ref does not resolve', async () => {
+  const noMain = tempDir('hpipe-nomain-')
+  git(['init', '-q', '--initial-branch=trunk', '.'], noMain)
+  git(['config', 'user.email', 'test@example.com'], noMain)
+  git(['config', 'user.name', 'Test'], noMain)
+  writeFileSync(join(noMain, 'README.md'), 'x\n')
+  git(['add', '-A'], noMain)
+  git(['commit', '-qm', 'base'], noMain)
+
+  expect(await adoptableArtifacts(noMain, new Set())).toEqual([])
+})
+
+test('adoptableArtifacts excludes review verdicts, which are added on the branch too', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/reviews/issue-1-spec-review-0.md', 'VERDICT: CLEAR\n')
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/misfiled.md',
+  ])
+})
+
+test('adoptableArtifacts excludes paths already recorded on the task', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/research-note.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/the-spec.md', 'spec\n')
+
+  const claimed = new Set(['docs/superpowers/notes/research-note.md'])
+  expect(await adoptableArtifacts(worktree, claimed)).toEqual([
+    'docs/superpowers/notes/the-spec.md',
+  ])
+})
+
+test('a moved doc is a rename even when the repo disables rename detection', async () => {
+  const worktree = repoWithWorktree(
+    ['docs/superpowers/notes/original.md'],
+    [['diff.renames', 'false']],
+  )
+  git(['mv', 'docs/superpowers/notes/original.md', 'docs/superpowers/notes/renamed.md'], worktree)
+  git(['commit', '-qm', 'move it'], worktree)
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+})
+
+test('a non-ASCII candidate path comes back raw, not C-quoted', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/café-señor.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/café-señor.md',
+  ])
 })

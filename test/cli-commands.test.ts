@@ -317,3 +317,16 @@ test('brief renders a worker brief without mutating the run', async () => {
   expect(result.text).toContain('land first')
   expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
 })
+
+test('the brief states the path contract without promising a recovery', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+
+  const result = await cmdBrief(ctx(), { taskId: 't1' })
+  expect(result.text).toContain('does not satisfy this phase\'s contract')
+  expect(result.text).not.toContain('stats those paths and nothing else')
+})
