@@ -212,6 +212,12 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         return { ...base, artifactFresh: true }
       }
 
+      // Stale is not missing. Every `onBlocker` re-entry re-stamps phase_entered_at
+      // and leaves the previous artifact in place, so adopting on `!isFresh` would
+      // replace an already-correct path with whatever else the worker committed
+      // while revising. Only an ABSENT artifact is a candidate for adoption.
+      if (existsSync(absolute)) return base
+
       const slot = taskRow(task.phase).artifact
       const checkout = task.checkout_path
       if (slot === undefined || checkout === null) return base

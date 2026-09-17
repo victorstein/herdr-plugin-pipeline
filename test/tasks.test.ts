@@ -389,3 +389,19 @@ test('in spec, the recorded research note is not re-adopted and the spec is', as
   expect(run.tasks[0]?.artifacts.spec).toBe('docs/superpowers/notes/the-spec.md')
   expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/the-research.md')
 })
+
+test('a present-but-stale canonical artifact is never replaced by adoption', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const artifacts = designArtifacts()
+  mkdirSync(join(worktree, dirname(artifacts.spec as string)), { recursive: true })
+  writeFileSync(join(worktree, artifacts.spec as string), 'the real spec\n')
+  commitIn(worktree, 'docs/superpowers/notes/stray.md', 'a stray doc\n')
+
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: Date.now() + 60_000, checkout_path: worktree, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.spec).toBe(artifacts.spec)
+})
