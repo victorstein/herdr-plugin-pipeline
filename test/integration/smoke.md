@@ -104,7 +104,8 @@ src/lib/config.ts"`, and a `→ --files src/lib,src/lib/config.ts` suggestion. N
 **Failure looks like:** the command succeeding and printing `task_id: t1`. That is the finding, and it
 cannot be repaired in place — no command removes a task, so this ghost takes `t1` and pushes the two
 real tasks below to `t2`/`t3`, breaking §3's assertions, which name `t1` and `t2` literally. Run
-`hpipe abort <run_id>`, restart from §2, and report it.
+`hpipe abort <run_id>`, restart this section from `hpipe start`, and report it — the abort leaves the
+run in `done`, so nothing can be registered into it afterwards.
 
 Now the two real registrations, which the orchestrator runs:
 

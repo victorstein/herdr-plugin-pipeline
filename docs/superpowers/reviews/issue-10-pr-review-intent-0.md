@@ -20,7 +20,7 @@ Every mechanical claim was re-measured in this worktree rather than taken from t
   the run I just did, which is the hazard A12 (`spec:375-384`) and the plan's Step 6 warning
   (`plan:443-449`) exist to prevent. The pinning is real: `src/cli.ts:391-393` reads
   `HERDR_PLUGIN_STATE_DIR` and `HERDR_PLUGIN_ROOT`, `src/lib/session.ts:6-7` prefers
-  `HERDR_SESSION`, and `test/cli-argv.test.ts:482-488` sets all four.
+  `HERDR_SESSION`, and `test/cli-argv.test.ts:28-33` sets all four.
 - `fail()` really is a stdout-plus-exit-1 channel: `src/cli.ts:478-479`
   (`console.log(out.text); return out.ok ? 0 : 1`), so the runbook's "exit 1" expectation and the
   argv tests' `code === 1` assertions are testing the operator-visible thing.
@@ -31,11 +31,11 @@ The issue's §Directions has exactly three bullets.
 
 1. **"Echo what was recorded on success: `files: src/foo, src/bar` (or `files: none`) alongside
    `task_id:`."** Met on both success returns: `src/cli.ts:143` (gated) and `src/cli.ts:152`
-   (dispatched), from one shared `filesLine` at `src/cli.ts:140`. I confirmed `cmdTask` has exactly
+   (dispatched), from one shared `filesLine` at `src/cli.ts:139`. I confirmed `cmdTask` has exactly
    two `ok(` returns (`grep -n "task_id:" src/cli.ts` → `:100` the literal, `:143`, `:152`), so
    "every success path" is literally satisfied, not just the two the spec named.
 2. **"Reject a `--files` entry containing whitespace, or accept repeated `--files` flags /
-   whitespace as a separator."** The PR takes the reject branch (`src/cli.ts:82-88`) *and* the
+   whitespace as a separator."** The PR takes the reject branch (`src/cli.ts:76-94`) *and* the
    repeated-flag branch (`src/cli.ts:366-379`). Doing both is not scope expansion — A3
    (`spec:305-309`) argues the accumulation is load-bearing for the rejection, since "repeat the
    flag" is the obvious retry and it silently dropped everything after the first.
@@ -44,8 +44,8 @@ The issue's §Directions has exactly three bullets.
    [--files <prefix,prefix>]`.
 
 The issue's root-cause framing ("the absence of feedback, not the separator") is answered in the
-right order: `src/cli.ts:82-88` sits after the `--surface` check and **before** the task literal at
-`src/cli.ts:99`, so a rejection mints nothing. `test/cli.test.ts:169-171` asserts exactly that —
+right order: `src/cli.ts:76-94` sits after the `--surface` check and **before** the task literal at
+`src/cli.ts:99`, so a rejection mints nothing. `test/cli.test.ts:182-183` asserts exactly that —
 `after?.tasks` is `[]` and a pre-set `intake_closed: true` is untouched — which is the assertion that
 distinguishes "rejected before `run.tasks.push`" from "rejected before the prompt was returned".
 
@@ -60,9 +60,9 @@ exactly two hunks, at `@@ -88` and `@@ -97`).
 
 | Component | Where | Held |
 |---|---|---|
-| C1 rule 1, whitespace (`spec:141`) | `src/cli.ts:83-88` | yes, message and `→` suggestion verbatim to `spec:147-148` |
-| C1 rule 2, flag-shaped (`spec:142`) | `src/cli.ts:89-94` | yes, verbatim to `spec:150` |
-| C2 echo, both returns (`spec:154-174`) | `src/cli.ts:140,143,152` | yes, `files: none` for the empty case |
+| C1 rule 1, whitespace (`spec:141`) | `src/cli.ts:82-87` | yes, message and `→` suggestion verbatim to `spec:147-148` |
+| C1 rule 2, flag-shaped (`spec:142`) | `src/cli.ts:88-93` | yes, verbatim to `spec:150` |
+| C2 echo, both returns (`spec:154-174`) | `src/cli.ts:139,143,152` | yes, `files: none` for the empty case |
 | C3 accumulation, `flag` unchanged (`spec:176-181`) | `src/cli.ts:366-379`; `flag` still `indexOf` at `:361-364` | yes |
 | C4, six documentation edits (`spec:187-194`) | see below | yes, all six, plus the review-1 MINOR 4 addition |
 | C5a, subprocess argv proof (`spec:222-239`) | `test/cli-argv.test.ts` | yes, five tests not four |
@@ -83,10 +83,10 @@ reading.
 **Goal 5 ("proven through the argv path") is genuinely satisfied, not restated.**
 `test/cli-argv.test.ts` spawns the real `src/cli.ts` and asserts on real stdout and real exit codes
 for all five shapes: comma-split, repeated flag, space-separated rejection, valueless `--files`
-swallowing `--surface`, and no flag at all. The fourth (`test/cli-argv.test.ts:535-545`) is the one
+swallowing `--surface`, and no flag at all. The fourth (`test/cli-argv.test.ts:80-90`) is the one
 only argv can produce, added per spec-review-1 MAJOR 1, and it asserts the thing that made the bug
 invisible — `not.toContain('no agent definition')`, i.e. `--surface` still resolved to `core` while
-`--files` was poisoned. `test/cli-argv.test.ts:514` asserts the *scratch* state dir received the run,
+`--files` was poisoned. `test/cli-argv.test.ts:59` asserts the *scratch* state dir received the run,
 which is both the safety check and proof the subprocess wrote where the test thinks it did. These are
 behavioural tests, not implementation restatements: none of them imports or names an internal, and
 all five fail against pre-change `src/cli.ts` because none of the asserted strings existed.
@@ -118,7 +118,7 @@ Nothing undisclosed.
 
 ## MINOR 1 — the runbook's new recovery clause sends the operator to the wrong section, which the `abort` it just told them to run makes unreachable
 
-`test/integration/smoke.md:105-107`:
+`test/integration/smoke.md:104-107`:
 
     **Failure looks like:** the command succeeding and printing `task_id: t1`. … Run
     `hpipe abort <run_id>`, restart from §2, and report it.
@@ -130,13 +130,13 @@ dispatched tasks already driving toward `spec`.
 That matters because of what `abort` does: `cmdAbort` (`src/cli.ts:318-328`) sets `run.phase = 'done'`,
 and `cmdTask` refuses any run that is not in `intake`, `dispatch` or `execute` (`src/cli.ts:57-61`).
 After the abort there is no registerable run, so the only correct restart point is §1's
-`hpipe start` at `:74`. Either reading of the reference — the literal §2, or "the registration
+`hpipe start` at `:75`. Either reading of the reference — the literal §2, or "the registration
 section" as the spec and plan both mislabel it (`spec:120`, `spec:193-194`, `plan:656`) — leaves the
 instruction unfollowable.
 
 Two adjacent claims in the same edit are correct and I re-checked both, so this is a single wrong
-cross-reference and not a pattern: §3 (`:204-238`) does name `t1` and `t2` literally, at `:212` and
-`:216`, so `:106` and `:124` are accurate.
+cross-reference and not a pattern: §3 (`:204-239`) does name `t1` and `t2` literally, at `:212` and in the asserted `status` line at
+`:217`, so `:106` and `:124` are accurate.
 
 This is inherited verbatim from `plan:698`, so it is not an unexplained divergence from the plan —
 the plan says it too. It is still a shipped defect in a hand-run runbook, in the branch a human
