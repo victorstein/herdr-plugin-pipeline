@@ -117,9 +117,13 @@ This does not make every silent stall visible; see §Non-goals.
   MAJOR 5 was right that it did not. `console.error` from the supervisor loop (§C1) is a log line,
   not something the human or the orchestrator sees. Issue #15's scope — probe cadence, backoff,
   escalation, dead-orchestrator detection, and (per its 2026-09-17 addendum) the task probe's
-  `artifact_path` substitution — does not cover it either. **It is owned by neither issue.**
-  Recommended: a follow-up issue, *"an idle worker in an artifact phase with no artifact must
-  produce a signal"*. Not filed here; filing issues is the orchestrator's call.
+  `artifact_path` substitution — does not cover it either. It was owned by neither issue.
+  **It is now issue #23**, *"An idle worker in an artifact phase with no identifiable artifact
+  produces no signal"*, which owns making "the artifact is absent" a distinct, reportable state in
+  `hpipe status` and the digest. Filed by the orchestrator on 2026-09-17 under the scope ruling
+  recorded on issue #9 — which narrows #9 to adoption-plus-log and separates the signal because a
+  complete one spans two tasks' file sets: detection in `src/supervisor/tasks.ts` (this task's)
+  and the marker in `src/lib/status.ts` (#15's).
 - **Stall probe cadence and escalation** — issue #15, task `t2`, which owns
   `src/supervisor/stall.ts`, `src/supervisor/main.ts`, `prompts/stall-probe.md`,
   `src/lib/status.ts`.
@@ -405,8 +409,11 @@ mismatch survivable, so there is no reason to trade the guarantee away.
 narrowing plus a `console.error`, because the human-visible surface is `hpipe status`
 (`src/lib/status.ts`) and the probe (`src/supervisor/main.ts`), both `t2`'s files. Widening would
 mean either reaching into them or inventing a third surface. The log line is honest but small; the
-gap is recorded in §Non-goals with a recommended follow-up rather than left implied.
-*A reviewer or the human may reasonably call this the wrong half of MAJOR 5 to take.*
+gap is recorded in §Non-goals rather than left implied.
+
+*Settled.* The scope ruling on issue #9 (2026-09-17) takes the same half — "narrow this issue, open
+a new one" — and records that this assumption reached it independently before the ruling was
+written down. The remainder is issue #23.
 
 **A10 — The brief states the contract, not the mechanism.** Advance warning scored 3/3 against the
 brief's 3/6, so the firm register stays (pass 0's MAJOR 4). But pass 1's MAJOR 2 was right that v1's
