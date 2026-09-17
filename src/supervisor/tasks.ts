@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecisionFor } from '../lib/decisions'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
@@ -8,7 +9,7 @@ import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath } from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -205,8 +206,29 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       if (!actorIdle) return base
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
-      if (!(await isFresh(absolute, task.phase_entered_at))) return base
-      if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+
+      if (await isFresh(absolute, task.phase_entered_at)) {
+        if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+        return { ...base, artifactFresh: true }
+      }
+
+      const slot = taskRow(task.phase).artifact
+      const checkout = task.checkout_path
+      if (slot === undefined || checkout === null) return base
+
+      const claimed = new Set(
+        [task.artifacts.research, task.artifacts.spec, task.artifacts.plan]
+          .filter((path): path is string => path !== null),
+      )
+      const candidates = await adoptableArtifacts(checkout, claimed)
+      const adopted = candidates.length === 1 ? candidates[0] : undefined
+      if (adopted === undefined) return base
+      if (!(await isSettled(join(checkout, adopted), deps.fileSettleMs))) return base
+
+      // Recorded, not merely accepted: every later prompt cites the artifact by the
+      // path stored here, and writing it back is what makes adoption idempotent —
+      // the next tick's canonical stat hits the adopted path directly.
+      task.artifacts[slot] = adopted
       return { ...base, artifactFresh: true }
     }
     case 'spec-review':

@@ -1,11 +1,12 @@
-import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
+import { cleanupFixtures, commitIn, repoWithWorktree } from './helpers/git-worktree'
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -307,4 +308,23 @@ test('a design row prompt names the artifact path its own predicate will check',
     expect(watched).not.toBeNull()
     expect(await promptForTaskPhase(run, task, deps(), 'research')).toContain(watched as string)
   }
+})
+
+afterEach(cleanupFixtures)
+
+test('a misfiled artifact is adopted from the branch and recorded on the task', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+    'docs/superpowers/reviews/old-c.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/misfiled.md')
 })
