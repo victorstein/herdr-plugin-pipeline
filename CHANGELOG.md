@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.4](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.3...v1.2.4) (2026-09-17)
+
+
+### Bug Fixes
+
+* make the stall probe's sentences true of what it names ([0aa1dbf](https://github.com/victorstein/herdr-plugin-pipeline/commit/0aa1dbf1904d03c46ef892254eee5b7c73aaa13d))
+
 ## [1.2.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.2...v1.2.3) (2026-09-17)
 
 
