@@ -1,7 +1,7 @@
 # Design — issue #15: the stall ladder
 
 Revision after **Ruling 2 — 2026-09-17** (`gh issue view 15`) and
-`docs/superpowers/reviews/issue-15-spec-review-1.md` (VERDICT: BLOCKER — 1 BLOCKER / 1 MAJOR /
+`docs/superpowers/reviews/issue-15-spec-review-narrowed-r2-preserved.md` (VERDICT: BLOCKER — 1 BLOCKER / 1 MAJOR /
 5 MINORs). Every finding is accepted and fixed.
 
 Scope is the **Scope narrowed** ruling: the ladder, and nothing else. Dead/unreachable pane
@@ -44,8 +44,9 @@ is bypassed.
 
 **Out, moved:** dead-pane detection → **#24**; `DeliveryBudget` and the `main.ts:234` reset bug →
 **#25**; `phases.ts` → **#19**; artifact-path derivation → **#9**; `announceDecisions`' unbounded
-retry (`tasks.ts:293-309`) → unfiled, named so it is not mistaken for handled. The escalation pane
-tail (old A14) stays dropped.
+retry (`tasks.ts:293-309`) → **#25**, which claims it explicitly ("Cover the existing unbounded
+site (`tasks.ts:293-309`), not only the new ones — it is the one with a measured history"). The
+escalation pane tail (old A14) stays dropped.
 
 ### Files
 
@@ -67,8 +68,8 @@ conditioned on t1 merging first and this branch rebasing; "unheld" covers only `
 **Never edited:** `src/cli.ts`, `src/supervisor/tasks.ts`, `src/supervisor/deliver.ts`,
 `src/lib/worker-prompt.ts`, `prompts/worker-brief.md` (t1); `src/lib/phases.ts` (#19);
 `src/lib/machine.ts`. `deliver.ts` and `machine.ts` are **imported** only —
-`absoluteArtifactPath` (`deliver.ts:97-102`), `enterTaskPhase`/`enterRunPhase` (`machine.ts:45-51`,
-`:90-96`). **A21** proves `phases.ts` is untouched.
+`absoluteArtifactPath` (`deliver.ts:97-102`), `enterRunPhase` (`machine.ts:45-51`) and
+`enterTaskPhase` (`machine.ts:90-96`). **A21** proves `phases.ts` is untouched.
 
 ---
 
@@ -212,6 +213,26 @@ stall?: StallState
 export function stallStateFor(run: Run, record: Run | Task): StallState { … }
 export function bumpStall(run: Run, record: Run | Task, kind: 'probes' | 'holds', now: number): void
 ```
+
+`bumpStall` **writes the whole state, stamps included** — it reads through `stallStateFor`, so a
+stale state is replaced rather than incremented:
+
+```ts
+const s = stallStateFor(run, record)
+record.stall = {
+  at: record.phase_entered_at,          // REQUIRED — see below
+  run_at: run.phase_entered_at,         // REQUIRED — see below
+  last_probe_at: now,
+  probes: s.probes + (kind === 'probes' ? 1 : 0),
+  holds:  s.holds  + (kind === 'holds'  ? 1 : 0),
+}
+```
+
+**Rewriting `at` and `run_at` is not incidental.** `stallStateFor` rejects a mismatched stamp and
+returns a fresh state, so a bump that advanced only `last_probe_at` and the counter would leave the
+stamps stale, be rejected on the next read, re-anchor to the phase entry and never accumulate —
+which is **P4** exactly. The regression test below (four ticks against an aged record) is what
+catches it.
 
 `stallStateFor` returns the stored state only when **both** stamps match; otherwise a fresh state:
 
@@ -389,9 +410,22 @@ To resume after they answer:
     {{hpipe}} rewind {{run_id}} {{phase}}{{task_flag}}
 ```
 
-`{{awaiting_short}}` is `Awaiting.short`; `{{probes}}` is `probes` — sent probes, never deferrals
-(**A6**). Must be added to `ALL` in `test/prompts.test.ts:10-14` or the orphan test fails
-(`:21-24`), and must not contain a literal `hpipe` (`:68-76`).
+The full variable bag, because `render` throws on any placeholder the caller does not resolve
+(`render.ts:9-13`) and the new prompt tests below assert only file-level properties, so a missing
+key fails at delivery in front of an agent:
+
+| key | value |
+| --- | --- |
+| `run_id` | `run.run_id` |
+| `phase` | the escalated-from phase — `task.escalated_from ?? run.escalated_from` |
+| `minutes` | `candidate.minutes` |
+| `probes` | `probes` — sent probes, never deferrals (**A6**) |
+| `awaiting_short` | `Awaiting.short` (**A13**) |
+| `task_flag` | `` ` --task ${task.task_id}` `` for a task, `''` for a run — the existing convention at `tasks.ts:84`, reused verbatim so the rendered `hpipe rewind` line matches `escalate.md`'s |
+| `hpipe` | injected by `renderPrompt` (`render.ts:46`); callers must not pass it |
+
+Must be added to `ALL` in `test/prompts.test.ts:10-14` or the orphan test fails (`:21-24`), and must
+not contain a literal `hpipe` (`:68-76`).
 
 **`hpipe` is passed in as a rendered string**: `render` is a single `String.replace` whose
 replacement text is never re-scanned and whose throw inspects only placeholders present in the
@@ -533,6 +567,7 @@ into `NUMERIC` (`:40-44`) — identical to `PROMPT_RETRY_MAX`.
 | Run is `escalated` or `done` | Its tasks produce no candidates | **A26** |
 | `stallAwaiting` cannot resolve a path | `whatever clears <phase>` clause | Same shape as today's fallback |
 | Probe pane is `null` | No candidate (`stall.ts:38-39`, `:76-77`) | Unchanged; `test/stall.test.ts:165-175` pins it |
+| `run.orchestrator_pane` is `null` at escalation | Transition and `persist` still happen; the send is skipped and logged | `orchestrator_pane` is `string \| null` (`types.ts:96`) and **A9** sends there, while `probePaneFor` can build a task candidate from `task.pane_id` alone (`stall.ts:24`) — so the escalation target can be null even though the probe target was not. **A22**: a missing pane loses the prompt, never the transition, and **A15** still surfaces it |
 | `persist` throws | Caught by the tick's `try` (`main.ts:269-271`); the bump is lost and the probe re-sent | A duplicate nudge beats a lost transition |
 | Clock moves backwards | `now - last_probe_at` goes negative → not due | Degrades to silence, not to a burst |
 
