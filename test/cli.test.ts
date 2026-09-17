@@ -182,3 +182,21 @@ test('task rejects a --files entry containing whitespace and mints no task', asy
   expect(after?.tasks).toEqual([])
   expect(after?.intake_closed).toBe(true)
 })
+
+test('task rejects a --files entry that is a flag, not a path prefix', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  const bad = await cmdTask(c, {
+    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    dependsOn: [], files: ['--surface'], keepWorktree: false,
+  })
+
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('--surface')
+  expect(bad.text).toContain('the value after --files is missing')
+  expect((await activeRunForRepo(dir, 'personal', 'k'))?.tasks).toEqual([])
+})

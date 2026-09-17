@@ -73,16 +73,22 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`no agent definition at ${agentFile} — check --surface`)
   }
 
-  // A path prefix cannot contain whitespace. The shape this rejects is one quoted
-  // space-separated list in a single --files, which records one entry no sibling
-  // can prefix-match; filesOverlap then never fires and the gate reports "no
-  // overlapping files in flight" while two workers edit the same files.
-  // Measured on a live run.
+  // A path prefix cannot contain whitespace, and cannot look like a flag. Both are
+  // argv accidents: one quoted space-separated list in a single --files, or a
+  // --files with no value swallowing the next flag. Neither is detectable later —
+  // filesOverlap simply never fires and the gate reports "no overlapping files in
+  // flight" while two workers edit the same files. Measured on a live run.
   for (const entry of input.files) {
     if (/\s/.test(entry)) {
       return fail(
         `--files is comma-separated; this entry contains whitespace: "${entry}"\n` +
         `  → --files ${entry.trim().split(/\s+/).join(',')}`,
+      )
+    }
+    if (entry.startsWith('--')) {
+      return fail(
+        `--files got a flag where a path prefix belongs: "${entry}" — ` +
+        'the value after --files is missing',
       )
     }
   }
