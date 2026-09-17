@@ -3,7 +3,10 @@
 **Date:** 2026-09-17
 **Issue:** #13 — the orchestrator digest carries no phase, no age, and no next action
 **Research:** `docs/superpowers/research/2026-09-17-issue-13-research.md` (commit `f6130ef`)
-**Status:** Design v1. Spec review pass 0 pending.
+**Status:** Design v1. Pass 0 returned `VERDICT: BLOCKER` (1 blocker / 1 major / 6 minors) —
+`docs/superpowers/reviews/issue-13-spec-review-0.md`. **Not yet applied**: BLOCKER 1 is a scope
+call surfaced to the orchestrator via `hpipe decide`, and v2 follows the answer. The only edit
+made since the review is the `test/integration/smoke.md` ownership ruling, recorded in §Non-goals.
 **Declared file set** (`t2.files` in the live run ledger): `src/supervisor/tick.ts`,
 `src/supervisor/deliver.ts`, `prompts/digest.md`. Two files outside it are needed — see **A11**.
 **Modelled on:** `docs/superpowers/specs/2026-09-17-issue-9-design.md` for the document shape, and
@@ -109,6 +112,16 @@ scoped so it cannot be read as a phase completion.
   named at `src/supervisor/stall.ts:159`.
 - **Touching `src/supervisor/stall.ts`.** Reusing `stallAwaiting` was the first design and was
   dropped on evidence — §Rejected alternatives, **A8**.
+- **Editing `test/integration/smoke.md`, and the prose it leaves stale.** The orchestrator's
+  ownership ruling of 2026-09-17 on issue #13 assigns that file to **#10** for this batch: #10
+  inserts a `files:` line that invalidates the assertion at `smoke.md:100`, which is the stronger
+  claim, while this change only makes prose stale. **This task does not edit it.** The staleness is
+  real and is named here rather than left unmentioned: `smoke.md:164-165` describes the orchestrator
+  pane as receiving `[pipeline] run <id> …` digests, and after C2 those digests carry a phase box, an
+  age and an action clause that the runbook does not describe. Per the same ruling that repair is
+  **deferred to this run's `branch-review` phase**, not dropped. This is a live instance of #37 —
+  the file gate serialises only what was declared at intake, and neither task could have known at
+  registration that it would need this file.
 - **Any schema change.** Every field this design reads is already persisted. `src/lib/types.ts`,
   `src/lib/phases.ts` and `src/lib/machine.ts` are untouched, so runs already on disk are
   unaffected (`.claude/agents/plugin-dev.md` §"The self-hosting hazard").
@@ -476,11 +489,13 @@ not edit `src/supervisor/deliver.ts`, so if either needs a change something has 
 delivery or pane I/O, say in your plan how it would be verified against a real herdr session"*).
 This change touches delivery. The unit suite proves `describeWake`'s output for a given `WakeLine`;
 it **cannot** prove that `main.ts` calls it after `advanceTasks`, which is the whole of C1.
-`test/integration/smoke.md:164-165` already asserts what the orchestrator pane receives, and gets a
-step: drive one task through an artifact phase in a real session and confirm the delivered line
-carries a `→` arrow on the tick the phase advances, and a bare `[<phase> <age>m]` box on a tick
-where the worker merely goes idle. A difference between that and what the runbook says is a
-finding, not a test to make pass.
+`test/integration/smoke.md:164-165` already asserts what the orchestrator pane receives and would be
+the natural home for a step — **but that file is ruled to #10 for this batch and this task must not
+edit it** (§Non-goals). So the live check is run and reported rather than written down as a runbook
+step: drive one task through an artifact phase in a real herdr session and confirm the delivered
+line carries a `→` arrow on the tick the phase advances, and a bare `[<phase> <age>m]` box on a tick
+where the worker merely goes idle. The observation goes in the PR body, and a difference between it
+and what the runbook says is a finding, not a test to make pass.
 
 **Whole-suite gate:** `bun test` (414 pass / 0 fail / 33 files at `f6130ef`, recorded in the
 research note) and `bun run typecheck` clean before the PR. CI in this repo runs a PR-title lint
