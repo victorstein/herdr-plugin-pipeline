@@ -293,3 +293,14 @@ test('adoptableArtifacts excludes review verdicts, which are added on the branch
     'docs/superpowers/notes/misfiled.md',
   ])
 })
+
+test('adoptableArtifacts excludes paths already recorded on the task', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/research-note.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/the-spec.md', 'spec\n')
+
+  const claimed = new Set(['docs/superpowers/notes/research-note.md'])
+  expect(await adoptableArtifacts(worktree, claimed)).toEqual([
+    'docs/superpowers/notes/the-spec.md',
+  ])
+})

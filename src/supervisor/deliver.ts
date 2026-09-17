@@ -155,6 +155,7 @@ export async function adoptableArtifacts(
     .split('\0')
     .filter((path) => path.length > 0)
     .filter((path) => !path.startsWith(REVIEWS_PREFIX))
+    .filter((path) => !claimed.has(path))
 }
 
 export function taskSignalsFor(run: Run) {
