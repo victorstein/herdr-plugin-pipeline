@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  sendProbes, stallCandidates, stallStateFor, taskStallCandidates,
+  bumpStall, sendProbes, stallCandidates, stallStateFor, taskStallCandidates,
 } from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
@@ -209,4 +209,34 @@ test('a stall state with both stamps matching is returned as stored', () => {
   const task = mkTask({ phase_entered_at: 900 })
   task.stall = { at: 900, run_at: 500, last_probe_at: 1234, probes: 2, holds: 1 }
   expect(stallStateFor(run, task)).toEqual(task.stall)
+})
+
+test('a bump rewrites both stamps, or the next read would reject it', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  bumpStall(run, task, 'probes', 5000)
+  expect(task.stall).toEqual({
+    at: 900, run_at: 500, last_probe_at: 5000, probes: 1, holds: 0,
+  })
+  expect(stallStateFor(run, task).probes).toBe(1)
+})
+
+test('bumps accumulate, and holds and probes count separately', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  bumpStall(run, task, 'probes', 1000)
+  bumpStall(run, task, 'probes', 2000)
+  bumpStall(run, task, 'holds', 3000)
+  expect(stallStateFor(run, task)).toEqual({
+    at: 900, run_at: 500, last_probe_at: 3000, probes: 2, holds: 1,
+  })
+})
+
+test('a bump on a stale state replaces it rather than incrementing it', () => {
+  const run = runAt('branch-review', 500)
+  const task = mkTask({ phase_entered_at: 900 })
+  task.stall = { at: 111, run_at: 500, last_probe_at: 111, probes: 7, holds: 7 }
+  bumpStall(run, task, 'probes', 4000)
+  expect(stallStateFor(run, task).probes).toBe(1)
+  expect(stallStateFor(run, task).holds).toBe(0)
 })

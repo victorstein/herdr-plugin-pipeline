@@ -119,3 +119,23 @@ export function stallStateFor(run: Run, record: Run | Task): StallState {
     holds: 0,
   }
 }
+
+/**
+ * Advances the ladder by one rung and moves the due anchor. Rewriting `at` and
+ * `run_at` is REQUIRED, not incidental: `stallStateFor` rejects a mismatched
+ * stamp, so a bump that advanced only `last_probe_at` and the counter would be
+ * rejected on the next read, re-anchor every tick, and never accumulate — which
+ * is the rung-per-tick burst this design exists to prevent.
+ */
+export function bumpStall(
+  run: Run, record: Run | Task, kind: 'probes' | 'holds', now: number,
+): void {
+  const s = stallStateFor(run, record)
+  record.stall = {
+    at: record.phase_entered_at,
+    run_at: run.phase_entered_at,
+    last_probe_at: now,
+    probes: s.probes + (kind === 'probes' ? 1 : 0),
+    holds: s.holds + (kind === 'holds' ? 1 : 0),
+  }
+}
