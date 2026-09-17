@@ -221,3 +221,22 @@ test('task echoes the file set it recorded while gated', async () => {
   expect(t2.text).toContain('files: src/lib/gating.ts, src/cli.ts')
   expect(t2.text).toContain('queued: waiting on t1')
 })
+
+test('task echoes files: none on the dispatched return when nothing was declared', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  const t1 = await cmdTask(c, {
+    branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+
+  expect(t1.ok).toBe(true)
+  expect(t1.text).toContain('task_id: t1')
+  expect(t1.text).toContain('files: none')
+  // The brief still follows, after the header lines.
+  expect(t1.text).toContain('core work')
+})

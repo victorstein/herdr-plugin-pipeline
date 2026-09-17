@@ -149,7 +149,7 @@ export async function cmdTask(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`task_id: ${task.task_id}\n\n${prompt}`)
+  return ok(`task_id: ${task.task_id}\n${filesLine}\n\n${prompt}`)
 }
 
 /**
