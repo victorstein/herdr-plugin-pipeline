@@ -9,7 +9,7 @@ const REVIEW_PROMPTS = [
 ]
 const ALL = [
   'spec', 'plan', 'dispatch', 'worker-brief', 'ci-red', 'merge', 'close',
-  'escalate', 'stall-probe', 'digest', ...REVIEW_PROMPTS,
+  'escalate', 'stall-probe', 'stall-escalate', 'digest', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement',
 ]
 
@@ -113,4 +113,14 @@ test('the plugin manifest version matches version.txt', async () => {
   const declared = /^version = "([^"]+)"/m.exec(manifest)?.[1]
   const canonical = (await Bun.file(join(ROOT, 'version.txt')).text()).trim()
   expect(declared, 'herdr-plugin.toml version is stale against version.txt').toBe(canonical)
+})
+
+test('the stall escalation prompt carries its own variables, not escalate.md\'s', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'stall-escalate.md')).text()
+  for (const key of ['{{run_id}}', '{{phase}}', '{{minutes}}', '{{probes}}',
+                     '{{awaiting_short}}', '{{task_flag}}']) {
+    expect(text, `stall-escalate.md must render ${key}`).toContain(key)
+  }
+  expect(text).not.toContain('review passes')
+  expect(text).not.toContain('{{pass}}')
 })
