@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  bumpStall, sendProbes, stallCandidates, stallStateFor, taskStallCandidates,
+  bumpStall, sendProbes, stallAwaiting, stallCandidates, stallStateFor, taskStallCandidates,
 } from '../src/supervisor/stall'
 import { newRun } from '../src/lib/ledger'
 import type { Run, RunPhase, Task } from '../src/lib/types'
@@ -239,4 +239,79 @@ test('a bump on a stale state replaces it rather than incrementing it', () => {
   bumpStall(run, task, 'probes', 4000)
   expect(stallStateFor(run, task).probes).toBe(1)
   expect(stallStateFor(run, task).holds).toBe(0)
+})
+
+test('an artifact row names a real absolute path and says how to fix a misfile', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', checkout_path: '/wt' })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  expect(a.clause).toContain('/wt/docs/superpowers/research/r.md')
+  expect(a.clause).toContain('Nothing has appeared at')
+  expect(a.short).toBe('its research/spec/plan artifact')
+})
+
+test('a verdict row shares the path branch but not the short form', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'spec-review', checkout_path: '/wt' })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  expect(a.short).toBe('its review verdict')
+  expect(a.clause).toContain('/wt/docs/superpowers/reviews/')
+})
+
+test('a run verdict row resolves against the repo root, not a worktree', () => {
+  const run = runAt('branch-review', LONG_AGO)
+  const a = stallAwaiting(run, null, 'hp')
+  expect(a.short).toBe('its review verdict')
+  expect(a.clause).toContain('/r/docs/superpowers/reviews/')
+})
+
+test('a pr row names the PR, never a path — the defect the issue addendum raised', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', branch: 'fix/x', issue: 38 })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  expect(a.clause).toBe('This phase is waiting for a pushed PR for fix/x (#38).')
+  expect(a.clause).not.toContain('appeared at')
+  expect(a.clause).not.toContain('path above')
+})
+
+test('run dispatch waits on a worktree, and never names a reviews path', () => {
+  const a = stallAwaiting(runAt('dispatch', LONG_AGO), null, 'hp')
+  expect(a.clause).toBe(
+    'This phase is waiting for a worktree to be adopted for a dispatched task.')
+  expect(a.clause).not.toContain('docs/superpowers/reviews')
+})
+
+test('run execute names the rendered hpipe command, never a raw placeholder', () => {
+  const a = stallAwaiting(runAt('execute', LONG_AGO), null, 'bun run /p/src/cli.ts')
+  expect(a.clause).toBe(
+    'This phase is waiting for `bun run /p/src/cli.ts dispatch --done` to close intake.')
+  expect(a.clause).not.toContain('{{')
+})
+
+test('the blocked rows name the exit, not the symptom', () => {
+  const run = runAt('execute', LONG_AGO)
+  const files = mkTask({ phase: 'blocked-on-files' })
+  const decision = mkTask({ task_id: 't2', phase: 'blocked-on-decision' })
+  const teardown = mkTask({ task_id: 't3', phase: 'teardown' })
+  run.tasks = [files, decision, teardown]
+  expect(stallAwaiting(run, files, 'hp')).toEqual({
+    short: 'the files another task holds',
+    clause: 'This phase is waiting for another task to release the files this one declared.',
+  })
+  expect(stallAwaiting(run, decision, 'hp').short).toBe('an answer to the open decision')
+  expect(stallAwaiting(run, teardown, 'hp').short).toBe('its worktree to be removed')
+})
+
+test('an unrecognised signal falls back to naming the phase', () => {
+  const run = runAt('execute', LONG_AGO)
+  const ci = mkTask({ phase: 'ci' })
+  run.tasks = [ci]
+  expect(stallAwaiting(run, ci, 'hp')).toEqual({
+    short: 'whatever clears ci',
+    clause: 'This phase is waiting for whatever clears ci.',
+  })
 })

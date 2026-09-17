@@ -1,4 +1,5 @@
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { absoluteArtifactPath } from './deliver'
 import type { Run, StallState, Task } from '../lib/types'
 
 export interface StallCandidate {
@@ -138,4 +139,61 @@ export function bumpStall(
     probes: s.probes + (kind === 'probes' ? 1 : 0),
     holds: s.holds + (kind === 'holds' ? 1 : 0),
   }
+}
+
+export interface Awaiting {
+  /** The whole waiting paragraph, so the template asserts nothing about its shape. */
+  clause: string
+  /** A noun phrase, for the escalation prompt's single sentence. */
+  short: string
+}
+
+/**
+ * What this phase is waiting for, phrased so the sentence is true of what it
+ * names. Keyed on `row.signal` rather than the phase name, so #19 making more
+ * rows stallable needs no change here. `hpipe` arrives already rendered:
+ * `render` never re-scans replacement text (`src/lib/render.ts:8-14`), so a
+ * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
+ */
+export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Awaiting {
+  const row = task ? taskRow(task.phase) : runRow(run.phase)
+  const phase = task ? task.phase : run.phase
+  const sentence = (short: string): Awaiting =>
+    ({ short, clause: `This phase is waiting for ${short}.` })
+
+  if (row.signal === 'artifact' || row.signal === 'verdict') {
+    const path = absoluteArtifactPath(run, task)
+    if (path !== null) {
+      return {
+        short: row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict',
+        clause: `Nothing has appeared at:\n\n    ${path}\n\n` +
+          'If you finished but wrote it elsewhere, move it exactly there — ' +
+          'the supervisor stats that path and nothing else.',
+      }
+    }
+  }
+  if (row.signal === 'pr' && task) {
+    return sentence(`a pushed PR for ${task.branch} (#${task.issue})`)
+  }
+  if (row.signal === 'files') {
+    return {
+      short: 'the files another task holds',
+      clause: 'This phase is waiting for another task to release the files this one declared.',
+    }
+  }
+  if (row.signal === 'manual') return sentence('an answer to the open decision')
+  if (row.signal === 'worktree') {
+    return task
+      ? { short: 'its worktree to be removed',
+          clause: "This phase is waiting for this task's worktree to be removed." }
+      : { short: 'a worktree for a dispatched task',
+          clause: 'This phase is waiting for a worktree to be adopted for a dispatched task.' }
+  }
+  if (row.signal === 'gate') {
+    return {
+      short: 'intake to be closed',
+      clause: `This phase is waiting for \`${hpipe} dispatch --done\` to close intake.`,
+    }
+  }
+  return sentence(`whatever clears ${phase}`)
 }
