@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.1...v1.2.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* adopt a misfiled artifact from the branch instead of stalling silently ([#27](https://github.com/victorstein/herdr-plugin-pipeline/issues/27)) ([f5c733d](https://github.com/victorstein/herdr-plugin-pipeline/commit/f5c733de544f9cd05a5716c11813eaf914c6019d)), closes [#9](https://github.com/victorstein/herdr-plugin-pipeline/issues/9)
+
 ## [1.2.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.0...v1.2.1) (2026-09-16)
 
 
