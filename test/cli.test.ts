@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
-import { cmdRewind, cmdStart, cmdTask } from '../src/cli'
+import { cmdRewind, cmdStart, cmdTask, listFlag } from '../src/cli'
 
 let dir: string
 let repoDir: string
@@ -137,4 +137,106 @@ test('the run id carries the whole title, not a fragment of it', async () => {
 
   const run = await activeRunForRepo(dir, 'personal', 'k')
   expect(run?.run_id).toContain('add-a-titlecase-helper')
+})
+
+test('listFlag splits one value on commas and drops the empties', () => {
+  expect(listFlag(['--files', 'a/,,b/ '], 'files')).toEqual(['a/', 'b/'])
+})
+
+test('listFlag accumulates every occurrence of a repeated flag', () => {
+  expect(listFlag(['--files', 'a/', '--files', 'b/'], 'files')).toEqual(['a/', 'b/'])
+})
+
+test('listFlag returns nothing when the flag is absent or carries no value', () => {
+  expect(listFlag(['--surface', 'core'], 'files')).toEqual([])
+  expect(listFlag(['--surface', 'core', '--files'], 'files')).toEqual([])
+})
+
+test('listFlag keeps a value that looks like a flag, for cmdTask to reject', () => {
+  expect(listFlag(['--files', '--surface', 'core'], 'files')).toEqual(['--surface'])
+})
+
+test('task rejects a --files entry containing whitespace and mints no task', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  // Set so the assertion below can prove the rejection returned before
+  // `run.intake_closed = false`. A fresh run already has it false.
+  started!.intake_closed = true
+  await saveRun(dir, started!)
+
+  const bad = await cmdTask(c, {
+    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    dependsOn: [], files: ['src/a.ts src/b.ts'], keepWorktree: false,
+  })
+
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('src/a.ts src/b.ts')
+  expect(bad.text).toContain('comma-separated')
+  expect(bad.text).toContain('--files src/a.ts,src/b.ts')
+
+  // There is no command that removes a task once minted, so the check has to run
+  // before the task literal is pushed — not merely before the prompt is returned.
+  const after = await activeRunForRepo(dir, 'personal', 'k')
+  expect(after?.tasks).toEqual([])
+  expect(after?.intake_closed).toBe(true)
+})
+
+test('task rejects a --files entry that is a flag, not a path prefix', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  const bad = await cmdTask(c, {
+    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    dependsOn: [], files: ['--surface'], keepWorktree: false,
+  })
+
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('--surface')
+  expect(bad.text).toContain('the value after --files is missing')
+  expect((await activeRunForRepo(dir, 'personal', 'k'))?.tasks).toEqual([])
+})
+
+test('task echoes the file set it recorded while gated', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  // t1 is dispatched into `research`, which is not terminal, so t2 stays gated and
+  // the `queued:` return is the one that runs.
+  await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false })
+  const t2 = await cmdTask(c, {
+    branch: 'feat/api', issue: 2, surface: 'api', notes: '',
+    dependsOn: ['t1'], files: ['src/lib/gating.ts', 'src/cli.ts'], keepWorktree: false,
+  })
+
+  expect(t2.ok).toBe(true)
+  expect(t2.text).toContain('task_id: t2')
+  expect(t2.text).toContain('files: src/lib/gating.ts, src/cli.ts')
+  expect(t2.text).toContain('queued: waiting on t1')
+})
+
+test('task echoes files: none on the dispatched return when nothing was declared', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+  const started = await activeRunForRepo(dir, 'personal', 'k')
+  started!.phase = 'dispatch'
+  await saveRun(dir, started!)
+
+  const t1 = await cmdTask(c, {
+    branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work',
+    dependsOn: [], files: [], keepWorktree: false,
+  })
+
+  expect(t1.ok).toBe(true)
+  expect(t1.text).toContain('task_id: t1')
+  expect(t1.text).toContain('files: none')
+  // The brief still follows, after the header lines.
+  expect(t1.text).toContain('core work')
 })

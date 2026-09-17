@@ -77,7 +77,7 @@ The orchestrator is then prompted to research the work, open one GitHub issue pe
 body is the brief** — and register each with:
 
     hpipe task --branch <branch> --issue <n> --surface <surface> \
-               [--depends-on <ids>] [--files <prefixes>] [--notes <batch context>]
+               [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>]
 
 When the batch is complete it closes intake with `hpipe dispatch --done`. Everything after that is
 injected: each worker gets its brief at dispatch and its next instruction as each phase completes.
