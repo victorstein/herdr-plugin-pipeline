@@ -1,11 +1,13 @@
-import { expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
+import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
+
+afterEach(cleanupFixtures)
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -245,7 +247,7 @@ const designArtifacts = (): Task['artifacts'] => ({
 })
 
 function worktreeWith(relative: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'hpipe-design-'))
+  const dir = tempDir('hpipe-design-')
   mkdirSync(join(dir, dirname(relative)), { recursive: true })
   writeFileSync(join(dir, relative), 'findings\n')
   return dir
@@ -307,4 +309,166 @@ test('a design row prompt names the artifact path its own predicate will check',
     expect(watched).not.toBeNull()
     expect(await promptForTaskPhase(run, task, deps(), 'research')).toContain(watched as string)
   }
+})
+
+test('a misfiled artifact is adopted from the branch and recorded on the task', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+    'docs/superpowers/reviews/old-c.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/misfiled.md')
+})
+
+test('adoption survives pre-existing docs being touched after the worker commits', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+  const now = new Date()
+  utimesSync(join(worktree, 'docs/superpowers/plans/old-a.md'), now, now)
+  utimesSync(join(worktree, 'docs/superpowers/specs/old-b.md'), now, now)
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/misfiled.md')
+})
+
+test('the adoption scan does not run while the worker is still working', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps({ liveIdle: async () => false }))
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('a branch with no commits past the base adopts nothing', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('in spec, the recorded research note is not re-adopted and the spec is', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/the-research.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/the-spec.md', 'spec\n')
+
+  const artifacts = designArtifacts()
+  artifacts.research = 'docs/superpowers/notes/the-research.md'
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: 0, checkout_path: worktree, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec-review')
+  expect(run.tasks[0]?.artifacts.spec).toBe('docs/superpowers/notes/the-spec.md')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/the-research.md')
+})
+
+test('a present-but-stale canonical artifact is never replaced by adoption', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const artifacts = designArtifacts()
+  mkdirSync(join(worktree, dirname(artifacts.spec as string)), { recursive: true })
+  writeFileSync(join(worktree, artifacts.spec as string), 'the real spec\n')
+  commitIn(worktree, 'docs/superpowers/notes/stray.md', 'a stray doc\n')
+
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: Date.now() + 60_000, checkout_path: worktree, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.spec).toBe(artifacts.spec)
+})
+
+test('two candidates are ambiguous, nothing is adopted, and it is logged once', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
+  commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  const ambiguityLog = new Set<string>()
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps({ ambiguityLog }))
+    await advanceTasks(run, deps({ ambiguityLog }))
+    await advanceTasks(run, deps({ ambiguityLog }))
+  } finally {
+    console.error = original
+  }
+
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
+})
+
+test('with no checkout the scan never falls back to the main checkout', async () => {
+  const mainCheckout = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(mainCheckout, 'docs/superpowers/notes/somebody-elses.md', 'not ours\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: null, artifacts: designArtifacts(),
+  })])
+  run.repo_root = mainCheckout
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('the supervisor default dedup set is what production actually uses', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
+  commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
+
+  // No `ambiguityLog` in deps, exactly as src/supervisor/main.ts builds them, so
+  // this is the only test that exercises the module-level default. Keyed on a
+  // task_id and phase_entered_at no other test uses, because that set is
+  // process-lifetime and shared across this file.
+  const run = mkRun([mkTask({
+    task_id: 'tdefault', phase: 'research', phase_entered_at: 7,
+    checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps())
+    await advanceTasks(run, deps())
+  } finally {
+    console.error = original
+  }
+
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
 })

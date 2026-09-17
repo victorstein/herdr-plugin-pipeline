@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecisionFor } from '../lib/decisions'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
@@ -8,7 +9,7 @@ import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath } from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -28,6 +29,13 @@ export interface TaskDeps {
   removeWorktree: (workspaceId: string) => Promise<boolean>
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
+  /**
+   * Phase entries whose ambiguous candidate set has already been reported. Ideally
+   * owned by main()'s loop the way `probed` and `attempts` are, but main.ts belongs
+   * to issue #15's file set, so this defaults to a module-level set and stays
+   * optional. Tests pass their own to avoid inheriting another test's keys.
+   */
+  ambiguityLog?: Set<string>
 }
 
 /**
@@ -173,6 +181,23 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   return prompts
 }
 
+// Reported once per phase entry rather than once per 1s tick for the 45 minutes
+// before the first stall probe. Keyed the same way taskStallKey keys alreadyProbed,
+// run_id included: task ids are per-run, so two live runs both hold a `t1`. Spelled
+// out rather than imported from stall.ts, which issue #15 is rewriting — a shared
+// key helper would make this dedup change shape underneath us.
+const defaultAmbiguityLog = new Set<string>()
+
+function logAmbiguous(run: Run, task: Task, candidates: string[], seen: Set<string>): void {
+  const key = `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
+  if (seen.has(key)) return
+  seen.add(key)
+  console.error(
+    `[pipeline] ${task.task_id} (${task.branch}): ${task.phase} artifact missing and ` +
+    `${candidates.length} candidates are ambiguous — ${candidates.join(', ')}`,
+  )
+}
+
 async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: boolean) {
   const base = {
     actorIdle,
@@ -205,8 +230,40 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       if (!actorIdle) return base
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
-      if (!(await isFresh(absolute, task.phase_entered_at))) return base
-      if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+
+      if (await isFresh(absolute, task.phase_entered_at)) {
+        if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+        return { ...base, artifactFresh: true }
+      }
+
+      // Stale is not missing. Every `onBlocker` re-entry re-stamps phase_entered_at
+      // and leaves the previous artifact in place, so adopting on `!isFresh` would
+      // replace an already-correct path with whatever else the worker committed
+      // while revising. Only an ABSENT artifact is a candidate for adoption.
+      if (existsSync(absolute)) return base
+
+      const slot = taskRow(task.phase).artifact
+      const checkout = task.checkout_path
+      if (slot === undefined || checkout === null) return base
+
+      const claimed = new Set(
+        [task.artifacts.research, task.artifacts.spec, task.artifacts.plan]
+          .filter((path): path is string => path !== null),
+      )
+      const candidates = await adoptableArtifacts(checkout, claimed)
+      const adopted = candidates.length === 1 ? candidates[0] : undefined
+      if (adopted === undefined) {
+        if (candidates.length > 1) {
+          logAmbiguous(run, task, candidates, deps.ambiguityLog ?? defaultAmbiguityLog)
+        }
+        return base
+      }
+      if (!(await isSettled(join(checkout, adopted), deps.fileSettleMs))) return base
+
+      // Recorded, not merely accepted: every later prompt cites the artifact by the
+      // path stored here, and writing it back is what makes adoption idempotent —
+      // the next tick's canonical stat hits the adopted path directly.
+      task.artifacts[slot] = adopted
       return { ...base, artifactFresh: true }
     }
     case 'spec-review':
