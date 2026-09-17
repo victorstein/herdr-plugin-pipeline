@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -212,6 +212,42 @@ test('an artifact row names a real absolute path and says how to fix a misfile',
   expect(a.clause).toContain('/wt/docs/superpowers/research/r.md')
   expect(a.clause).toContain('Nothing has appeared at')
   expect(a.short).toBe('its research/spec/plan artifact')
+})
+
+test('the artifact clause does not reassert the sentence #9 retired from the brief', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', checkout_path: '/wt' })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  expect(a.clause).not.toContain('stats that path and nothing else')
+  expect(a.clause).toContain("does not satisfy this phase's contract")
+})
+
+test('a task with no worktree is told it was never dispatched, not sent at the main checkout', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', checkout_path: null })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  // `/r` is the run repo_root in these fixtures; naming it would point the reader
+  // at the orchestrator's own tree.
+  expect(a.clause).not.toContain('/r/docs/superpowers/research/r.md')
+  expect(a.short).toContain('never been dispatched')
+})
+
+test('an artifact that exists but is stale is not described as absent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stall-awaiting-'))
+  mkdirSync(join(dir, 'docs/superpowers/research'), { recursive: true })
+  writeFileSync(join(dir, 'docs/superpowers/research/r.md'), 'stale pass output')
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', checkout_path: dir })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp')
+  expect(a.clause).not.toContain('Nothing has appeared at')
+  expect(a.clause).toContain("Nothing newer than this phase's start")
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('a verdict row shares the path branch but not the short form', () => {

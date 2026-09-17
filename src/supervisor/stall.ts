@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
@@ -164,13 +165,30 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
     ({ short, clause: `This phase is waiting for ${short}.` })
 
   if (row.signal === 'artifact' || row.signal === 'verdict') {
+    const short = row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict'
+    // With no worktree `absoluteArtifactPath` falls back to the main checkout,
+    // which is the orchestrator's tree and holds every sibling's merged docs — so
+    // naming it sends the reader at the wrong file when the real fault is that
+    // this task was never dispatched. `adoptableArtifacts` refuses the identical
+    // fallback for the identical reason.
+    if (task !== null && task.checkout_path === null) {
+      return sentence('a worktree for this task, which has never been dispatched')
+    }
     const path = absoluteArtifactPath(run, task)
     if (path !== null) {
+      // An `onBlocker` re-entry leaves the previous pass's file in place, so
+      // "nothing has appeared" is simply false there. What the phase waits for is
+      // a version newer than its entry, which is what `isFresh` tests.
+      const lead = existsSync(path)
+        ? `Nothing newer than this phase's start has appeared at:\n\n    ${path}`
+        : `Nothing has appeared at:\n\n    ${path}`
       return {
-        short: row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict',
-        clause: `Nothing has appeared at:\n\n    ${path}\n\n` +
-          'If you finished but wrote it elsewhere, move it exactly there — ' +
-          'the supervisor stats that path and nothing else.',
+        short,
+        // Not "the supervisor stats that path and nothing else": adoption also asks
+        // the branch what it added, so that sentence stopped being true when #9
+        // landed, and #9 deleted it from `prompts/worker-brief.md` in this batch.
+        clause: `${lead}\n\nIf you finished but wrote it elsewhere, move it exactly there — ` +
+          "an artifact written anywhere else does not satisfy this phase's contract.",
       }
     }
   }

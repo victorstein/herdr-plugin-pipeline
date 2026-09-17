@@ -107,7 +107,17 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
   return join(base, rel)
 }
 
-/** The branch every worker worktree is cut from; `prompts/dispatch.md` mandates `--base main`. */
+/**
+ * The branch every worker worktree is cut from; `prompts/dispatch.md` mandates
+ * `--base main`.
+ *
+ * `main...HEAD` is the merge-base diff, so it names what this branch added — but
+ * only while the branch has not merged `main` against a stale local ref. When it
+ * has, the merge-base stays behind and every doc that landed on `origin/main`
+ * meanwhile reads as added. Measured on this repo: six sibling-owned candidates.
+ * That fails closed, because two or more candidates adopt nothing, so it costs a
+ * repair rather than causing a wrong one.
+ */
 const ARTIFACT_BASE_REF = 'main'
 
 // Bun.spawn throws synchronously on a missing binary, and this runs inside the

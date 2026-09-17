@@ -182,10 +182,11 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 }
 
 // Reported once per phase entry rather than once per 1s tick for the 45 minutes
-// before the first stall probe. Keyed the same way taskStallKey keys alreadyProbed,
-// run_id included: task ids are per-run, so two live runs both hold a `t1`. Spelled
-// out rather than imported from stall.ts, which issue #15 is rewriting — a shared
-// key helper would make this dedup change shape underneath us.
+// before the first stall probe. `run_id` is in the key because task ids are
+// per-run: two live runs both hold a `t1`. The key was originally spelled out
+// here to avoid sharing a helper with stall.ts while #15 rewrote it; #15 has
+// landed and deleted the helper this once mirrored, so the duplication is now
+// simply local.
 const defaultAmbiguityLog = new Set<string>()
 
 function logAmbiguous(run: Run, task: Task, candidates: string[], seen: Set<string>): void {
