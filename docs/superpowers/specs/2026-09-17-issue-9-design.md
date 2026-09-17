@@ -106,8 +106,13 @@ and a worker that declines is met with silence.**
 
 *(Narrowed from v1 per MAJOR 5.)* A task whose worker wrote its artifact somewhere other than the
 path the plugin named **advances anyway, whenever the branch identifies exactly one candidate** —
-which, verified below, is all three of the measured failures. On the branches where it cannot, the
-supervisor **logs why** rather than returning silently.
+which, verified below, is all three of the measured failures. Where the branch names **two or more**
+candidates, the supervisor **logs why** rather than returning silently.
+
+Note the asymmetry, because v2 of this sentence overstated it: the **zero**-candidate branch stays
+silent, exactly as today (§Data and control flow step 5). A log line there would fire on every
+worker that merely goes idle before writing anything, and the per-phase-entry dedup (**A13**) would
+then swallow the message at the point it would actually mean something.
 
 This does not make every silent stall visible; see §Non-goals.
 
