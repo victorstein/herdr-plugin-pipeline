@@ -112,9 +112,13 @@ const REVIEWS_PREFIX = 'docs/superpowers/reviews/'
 // Bun.spawn throws synchronously on a missing binary or a cwd that doesn't exist,
 // and this runs inside the supervisor tick, so a spawn failure must degrade to a
 // non-ok result rather than crash the loop. Mirrors Gh.run in ../lib/gh.ts.
+//
+// `diff.renames=true` is pinned rather than inherited: a user gitconfig disabling
+// rename detection turns a `git mv`d doc into a false `A` and therefore a false
+// candidate, which is the one way this scan can adopt the wrong file.
 async function git(checkoutPath: string, args: string[]): Promise<{ code: number; text: string }> {
   try {
-    const proc = Bun.spawn(['git', '-C', checkoutPath, ...args], {
+    const proc = Bun.spawn(['git', '-c', 'diff.renames=true', '-C', checkoutPath, ...args], {
       stdout: 'pipe', stderr: 'ignore',
     })
     const text = await new Response(proc.stdout).text()

@@ -304,3 +304,23 @@ test('adoptableArtifacts excludes paths already recorded on the task', async () 
     'docs/superpowers/notes/the-spec.md',
   ])
 })
+
+test('a moved doc is a rename even when the repo disables rename detection', async () => {
+  const worktree = repoWithWorktree(
+    ['docs/superpowers/notes/original.md'],
+    [['diff.renames', 'false']],
+  )
+  git(['mv', 'docs/superpowers/notes/original.md', 'docs/superpowers/notes/renamed.md'], worktree)
+  git(['commit', '-qm', 'move it'], worktree)
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+})
+
+test('a non-ASCII candidate path comes back raw, not C-quoted', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/café-señor.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/café-señor.md',
+  ])
+})
