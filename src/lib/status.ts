@@ -116,6 +116,17 @@ export function formatStatus(
       )
     }
 
+    // `phase === 'escalated'`, never `escalated_from !== null`: cmdAbort sets
+    // escalated_from and then parks the run in `done` (src/cli.ts:298-299), so
+    // the looser predicate would warn about every aborted run.
+    if (run.phase === 'escalated') {
+      lines.push(
+        `  ⚠ run escalated from ${run.escalated_from ?? 'unknown'} ` +
+        `${ageMinutes(run.phase_entered_at)}m ago — needs a human; ` +
+        `\`hpipe rewind ${run.run_id} ${run.escalated_from ?? '<phase>'}\` resumes it`,
+      )
+    }
+
     for (const task of run.tasks) {
       const bits = [
         `  ${task.task_id}`,
