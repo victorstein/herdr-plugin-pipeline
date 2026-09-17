@@ -405,3 +405,43 @@ test('a present-but-stale canonical artifact is never replaced by adoption', asy
   expect(run.tasks[0]?.phase).toBe('spec')
   expect(run.tasks[0]?.artifacts.spec).toBe(artifacts.spec)
 })
+
+test('two candidates are ambiguous, nothing is adopted, and it is logged once', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
+  commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  const ambiguityLog = new Set<string>()
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps({ ambiguityLog }))
+    await advanceTasks(run, deps({ ambiguityLog }))
+    await advanceTasks(run, deps({ ambiguityLog }))
+  } finally {
+    console.error = original
+  }
+
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
+})
+
+test('with no checkout the scan never falls back to the main checkout', async () => {
+  const mainCheckout = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(mainCheckout, 'docs/superpowers/notes/somebody-elses.md', 'not ours\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: null, artifacts: designArtifacts(),
+  })])
+  run.repo_root = mainCheckout
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})

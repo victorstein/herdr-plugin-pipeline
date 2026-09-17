@@ -29,6 +29,12 @@ export interface TaskDeps {
   removeWorktree: (workspaceId: string) => Promise<boolean>
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
+  /**
+   * Phase entries whose ambiguous candidate set has already been reported. Omitted
+   * by the supervisor, which wants one shared log across the process; tests pass
+   * their own so they do not inherit another test's keys.
+   */
+  ambiguityLog?: Set<string>
 }
 
 /**
@@ -174,6 +180,27 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   return prompts
 }
 
+// Process-lifetime by default, so an ambiguous candidate set is reported once
+// rather than once per 1s tick for the 45 minutes before the first stall probe.
+// Keyed like stall.ts's taskStallKey (src/supervisor/stall.ts:62-64) minus the
+// run_id, which task_id does not subsume — two runs can each hold a `t1`, and
+// only phase_entered_at separates them. Tolerable for a log line: a collision
+// needs the same Date.now() millisecond and costs one dropped message.
+// Ownership differs too — `alreadyProbed` is threaded from main.ts, while this is
+// a module default that TaskDeps.ambiguityLog replaces so a test does not inherit
+// another test's keys.
+const defaultAmbiguityLog = new Set<string>()
+
+function logAmbiguous(task: Task, candidates: string[], seen: Set<string>): void {
+  const key = `${task.task_id}:${task.phase}:${task.phase_entered_at}`
+  if (seen.has(key)) return
+  seen.add(key)
+  console.error(
+    `[pipeline] ${task.task_id} (${task.branch}): ${task.phase} artifact missing and ` +
+    `${candidates.length} candidates are ambiguous — ${candidates.join(', ')}`,
+  )
+}
+
 async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: boolean) {
   const base = {
     actorIdle,
@@ -228,7 +255,12 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       )
       const candidates = await adoptableArtifacts(checkout, claimed)
       const adopted = candidates.length === 1 ? candidates[0] : undefined
-      if (adopted === undefined) return base
+      if (adopted === undefined) {
+        if (candidates.length > 1) {
+          logAmbiguous(task, candidates, deps.ambiguityLog ?? defaultAmbiguityLog)
+        }
+        return base
+      }
       if (!(await isSettled(join(checkout, adopted), deps.fileSettleMs))) return base
 
       // Recorded, not merely accepted: every later prompt cites the artifact by the
