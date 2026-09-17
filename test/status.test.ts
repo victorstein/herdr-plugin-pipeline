@@ -148,3 +148,19 @@ test('a stuck holder is still reported as needing release', () => {
   ]
   expect(formatStatus([run], { state: 'live' }, 'personal')).toContain('hpipe release --task t1')
 })
+
+test('an escalated task is called out as needing a human', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'escalated', escalated_from: 'implement',
+                        phase_entered_at: Date.now() - 47 * 60_000 })]
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain('t1 escalated from implement')
+  expect(out).toContain('47m')
+  expect(out).toContain('hpipe rewind')
+})
+
+test('a healthy task gets no escalation warning', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'implement' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('needs a human')
+})

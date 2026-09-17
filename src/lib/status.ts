@@ -18,6 +18,14 @@ function taskWarnings(run: Run): string[] {
   const lines: string[] = []
 
   for (const task of run.tasks) {
+    if (task.phase === 'escalated') {
+      lines.push(
+        `  ⚠ ${task.task_id} escalated from ${task.escalated_from ?? 'unknown'} ` +
+        `${ageMinutes(task.phase_entered_at)}m ago — needs a human; ` +
+        `\`hpipe rewind ${run.run_id} ${task.escalated_from ?? '<phase>'} --task ${task.task_id}\` resumes it`,
+      )
+    }
+
     const open = openDecisionFor(task)
     if (open) {
       lines.push(
