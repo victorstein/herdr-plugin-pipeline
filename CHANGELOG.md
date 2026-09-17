@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.2...v1.2.3) (2026-09-17)
+
+
+### Bug Fixes
+
+* re-probe stalled phases and escalate them to a human ([#28](https://github.com/victorstein/herdr-plugin-pipeline/issues/28)) ([93f79b2](https://github.com/victorstein/herdr-plugin-pipeline/commit/93f79b2954e67c09d62fa329d26afed48e8484c8)), closes [#15](https://github.com/victorstein/herdr-plugin-pipeline/issues/15)
+
 ## [1.2.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.1...v1.2.2) (2026-09-17)
 
 
