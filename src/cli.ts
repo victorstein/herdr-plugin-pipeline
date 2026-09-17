@@ -364,12 +364,13 @@ function flag(argv: string[], name: string): string | null {
 }
 
 // Exported for its tests: `dispatch` is module-private, so this is the only
-// reachable seam on the argv layer where the --files bug lived.
+// importable symbol on the argv layer where the --files bug lived. It proves the
+// helper; `test/cli-argv.test.ts` drives the real binary and proves the wiring.
 export function listFlag(argv: string[], name: string): string[] {
   const entries: string[] = []
   // Every occurrence contributes. `flag` is indexOf-based, so the previous
   // single-lookup form silently dropped a repeated --files and everything it
-  // declared, with no diagnostic anywhere. Measured on a live run.
+  // declared, with no diagnostic anywhere.
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] !== `--${name}`) continue
     const raw = argv[i + 1]
