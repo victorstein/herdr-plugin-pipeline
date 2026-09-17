@@ -328,3 +328,64 @@ test('a misfiled artifact is adopted from the branch and recorded on the task', 
   expect(run.tasks[0]?.phase).toBe('spec')
   expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/misfiled.md')
 })
+
+test('adoption survives pre-existing docs being touched after the worker commits', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+  const now = new Date()
+  utimesSync(join(worktree, 'docs/superpowers/plans/old-a.md'), now, now)
+  utimesSync(join(worktree, 'docs/superpowers/specs/old-b.md'), now, now)
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/misfiled.md')
+})
+
+test('the adoption scan does not run while the worker is still working', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps({ liveIdle: async () => false }))
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('a branch with no commits past the base adopts nothing', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
+})
+
+test('in spec, the recorded research note is not re-adopted and the spec is', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/the-research.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/the-spec.md', 'spec\n')
+
+  const artifacts = designArtifacts()
+  artifacts.research = 'docs/superpowers/notes/the-research.md'
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: 0, checkout_path: worktree, artifacts,
+  })])
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec-review')
+  expect(run.tasks[0]?.artifacts.spec).toBe('docs/superpowers/notes/the-spec.md')
+  expect(run.tasks[0]?.artifacts.research).toBe('docs/superpowers/notes/the-research.md')
+})
