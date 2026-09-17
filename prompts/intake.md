@@ -21,12 +21,15 @@ plans its own issue.
 4. **Register each one:**
 
        {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
-                  [--depends-on <task_ids>] [--files <path-prefixes>] \
+                  [--depends-on <id,id>] [--files <prefix,prefix>] \
                   [--notes "<batch context that does not belong in a public issue>"]
 
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
-   exists. `{{hpipe}} task` prints the task id, and either the worker brief to dispatch or
-   `queued: waiting on …` — which is correct, and you will be told when that task is ready.
+   exists. `--files` and `--depends-on` are **comma-separated**: a value containing whitespace is
+   rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the
+   task id, then a `files:` line echoing exactly what it recorded (or `files: none`) — check it says
+   what you meant — and then either the worker brief to dispatch or `queued: waiting on …`, which is
+   correct, and you will be told when that task is ready.
 
 5. **When the last task is registered, close intake:**
 
