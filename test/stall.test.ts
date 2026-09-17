@@ -511,3 +511,25 @@ test('only `working` defers — blocked and unknown escalate', async () => {
     expect(deps.sent, `${status} must escalate`).toEqual(['escalate:t1'])
   }
 })
+
+test('a paneless worker escalates without consulting anyone (A7, through applyStalls)', async () => {
+  // The candidate-level test pins actorPaneId === null. This drives it through
+  // applyStalls: the deferral gate must be skipped entirely rather than asking
+  // the orchestrator — probePaneFor's fallback pane — how the worker is doing.
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', pane_id: null, phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+
+  let statusCalls = 0
+  const deps = mkDeps({
+    agentStatus: async () => { statusCalls += 1; return 'working' },
+  })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+
+  expect(deps.sent).toEqual(['escalate:t1'])
+  expect(statusCalls).toBe(0)
+  expect(stallStateFor(run, task).holds).toBe(0)
+})
