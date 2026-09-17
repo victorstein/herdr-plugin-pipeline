@@ -1,7 +1,11 @@
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
-  absoluteArtifactPath, artifactPathFor, buildDigest, deliveriesFor, shouldRetry, taskSignalsFor,
+  absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
+  shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
+import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -244,4 +248,38 @@ test('a task with no checkout path falls back to repo_root', () => {
   const task = mkTask({ phase: 'spec', checkout_path: null })
   task.artifacts.spec = 'docs/superpowers/specs/design.md'
   expect(absoluteArtifactPath(run, task)).toBe('/r/docs/superpowers/specs/design.md')
+})
+
+afterEach(cleanupFixtures)
+
+test('adoptableArtifacts returns docs this branch added, not what the worktree checked out', async () => {
+  const worktree = repoWithWorktree([
+    'docs/superpowers/plans/old-a.md',
+    'docs/superpowers/specs/old-b.md',
+  ])
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/misfiled.md',
+  ])
+})
+
+test('adoptableArtifacts yields nothing without a checkout', async () => {
+  expect(await adoptableArtifacts(null, new Set())).toEqual([])
+})
+
+test('adoptableArtifacts yields nothing outside a git repo', async () => {
+  expect(await adoptableArtifacts(tempDir('hpipe-nogit-'), new Set())).toEqual([])
+})
+
+test('adoptableArtifacts yields nothing when the base ref does not resolve', async () => {
+  const noMain = tempDir('hpipe-nomain-')
+  git(['init', '-q', '--initial-branch=trunk', '.'], noMain)
+  git(['config', 'user.email', 'test@example.com'], noMain)
+  git(['config', 'user.name', 'Test'], noMain)
+  writeFileSync(join(noMain, 'README.md'), 'x\n')
+  git(['add', '-A'], noMain)
+  git(['commit', '-qm', 'base'], noMain)
+
+  expect(await adoptableArtifacts(noMain, new Set())).toEqual([])
 })

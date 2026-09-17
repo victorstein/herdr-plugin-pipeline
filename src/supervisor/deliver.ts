@@ -101,6 +101,54 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
   return join(base, rel)
 }
 
+/** The branch every worker worktree is cut from; `prompts/dispatch.md` mandates `--base main`. */
+export const ARTIFACT_BASE_REF = 'main'
+
+// Bun.spawn throws synchronously on a missing binary or a cwd that doesn't exist,
+// and this runs inside the supervisor tick, so a spawn failure must degrade to a
+// non-ok result rather than crash the loop. Mirrors Gh.run in ../lib/gh.ts.
+async function git(checkoutPath: string, args: string[]): Promise<{ code: number; text: string }> {
+  try {
+    const proc = Bun.spawn(['git', '-C', checkoutPath, ...args], {
+      stdout: 'pipe', stderr: 'ignore',
+    })
+    const text = await new Response(proc.stdout).text()
+    const code = await proc.exited
+    return { code, text }
+  } catch {
+    return { code: -1, text: '' }
+  }
+}
+
+/**
+ * Docs this branch ADDED. The worker was given one path and wrote another — 3 of 6
+ * research notes on the berean-os run of 2026-09-16 — so ask the branch what it
+ * added rather than the filesystem what is recent: `git worktree add` stamps every
+ * checked-out file with the current mtime, and `research`'s phase_entered_at
+ * predates the worktree, so no mtime comparison separates the worker's note from
+ * the whole repo's docs.
+ *
+ * `-z` emits raw NUL-terminated paths, so a non-ASCII filename is not C-quoted.
+ */
+export async function adoptableArtifacts(
+  checkoutPath: string | null, claimed: Set<string>,
+): Promise<string[]> {
+  // Adoption is a worktree-scoped repair. With no checkout the scan would run
+  // against the main checkout, shared with the orchestrator, the run-level
+  // branch-review artifact and every sibling's merged docs.
+  if (checkoutPath === null) return []
+
+  const base = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ARTIFACT_BASE_REF])
+  if (base.code !== 0) return []
+
+  const diff = await git(checkoutPath, [
+    'diff', '-z', '--name-only', '--diff-filter=A', `${ARTIFACT_BASE_REF}...HEAD`, '--', 'docs/',
+  ])
+  if (diff.code !== 0) return []
+
+  return diff.text.split('\0').filter((path) => path.length > 0)
+}
+
 export function taskSignalsFor(run: Run) {
   const adopted = run.tasks
     .map((t) => t.adopted_at)
