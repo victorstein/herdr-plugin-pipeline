@@ -28,9 +28,10 @@ branch, not when you feel finished.
 6. `implement` — the code, the tests, the PR
 7. `pr-review-intent`, then `pr-review-quality`
 
-Those paths are relative to this worktree, which is your cwd. Write to them exactly as given: the
-supervisor stats those paths and nothing else, so an artifact written anywhere else is invisible and
-the phase never completes.
+Those paths are relative to this worktree, which is your cwd. Write them exactly as given, stem and
+all — do not re-derive them from the conventions you see in `docs/`. The stem carries the issue
+number, and every later phase cites the path by name. An artifact written anywhere else
+does not satisfy this phase's contract.
 
 Between `plan-review` and `implement` you may wait — a sibling task holding files you need has to
 land first. **When `implement` starts, re-read every file you are about to touch.** A sibling may
