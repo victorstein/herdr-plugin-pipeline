@@ -86,7 +86,7 @@ wanted, it is a behaviour reversal that needs the human, not a paragraph inside 
 
 **Claim.** Scope boundary (spec:54-55): "**Not held, not touched:** artifact-path *derivation* — #9
 owns `src/cli.ts:88-92`. This spec calls `absoluteArtifactPath` (`deliver.ts:97-102`); it does not
-change what it returns." A23 (spec:57-62, :387-400) enumerates the unheld files edited under the
+change what it returns." A23 (spec:56-61, :411-427) enumerates the unheld files edited under the
 orchestrator's ruling as exactly four: `src/cli.ts`, `src/lib/types.ts`, `src/lib/machine.ts`,
 `test/cli-commands.test.ts`. A11 (spec:330): "`main.ts:223-236` is **extracted into `deliver.ts`**
 beside `shouldRetry`", with its tests in `test/deliver.test.ts` (spec:591).
@@ -113,7 +113,7 @@ in flight simultaneously. So the gate that is supposed to serialise them has bee
 file the design added after the holdings were declared. This is the *precise* failure A23 was
 written to stop: "distance between hunks is about the odds of a textual conflict, not about
 ownership, and it is the reasoning that produced a broken file lock on the run these issues came
-from" (spec:59-61). The spec disavows the reasoning and then relies on it.
+from" (spec:58-61). The spec disavows the reasoning and then relies on it.
 
 Two smaller corrections fall out of the same ledger read: `src/lib/status.ts` **is** held by this
 task and the Scope boundary omits it from the held list (spec:50-51); and `#9 owns src/cli.ts:88-92`
@@ -133,7 +133,7 @@ sequencing behind #9's merge — that is the human's call, not an inline edit.
 **Claim.** A11 as amended (spec:344-346): "the same budget instance is passed into `StallDeps`, so
 probe and escalation sends check `accepts` too. Pass 0 left both calling `herdr.agentPrompt`
 directly, which would have left a dead pane receiving an unbounded probe stream." Error handling
-(spec:542): "`agentPrompt` rejects a probe … and keeps rejecting | `DeliveryBudget` abandons the
+(spec:544): "`agentPrompt` rejects a probe … and keeps rejecting | `DeliveryBudget` abandons the
 pane after `PROMPT_RETRY_MAX` | **A11** — pass 0 left this unbounded (MAJOR 6)."
 
 **Problem.** `accepts` only ever returns `false` for a pane that `record` has moved to `abandoned`
@@ -182,7 +182,7 @@ what makes `hpipe status` show the ⚠ line of **A15**, and what Goal 1 promises
 courtesy prompt. spec:490 gates both on the send channel. So a pane the budget has abandoned — the
 dead-orchestrator case — means the task is never marked escalated, never surfaces in status, and
 sits silently. The design already accepts the opposite ordering everywhere else: A22 is "ledger
-before send", and the error table (spec:543) says an escalation whose prompt is rejected is fine
+before send", and the error table (spec:545) says an escalation whose prompt is rejected is fine
 because "the transition is already persisted; `hpipe status` shows it". spec:490 makes that row
 unreachable.
 
@@ -232,7 +232,7 @@ sure it exercises the pseudocode's predicate, not the prose's.
 
 **Claim.** spec:440-442: "Reset wherever `phase_entered_at` is set: `enterRunPhase`
 (`machine.ts:45-51`), `enterTaskPhase` (`machine.ts:90-96`), and `cmdRewind` (`cli.ts:177-194`),
-which bypasses both." A23's first ruling item (spec:388-393) argues the `cmdRewind` reset is
+which bypasses both." A23's first ruling item (spec:416-422) argues the `cmdRewind` reset is
 mandatory because a record whose counter is already at the cap "would escalate on the first due tick
 instead of re-arming".
 
