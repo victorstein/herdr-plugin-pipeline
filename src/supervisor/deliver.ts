@@ -104,6 +104,11 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 /** The branch every worker worktree is cut from; `prompts/dispatch.md` mandates `--base main`. */
 export const ARTIFACT_BASE_REF = 'main'
 
+// Verdicts are added on the branch under docs/ exactly like artifacts are, and
+// nothing ever populates `artifacts.verdicts` (read at :89 and :93, written
+// nowhere), so `claimed` cannot exclude them. Every completed branch carries 3-5.
+const REVIEWS_PREFIX = 'docs/superpowers/reviews/'
+
 // Bun.spawn throws synchronously on a missing binary or a cwd that doesn't exist,
 // and this runs inside the supervisor tick, so a spawn failure must degrade to a
 // non-ok result rather than crash the loop. Mirrors Gh.run in ../lib/gh.ts.
@@ -146,7 +151,10 @@ export async function adoptableArtifacts(
   ])
   if (diff.code !== 0) return []
 
-  return diff.text.split('\0').filter((path) => path.length > 0)
+  return diff.text
+    .split('\0')
+    .filter((path) => path.length > 0)
+    .filter((path) => !path.startsWith(REVIEWS_PREFIX))
 }
 
 export function taskSignalsFor(run: Run) {

@@ -283,3 +283,13 @@ test('adoptableArtifacts yields nothing when the base ref does not resolve', asy
 
   expect(await adoptableArtifacts(noMain, new Set())).toEqual([])
 })
+
+test('adoptableArtifacts excludes review verdicts, which are added on the branch too', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/reviews/issue-1-spec-review-0.md', 'VERDICT: CLEAR\n')
+  commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/misfiled.md',
+  ])
+})
