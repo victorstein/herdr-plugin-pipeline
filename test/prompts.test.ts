@@ -9,7 +9,7 @@ const REVIEW_PROMPTS = [
 ]
 const ALL = [
   'spec', 'plan', 'dispatch', 'worker-brief', 'ci-red', 'merge', 'close',
-  'escalate', 'stall-probe', 'stall-escalate', 'digest', ...REVIEW_PROMPTS,
+  'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement',
 ]
 
