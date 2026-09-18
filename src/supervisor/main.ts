@@ -157,6 +157,7 @@ async function main(): Promise<void> {
       // One stamp and one CLI spelling per tick, so every line in one digest agrees
       // on "now". `hpipe` moves up from the stall block below; same call count.
       const tickNow = Date.now()
+      const hpipe = hpipeCommand(pluginRoot)
 
       const pending: PendingPrompt[] = []
       for (const run of advancing) {
@@ -245,7 +246,6 @@ async function main(): Promise<void> {
         }
       }
 
-      const hpipe = hpipeCommand(pluginRoot)
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
       const probeMax = config.STALL_PROBE_MAX

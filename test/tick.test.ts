@@ -451,3 +451,16 @@ test('a run-level wake line renders without an action rung', () => {
     { run, task: null, event: 'agent:idle', phaseAtEvent: 'execute' }, now, 'hp')
   expect(text).toBe('r1 [execute 1m] agent:idle')
 })
+
+test('main declares hpipe once, above the run loop that renders digest lines', async () => {
+  // A source-text guard because nothing else catches this: `main()` runs only
+  // under import.meta.main so no test executes its tick body, and tsc does not
+  // flag a temporal-dead-zone read from inside a loop body. Hoisting this
+  // binding while leaving the original in place put the only declaration BELOW
+  // its first use, which throws ReferenceError on every tick into the per-run
+  // catch — a dead supervisor that still logs as if it were driving.
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'supervisor', 'main.ts')).text()
+  const declarations = [...src.matchAll(/const hpipe = hpipeCommand\(/g)]
+  expect(declarations).toHaveLength(1)
+  expect(declarations[0]?.index).toBeLessThan(src.indexOf('describeWake('))
+})
