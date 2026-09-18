@@ -67,6 +67,34 @@ export interface WakeLine {
   text: string
 }
 
+function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number): string {
+  return phaseAtEvent === phase
+    ? `${phase} ${ageMinutes(enteredAt, now)}m`
+    : `${phaseAtEvent} → ${phase}`
+}
+
+/**
+ * One digest line, composed at delivery time from the LIVE record. Every one of
+ * the ~50 digests on the berean-os run of 2026-09-16 carried herdr's agent status
+ * and nothing else, and every one was followed by `hpipe status`.
+ * Measured on a live run.
+ */
+export function describeWake(line: WakeLine, now: number, hpipe: string): string {
+  const { run, task } = line
+  if (task === null) {
+    const box = phaseBox(line.phaseAtEvent, run.phase, run.phase_entered_at, now)
+    return `${run.run_id} [${box}] ${line.event}`
+  }
+
+  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
+  const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
+    `${line.event} — ${actionFor(run, task, hpipe)}`
+  if (line.detail === undefined || line.detail.length === 0) return head
+
+  const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
+  return `${head}\n${indented}`
+}
+
 export interface ApplyResult {
   changed: boolean
   wake: WakeLine[]

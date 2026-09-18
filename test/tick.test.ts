@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { actionFor, ageMinutes, applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import {
+  actionFor, ageMinutes, applyEvents, describeWake, pickOneAdvance, type WakeLine,
+} from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
@@ -396,4 +398,56 @@ test('two status events for one task in one drain produce two separately-keyed l
   // The point: `task.agent_status` is `idle` for BOTH lines, so the old per-task
   // gate could not have told them apart.
   expect(run.tasks[0]?.agent_status).toBe('idle')
+})
+
+const wakeLine = (over: Partial<WakeLine>): WakeLine => {
+  const run = mkRun([])
+  run.run_id = 'r1'
+  return { run, task: mkTask({}), event: 'agent:idle', phaseAtEvent: 'implement', text: '', ...over }
+}
+
+test('a digest line carries the task, the phase, the age and the action', () => {
+  const now = 1_000_000
+  const line = wakeLine({ task: mkTask({ phase: 'implement', phase_entered_at: now - 720_000 }) })
+  expect(describeWake(line, now, 'hp'))
+    .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move")
+})
+
+test('a phase that moved this tick renders as a transition and drops the age', () => {
+  // Every in-tick mutator re-stamps phase_entered_at, so the age would read 0m in
+  // every arrow line. The arrow is the signal that the phase actually completed.
+  const now = 1_000_000
+  const line = wakeLine({
+    phaseAtEvent: 'research',
+    task: mkTask({ phase: 'spec', phase_entered_at: now }),
+  })
+  expect(describeWake(line, now, 'hp'))
+    .toBe("t1 feat/x (#1) [research → spec] agent:idle — worker's move")
+})
+
+test('a blocked line indents its pane tail four spaces under the bullet', () => {
+  const now = 1_000_000
+  const line = wakeLine({
+    event: 'agent:blocked',
+    detail: 'Do you want to proceed?\nyes / no',
+    task: mkTask({ phase: 'plan', phase_entered_at: now }),
+  })
+  expect(describeWake(line, now, 'hp')).toBe(
+    "t1 feat/x (#1) [implement → plan] agent:blocked — worker's move\n" +
+    '    Do you want to proceed?\n' +
+    '    yes / no',
+  )
+})
+
+test('a run-level wake line renders without an action rung', () => {
+  // Unreachable today — all three push sites have a task — so this is a
+  // characterisation test guarding the defensive branch.
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  run.phase = 'execute'
+  run.phase_entered_at = now - 60_000
+  const text = describeWake(
+    { run, task: null, event: 'agent:idle', phaseAtEvent: 'execute', text: '' }, now, 'hp')
+  expect(text).toBe('r1 [execute 1m] agent:idle')
 })
