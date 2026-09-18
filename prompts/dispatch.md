@@ -23,12 +23,14 @@ needs it.
 Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
 issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
 for `{{hpipe}} decide`. Do not summarise it, do not add task text of your own: the issue body is the
-brief, and anything you say here instead of in the issue is lost.
+brief, and anything you say here instead of in the issue is lost. The two header lines above the
+brief — `task_id:` and `files:` — are for you and not for the worker: confirm the `files:` line
+matches what you declared, then hand over everything from the blank line onward.
 
 **Still registering?** New tasks go in with an issue first, then:
 
     {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
-               [--depends-on <task_ids>] [--files <path-prefixes>] \
+               [--depends-on <id,id>] [--files <prefix,prefix>] \
                [--notes "<batch context that does not belong in a public issue>"]
 
 There is no `--text` flag. Never run two agents against the same files in parallel — serialize them

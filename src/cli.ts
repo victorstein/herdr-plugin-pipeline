@@ -73,6 +73,26 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`no agent definition at ${agentFile} — check --surface`)
   }
 
+  // A path prefix cannot contain whitespace, and cannot look like a flag. Both are
+  // argv accidents: one quoted space-separated list in a single --files, or a
+  // --files with no value swallowing the next flag. Neither is detectable later —
+  // filesOverlap simply never fires and the gate reports "no overlapping files in
+  // flight" while two workers edit the same files. Measured on a live run.
+  for (const entry of input.files) {
+    if (/\s/.test(entry)) {
+      return fail(
+        `--files is comma-separated; this entry contains whitespace: "${entry}"\n` +
+        `  → --files ${entry.trim().split(/\s+/).join(',')}`,
+      )
+    }
+    if (entry.startsWith('--')) {
+      return fail(
+        `--files got a flag where a path prefix belongs: "${entry}" — ` +
+        'the value after --files is missing',
+      )
+    }
+  }
+
   const date = new Date().toISOString().slice(0, 10)
   const stem = `${date}-issue-${input.issue}`
 
@@ -112,9 +132,15 @@ export async function cmdTask(ctx: Ctx, input: {
   run.intake_closed = false
   await saveRun(ctx.stateDir, run)
 
+  // The recorded set, printed back. A malformed --files is otherwise invisible:
+  // the only other place task.files reaches a human is the blocked-on-files
+  // warning in status.ts, which speaks only once overlap has already fired — so a
+  // declaration that matches nothing is silent by construction.
+  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
+
   const gate = gateStatus(task, run.tasks)
   if (gate.state !== 'ready') {
-    return ok(`task_id: ${task.task_id}\nqueued: waiting on ${gate.on.join(', ')}`)
+    return ok(`task_id: ${task.task_id}\n${filesLine}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
@@ -123,7 +149,7 @@ export async function cmdTask(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`task_id: ${task.task_id}\n\n${prompt}`)
+  return ok(`task_id: ${task.task_id}\n${filesLine}\n\n${prompt}`)
 }
 
 /**
@@ -337,9 +363,21 @@ function flag(argv: string[], name: string): string | null {
   return i === -1 ? null : (argv[i + 1] ?? null)
 }
 
-function listFlag(argv: string[], name: string): string[] {
-  const raw = flag(argv, name)
-  return raw ? raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0) : []
+// Exported for its tests: `dispatch` is module-private, so this is the only
+// importable symbol on the argv layer where the --files bug lived. It proves the
+// helper; `test/cli-argv.test.ts` drives the real binary and proves the wiring.
+export function listFlag(argv: string[], name: string): string[] {
+  const entries: string[] = []
+  // Every occurrence contributes. `flag` is indexOf-based, so the previous
+  // single-lookup form silently dropped a repeated --files and everything it
+  // declared, with no diagnostic anywhere.
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== `--${name}`) continue
+    const raw = argv[i + 1]
+    if (raw === undefined) continue
+    entries.push(...raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0))
+  }
+  return entries
 }
 
 async function repoContext(): Promise<{ repoKey: string; repoRoot: string } | null> {
