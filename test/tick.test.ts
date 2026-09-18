@@ -349,3 +349,51 @@ test('actionFor covers every row in TASK_ROWS with a known clause', () => {
     expect(known.has(clause) || isCommandClause, `${row.phase} produced: ${clause}`).toBe(true)
   }
 })
+
+test('a status wake line carries the scoped trigger and the phase at the event', () => {
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'done' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.event).toBe('agent:done')
+  expect(wake[0]?.phaseAtEvent).toBe('implement')
+})
+
+test('a pane exit reports the phase it left, not the failed phase it was just put in', () => {
+  // applyEvents forces `failed` before pushing, so capturing after the transition
+  // would render "failed → failed" and lose what the task was actually doing.
+  const run = mkRun([mkTask({ phase: 'implement', pr: null })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.phaseAtEvent).toBe('implement')
+  expect(wake[0]?.event).toBe('pane exited, no PR')
+  expect(run.tasks[0]?.phase).toBe('failed')
+})
+
+test('a released agent reports the phase it left', () => {
+  const run = mkRun([mkTask({ phase: 'spec' })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', released: true },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.event).toBe('agent released')
+  expect(wake[0]?.phaseAtEvent).toBe('spec')
+})
+
+test('two status events for one task in one drain produce two separately-keyed lines', () => {
+  // The gate main.ts uses for the pane tail keys off `event`, not
+  // `task.agent_status` — that field is overwritten by the second event in the
+  // same drain, so a per-task gate attaches the tail to the wrong line.
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  const at = (agent_status: AgentStatus): QueuedEvent =>
+    ({ kind: 'pane.agent_status_changed', session: 'personal', at: 1,
+       pane_id: 'w7:p1', workspace_id: 'w7', agent_status })
+  const { wake } = applyEvents([run], [at('blocked'), at('idle')], 'personal', new Set())
+  expect(wake.map((w) => w.event)).toEqual(['agent:blocked', 'agent:idle'])
+  // The point: `task.agent_status` is `idle` for BOTH lines, so the old per-task
+  // gate could not have told them apart.
+  expect(run.tasks[0]?.agent_status).toBe('idle')
+})

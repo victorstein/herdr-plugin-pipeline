@@ -49,6 +49,21 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
 export interface WakeLine {
   run: Run
   task: Task | null
+  /**
+   * The rendered trigger, ALREADY scoped: `agent:<status>`, `pane exited[, no PR]`,
+   * `agent released`. Never a phase completion. The `agent:` prefix is applied here,
+   * at push, because the driver keys the blocked-tail gate off it — storing a bare
+   * `blocked` makes that gate never match and silently drops the pane tail.
+   */
+  event: string
+  /**
+   * The record's phase when this event was applied, before this tick advanced it.
+   * Rendered against the LIVE record at delivery time, so a phase this same tick
+   * advanced shows as a transition instead of as the phase already left.
+   */
+  phaseAtEvent: string
+  /** Pane tail for a blocked event. Attached by the driver; indented by `describeWake`. */
+  detail?: string
   text: string
 }
 
@@ -97,6 +112,7 @@ export function applyEvents(
     )
     if (!found) continue
     const { run, task } = found
+    const phaseAtEvent = task.phase
 
     if (event.kind === 'pane.agent_detected') {
       if (event.released === true) {
@@ -104,7 +120,10 @@ export function applyEvents(
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)
         enterTaskPhase(run, task, 'failed', 'agent released')
-        wake.push({ run, task, text: `${task.branch} (#${task.issue}, ${task.task_id}) agent released` })
+        wake.push({
+          run, task, phaseAtEvent, event: 'agent released',
+          text: `${task.branch} (#${task.issue}, ${task.task_id}) agent released`,
+        })
       } else if (event.pane_id) {
         task.pane_id = event.pane_id
       }
@@ -116,7 +135,8 @@ export function applyEvents(
       if (task.phase === 'blocked-on-decision') abandonDecisions(task)
       enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
       wake.push({
-        run, task,
+        run, task, phaseAtEvent,
+        event: `pane exited${task.pr ? '' : ', no PR'}`,
         text: `${task.branch} (#${task.issue}, ${task.task_id}) exited${task.pr ? '' : ', no PR'}`,
       })
       changed = true
@@ -129,7 +149,8 @@ export function applyEvents(
       changed = true
       if (wakeOn.has(event.agent_status)) {
         wake.push({
-          run, task,
+          run, task, phaseAtEvent,
+          event: `agent:${event.agent_status}`,
           text: `${task.branch} (#${task.issue}, ${task.task_id}) ${event.agent_status}`,
         })
       }
