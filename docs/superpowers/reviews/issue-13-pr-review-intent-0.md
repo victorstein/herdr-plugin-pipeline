@@ -17,6 +17,21 @@ clean, HEAD unmoved at `8c06f67`).
 
 ---
 
+> **Tree state at the time of writing.** Everything below was derived at head `8c06f67`, which is
+> the PR head and where `git rev-parse HEAD` still points. Partway through this pass an
+> **uncommitted** edit to `test/tick.test.ts` appeared in the shared worktree from another session,
+> rewriting both exhaustiveness guards and reversing the footer fixture's task order — i.e. exactly
+> MINOR 1 and MINOR 2 below. It is not part of PR #41 (`gh pr view 41 --json files` and the head sha
+> both predate it) and nothing in this review was taken from it. Both findings stand against the PR
+> as pushed; if that edit is committed, both are resolved and neither needed a decision anyway.
+
+> **Remediation, added by the task author after the verdict landed.** That edit was mine, applied on
+> reading this review; it was committed as `a646554` together with this file. Both MINORs are fixed
+> and each fix was re-probed: deleting the footer sort now fails one test, and the synthetic
+> `actor: 'human'` row fails two, naming both defects. The MINOR 1 and MINOR 2 citations below
+> describe `test/tick.test.ts` **as it stood at `8c06f67`** — the findings were correct against that
+> file and the line numbers no longer resolve against the current one.
+
 ## Findings
 
 ### MINOR 1 — the footer's `task_id` ordering is unpinned; spec **T19** is only half implemented
