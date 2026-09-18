@@ -17,7 +17,7 @@ import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates,
 } from './stall'
-import { applyEvents, describeWake, pickOneAdvance } from './tick'
+import { applyEvents, describeWake, parkedFooter, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
       for (const run of advancing) {
         const addPending = (
           paneId: string | null, text: string, eventLines: string[], subject: string,
-          phaseNote?: string,
+          phaseNote?: string, footer?: string,
         ) => {
           if (text.length === 0 && eventLines.length === 0) return
           if (paneId === null) {
@@ -171,7 +171,7 @@ async function main(): Promise<void> {
             return
           }
           pending.push({
-            paneId, run, text, events: eventLines, phaseNote,
+            paneId, run, text, events: eventLines, phaseNote, footer,
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
@@ -217,14 +217,28 @@ async function main(): Promise<void> {
             : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
+          const covered = new Set<string>()
           const lines = wake
             .filter((w) => w.run.run_id === run.run_id)
-            .map((w) => `- ${describeWake(w, tickNow, hpipe)}`)
-          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`, phaseNote)
+            .map((w) => {
+              if (w.task) covered.add(w.task.task_id)
+              return `- ${describeWake(w, tickNow, hpipe)}`
+            })
+          // Attached to every orchestrator-pane pending, not just the first: that
+          // one is dropped when it has no text and no events, while a task prompt
+          // on the same pane still produces a digest — which is the tick a task
+          // advances off the CI poll rather than a pane event. `deliveriesFor`
+          // renders it once.
+          const footer = parkedFooter(run, covered, tickNow, hpipe)
+
+          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`,
+            phaseNote, footer)
           for (const prompt of taskPrompts) {
-            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
+            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`, undefined,
+              prompt.paneId === run.orchestrator_pane ? footer : undefined)
           }
-          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`)
+          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`,
+            undefined, footer)
           await saveRun(stateDir, run)
         } catch (error) {
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
