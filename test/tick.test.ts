@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  actionFor, ageMinutes, applyEvents, describeWake, pickOneAdvance, type WakeLine,
+  actionFor, ageMinutes, applyEvents, describeWake, parkedFooter, pickOneAdvance,
+  type WakeLine,
 } from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
@@ -463,4 +464,54 @@ test('main declares hpipe once, above the run loop that renders digest lines', a
   const declarations = [...src.matchAll(/const hpipe = hpipeCommand\(/g)]
   expect(declarations).toHaveLength(1)
   expect(declarations[0]?.index).toBeLessThan(src.indexOf('describeWake('))
+})
+
+test('the footer names orchestrator-owned and escalated tasks that produced no line', () => {
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  run.tasks = [
+    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge',
+             phase_entered_at: now - 2_460_000 }),
+    mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'escalated',
+             escalated_from: 'plan', phase_entered_at: now - 3_780_000 }),
+  ]
+  expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
+    'also waiting on you:\n' +
+    '- t1 fix/a (#30) [merge 41m] — YOUR move\n' +
+    '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2`',
+  )
+})
+
+test('a task already named in the digest is not repeated in the footer', () => {
+  const now = 1_000_000
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'merge', phase_entered_at: now })])
+  expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
+})
+
+test('worker-owned, no-actor and terminal rows are not the footer\'s business', () => {
+  const now = 1_000_000
+  const run = mkRun([])
+  for (const phase of ['research', 'implement', 'queued', 'ci', 'teardown', 'blocked-on-files',
+                       'done', 'failed', 'orphaned', 'blocked-on-failure'] as TaskPhase[]) {
+    run.tasks = [mkTask({ phase })]
+    expect(parkedFooter(run, new Set(), now, 'hp'), `${phase} must not be listed`).toBe('')
+  }
+})
+
+test('the footer is empty for a run with no tasks', () => {
+  expect(parkedFooter(mkRun([]), new Set(), 1_000_000, 'hp')).toBe('')
+})
+
+test('the footer renders the CLI it is given, and covered beats the escalated exception', () => {
+  // The hpipe parameter is only live because `escalated` is in the predicate —
+  // every other covered row renders `YOUR move`, which carries no command.
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'plan',
+                        phase_entered_at: now })]
+  expect(parkedFooter(run, new Set(), now, 'bun run /p/src/cli.ts'))
+    .toContain('bun run /p/src/cli.ts rewind r1 plan --task t1')
+  expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
 })

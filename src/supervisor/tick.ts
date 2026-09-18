@@ -94,6 +94,35 @@ export function describeWake(line: WakeLine, now: number, hpipe: string): string
   return `${head}\n${indented}`
 }
 
+/**
+ * Tasks whose row the orchestrator — or a human — owns produce no herdr pane
+ * event, so they never reach a digest on their own: t3 sat in `merge` for 4h57m on
+ * the berean-os run of 2026-09-16 and emitted zero wake lines. This reports them on
+ * digests that are already being sent; it does NOT make them visible in a quiet
+ * window, which is #19. Measured on a live run.
+ */
+export function parkedFooter(
+  run: Run, covered: ReadonlySet<string>, now: number, hpipe: string,
+): string {
+  const parked = run.tasks
+    .filter((task) => !covered.has(task.task_id))
+    .filter((task) => {
+      const row = taskRow(task.phase)
+      if (row.terminal === true) return false
+      // `escalated` is spelled out rather than matched as `actor: 'human'` so a
+      // future human-owned row has to opt in here instead of inheriting this.
+      return row.actor === 'orchestrator' || task.phase === 'escalated'
+    })
+    .sort((a, b) => a.task_id.localeCompare(b.task_id))
+
+  if (parked.length === 0) return ''
+
+  const lines = parked.map((task) =>
+    `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
+    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe)}`)
+  return ['also waiting on you:', ...lines].join('\n')
+}
+
 export interface ApplyResult {
   changed: boolean
   wake: WakeLine[]
