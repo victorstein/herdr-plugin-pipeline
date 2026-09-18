@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { actionFor, ageMinutes, applyEvents, pickOneAdvance } from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
+import { TASK_ROWS } from '../src/lib/phases'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
 let dir: string
@@ -327,4 +328,24 @@ test('a blocked-on-files task whose holder touches other files is not blamed on 
   const unrelated = mkTask({ task_id: 't2', phase: 'failed', files: ['src/z.ts'] })
   run.tasks = [blocked, unrelated]
   expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+})
+
+test('actionFor covers every row in TASK_ROWS with a known clause', () => {
+  const run = mkRun([])
+  const known = new Set([
+    'nothing for you — this task is finished',
+    'dead end, needs a human',
+    "worker's move",
+    'YOUR move',
+    'nothing for you — the supervisor is driving',
+  ])
+  for (const row of TASK_ROWS) {
+    const task = mkTask({ phase: row.phase, escalated_from: 'implement' })
+    run.tasks = [task]
+    const clause = actionFor(run, task, 'hp')
+    expect(clause.length, `${row.phase} produced an empty clause`).toBeGreaterThan(0)
+    const isCommandClause = clause.startsWith('needs a human: `') ||
+      clause.startsWith('YOUR move: `')
+    expect(known.has(clause) || isCommandClause, `${row.phase} produced: ${clause}`).toBe(true)
+  }
 })
