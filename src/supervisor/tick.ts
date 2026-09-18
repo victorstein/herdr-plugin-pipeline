@@ -8,8 +8,11 @@ const MS_PER_MINUTE = 60_000
 
 /**
  * Clamped, matching `src/lib/status.ts:12-14`. A third private copy of this
- * arithmetic is deliberate: sharing would mean exporting from `status.ts`, which
- * belongs to #14 and is being edited in the same batch.
+ * arithmetic is deliberate, and both of the other two are out of reach rather
+ * than merely inconvenient: `status.ts` belongs to #14 and is being edited in the
+ * same batch, and `./stall.ts` — which declares the identical `MS_PER_MINUTE` one
+ * file over — is outside this task's declared file set. Whoever lands last
+ * collapses the three.
  */
 export function ageMinutes(sinceMs: number, now: number): number {
   return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
