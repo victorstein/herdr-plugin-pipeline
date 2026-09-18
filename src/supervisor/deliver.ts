@@ -15,18 +15,22 @@ export interface DigestInput {
   eventLines: string[]
   phaseNote: string
   nextPrompt: string
+  /** Optional so the existing `buildDigest` literals keep compiling. */
+  footer?: string
 }
 
 export interface Delivery { paneId: string; text: string; run: Run }
 
 export function buildDigest(input: DigestInput): string {
+  // Each non-empty tail part brings exactly one blank line with it, so the output
+  // is byte-identical to the old fixed-slot join whenever there is no footer.
+  const tail = [input.nextPrompt, input.footer ?? ''].filter((part) => part.length > 0)
   return [
     `[pipeline] run ${input.run.run_id}${input.phaseNote}`,
     '',
     `${input.eventLines.length} events:`,
     ...input.eventLines,
-    '',
-    input.nextPrompt,
+    ...tail.flatMap((part) => ['', part]),
   ].join('\n').trimEnd()
 }
 
@@ -38,6 +42,8 @@ export interface PendingPrompt {
   events: string[]
   /** `evaluateRun`'s " → to (from X)"; the transition is why the digest arrived. */
   phaseNote?: string
+  /** The parked-task footer; set on every orchestrator pending, rendered once. */
+  footer?: string
 }
 
 /**
@@ -65,6 +71,7 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
       ? buildDigest({
           run: first.run, eventLines: events,
           phaseNote: group.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
+          footer: group.find((p) => p.footer)?.footer ?? '',
           nextPrompt: body,
         })
       : body

@@ -2,10 +2,14 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import {
+  actionFor, ageMinutes, applyEvents, describeWake, parkedFooter, pickOneAdvance,
+  type WakeLine,
+} from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
-import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
+import { TASK_ROWS } from '../src/lib/phases'
+import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'tick-')) })
@@ -248,4 +252,292 @@ test('panes awaited one after another still share a single settle window', async
   const started = Date.now()
   for (const pane of panes) expect(await idle(pane)).toBe(true)
   expect(Date.now() - started).toBeLessThan(settleMs * 2)
+})
+
+test('ageMinutes floors to whole minutes and never goes negative', () => {
+  const now = 10_000_000
+  expect(ageMinutes(now - 125_000, now)).toBe(2)
+  expect(ageMinutes(now, now)).toBe(0)
+  // Clock skew: a future stamp must not print "-1m" at an orchestrator.
+  expect(ageMinutes(now + 600_000, now)).toBe(0)
+})
+
+test('actionFor answers whose move it is, by rung', () => {
+  const run = mkRun([])
+  run.run_id = 'r1'
+  const at = (phase: TaskPhase, over: Partial<Task> = {}) =>
+    actionFor(run, mkTask({ phase, ...over }), 'hp')
+
+  expect(at('done')).toBe('nothing for you — this task is finished')
+  for (const phase of ['failed', 'orphaned', 'blocked-on-failure'] as TaskPhase[]) {
+    expect(at(phase)).toBe('dead end, needs a human')
+  }
+  expect(at('escalated', { escalated_from: 'implement' }))
+    .toBe('needs a human: `hp rewind r1 implement --task t1`')
+  expect(at('escalated', { escalated_from: null }))
+    .toBe('needs a human: `hp rewind r1 <phase> --task t1`')
+  for (const phase of ['merge', 'close', 'blocked-on-decision'] as TaskPhase[]) {
+    expect(at(phase)).toBe('YOUR move')
+  }
+  for (const phase of ['research', 'spec', 'spec-review', 'plan', 'plan-review',
+                       'implement', 'pr-review-intent', 'pr-review-quality'] as TaskPhase[]) {
+    expect(at(phase)).toBe("worker's move")
+  }
+  for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
+    expect(at(phase)).toBe('nothing for you — the supervisor is driving')
+    // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
+    // sentence and is false of a queued TASK, which waits on its dependency and
+    // file gates. Reusing that map here is what the spec declines.
+    expect(at(phase)).not.toContain('intake')
+  }
+})
+
+test('actionFor renders the CLI it is given, never a literal hpipe', () => {
+  // A plugin installed from GitHub has no `hpipe` on PATH (src/lib/render.ts:19-22),
+  // so a hardcoded name would be uninvokable. status.ts:25 has that latent defect.
+  const run = mkRun([])
+  const text = actionFor(run, mkTask({ phase: 'escalated', escalated_from: 'plan' }),
+    'bun run /p/src/cli.ts')
+  expect(text).toContain('bun run /p/src/cli.ts rewind')
+  expect(text).not.toMatch(/(^|[^/])hpipe /)
+})
+
+test('a blocked-on-files task held by a dead task names the release command', () => {
+  // `failed` and `escalated` both hold files forever (holdsFiles: true), so
+  // filesClearFor never goes true and only `hpipe release` clears it. Telling the
+  // orchestrator "the supervisor is driving" there is false, permanently.
+  for (const holderPhase of ['failed', 'escalated'] as TaskPhase[]) {
+    const run = mkRun([])
+    const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+    const holder = mkTask({ task_id: 't2', phase: holderPhase, files: ['src/a.ts'] })
+    run.tasks = [blocked, holder]
+    expect(actionFor(run, blocked, 'hp')).toBe('YOUR move: `hp release --task t2`')
+  }
+})
+
+test('a blocked-on-files task held by a live task is still the supervisor\'s', () => {
+  // `hpipe release` refuses an in-flight holder, so offering it against a healthy
+  // one sends the orchestrator at a command that will bounce (src/lib/status.ts:51-54).
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'implement', files: ['src/a.ts'] })
+  run.tasks = [blocked, holder]
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+})
+
+test('a blocked-on-files task whose holder touches other files is not blamed on it', () => {
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const unrelated = mkTask({ task_id: 't2', phase: 'failed', files: ['src/z.ts'] })
+  run.tasks = [blocked, unrelated]
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+})
+
+test('every row in TASK_ROWS gets a clause that matches who its actor is', () => {
+  // Keyed on what `actor` MEANS, not on actionFor's own branch order. An earlier
+  // version asserted membership in a set of known strings, which rung 7's
+  // unconditional catch-all makes unfalsifiable: a new `actor: 'human'` row would
+  // land on "the supervisor is driving" — false for a human-owned row — and still
+  // pass. This fails for that row instead.
+  const run = mkRun([])
+  for (const row of TASK_ROWS) {
+    const task = mkTask({ phase: row.phase, escalated_from: 'implement' })
+    run.tasks = [task]
+    const clause = actionFor(run, task, 'hp')
+    const where = `${row.phase} produced: ${clause}`
+
+    expect(clause.length, `${row.phase} produced an empty clause`).toBeGreaterThan(0)
+    if (row.terminal === true) {
+      expect(clause, where).not.toContain('move')
+    } else if (row.actor === 'human') {
+      expect(clause, where).toContain('needs a human')
+    } else if (row.actor === 'orchestrator') {
+      expect(clause, where).toContain('YOUR move')
+    } else if (row.actor === 'worker') {
+      expect(clause, where).toBe("worker's move")
+    } else {
+      expect(clause, where).toContain('nothing for you')
+    }
+  }
+})
+
+test('a status wake line carries the scoped trigger and the phase at the event', () => {
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'done' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.event).toBe('agent:done')
+  expect(wake[0]?.phaseAtEvent).toBe('implement')
+})
+
+test('a pane exit reports the phase it left, not the failed phase it was just put in', () => {
+  // applyEvents forces `failed` before pushing, so capturing after the transition
+  // would render "failed → failed" and lose what the task was actually doing.
+  const run = mkRun([mkTask({ phase: 'implement', pr: null })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.phaseAtEvent).toBe('implement')
+  expect(wake[0]?.event).toBe('pane exited, no PR')
+  expect(run.tasks[0]?.phase).toBe('failed')
+})
+
+test('a released agent reports the phase it left', () => {
+  const run = mkRun([mkTask({ phase: 'spec' })])
+  const events: QueuedEvent[] = [
+    { kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', released: true },
+  ]
+  const { wake } = applyEvents([run], events, 'personal', new Set())
+  expect(wake[0]?.event).toBe('agent released')
+  expect(wake[0]?.phaseAtEvent).toBe('spec')
+})
+
+test('two status events for one task in one drain produce two separately-keyed lines', () => {
+  // The gate main.ts uses for the pane tail keys off `event`, not
+  // `task.agent_status` — that field is overwritten by the second event in the
+  // same drain, so a per-task gate attaches the tail to the wrong line.
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  const at = (agent_status: AgentStatus): QueuedEvent =>
+    ({ kind: 'pane.agent_status_changed', session: 'personal', at: 1,
+       pane_id: 'w7:p1', workspace_id: 'w7', agent_status })
+  const { wake } = applyEvents([run], [at('blocked'), at('idle')], 'personal', new Set())
+  expect(wake.map((w) => w.event)).toEqual(['agent:blocked', 'agent:idle'])
+  // The point: `task.agent_status` is `idle` for BOTH lines, so the old per-task
+  // gate could not have told them apart.
+  expect(run.tasks[0]?.agent_status).toBe('idle')
+})
+
+const wakeLine = (over: Partial<WakeLine>): WakeLine => {
+  const run = mkRun([])
+  run.run_id = 'r1'
+  return { run, task: mkTask({}), event: 'agent:idle', phaseAtEvent: 'implement', ...over }
+}
+
+test('a digest line carries the task, the phase, the age and the action', () => {
+  const now = 1_000_000
+  const line = wakeLine({ task: mkTask({ phase: 'implement', phase_entered_at: now - 720_000 }) })
+  expect(describeWake(line, now, 'hp'))
+    .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move")
+})
+
+test('a phase that moved this tick renders as a transition and drops the age', () => {
+  // Every in-tick mutator re-stamps phase_entered_at, so the age would read 0m in
+  // every arrow line. The arrow is the signal that the phase actually completed.
+  const now = 1_000_000
+  const line = wakeLine({
+    phaseAtEvent: 'research',
+    task: mkTask({ phase: 'spec', phase_entered_at: now }),
+  })
+  expect(describeWake(line, now, 'hp'))
+    .toBe("t1 feat/x (#1) [research → spec] agent:idle — worker's move")
+})
+
+test('a blocked line indents its pane tail four spaces under the bullet', () => {
+  const now = 1_000_000
+  const line = wakeLine({
+    event: 'agent:blocked',
+    detail: 'Do you want to proceed?\nyes / no',
+    task: mkTask({ phase: 'plan', phase_entered_at: now }),
+  })
+  expect(describeWake(line, now, 'hp')).toBe(
+    "t1 feat/x (#1) [implement → plan] agent:blocked — worker's move\n" +
+    '    Do you want to proceed?\n' +
+    '    yes / no',
+  )
+})
+
+test('a run-level wake line renders without an action rung', () => {
+  // Unreachable today — all three push sites have a task — so this is a
+  // characterisation test guarding the defensive branch.
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  run.phase = 'execute'
+  run.phase_entered_at = now - 60_000
+  const text = describeWake(
+    { run, task: null, event: 'agent:idle', phaseAtEvent: 'execute' }, now, 'hp')
+  expect(text).toBe('r1 [execute 1m] agent:idle')
+})
+
+test('main declares hpipe once, above the run loop that renders digest lines', async () => {
+  // A source-text guard because nothing else catches this: `main()` runs only
+  // under import.meta.main so no test executes its tick body, and tsc does not
+  // flag a temporal-dead-zone read from inside a loop body. Hoisting this
+  // binding while leaving the original in place put the only declaration BELOW
+  // its first use, which throws ReferenceError on every tick into the per-run
+  // catch — a dead supervisor that still logs as if it were driving.
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'supervisor', 'main.ts')).text()
+  const declarations = [...src.matchAll(/const hpipe = hpipeCommand\(/g)]
+  expect(declarations).toHaveLength(1)
+  expect(declarations[0]?.index).toBeLessThan(src.indexOf('describeWake('))
+})
+
+test('the footer names orchestrator-owned and escalated tasks that produced no line', () => {
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  // Declared out of order on purpose: with these already sorted the sort never
+  // has to do anything and deleting it leaves the suite green.
+  run.tasks = [
+    mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'escalated',
+             escalated_from: 'plan', phase_entered_at: now - 3_780_000 }),
+    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge',
+             phase_entered_at: now - 2_460_000 }),
+  ]
+  expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
+    'also waiting on you:\n' +
+    '- t1 fix/a (#30) [merge 41m] — YOUR move\n' +
+    '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2`',
+  )
+})
+
+test('a task already named in the digest is not repeated in the footer', () => {
+  const now = 1_000_000
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'merge', phase_entered_at: now })])
+  expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
+})
+
+test('worker-owned, no-actor and terminal rows are not the footer\'s business', () => {
+  const now = 1_000_000
+  const run = mkRun([])
+  for (const phase of ['research', 'implement', 'queued', 'ci', 'teardown', 'blocked-on-files',
+                       'done', 'failed', 'orphaned', 'blocked-on-failure'] as TaskPhase[]) {
+    run.tasks = [mkTask({ phase })]
+    expect(parkedFooter(run, new Set(), now, 'hp'), `${phase} must not be listed`).toBe('')
+  }
+})
+
+test('the footer is empty for a run with no tasks', () => {
+  expect(parkedFooter(mkRun([]), new Set(), 1_000_000, 'hp')).toBe('')
+})
+
+test('the footer renders the CLI it is given, and covered beats the escalated exception', () => {
+  // The hpipe parameter is only live because `escalated` is in the predicate —
+  // every other covered row renders `YOUR move`, which carries no command.
+  const now = 1_000_000
+  const run = mkRun([])
+  run.run_id = 'r1'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'plan',
+                        phase_entered_at: now })]
+  expect(parkedFooter(run, new Set(), now, 'bun run /p/src/cli.ts'))
+    .toContain('bun run /p/src/cli.ts rewind r1 plan --task t1')
+  expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
+})
+
+test('the footer lists every non-terminal row a person has to act on', () => {
+  // Keyed on `actor`, deliberately NOT on parkedFooter's own predicate — which
+  // spells the human case as `phase === 'escalated'`. The two agree only because
+  // `escalated` is the single actor:'human' row today; a second one would diverge
+  // and this goes red, which is the whole point of a table-driven guard.
+  const now = 1_000_000
+  const run = mkRun([])
+  for (const row of TASK_ROWS) {
+    const needsAPerson = row.actor === 'orchestrator' || row.actor === 'human'
+    const expected = row.terminal !== true && needsAPerson
+    run.tasks = [mkTask({ phase: row.phase, escalated_from: 'implement' })]
+    const listed = parkedFooter(run, new Set(), now, 'hp').length > 0
+    expect(listed, `${row.phase}: expected listed=${expected}`).toBe(expected)
+  }
 })

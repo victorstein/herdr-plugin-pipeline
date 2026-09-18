@@ -1,12 +1,129 @@
 import { abandonDecisions } from '../lib/decisions'
+import { filesOverlap, isInFlight } from '../lib/gating'
 import { enterTaskPhase } from '../lib/machine'
-import { runRow } from '../lib/phases'
+import { runRow, taskRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
+
+const MS_PER_MINUTE = 60_000
+
+/**
+ * Clamped, matching `src/lib/status.ts:12-14`. A third private copy of this
+ * arithmetic is deliberate, and both of the other two are out of reach rather
+ * than merely inconvenient: `status.ts` belongs to #14 and is being edited in the
+ * same batch, and `./stall.ts` — which declares the identical `MS_PER_MINUTE` one
+ * file over — is outside this task's declared file set. Whoever lands last
+ * collapses the three.
+ */
+export function ageMinutes(sinceMs: number, now: number): number {
+  return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
+}
+
+/**
+ * Whose move it is, keyed on the phase row rather than the phase name so a row
+ * added to TASK_ROWS gets a correct clause with no edit here. Shared by the
+ * digest line and the parked-task footer so the two cannot drift.
+ */
+export function actionFor(run: Run, task: Task, hpipe: string): string {
+  const row = taskRow(task.phase)
+
+  if (task.phase === 'done') return 'nothing for you — this task is finished'
+  if (row.terminal === true) return 'dead end, needs a human'
+  if (task.phase === 'escalated') {
+    const from = task.escalated_from ?? '<phase>'
+    return `needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``
+  }
+  if (row.actor === 'orchestrator') return 'YOUR move'
+  if (row.actor === 'worker') return "worker's move"
+  if (task.phase === 'blocked-on-files') {
+    // Mirrors `src/lib/status.ts:51-60`: only a holder that has stopped moving is
+    // releasable, and this row has no escalation path of its own — `files` is not
+    // in stall.ts's ESCALATING_SIGNALS, so the ladder probes it to the cap and
+    // then goes quiet forever.
+    const stuck = run.tasks.find(
+      (t) => t.task_id !== task.task_id &&
+        isInFlight(t) && filesOverlap(task.files, t.files) &&
+        (taskRow(t.phase).terminal === true || t.phase === 'escalated'),
+    )
+    if (stuck) return `YOUR move: \`${hpipe} release --task ${stuck.task_id}\``
+  }
+  return 'nothing for you — the supervisor is driving'
+}
 
 export interface WakeLine {
   run: Run
   task: Task | null
-  text: string
+  /**
+   * The rendered trigger, ALREADY scoped: `agent:<status>`, `pane exited[, no PR]`,
+   * `agent released`. Never a phase completion. The `agent:` prefix is applied here,
+   * at push, because the driver keys the blocked-tail gate off it — storing a bare
+   * `blocked` makes that gate never match and silently drops the pane tail.
+   */
+  event: string
+  /**
+   * The record's phase when this event was applied, before this tick advanced it.
+   * Rendered against the LIVE record at delivery time, so a phase this same tick
+   * advanced shows as a transition instead of as the phase already left.
+   */
+  phaseAtEvent: string
+  /** Pane tail for a blocked event. Attached by the driver; indented by `describeWake`. */
+  detail?: string
+}
+
+function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number): string {
+  return phaseAtEvent === phase
+    ? `${phase} ${ageMinutes(enteredAt, now)}m`
+    : `${phaseAtEvent} → ${phase}`
+}
+
+/**
+ * One digest line, composed at delivery time from the LIVE record. Every one of
+ * the ~50 digests on the berean-os run of 2026-09-16 carried herdr's agent status
+ * and nothing else, and every one was followed by `hpipe status`.
+ * Measured on a live run.
+ */
+export function describeWake(line: WakeLine, now: number, hpipe: string): string {
+  const { run, task } = line
+  if (task === null) {
+    const box = phaseBox(line.phaseAtEvent, run.phase, run.phase_entered_at, now)
+    return `${run.run_id} [${box}] ${line.event}`
+  }
+
+  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
+  const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
+    `${line.event} — ${actionFor(run, task, hpipe)}`
+  if (line.detail === undefined || line.detail.length === 0) return head
+
+  const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
+  return `${head}\n${indented}`
+}
+
+/**
+ * Tasks whose row the orchestrator — or a human — owns produce no herdr pane
+ * event, so they never reach a digest on their own: t3 sat in `merge` for 4h57m on
+ * the berean-os run of 2026-09-16 and emitted zero wake lines. This reports them on
+ * digests that are already being sent; it does NOT make them visible in a quiet
+ * window, which is #19. Measured on a live run.
+ */
+export function parkedFooter(
+  run: Run, covered: ReadonlySet<string>, now: number, hpipe: string,
+): string {
+  const parked = run.tasks
+    .filter((task) => !covered.has(task.task_id))
+    .filter((task) => {
+      const row = taskRow(task.phase)
+      if (row.terminal === true) return false
+      // `escalated` is spelled out rather than matched as `actor: 'human'` so a
+      // future human-owned row has to opt in here instead of inheriting this.
+      return row.actor === 'orchestrator' || task.phase === 'escalated'
+    })
+    .sort((a, b) => a.task_id.localeCompare(b.task_id))
+
+  if (parked.length === 0) return ''
+
+  const lines = parked.map((task) =>
+    `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
+    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe)}`)
+  return ['also waiting on you:', ...lines].join('\n')
 }
 
 export interface ApplyResult {
@@ -54,6 +171,7 @@ export function applyEvents(
     )
     if (!found) continue
     const { run, task } = found
+    const phaseAtEvent = task.phase
 
     if (event.kind === 'pane.agent_detected') {
       if (event.released === true) {
@@ -61,7 +179,9 @@ export function applyEvents(
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)
         enterTaskPhase(run, task, 'failed', 'agent released')
-        wake.push({ run, task, text: `${task.branch} (#${task.issue}, ${task.task_id}) agent released` })
+        wake.push({
+          run, task, phaseAtEvent, event: 'agent released',
+        })
       } else if (event.pane_id) {
         task.pane_id = event.pane_id
       }
@@ -73,8 +193,8 @@ export function applyEvents(
       if (task.phase === 'blocked-on-decision') abandonDecisions(task)
       enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
       wake.push({
-        run, task,
-        text: `${task.branch} (#${task.issue}, ${task.task_id}) exited${task.pr ? '' : ', no PR'}`,
+        run, task, phaseAtEvent,
+        event: `pane exited${task.pr ? '' : ', no PR'}`,
       })
       changed = true
       continue
@@ -86,8 +206,8 @@ export function applyEvents(
       changed = true
       if (wakeOn.has(event.agent_status)) {
         wake.push({
-          run, task,
-          text: `${task.branch} (#${task.issue}, ${task.task_id}) ${event.agent_status}`,
+          run, task, phaseAtEvent,
+          event: `agent:${event.agent_status}`,
         })
       }
     }

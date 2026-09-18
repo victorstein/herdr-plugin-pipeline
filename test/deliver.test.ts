@@ -324,3 +324,55 @@ test('a non-ASCII candidate path comes back raw, not C-quoted', async () => {
     'docs/superpowers/notes/café-señor.md',
   ])
 })
+
+test('the digest appends the footer after the next prompt', () => {
+  const text = buildDigest({
+    run: mkRun(), eventLines: ["- t1 x (#1) [spec 2m] agent:idle — worker's move"],
+    phaseNote: '', nextPrompt: 'DO THE THING',
+    footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move',
+  })
+  expect(text).toContain('DO THE THING\n\nalso waiting on you:')
+})
+
+test('a footer with no next prompt is separated by exactly one blank line', () => {
+  // nextPrompt is '' unless a run-level phase was entered, so this is the common
+  // case; a naive join leaves three blank lines here.
+  const text = buildDigest({
+    run: mkRun(), eventLines: ['- e1'], phaseNote: '', nextPrompt: '',
+    footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move',
+  })
+  expect(text).toContain('- e1\n\nalso waiting on you:')
+  expect(text).not.toContain('\n\n\n')
+})
+
+test('a digest with no footer is byte-identical to one built without the field', () => {
+  const base = { run: mkRun(), eventLines: ['- e1'], phaseNote: ' → execute', nextPrompt: 'P' }
+  expect(buildDigest({ ...base, footer: '' })).toBe(buildDigest(base))
+})
+
+test('the footer rides any orchestrator delivery, not only the wake-line one', () => {
+  // main.ts pushes up to three orchestrator pendings per run, and the FIRST is
+  // dropped by deliveriesFor when it has no text and no events — which is exactly
+  // the tick a task advances without a pane event. Both pendings must carry the
+  // footer, which is what the driver produces; with it on the dropped one only,
+  // `group.find` never sees it.
+  const run = mkRun()
+  const footer = 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move'
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: '', isOrchestrator: true, events: [], footer },
+    { paneId: 'w1:p1', run, text: 'merge PR #44', isOrchestrator: true, events: [], footer },
+  ])
+  expect(out).toHaveLength(1)
+  expect(out[0]?.text).toContain('also waiting on you:')
+  // group.find de-duplicates: the footer renders once, not once per pending.
+  expect(out[0]?.text.split('also waiting on you:')).toHaveLength(2)
+})
+
+test('a worker delivery never carries the footer', () => {
+  const run = mkRun()
+  const out = deliveriesFor([
+    { paneId: 'w7:p1', run, text: 'worker prompt', isOrchestrator: false, events: [],
+      footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move' },
+  ])
+  expect(out[0]?.text).toBe('worker prompt')
+})

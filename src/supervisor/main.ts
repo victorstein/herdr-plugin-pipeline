@@ -17,7 +17,7 @@ import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates,
 } from './stall'
-import { applyEvents, pickOneAdvance } from './tick'
+import { applyEvents, describeWake, parkedFooter, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
@@ -122,10 +122,13 @@ async function main(): Promise<void> {
       const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))
 
       for (const line of wake) {
-        if (line.task?.agent_status === 'blocked' && line.task.pane_id) {
+        // Gated on the event, not on task.agent_status: that field is the badge
+        // and wake cache and is overwritten by every event in the same drain, so
+        // a `blocked` then `idle` pair attached the tail to the wrong line.
+        if (line.event === 'agent:blocked' && line.task?.pane_id) {
           const tail = await herdr.paneRead(line.task.pane_id, config.BLOCKED_TAIL_LINES)
           if (tail.trim().length > 0) {
-            line.text += `\n    ${tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n    ')}`
+            line.detail = tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n')
           }
         }
       }
@@ -151,11 +154,16 @@ async function main(): Promise<void> {
         actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane),
       )
 
+      // One stamp and one CLI spelling per tick, so every line in one digest agrees
+      // on "now". `hpipe` moves up from the stall block below; same call count.
+      const tickNow = Date.now()
+      const hpipe = hpipeCommand(pluginRoot)
+
       const pending: PendingPrompt[] = []
       for (const run of advancing) {
         const addPending = (
           paneId: string | null, text: string, eventLines: string[], subject: string,
-          phaseNote?: string,
+          phaseNote?: string, footer?: string,
         ) => {
           if (text.length === 0 && eventLines.length === 0) return
           if (paneId === null) {
@@ -163,7 +171,7 @@ async function main(): Promise<void> {
             return
           }
           pending.push({
-            paneId, run, text, events: eventLines, phaseNote,
+            paneId, run, text, events: eventLines, phaseNote, footer,
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
@@ -209,12 +217,28 @@ async function main(): Promise<void> {
             : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
-          const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
-          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`, phaseNote)
+          const covered = new Set<string>()
+          const lines = wake
+            .filter((w) => w.run.run_id === run.run_id)
+            .map((w) => {
+              if (w.task) covered.add(w.task.task_id)
+              return `- ${describeWake(w, tickNow, hpipe)}`
+            })
+          // Attached to every orchestrator-pane pending, not just the first: that
+          // one is dropped when it has no text and no events, while a task prompt
+          // on the same pane still produces a digest — which is the tick a task
+          // advances off the CI poll rather than a pane event. `deliveriesFor`
+          // renders it once.
+          const footer = parkedFooter(run, covered, tickNow, hpipe)
+
+          addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`,
+            phaseNote, footer)
           for (const prompt of taskPrompts) {
-            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
+            addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`, undefined,
+              prompt.paneId === run.orchestrator_pane ? footer : undefined)
           }
-          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`)
+          addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`,
+            undefined, footer)
           await saveRun(stateDir, run)
         } catch (error) {
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
@@ -236,7 +260,6 @@ async function main(): Promise<void> {
         }
       }
 
-      const hpipe = hpipeCommand(pluginRoot)
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
       const probeMax = config.STALL_PROBE_MAX
