@@ -403,7 +403,7 @@ test('two status events for one task in one drain produce two separately-keyed l
 const wakeLine = (over: Partial<WakeLine>): WakeLine => {
   const run = mkRun([])
   run.run_id = 'r1'
-  return { run, task: mkTask({}), event: 'agent:idle', phaseAtEvent: 'implement', text: '', ...over }
+  return { run, task: mkTask({}), event: 'agent:idle', phaseAtEvent: 'implement', ...over }
 }
 
 test('a digest line carries the task, the phase, the age and the action', () => {
@@ -448,6 +448,6 @@ test('a run-level wake line renders without an action rung', () => {
   run.phase = 'execute'
   run.phase_entered_at = now - 60_000
   const text = describeWake(
-    { run, task: null, event: 'agent:idle', phaseAtEvent: 'execute', text: '' }, now, 'hp')
+    { run, task: null, event: 'agent:idle', phaseAtEvent: 'execute' }, now, 'hp')
   expect(text).toBe('r1 [execute 1m] agent:idle')
 })

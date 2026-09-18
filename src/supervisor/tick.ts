@@ -64,7 +64,6 @@ export interface WakeLine {
   phaseAtEvent: string
   /** Pane tail for a blocked event. Attached by the driver; indented by `describeWake`. */
   detail?: string
-  text: string
 }
 
 function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number): string {
@@ -150,7 +149,6 @@ export function applyEvents(
         enterTaskPhase(run, task, 'failed', 'agent released')
         wake.push({
           run, task, phaseAtEvent, event: 'agent released',
-          text: `${task.branch} (#${task.issue}, ${task.task_id}) agent released`,
         })
       } else if (event.pane_id) {
         task.pane_id = event.pane_id
@@ -165,7 +163,6 @@ export function applyEvents(
       wake.push({
         run, task, phaseAtEvent,
         event: `pane exited${task.pr ? '' : ', no PR'}`,
-        text: `${task.branch} (#${task.issue}, ${task.task_id}) exited${task.pr ? '' : ', no PR'}`,
       })
       changed = true
       continue
@@ -179,7 +176,6 @@ export function applyEvents(
         wake.push({
           run, task, phaseAtEvent,
           event: `agent:${event.agent_status}`,
-          text: `${task.branch} (#${task.issue}, ${task.task_id}) ${event.agent_status}`,
         })
       }
     }

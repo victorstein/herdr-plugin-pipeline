@@ -17,7 +17,7 @@ import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates,
 } from './stall'
-import { applyEvents, pickOneAdvance } from './tick'
+import { applyEvents, describeWake, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
@@ -122,10 +122,13 @@ async function main(): Promise<void> {
       const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))
 
       for (const line of wake) {
-        if (line.task?.agent_status === 'blocked' && line.task.pane_id) {
+        // Gated on the event, not on task.agent_status: that field is the badge
+        // and wake cache and is overwritten by every event in the same drain, so
+        // a `blocked` then `idle` pair attached the tail to the wrong line.
+        if (line.event === 'agent:blocked' && line.task?.pane_id) {
           const tail = await herdr.paneRead(line.task.pane_id, config.BLOCKED_TAIL_LINES)
           if (tail.trim().length > 0) {
-            line.text += `\n    ${tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n    ')}`
+            line.detail = tail.trim().split('\n').slice(-config.BLOCKED_TAIL_LINES).join('\n')
           }
         }
       }
@@ -150,6 +153,10 @@ async function main(): Promise<void> {
       const liveIdle = makeSettledIdleReader(
         actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane),
       )
+
+      // One stamp and one CLI spelling per tick, so every line in one digest agrees
+      // on "now". `hpipe` moves up from the stall block below; same call count.
+      const tickNow = Date.now()
 
       const pending: PendingPrompt[] = []
       for (const run of advancing) {
@@ -209,7 +216,9 @@ async function main(): Promise<void> {
             : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
-          const lines = wake.filter((w) => w.run.run_id === run.run_id).map((w) => `- ${w.text}`)
+          const lines = wake
+            .filter((w) => w.run.run_id === run.run_id)
+            .map((w) => `- ${describeWake(w, tickNow, hpipe)}`)
           addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`, phaseNote)
           for (const prompt of taskPrompts) {
             addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`)
