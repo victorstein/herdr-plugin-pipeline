@@ -1,6 +1,6 @@
 import { abandonDecisions } from '../lib/decisions'
 import { enterTaskPhase } from '../lib/machine'
-import { runRow } from '../lib/phases'
+import { runRow, taskRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
@@ -12,6 +12,25 @@ const MS_PER_MINUTE = 60_000
  */
 export function ageMinutes(sinceMs: number, now: number): number {
   return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
+}
+
+/**
+ * Whose move it is, keyed on the phase row rather than the phase name so a row
+ * added to TASK_ROWS gets a correct clause with no edit here. Shared by the
+ * digest line and the parked-task footer so the two cannot drift.
+ */
+export function actionFor(run: Run, task: Task, hpipe: string): string {
+  const row = taskRow(task.phase)
+
+  if (task.phase === 'done') return 'nothing for you — this task is finished'
+  if (row.terminal === true) return 'dead end, needs a human'
+  if (task.phase === 'escalated') {
+    const from = task.escalated_from ?? '<phase>'
+    return `needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``
+  }
+  if (row.actor === 'orchestrator') return 'YOUR move'
+  if (row.actor === 'worker') return "worker's move"
+  return 'nothing for you — the supervisor is driving'
 }
 
 export interface WakeLine {

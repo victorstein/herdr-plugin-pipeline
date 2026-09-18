@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ageMinutes, applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import { actionFor, ageMinutes, applyEvents, pickOneAdvance } from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
-import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
+import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'tick-')) })
@@ -256,4 +256,44 @@ test('ageMinutes floors to whole minutes and never goes negative', () => {
   expect(ageMinutes(now, now)).toBe(0)
   // Clock skew: a future stamp must not print "-1m" at an orchestrator.
   expect(ageMinutes(now + 600_000, now)).toBe(0)
+})
+
+test('actionFor answers whose move it is, by rung', () => {
+  const run = mkRun([])
+  run.run_id = 'r1'
+  const at = (phase: TaskPhase, over: Partial<Task> = {}) =>
+    actionFor(run, mkTask({ phase, ...over }), 'hp')
+
+  expect(at('done')).toBe('nothing for you — this task is finished')
+  for (const phase of ['failed', 'orphaned', 'blocked-on-failure'] as TaskPhase[]) {
+    expect(at(phase)).toBe('dead end, needs a human')
+  }
+  expect(at('escalated', { escalated_from: 'implement' }))
+    .toBe('needs a human: `hp rewind r1 implement --task t1`')
+  expect(at('escalated', { escalated_from: null }))
+    .toBe('needs a human: `hp rewind r1 <phase> --task t1`')
+  for (const phase of ['merge', 'close', 'blocked-on-decision'] as TaskPhase[]) {
+    expect(at(phase)).toBe('YOUR move')
+  }
+  for (const phase of ['research', 'spec', 'spec-review', 'plan', 'plan-review',
+                       'implement', 'pr-review-intent', 'pr-review-quality'] as TaskPhase[]) {
+    expect(at(phase)).toBe("worker's move")
+  }
+  for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
+    expect(at(phase)).toBe('nothing for you — the supervisor is driving')
+    // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
+    // sentence and is false of a queued TASK, which waits on its dependency and
+    // file gates. Reusing that map here is what the spec declines.
+    expect(at(phase)).not.toContain('intake')
+  }
+})
+
+test('actionFor renders the CLI it is given, never a literal hpipe', () => {
+  // A plugin installed from GitHub has no `hpipe` on PATH (src/lib/render.ts:19-22),
+  // so a hardcoded name would be uninvokable. status.ts:25 has that latent defect.
+  const run = mkRun([])
+  const text = actionFor(run, mkTask({ phase: 'escalated', escalated_from: 'plan' }),
+    'bun run /p/src/cli.ts')
+  expect(text).toContain('bun run /p/src/cli.ts rewind')
+  expect(text).not.toMatch(/(^|[^/])hpipe /)
 })
