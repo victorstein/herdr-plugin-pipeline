@@ -333,23 +333,31 @@ test('a blocked-on-files task whose holder touches other files is not blamed on 
   expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
 })
 
-test('actionFor covers every row in TASK_ROWS with a known clause', () => {
+test('every row in TASK_ROWS gets a clause that matches who its actor is', () => {
+  // Keyed on what `actor` MEANS, not on actionFor's own branch order. An earlier
+  // version asserted membership in a set of known strings, which rung 7's
+  // unconditional catch-all makes unfalsifiable: a new `actor: 'human'` row would
+  // land on "the supervisor is driving" — false for a human-owned row — and still
+  // pass. This fails for that row instead.
   const run = mkRun([])
-  const known = new Set([
-    'nothing for you — this task is finished',
-    'dead end, needs a human',
-    "worker's move",
-    'YOUR move',
-    'nothing for you — the supervisor is driving',
-  ])
   for (const row of TASK_ROWS) {
     const task = mkTask({ phase: row.phase, escalated_from: 'implement' })
     run.tasks = [task]
     const clause = actionFor(run, task, 'hp')
+    const where = `${row.phase} produced: ${clause}`
+
     expect(clause.length, `${row.phase} produced an empty clause`).toBeGreaterThan(0)
-    const isCommandClause = clause.startsWith('needs a human: `') ||
-      clause.startsWith('YOUR move: `')
-    expect(known.has(clause) || isCommandClause, `${row.phase} produced: ${clause}`).toBe(true)
+    if (row.terminal === true) {
+      expect(clause, where).not.toContain('move')
+    } else if (row.actor === 'human') {
+      expect(clause, where).toContain('needs a human')
+    } else if (row.actor === 'orchestrator') {
+      expect(clause, where).toContain('YOUR move')
+    } else if (row.actor === 'worker') {
+      expect(clause, where).toBe("worker's move")
+    } else {
+      expect(clause, where).toContain('nothing for you')
+    }
   }
 })
 
@@ -470,11 +478,13 @@ test('the footer names orchestrator-owned and escalated tasks that produced no l
   const now = 1_000_000
   const run = mkRun([])
   run.run_id = 'r1'
+  // Declared out of order on purpose: with these already sorted the sort never
+  // has to do anything and deleting it leaves the suite green.
   run.tasks = [
-    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge',
-             phase_entered_at: now - 2_460_000 }),
     mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'escalated',
              escalated_from: 'plan', phase_entered_at: now - 3_780_000 }),
+    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge',
+             phase_entered_at: now - 2_460_000 }),
   ]
   expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
     'also waiting on you:\n' +
@@ -516,12 +526,16 @@ test('the footer renders the CLI it is given, and covered beats the escalated ex
   expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
 })
 
-test('footer membership agrees with the phase table for every row', () => {
+test('the footer lists every non-terminal row a person has to act on', () => {
+  // Keyed on `actor`, deliberately NOT on parkedFooter's own predicate — which
+  // spells the human case as `phase === 'escalated'`. The two agree only because
+  // `escalated` is the single actor:'human' row today; a second one would diverge
+  // and this goes red, which is the whole point of a table-driven guard.
   const now = 1_000_000
   const run = mkRun([])
   for (const row of TASK_ROWS) {
-    const expected = row.terminal !== true &&
-      (row.actor === 'orchestrator' || row.phase === 'escalated')
+    const needsAPerson = row.actor === 'orchestrator' || row.actor === 'human'
+    const expected = row.terminal !== true && needsAPerson
     run.tasks = [mkTask({ phase: row.phase, escalated_from: 'implement' })]
     const listed = parkedFooter(run, new Set(), now, 'hp').length > 0
     expect(listed, `${row.phase}: expected listed=${expected}`).toBe(expected)
