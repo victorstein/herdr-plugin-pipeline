@@ -7,12 +7,17 @@ import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 const MS_PER_MINUTE = 60_000
 
 /**
- * Clamped, matching `src/lib/status.ts:12-14`. A third private copy of this
- * arithmetic is deliberate, and both of the other two are out of reach rather
- * than merely inconvenient: `status.ts` belongs to #14 and is being edited in the
- * same batch, and `./stall.ts` — which declares the identical `MS_PER_MINUTE` one
- * file over — is outside this task's declared file set. Whoever lands last
- * collapses the three.
+ * Clamped, matching `src/lib/status.ts:12-14`. A third private copy, written
+ * because both other homes were outside the declaring task's file set at the
+ * time — not because the duplication is wanted.
+ *
+ * It is worse than ordinary triplication: `status.ts:25` hardcodes a literal
+ * `hpipe`, which a GitHub-installed plugin cannot invoke, while everything here
+ * renders `hpipeCommand`. So `hpipe status` and the digest now hand an operator
+ * different recovery commands for the same escalated task, one of them wrong.
+ * Collapsing these belongs to #14, which needs this arithmetic and an `actionFor`
+ * equivalent in `src/lib/` — where `src/supervisor/` cannot be imported from,
+ * since the layering is one-way.
  */
 export function ageMinutes(sinceMs: number, now: number): number {
   return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
@@ -51,6 +56,13 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
 
 export interface WakeLine {
   run: Run
+  /**
+   * Null has no producer today: all three `wake.push` sites set this from
+   * `findTask`, which only returns a match. The branch `describeWake` keeps for
+   * it is defensive, for a run-level event source that does not exist yet — so
+   * `test/tick.test.ts`'s cover for it is a characterisation test, not evidence
+   * of behaviour the supervisor can reach. Narrow the type if that stays true.
+   */
   task: Task | null
   /**
    * The rendered trigger, ALREADY scoped: `agent:<status>`, `pane exited[, no PR]`,

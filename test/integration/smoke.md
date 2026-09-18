@@ -185,7 +185,23 @@ watch -n 2 'hpipe status'
   fragments name two different branches.
 - In the **orchestrator's pane**: a digest, not a worker prompt. Worker prompts go to worker panes;
   the orchestrator only gets `[pipeline] run <id> …` digests and the dispatch/merge/close/decision
-  prompts that are its own.
+  prompts that are its own. Every event line in that digest must carry, in this order, the task id,
+  the branch and issue, a bracketed phase box with the age in that phase — `[spec 12m]`, or a
+  transition box `[research → spec]` on the tick a phase advances — and an action clause naming
+  whose move it is: `YOUR move`, `worker's move`, `needs a human: <rewind cmd>`, `dead end`, or
+  `nothing for you …`. A line of the old shape — `branch (#n, tN) done`, carrying herdr's agent
+  status and nothing else — is a **finding**: that form is what issue #13 was filed over, because
+  `done` there means "the agent stopped typing", not "the phase completed".
+- **Confirm the `→` arrow specifically.** #13 shipped without ever being observed live: the
+  supervisor that drove its own run was the released plugin, so the transition box has only ever
+  been exercised by unit tests. Watch for one digest where a phase advances and record whether the
+  box reads `[research → spec]` rather than `[spec 0m]`.
+- **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
+  all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so the footer is
+  the only thing that reports it. Expect it to name the same tasks `hpipe status` flags, and note
+  that a task parked in an orchestrator-owned row is reported **only** on ticks that already produce
+  a digest; a genuinely quiet window shows nothing. That residual gap is issue #19, not a defect
+  here.
 - In the **supervisor pane**: no `dropping prompt for task tN — no pane`. That line means a prompt
   was generated for a task whose `pane_id` is null and thrown away; the task will sit until the
   stall probe.
@@ -263,7 +279,11 @@ hpipe decide --task t1 \
 1. The worker's task goes to `[blocked-on-decision]`, and `decision_from` remembers the phase it
    was in.
 2. Within a tick, the **orchestrator's pane** receives the `decision` prompt: the question, the
-   worker's recommendation, and the exact `hpipe answer` line to run.
+   worker's recommendation, and the exact `hpipe answer` line to run. That same delivery will also
+   carry an `also waiting on you:` footer line for this task — `- tN <branch> (#n)
+   [blocked-on-decision 0m] — YOUR move`. `hpipe decide` is not a pane event, so the task produces
+   no wake line of its own and the footer is what reports it; seeing both the prompt and the footer
+   line for one task is correct, not a duplicate.
 3. **While the question is open**, `hpipe status` prints:
 
    ```
