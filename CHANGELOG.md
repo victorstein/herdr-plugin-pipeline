@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.6](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.5...v1.2.6) (2026-09-18)
+
+
+### Bug Fixes
+
+* put the phase, age and next action in every digest line ([#41](https://github.com/victorstein/herdr-plugin-pipeline/issues/41)) ([dde2d92](https://github.com/victorstein/herdr-plugin-pipeline/commit/dde2d92de65a271c50087d6f380264c71055d4b0)), closes [#13](https://github.com/victorstein/herdr-plugin-pipeline/issues/13)
+
 ## [1.2.5](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.4...v1.2.5) (2026-09-17)
 
 
