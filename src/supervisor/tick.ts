@@ -1,4 +1,5 @@
 import { abandonDecisions } from '../lib/decisions'
+import { filesOverlap, isInFlight } from '../lib/gating'
 import { enterTaskPhase } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
@@ -30,6 +31,18 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
   }
   if (row.actor === 'orchestrator') return 'YOUR move'
   if (row.actor === 'worker') return "worker's move"
+  if (task.phase === 'blocked-on-files') {
+    // Mirrors `src/lib/status.ts:51-60`: only a holder that has stopped moving is
+    // releasable, and this row has no escalation path of its own — `files` is not
+    // in stall.ts's ESCALATING_SIGNALS, so the ladder probes it to the cap and
+    // then goes quiet forever.
+    const stuck = run.tasks.find(
+      (t) => t.task_id !== task.task_id &&
+        isInFlight(t) && filesOverlap(task.files, t.files) &&
+        (taskRow(t.phase).terminal === true || t.phase === 'escalated'),
+    )
+    if (stuck) return `YOUR move: \`${hpipe} release --task ${stuck.task_id}\``
+  }
   return 'nothing for you — the supervisor is driving'
 }
 
