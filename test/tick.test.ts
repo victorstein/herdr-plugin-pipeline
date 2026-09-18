@@ -515,3 +515,15 @@ test('the footer renders the CLI it is given, and covered beats the escalated ex
     .toContain('bun run /p/src/cli.ts rewind r1 plan --task t1')
   expect(parkedFooter(run, new Set(['t1']), now, 'hp')).toBe('')
 })
+
+test('footer membership agrees with the phase table for every row', () => {
+  const now = 1_000_000
+  const run = mkRun([])
+  for (const row of TASK_ROWS) {
+    const expected = row.terminal !== true &&
+      (row.actor === 'orchestrator' || row.phase === 'escalated')
+    run.tasks = [mkTask({ phase: row.phase, escalated_from: 'implement' })]
+    const listed = parkedFooter(run, new Set(), now, 'hp').length > 0
+    expect(listed, `${row.phase}: expected listed=${expected}`).toBe(expected)
+  }
+})
