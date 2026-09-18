@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyEvents, pickOneAdvance } from '../src/supervisor/tick'
+import { ageMinutes, applyEvents, pickOneAdvance } from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { newRun, saveRun } from '../src/lib/ledger'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
@@ -248,4 +248,12 @@ test('panes awaited one after another still share a single settle window', async
   const started = Date.now()
   for (const pane of panes) expect(await idle(pane)).toBe(true)
   expect(Date.now() - started).toBeLessThan(settleMs * 2)
+})
+
+test('ageMinutes floors to whole minutes and never goes negative', () => {
+  const now = 10_000_000
+  expect(ageMinutes(now - 125_000, now)).toBe(2)
+  expect(ageMinutes(now, now)).toBe(0)
+  // Clock skew: a future stamp must not print "-1m" at an orchestrator.
+  expect(ageMinutes(now + 600_000, now)).toBe(0)
 })

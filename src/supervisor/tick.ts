@@ -3,6 +3,17 @@ import { enterTaskPhase } from '../lib/machine'
 import { runRow } from '../lib/phases'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
+const MS_PER_MINUTE = 60_000
+
+/**
+ * Clamped, matching `src/lib/status.ts:12-14`. A third private copy of this
+ * arithmetic is deliberate: sharing would mean exporting from `status.ts`, which
+ * belongs to #14 and is being edited in the same batch.
+ */
+export function ageMinutes(sinceMs: number, now: number): number {
+  return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
+}
+
 export interface WakeLine {
   run: Run
   task: Task | null
