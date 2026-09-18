@@ -136,7 +136,7 @@ failed               holdsFiles=true  terminal=true       actor=undefined stalla
 escalated            holdsFiles=true  terminal=undefined  actor=human     stallable=undefined
 ```
 
-`isInFlight` (`src/lib/gating.ts:23-28`) returns `rule === true` for both, so a `failed` or
+`isInFlight` (`src/lib/gating.ts:23-29`) returns `rule === true` for both, so a `failed` or
 `escalated` holder blocks forever. The repo already treats this as a human move:
 `src/lib/status.ts:55-60` computes `const stuck = taskRow(holder.phase).terminal || holder.phase ===
 'escalated'` and prints `` `hpipe release --task <holder>` is the only way out ``.
@@ -264,7 +264,7 @@ cleared. Bounded by one tick; the alternative is no tail at all, which is today'
 §Testing (spec:751-755): *"the four wake-producing tests at `:71`, `:80`, `:98`, `:114` discard
 `applyEvents`' return value."* `test/tick.test.ts:34-42` (*"an agent_status event updates the matching
 task"*) also produces a wake line — it passes `agent_status: 'idle'` and lets `wakeOn` default to
-`new Set(['blocked','done','idle'])` (`src/supervisor/tick.ts:27`), so `tick.ts:86-91` pushes. It
+`new Set(['blocked','done','idle'])` (`src/supervisor/tick.ts:27`), so `tick.ts:87-91` pushes. It
 destructures `const { changed } = applyEvents(…)` at `:39`, so the **conclusion is unaffected** and
 the blast-radius claim still holds. Both prior passes re-asserted the same count; this is the third
 document to carry it.
