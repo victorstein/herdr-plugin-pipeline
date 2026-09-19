@@ -1,4 +1,4 @@
-import { repoContext } from '../cli'
+import { repoContext } from '../lib/repo'
 import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
 import { sessionKey } from '../lib/session'
 
