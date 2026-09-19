@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.10](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.9...v1.2.10) (2026-09-19)
+
+
+### Documentation
+
+* name plan among the rows the stall ladder escalates ([e426220](https://github.com/victorstein/herdr-plugin-pipeline/commit/e426220d0f82e219ac05755663f623aebba623a0))
+
 ## [1.2.9](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.8...v1.2.9) (2026-09-19)
 
 
