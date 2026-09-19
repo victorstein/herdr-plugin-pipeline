@@ -513,10 +513,17 @@ async function dispatch(argv: string[]): Promise<number> {
   const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
   const [command, ...rest] = argv
 
-  const needsRepo = command === 'start' || command === 'task'
+  // Every command that resolves a run needs the caller's repo to filter by.
+  // --run names the run outright, so the lookup is skipped; `start` has no --run
+  // and always needs one. Without either, the resolver would be back to picking
+  // the first match across every repo in the session, which is the bug.
+  const resolves = ['task', 'brief', 'dispatch', 'release', 'decide', 'answer'].includes(command ?? '')
+  const needsRepo = command === 'start' || (resolves && flag(rest, 'run') === null)
   const repo = needsRepo ? await repoContext() : null
   if (needsRepo && !repo) {
-    console.error('hpipe: not inside a git repository')
+    console.error(command === 'start'
+      ? 'hpipe: not inside a git repository'
+      : 'hpipe: not inside a git repository — run it from the repo whose run you mean, or pass --run <run-id>')
     return 1
   }
 
