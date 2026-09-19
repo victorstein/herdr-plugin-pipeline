@@ -6,7 +6,7 @@ import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
   activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, runPhaseState, saveRun,
-  writeOrchestrator,
+  taskPhaseIsTerminal, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
@@ -44,10 +44,6 @@ const excludedLine = (run: Run): string =>
   runPhaseState(run) === 'unreadable'
     ? `  ${run.run_id} (${run.phase}) — unrecognised phase, in no phase row`
     : runLine(run)
-
-// taskRow throws on a phase with no row, and cmdRewind can write one.
-const taskIsTerminal = (phase: string): boolean =>
-  TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
 
 /**
  * The sentence a failed resolution prints. #36's brief was wrong for hours
@@ -95,6 +91,50 @@ function resolveFailure(
   }
 }
 
+type Resolved<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
+
+/**
+ * Resolve a run for one command, or the sentence to print instead. Every
+ * command goes through here so `--run` is validated and a failure is worded the
+ * same way whoever asked; `escape` is how this command reaches a finished run,
+ * or null when it has no way in.
+ */
+async function resolveFor(
+  ctx: Ctx, query: RunQuery, escape: string | null,
+): Promise<Resolved<Run>> {
+  if (query.runId !== null && query.runId.trim().length === 0) {
+    return { ok: false, result: fail('--run needs a run id') }
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  return resolved.ok
+    ? { ok: true, value: resolved.run }
+    : { ok: false, result: resolveFailure(ctx, query, escape, resolved) }
+}
+
+/**
+ * The four commands addressed by task id share this: a task id is per-run
+ * (`t${n}`), so the run has to be pinned before the id means anything.
+ */
+async function resolveTask(ctx: Ctx, input: {
+  taskId: string; repoKey: string | null; runId: string | null
+  allowTerminal: boolean; escape: string | null
+}): Promise<Resolved<{ run: Run; task: Task }>> {
+  if (input.taskId.trim().length === 0) {
+    return { ok: false, result: fail('--task is required') }
+  }
+
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: null, taskId: input.taskId, allowTerminal: input.allowTerminal,
+  }
+  const found = await resolveFor(ctx, query, input.escape)
+  if (!found.ok) return found
+
+  const task = found.value.tasks.find((t) => t.task_id === input.taskId)
+  if (!task) return { ok: false, result: fail(`no such task: ${input.taskId}`) }
+  return { ok: true, value: { run: found.value, task } }
+}
+
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
@@ -133,9 +173,9 @@ export async function cmdTask(ctx: Ctx, input: {
     runId: input.runId, repoKey: input.repoKey,
     phases: REGISTRABLE, taskId: null, allowTerminal: false,
   }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
-  const run = resolved.run
+  const found = await resolveFor(ctx, query, null)
+  if (!found.ok) return found.result
+  const run = found.value
 
   // The argv parser defaults a missing --issue to 0 and a missing --branch to
   // "". Without these checks a mistyped command mints a ghost task into a live
@@ -237,21 +277,13 @@ export async function cmdTask(ctx: Ctx, input: {
 export async function cmdBrief(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  if (input.taskId.trim().length === 0) return fail('--task is required')
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: input.runId !== null, escape: '--run <run-id> renders it anyway',
+  })
+  if (!found.ok) return found.result
 
-  const query: RunQuery = {
-    runId: input.runId, repoKey: input.repoKey,
-    phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
-  }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) {
-    return resolveFailure(ctx, query, '--run <run-id> renders it anyway', resolved)
-  }
-
-  const task = resolved.run.tasks.find((t) => t.task_id === input.taskId)
-  if (!task) return fail(`no such task: ${input.taskId}`)
-
-  return ok(await renderWorkerPrompt(ctx.pluginRoot, resolved.run, task))
+  return ok(await renderWorkerPrompt(ctx.pluginRoot, found.value.run, found.value.task))
 }
 
 export async function cmdDispatchDone(ctx: Ctx, input: {
@@ -261,10 +293,10 @@ export async function cmdDispatchDone(ctx: Ctx, input: {
     runId: input.runId, repoKey: input.repoKey,
     phases: REGISTRABLE, taskId: null, allowTerminal: false,
   }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
+  const found = await resolveFor(ctx, query, null)
+  if (!found.ok) return found.result
 
-  const run = resolved.run
+  const run = found.value
   run.intake_closed = true
   await saveRun(ctx.stateDir, run)
   return ok(`intake closed for ${run.run_id}`)
@@ -301,10 +333,12 @@ export async function cmdRewind(ctx: Ctx, input: {
     }
 
     // A terminal rewind ends every question addressed to this task; otherwise
-    // openDecisionFor keeps hpipe status nagging about a pane that is gone.
-    // After the block above, so an answered-but-undelivered decision keeps its
-    // own history entry rather than being abandoned silently.
-    if (taskIsTerminal(input.phase)) {
+    // openDecisionFor keeps hpipe status reporting a decision the task can never
+    // return to. `escalated` is deliberately excluded — it carries returnsTo, so
+    // it can come back still needing its answer. After the block above, so an
+    // answered-but-undelivered decision keeps its own history entry rather than
+    // being abandoned silently.
+    if (taskPhaseIsTerminal(input.phase)) {
       const open = openDecisionFor(task)
       abandonDecisions(task)
       if (open) {
@@ -342,20 +376,12 @@ export async function cmdRewind(ctx: Ctx, input: {
 export async function cmdRelease(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  if (input.taskId.trim().length === 0) return fail('--task is required')
-
-  const query: RunQuery = {
-    runId: input.runId, repoKey: input.repoKey,
-    phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
-  }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) {
-    return resolveFailure(ctx, query, '--run <run-id> releases it anyway', resolved)
-  }
-
-  const run = resolved.run
-  const task = run.tasks.find((t) => t.task_id === input.taskId)
-  if (!task) return fail(`no such task: ${input.taskId}`)
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: input.runId !== null, escape: '--run <run-id> releases it anyway',
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
 
   // `escalated` is not `terminal` — it carries `escalated_from` so a human can
   // rewind it — but it has stopped moving and is a legitimate release target too.
@@ -372,18 +398,15 @@ export async function cmdDecide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  if (input.task.trim().length === 0) return fail('--task is required')
-
-  const query: RunQuery = {
-    runId: input.runId, repoKey: input.repoKey,
-    phases: null, taskId: input.task, allowTerminal: false,
-  }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
-
-  const run = resolved.run
-  const task = run.tasks.find((t) => t.task_id === input.task)
-  if (!task) return fail(`no such task: ${input.task}`)
+  // Alone among the four, this refuses a finished run even when named: opening a
+  // decision on one strands the question, because neither `rewind` (it leaves
+  // run.phase alone) nor `resume` (it needs a prior abort) can get a worker back.
+  const found = await resolveTask(ctx, {
+    taskId: input.task, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: false, escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
 
   if (input.recommendation.trim().length === 0) {
     return fail('--recommend is required: a bare question pushes the call up to the orchestrator')
@@ -398,7 +421,7 @@ export async function cmdDecide(ctx: Ctx, input: {
 
   // Mirrors cmdAnswer's guard. Nothing should move a finished task into a live
   // phase; #38 did exactly that to two tasks whose worktrees were already gone.
-  if (taskIsTerminal(task.phase)) {
+  if (taskPhaseIsTerminal(task.phase)) {
     return fail(`task ${input.task} is finished (phase: ${task.phase}) — ` +
       'it cannot be blocked on a decision')
   }
@@ -414,20 +437,13 @@ export async function cmdAnswer(ctx: Ctx, input: {
   task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  if (input.task.trim().length === 0) return fail('--task is required')
-
-  const query: RunQuery = {
-    runId: input.runId, repoKey: input.repoKey,
-    phases: null, taskId: input.task, allowTerminal: input.runId !== null,
-  }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
-  if (!resolved.ok) {
-    return resolveFailure(ctx, query, '--run <run-id> records an answer on it anyway', resolved)
-  }
-
-  const run = resolved.run
-  const task = run.tasks.find((t) => t.task_id === input.task)
-  if (!task) return fail(`no such task: ${input.task}`)
+  const found = await resolveTask(ctx, {
+    taskId: input.task, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: input.runId !== null,
+    escape: '--run <run-id> records an answer on it anyway',
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
 
   if (input.by !== 'orchestrator' && input.by !== 'human') {
     return fail(`--by must be 'orchestrator' or 'human', got: ${input.by}`)
@@ -541,12 +557,15 @@ async function dispatch(argv: string[]): Promise<number> {
   const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
   const [command, ...rest] = argv
 
-  // Every command that resolves a run needs the caller's repo to filter by.
-  // --run names the run outright, so the lookup is skipped; `start` has no --run
-  // and always needs one. Without either, the resolver would be back to picking
-  // the first match across every repo in the session, which is the bug.
-  const resolves = ['task', 'brief', 'dispatch', 'release', 'decide', 'answer'].includes(command ?? '')
-  const needsRepo = command === 'start' || (resolves && flag(rest, 'run') === null)
+  // Every command that resolves a run needs the caller's repo to filter by, so
+  // this is a deny-list, not an allow-list: a new command is assumed to resolve.
+  // Get it wrong that way and it fails loudly outside a repo; get an allow-list
+  // wrong and the new command silently gets repoKey: null, which is #21 again
+  // with no error anywhere. These six address a run by id, or not at all.
+  const byIdOrNothing = ['status', 'drain', 'abort', 'resume', 'forget', 'rewind']
+  // --run names the run outright, so the lookup is skipped; `start` has no --run.
+  const needsRepo = command === 'start' ||
+    (!byIdOrNothing.includes(command ?? '') && flag(rest, 'run') === null)
   const repo = needsRepo ? await repoContext() : null
   if (needsRepo && !repo) {
     console.error(command === 'start'

@@ -602,3 +602,20 @@ test('a missing --task names the flag rather than printing an empty subject', as
     expect(result.text).toBe('--task is required')
   }
 })
+
+test('an empty --run names the flag rather than searching for a run called ""', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  for (const result of [
+    await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: '' }),
+    await cmdTask(ctx(), {
+      branch: 'feat/x', issue: 1, surface: 'core', notes: '',
+      dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: '',
+    }),
+    await cmdDispatchDone(ctx(), { runId: '', repoKey: 'k' }),
+  ]) {
+    expect(result.ok).toBe(false)
+    expect(result.text).toBe('--run needs a run id')
+  }
+})

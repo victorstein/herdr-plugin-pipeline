@@ -155,3 +155,24 @@ test('decide from another repo does not reach the first repo run', () => {
   expect(r.code).toBe(1)
   expect(r.out).not.toContain('opened decision')
 })
+
+test('a command that resolves a run is assumed to need the caller repo', () => {
+  // The dispatcher keeps a deny-list, not an allow-list: `release` is not in it,
+  // so it gets the repo lookup without being named. An allow-list that forgot a
+  // command would hand it repoKey: null and silently reintroduce #21.
+  const f = started()
+  const outside = tempDir('hpipe-argv-denylist-')
+
+  const resolving = Bun.spawnSync(['bun', 'run', CLI, 'release', '--task', 't1'], {
+    cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
+  })
+  expect(resolving.exitCode).toBe(1)
+  expect(resolving.stdout.toString() + resolving.stderr.toString())
+    .toContain('not inside a git repository')
+
+  // `status` addresses no run, so it works from anywhere.
+  const byId = Bun.spawnSync(['bun', 'run', CLI, 'status'], {
+    cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
+  })
+  expect(byId.exitCode).toBe(0)
+})

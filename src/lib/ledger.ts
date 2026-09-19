@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { runRow } from './phases'
+import { TASK_ROWS, runRow } from './phases'
 import { readJson, writeJson } from './store'
 import type { Orchestrator, Run, RunPhase, SessionKey } from './types'
 
@@ -132,6 +132,10 @@ export type RunResolution =
   | { ok: false; reason: 'ambiguous'; candidates: Run[] }
 
 /**
+ * Both phase questions below are throw-safe, and both live here rather than in
+ * `phases.ts` beside `runRow`/`taskRow` — one address, so the next caller
+ * reading a phase off disk finds them instead of writing a fourth spelling.
+ *
  * `runRow` throws on a phase with no row and nothing validates what is on disk,
  * so every caller of resolveRun would otherwise inherit a stack trace from one
  * typo'd `hpipe rewind`. An unreadable run is simply not a candidate.
@@ -143,6 +147,9 @@ export function runPhaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
     return 'unreadable'
   }
 }
+
+export const taskPhaseIsTerminal = (phase: string): boolean =>
+  TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
 
 export async function resolveRun(
   stateDir: string, session: SessionKey, query: RunQuery,

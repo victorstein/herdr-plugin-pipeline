@@ -98,7 +98,7 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 | | |
 |---|---|
 | Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters, any undelivered answer, and (rewinding to `dispatch`) worktree adoption. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
-| Two live runs in one session | Every command that takes `--task` resolves against the repo you are standing in and refuses a finished run. If it still cannot tell, it names the candidates — pass `--run <run-id>` |
+| Two live runs in one session | `task`, `brief`, `dispatch --done`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
