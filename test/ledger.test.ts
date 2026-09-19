@@ -153,3 +153,38 @@ test('resolveRun reports none with nothing excluded when no run holds the task',
   expect(!result.ok && result.reason).toBe('none')
   expect(!result.ok && result.reason === 'none' && result.excluded).toEqual([])
 })
+
+test('resolveRun by id ignores the repo and task filters', async () => {
+  const other = await seedRun({ repoKey: '/repos/other', taskIds: ['t1'] })
+
+  const result = await resolveRun(dir, 'personal', query({
+    runId: other, repoKey: '/repos/mine', taskId: 't9',
+  }))
+  expect(result.ok && result.run.run_id).toBe(other)
+})
+
+test('resolveRun by id still applies the phase filter', async () => {
+  // --run overrides inference, not legality. A task registered into a run past
+  // `execute` cannot be removed by any command.
+  const late = await seedRun({ phase: 'branch-review' })
+
+  const result = await resolveRun(dir, 'personal', query({
+    runId: late, phases: ['intake', 'dispatch', 'execute'],
+  }))
+  expect(!result.ok && result.reason).toBe('wrong-phase')
+})
+
+test('resolveRun by id refuses a finished run unless the caller allows it', async () => {
+  const done = await seedRun({ phase: 'done' })
+
+  const refused = await resolveRun(dir, 'personal', query({ runId: done }))
+  expect(!refused.ok && refused.reason).toBe('terminal')
+
+  const allowed = await resolveRun(dir, 'personal', query({ runId: done, allowTerminal: true }))
+  expect(allowed.ok && allowed.run.run_id).toBe(done)
+})
+
+test('resolveRun by id reports an unknown id', async () => {
+  const result = await resolveRun(dir, 'personal', query({ runId: 'nope' }))
+  expect(!result.ok && result.reason).toBe('no-such-run')
+})

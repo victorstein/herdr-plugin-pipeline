@@ -136,6 +136,18 @@ export async function resolveRun(
 ): Promise<RunResolution> {
   const runs = await listRuns(stateDir, session)
 
+  if (query.runId !== null) {
+    const named = runs.find((r) => r.run_id === query.runId)
+    if (!named) return { ok: false, reason: 'no-such-run' }
+    if (runRow(named.phase).terminal && !query.allowTerminal) {
+      return { ok: false, reason: 'terminal', run: named }
+    }
+    if (query.phases !== null && !query.phases.includes(named.phase)) {
+      return { ok: false, reason: 'wrong-phase', run: named }
+    }
+    return { ok: true, run: named }
+  }
+
   const inRepo = runs.filter((r) => query.repoKey === null || r.repo_key === query.repoKey)
   const withTask = inRepo.filter(
     (r) => query.taskId === null || r.tasks.some((t) => t.task_id === query.taskId),
