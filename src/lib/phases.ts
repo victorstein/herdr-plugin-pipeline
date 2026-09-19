@@ -115,20 +115,31 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
     onClear: 'ci', onBlocker: 'implement', counter: 'pr-review-quality',
     prompt: 'pr-review-quality', stallable: true, holdsFiles: true },
 
+  // #19. Each waits on something outside the pipeline — GitHub, or a person — and
+  // none of their signals is escalatable, so each is nudged forever and can never
+  // cascade a dependent. t3 sat in `merge` for 4h57m emitting nothing.
+  // Measured on a live run.
   { phase: 'ci', signal: 'ci', onClear: 'merge', onBlocker: 'implement',
-    counter: 'ci', prompt: 'ci-red', holdsFiles: true },
+    counter: 'ci', prompt: 'ci-red', stallable: true, probeTarget: 'orchestrator',
+    holdsFiles: true },
   { phase: 'merge', actor: 'orchestrator', signal: 'merged',
-    onClear: 'close', prompt: 'merge', holdsFiles: true },
+    onClear: 'close', prompt: 'merge', stallable: true, holdsFiles: true },
   { phase: 'close', actor: 'orchestrator', signal: 'closed',
-    onClear: 'teardown', prompt: 'close', holdsFiles: true },
-  { phase: 'teardown', signal: 'worktree', onClear: 'done', holdsFiles: true },
+    onClear: 'teardown', prompt: 'close', stallable: true, holdsFiles: true },
+  // Teardown is unconditional and runs first (tasks.ts:137), so a task still here
+  // past the threshold means this run is not being advanced at all.
+  { phase: 'teardown', signal: 'worktree', onClear: 'done',
+    stallable: true, probeTarget: 'orchestrator', holdsFiles: true },
 
   { phase: 'blocked-on-decision', actor: 'orchestrator', signal: 'manual',
     returnsTo: 'decision_from', prompt: 'decision',
     resumePrompt: 'answer', resumeActor: 'worker',
     stallable: true, holdsFiles: 'inherit' },
+  // probeTarget because a human owns no pane: table.test.ts:33 counts only
+  // `orchestrator` and `worker` as resolving to one.
   { phase: 'escalated', actor: 'human', signal: 'manual',
-    returnsTo: 'escalated_from', prompt: 'escalate', holdsFiles: true },
+    returnsTo: 'escalated_from', prompt: 'escalate',
+    stallable: true, probeTarget: 'orchestrator', holdsFiles: true },
 
   // `failed` and `escalated` both leave a worktree holding unmerged work, and
   // nothing ever tears an escalated task down — releasing their files would let

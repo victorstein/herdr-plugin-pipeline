@@ -197,11 +197,14 @@ watch -n 2 'hpipe status'
   been exercised by unit tests. Watch for one digest where a phase advances and record whether the
   box reads `[research → spec]` rather than `[spec 0m]`.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
-  all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so the footer is
-  the only thing that reports it. Expect it to name the same tasks `hpipe status` flags, and note
-  that a task parked in an orchestrator-owned row is reported **only** on ticks that already produce
-  a digest; a genuinely quiet window shows nothing. That residual gap is issue #19, not a defect
-  here.
+  all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
+  is already sending a digest the footer is what reports it. Expect it to name the same tasks
+  `hpipe status` flags.
+- **Independently of any digest, a task parked in `ci`, `merge`, `close`, `teardown` or `escalated`
+  is probed in the orchestrator's pane every `TASK_STALL_MINUTES`** (#19). In a genuinely quiet
+  window that probe is the only thing that speaks. Confirm one arrives; that its clause names what
+  the row is waiting for rather than `whatever clears <phase>`; and that the task is **never**
+  escalated by it, however long it sits — those five rows are probe-only for ever (§4c).
 - In the **supervisor pane**: no `dropping prompt for task tN — no pane`. That line means a prompt
   was generated for a task whose `pane_id` is null and thrown away; the task will sit until the
   stall probe.
@@ -363,9 +366,12 @@ produces one probe per stalled record, not a burst. After `STALL_PROBE_MAX` (3) 
 row whose signal the probed actor produces itself (`research`, `spec`, the four review rows,
 `implement`, and the run's `branch-review`) is moved to `escalated` and reported by `hpipe status`.
 
-`blocked-on-files`, `blocked-on-decision`, and the run's `dispatch` and `execute` are probed but
-**never** escalated — they are waiting correctly, on a sibling task or on you, and escalating them
-would cascade their dependents to `blocked-on-failure`. Their probe says so.
+Nine rows are probed but **never** escalated: `blocked-on-files`, `blocked-on-decision`, the last
+mile (`ci`, `merge`, `close`, `teardown`), a task already in `escalated`, and the run's `dispatch`
+and `execute`. They are waiting correctly — on a sibling task, on GitHub, or on you — and escalating
+them would cascade their dependents to `blocked-on-failure`. Their probe says so, and names what it
+is waiting for: the PR to merge, the issue to close, `gh pr checks <pr>`, or the `rewind` that
+resumes an escalated task.
 
 If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
 `STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.

@@ -153,8 +153,11 @@ export interface Awaiting {
 
 /**
  * What this phase is waiting for, phrased so the sentence is true of what it
- * names. Keyed on `row.signal` rather than the phase name, so #19 making more
- * rows stallable needs no change here. `hpipe` arrives already rendered:
+ * names. Mostly keyed on `row.signal`, but not only: `escalated` and
+ * `blocked-on-decision` share `signal: 'manual'` and need opposite sentences,
+ * so the human-owned branch is checked first. #19 found that the hard way —
+ * this docblock used to claim signal-keying alone would carry it.
+ * `hpipe` arrives already rendered:
  * `render` never re-scans replacement text (`src/lib/render.ts:8-14`), so a
  * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
  */
@@ -163,6 +166,29 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   const phase = task ? task.phase : run.phase
   const sentence = (short: string): Awaiting =>
     ({ short, clause: `This phase is waiting for ${short}.` })
+  // `ci` and `merge` deadlock identically on a missing PR and share one way out,
+  // so the command a reader will paste is composed in one place.
+  const missingPr = (t: Task, consequence: string): Awaiting => ({
+    short: 'a PR number this task never recorded',
+    clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+      `${consequence} The rewind is what produces one: \`${hpipe} rewind ` +
+      `${run.run_id} implement --task ${t.task_id}\`.`,
+  })
+
+  // A human-owned row waits on a person, not on the pane being probed. Checked
+  // before the `manual` branch, which `blocked-on-decision` shares with it and
+  // which would otherwise tell an escalated task it is waiting for an answer to a
+  // decision it never asked.
+  if (row.actor === 'human') {
+    const from = (task ? task.escalated_from : run.escalated_from) ?? '<phase>'
+    const flag = task ? ` --task ${task.task_id}` : ''
+    return {
+      short: 'a human to act on the escalation',
+      clause: 'This phase is escalated and waits on the human, not on you. If they have not been ' +
+        'told, tell them now; once they have decided, ' +
+        `\`${hpipe} rewind ${run.run_id} ${from}${flag}\` resumes it.`,
+    }
+  }
 
   if (row.signal === 'artifact' || row.signal === 'verdict') {
     const short = row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict'
@@ -195,6 +221,49 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   if (row.signal === 'pr' && task) {
     return sentence(`a pushed PR for ${task.branch} (#${task.issue})`)
   }
+  if (row.signal === 'ci' && task) {
+    // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
+    // polled and cannot clear — a different fault from a slow CI run, and the
+    // probe is the only thing that will ever say so.
+    if (task.pr === null) return missingPr(task, 'so CI is never polled for it.')
+    // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
+    // advances the row back to `implement` — one of the fastest ways OUT of ci.
+    return {
+      short: `CI on PR #${task.pr}`,
+      clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
+        `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
+        'conclusion, and this phase waits on it forever.',
+    }
+  }
+  if (row.signal === 'merged' && task) {
+    // `gatherSignals` returns early on a null PR (tasks.ts:278), so `merged` is
+    // never true and machine.ts:165-171 never fires.
+    if (task.pr === null) return missingPr(task, 'so no merge is ever seen.')
+    // The second sentence is not padding: this row cannot distinguish "not yet
+    // merged" from "merged too early to be seen" (machine.ts:167), so a clause
+    // asserting the first would be false in the second.
+    return {
+      short: `PR #${task.pr} to be merged`,
+      clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
+        "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
+        "merged, this phase cannot see it: only a merge that postdates this phase's entry " +
+        'counts, so say so rather than waiting.',
+    }
+  }
+  if (row.signal === 'closed' && task) {
+    // Not "the issue is still open": `closedByMerge` needs `merged_at_ms`, which
+    // only the merge edge writes (machine.ts:168). A task rewound into `close`
+    // from before `merge` has none, so a closed issue never satisfies
+    // machine.ts:178-181 and this row parks with the work already done.
+    return {
+      short: `issue #${task.issue} to close`,
+      clause: `This phase is waiting for issue #${task.issue} to close. Check it with ` +
+        `\`gh issue view ${task.issue} --json closed,state\`; if the PR body used a phrase ` +
+        'GitHub does not treat as a closing keyword, close it by hand. If it is already ' +
+        'closed, this phase cannot see it: it only counts a close it can tie to this ' +
+        "task's recorded merge, so say so rather than waiting.",
+    }
+  }
   if (row.signal === 'files') {
     return {
       short: 'the files another task holds',
@@ -205,7 +274,10 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   if (row.signal === 'worktree') {
     return task
       ? { short: 'its worktree to be removed',
-          clause: "This phase is waiting for this task's worktree to be removed." }
+          clause: "This phase is waiting for this task's worktree to be removed. Teardown is " +
+            'unconditional and runs first in every tick, so a task still here means this run is ' +
+            "not being advanced — check the supervisor pane's log, and check whether another run " +
+            'already holds this orchestrator pane.' }
       : { short: 'a worktree for a dispatched task',
           clause: 'This phase is waiting for a worktree to be adopted for a dispatched task.' }
   }

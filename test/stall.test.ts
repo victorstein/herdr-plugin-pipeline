@@ -7,6 +7,7 @@ import {
   type StallDeps, taskStallCandidates,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
@@ -107,7 +108,7 @@ test('a task inside the threshold is not a candidate', () => {
 })
 
 test('a task phase whose row is not stallable is never probed', () => {
-  for (const phase of ['queued', 'ci', 'merge', 'close', 'teardown', 'done'] as const) {
+  for (const phase of ['queued', 'done', 'failed', 'orphaned', 'blocked-on-failure'] as const) {
     const run = runWithTasks([mkTask({ phase })])
     expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
   }
@@ -305,12 +306,13 @@ test('the blocked rows name the exit, not the symptom', () => {
 })
 
 test('an unrecognised signal falls back to naming the phase', () => {
-  const run = runAt('execute', LONG_AGO)
-  const ci = mkTask({ phase: 'ci' })
-  run.tasks = [ci]
-  expect(stallAwaiting(run, ci, 'hp')).toEqual({
-    short: 'whatever clears ci',
-    clause: 'This phase is waiting for whatever clears ci.',
+  // Characterisation, not behaviour: after #19 every TASK_ROWS signal has a
+  // branch, so the only row that can reach the fallback is a run row with
+  // `signal: 'registration'` — and no such row is stallable. Same status as
+  // `describeWake`'s null-task arm (tick.ts:59-64).
+  expect(stallAwaiting(runAt('intake', LONG_AGO), null, 'hp')).toEqual({
+    short: 'whatever clears intake',
+    clause: 'This phase is waiting for whatever clears intake.',
   })
 })
 
@@ -626,4 +628,172 @@ test('the ledger is persisted before the escalation is sent', async () => {
     sendEscalation: async () => { order.push('send') },
   }))
   expect(order).toEqual(['persist:escalated', 'send'])
+})
+
+test('every last-mile row is probed via the orchestrator — #19', () => {
+  for (const phase of ['ci', 'merge', 'close', 'teardown', 'escalated'] as const) {
+    const run = runWithTask({ phase })
+    const out = taskStallCandidates([run], NOW, 45, 3)
+    expect(out, `${phase} produced no candidate`).toHaveLength(1)
+    expect(out[0]?.paneId, `${phase} is not probed via the orchestrator`).toBe(ORCHESTRATOR_PANE)
+    expect(out[0]?.escalatable, `${phase} must not be escalatable`).toBe(false)
+  }
+})
+
+test('no last-mile row escalates, however many probes go unanswered — #19', async () => {
+  for (const phase of ['ci', 'merge', 'close', 'teardown', 'escalated'] as const) {
+    const run = runWithTask({ phase })
+    const task = run.tasks[0] as Task
+    const deps = mkDeps({
+      sendEscalation: async () => { throw new Error(`${phase} must never escalate`) },
+    })
+    let now = NOW
+    for (let i = 0; i < 20; i += 1) {
+      await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+      now += 45 * 60_000
+    }
+    expect(task.phase, `${phase} left its row`).toBe(phase)
+    expect(stallStateFor(run, task).probes, `${phase} stopped probing`).toBeGreaterThan(3)
+  }
+})
+
+test('a 4h57m merge park produces six probes and no escalation — #19', async () => {
+  // t3's real park on the berean-os run of 2026-09-16, replayed minute by minute
+  // at the shipped defaults. Measured on a live run.
+  const run = runWithTask({ phase: 'merge', phase_entered_at: 0, pr: 42 })
+  const task = run.tasks[0] as Task
+  let now = 0
+  const probesAtMinute: number[] = []
+  const deps = mkDeps({
+    probe: async () => { probesAtMinute.push(now / 60_000); return { ok: true } },
+    sendEscalation: async () => { throw new Error('merge must never escalate') },
+  })
+  for (; now <= (4 * 60 + 57) * 60_000; now += 60_000) {
+    await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+  }
+  expect(probesAtMinute).toEqual([45, 90, 135, 180, 225, 270])
+  expect(task.phase).toBe('merge')
+})
+
+test('a last-mile task in a pane-releasing run is left alone — #19 keeps A26', () => {
+  for (const runPhase of ['done', 'escalated'] as const) {
+    const run = runWithTask({ phase: 'merge' })
+    run.phase = runPhase
+    expect(taskStallCandidates([run], NOW, 45, 3), runPhase).toHaveLength(0)
+  }
+})
+
+test('an escalated task is not told it awaits a decision it never asked — #19', () => {
+  const run = runWithTask({ phase: 'escalated', escalated_from: 'implement' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+  expect(a.short).toBe('a human to act on the escalation')
+  expect(a.clause).not.toContain('open decision')
+  expect(a.clause).not.toContain('an answer to')
+  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  // The run id is load-bearing: without it the rendered command is `rewind
+  // implement --task t1`, which does not run. Nothing else here would catch that.
+  expect(a.clause).toContain(run.run_id)
+  expect(a.clause).toContain('implement')
+  expect(a.clause).toContain('--task t1')
+  expect(a.clause).not.toContain('{{')
+})
+
+test('blocked-on-decision still names the open decision after the reorder — #19', () => {
+  const run = runWithTask({ phase: 'blocked-on-decision' })
+  expect(stallAwaiting(run, run.tasks[0] as Task, 'hp').short)
+    .toBe('an answer to the open decision')
+})
+
+test('a ci row names the check command and not a false forever-wait — #19', () => {
+  const run = runWithTask({ phase: 'ci', pr: 42 })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('CI on PR #42')
+  expect(a.clause).toContain('gh pr checks 42')
+  // rollUpBucket maps `cancel` to `fail` (gh.ts:19), which sends the row back to
+  // `implement` — the opposite of waiting forever.
+  expect(a.clause).not.toContain('cancelled')
+  expect(a.clause).not.toContain('whatever clears')
+})
+
+test('a cancelled check rolls up to fail, which is why the ci clause omits it — #19', () => {
+  // The clause above asserts `cancelled` is not a forever-wait. That is only true
+  // while gh.ts:19 maps it to `fail`; unpinned, the two drift apart in silence —
+  // no test in this repo exercised `cancel` before this one.
+  expect(rollUpBucket([{ bucket: 'pass' }, { bucket: 'cancel' }])).toBe('fail')
+})
+
+test('a row with no PR reports the deadlock and its exit — #19', () => {
+  for (const phase of ['ci', 'merge'] as const) {
+    const run = runWithTask({ phase, pr: null })
+    const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+    expect(a.short, phase).toBe('a PR number this task never recorded')
+    expect(a.clause, phase).toContain(
+      phase === 'ci' ? 'CI is never polled' : 'no merge is ever seen')
+    expect(a.clause, phase).toContain('bun run /p/src/cli.ts rewind')
+    // The run id is load-bearing: without it the rendered command is `rewind
+    // implement --task t1`, which does not run.
+    expect(a.clause, phase).toContain(run.run_id)
+    expect(a.clause, phase).toContain('implement --task t1')
+    // Must not contradict ladderFor's "clears when whatever it is waiting for
+    // arrives" (stall.ts:306-307), which every probe renders beneath the clause.
+    expect(a.clause, phase).not.toContain('never clear')
+    expect(a.clause, phase).not.toContain('{{')
+  }
+})
+
+test('a merge row names the PR and does not assert it is unmerged — #19', () => {
+  const run = runWithTask({ phase: 'merge', pr: 42 })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('PR #42 to be merged')
+  expect(a.clause).toContain('PR #42')
+  expect(a.clause).toContain('feat/x')
+  expect(a.clause).toContain('nothing merges automatically')
+  // machine.ts:167 is an edge: a PR merged before phase entry is never seen, so
+  // a clause asserting "not yet merged" would be false in that deadlock.
+  expect(a.clause).toContain('already merged, this phase cannot see it')
+  expect(a.clause).toContain('postdates')
+})
+
+
+test('a close row names the issue and does not assert it is still open — #19', () => {
+  const run = runWithTask({ phase: 'close' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('issue #1 to close')
+  expect(a.clause).toContain('gh issue view 1 --json closed,state')
+  expect(a.clause).toContain('closing keyword')
+  // A task rewound into `close` from before `merge` has no `merged_at_ms`, so
+  // machine.ts:178-181 can never fire however closed the issue is.
+  expect(a.clause).toContain('already closed, this phase cannot see it')
+  expect(a.clause).not.toContain('never clear')
+  expect(a.clause).not.toContain('whatever clears')
+})
+
+test('a teardown row states the fact and diagnoses no cause — #19', () => {
+  const run = runWithTask({ phase: 'teardown' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('its worktree to be removed')
+  expect(a.clause).toContain('not being advanced')
+  expect(a.clause).toContain('orchestrator pane')
+  // pickOneAdvance has three skips (tick.ts:237-248); the third starves a run
+  // with nothing throwing, so the clause must not assert a throw.
+  expect(a.clause).not.toContain('throwing')
+})
+
+test('the escalation text describes the phase being left, not escalated — #19', async () => {
+  const run = runWithTask({ phase: 'implement' })
+  const task = run.tasks[0] as Task
+  const seen: string[] = []
+  const deps = mkDeps({
+    escalationText: async (c, from) => {
+      seen.push(`${from}|${stallAwaiting(c.run, c.task, 'hp').short}`)
+      return 'escalation text'
+    },
+  })
+  let now = NOW
+  for (let i = 0; i < 5; i += 1) {
+    await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+    now += 45 * 60_000
+  }
+  expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])
+  expect(task.phase).toBe('escalated')
 })
