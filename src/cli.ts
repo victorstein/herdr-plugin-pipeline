@@ -257,7 +257,19 @@ export async function cmdRewind(ctx: Ctx, input: {
   const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
-  if (input.taskId) {
+  // The phase is written onto the record unvalidated today, and every later row
+  // lookup throws on one that is in no row — including the terminal test below.
+  // `isTask` is shared with the branch below, which tests truthiness: flag() can
+  // return '', and validating against TASK_ROWS then writing to run.phase is
+  // exactly the mismatch this check exists to close.
+  const isTask = Boolean(input.taskId)
+  const rows = isTask ? TASK_ROWS : RUN_ROWS
+  if (!rows.some((r) => r.phase === input.phase)) {
+    return fail(`no such phase: ${input.phase || '(missing)'} — valid ` +
+      `${isTask ? 'task' : 'run'} phases are ${rows.map((r) => r.phase).join(', ')}`)
+  }
+
+  if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
 

@@ -467,3 +467,30 @@ test('dispatch --done closes the run in the caller repo, not another repo run th
   expect(runs.find((r) => r.run_id === mine.run_id)?.intake_closed).toBe(true)
   expect(runs.find((r) => r.run_id === other.run_id)?.intake_closed).toBe(false)
 })
+
+test('rewind refuses a phase that is in no row and writes nothing', async () => {
+  // rewind writes its argument straight onto the record, and every later row
+  // lookup throws on a phase with no row — including resolveRun's.
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement' }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'dnoe', taskId: 't1' })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('dnoe')
+  expect(result.text).toContain('implement')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.phase).toBe('implement')
+})
+
+test('rewind refuses a run phase that is in no row', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement' }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'excute', taskId: null })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('execute')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.phase).toBe('intake')
+})
