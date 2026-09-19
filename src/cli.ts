@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { answerDecision, openDecision, openDecisionFor } from './lib/decisions'
+import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
@@ -279,6 +279,21 @@ export async function cmdRewind(ctx: Ctx, input: {
         why: `answer to ${task.pending_answer} discarded, undelivered`,
       })
       task.pending_answer = null
+    }
+
+    // A terminal rewind ends every question addressed to this task; otherwise
+    // openDecisionFor keeps hpipe status nagging about a pane that is gone.
+    // After the block above, so an answered-but-undelivered decision keeps its
+    // own history entry rather than being abandoned silently.
+    if (taskIsTerminal(input.phase)) {
+      const open = openDecisionFor(task)
+      abandonDecisions(task)
+      if (open) {
+        run.history.push({
+          at: Date.now(), task_id: task.task_id, from: task.phase, to: input.phase,
+          why: `decision ${open.id} abandoned, unanswered`,
+        })
+      }
     }
 
     task.phase = input.phase as TaskPhase

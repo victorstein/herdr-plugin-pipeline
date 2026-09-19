@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   cmdAbort, cmdBrief, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdRewind, cmdStatus, cmdTask,
 } from '../src/cli'
+import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
 import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -493,4 +494,54 @@ test('rewind refuses a run phase that is in no row', async () => {
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.phase).toBe('intake')
+})
+
+test('rewind to a terminal phase abandons an open decision', async () => {
+  // #38's repair needed three commands per task because a rewind left the
+  // decision open and hpipe status kept nagging about it.
+  const run = runWithTasks([{ task_id: 't1', phase: 'blocked-on-decision' }])
+  const task = run.tasks[0]!
+  task.decisions.push({
+    id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: null,
+  })
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'done', taskId: 't1' })
+  expect(result.ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(openDecisionFor(saved!.tasks[0]!)).toBeNull()
+  expect(saved?.history.some((h) => h.why.includes('d1') && h.why.includes('abandoned'))).toBe(true)
+})
+
+test('rewind to a live phase leaves an open decision alone', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'blocked-on-decision' }])
+  run.tasks[0]!.decisions.push({
+    id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: null,
+  })
+  await saveRun(dir, run)
+
+  await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan', taskId: 't1' })
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(openDecisionFor(saved!.tasks[0]!)?.id).toBe('d1')
+})
+
+test('a terminal rewind keeps the undelivered-answer history entry', async () => {
+  // abandonDecisions nulls pending_answer and its per-decision test reads it, so
+  // it must run AFTER the existing discard block or the entry is lost.
+  const run = runWithTasks([{ task_id: 't1', phase: 'blocked-on-decision', pending_answer: 'd1' }])
+  run.tasks[0]!.decisions.push({
+    id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: 'do X', answered_by: 'human', answered_at: 2, prompted_at: null,
+  })
+  await saveRun(dir, run)
+
+  await cmdRewind(ctx(), { runId: run.run_id, phase: 'done', taskId: 't1' })
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.history.some((h) => h.why.includes('discarded, undelivered'))).toBe(true)
+  expect(saved?.tasks[0]?.pending_answer).toBeNull()
 })
