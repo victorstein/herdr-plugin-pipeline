@@ -363,9 +363,12 @@ produces one probe per stalled record, not a burst. After `STALL_PROBE_MAX` (3) 
 row whose signal the probed actor produces itself (`research`, `spec`, the four review rows,
 `implement`, and the run's `branch-review`) is moved to `escalated` and reported by `hpipe status`.
 
-`blocked-on-files`, `blocked-on-decision`, and the run's `dispatch` and `execute` are probed but
-**never** escalated — they are waiting correctly, on a sibling task or on you, and escalating them
-would cascade their dependents to `blocked-on-failure`. Their probe says so.
+Nine rows are probed but **never** escalated: `blocked-on-files`, `blocked-on-decision`, the last
+mile (`ci`, `merge`, `close`, `teardown`), a task already in `escalated`, and the run's `dispatch`
+and `execute`. They are waiting correctly — on a sibling task, on GitHub, or on you — and escalating
+them would cascade their dependents to `blocked-on-failure`. Their probe says so, and names what it
+is waiting for: the PR to merge, the issue to close, `gh pr checks <pr>`, or the `rewind` that
+resumes an escalated task.
 
 If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
 `STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.
