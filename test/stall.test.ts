@@ -628,3 +628,57 @@ test('the ledger is persisted before the escalation is sent', async () => {
   }))
   expect(order).toEqual(['persist:escalated', 'send'])
 })
+
+test('every last-mile row is probed via the orchestrator — #19', () => {
+  for (const phase of ['ci', 'merge', 'close', 'teardown', 'escalated'] as const) {
+    const run = runWithTask({ phase })
+    const out = taskStallCandidates([run], NOW, 45, 3)
+    expect(out, `${phase} produced no candidate`).toHaveLength(1)
+    expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+    expect(out[0]?.escalatable, `${phase} must not be escalatable`).toBe(false)
+  }
+})
+
+test('no last-mile row escalates, however many probes go unanswered — #19', async () => {
+  for (const phase of ['ci', 'merge', 'close', 'teardown', 'escalated'] as const) {
+    const run = runWithTask({ phase })
+    const task = run.tasks[0] as Task
+    const deps = mkDeps({
+      sendEscalation: async () => { throw new Error(`${phase} must never escalate`) },
+    })
+    let now = NOW
+    for (let i = 0; i < 20; i += 1) {
+      await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+      now += 45 * 60_000
+    }
+    expect(task.phase, `${phase} left its row`).toBe(phase)
+    expect(stallStateFor(run, task).probes).toBeGreaterThan(3)
+  }
+})
+
+test('a 4h57m merge park produces six probes and no escalation — #19', async () => {
+  // t3's real park on the berean-os run of 2026-09-16, replayed minute by minute
+  // at the shipped defaults. Measured on a live run.
+  const run = runWithTask({ phase: 'merge', phase_entered_at: 0, pr: 42 })
+  run.phase_entered_at = 0
+  const task = run.tasks[0] as Task
+  let now = 0
+  const probesAtMinute: number[] = []
+  const deps = mkDeps({
+    probe: async () => { probesAtMinute.push(now / 60_000); return { ok: true } },
+    sendEscalation: async () => { throw new Error('merge must never escalate') },
+  })
+  for (; now <= (4 * 60 + 57) * 60_000; now += 60_000) {
+    await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+  }
+  expect(probesAtMinute).toEqual([45, 90, 135, 180, 225, 270])
+  expect(task.phase).toBe('merge')
+})
+
+test('a last-mile task in a pane-releasing run is left alone — #19 keeps A26', () => {
+  for (const runPhase of ['done', 'escalated'] as const) {
+    const run = runWithTask({ phase: 'merge' })
+    run.phase = runPhase
+    expect(taskStallCandidates([run], NOW, 45, 3), runPhase).toHaveLength(0)
+  }
+})
