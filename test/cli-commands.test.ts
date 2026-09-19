@@ -317,7 +317,7 @@ test('brief renders a worker brief without mutating the run', async () => {
       })
 
   const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
-  const result = await cmdBrief(ctx(), { taskId: 't1' })
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
 
   expect(result.ok).toBe(true)
   expect(result.text).toContain('11')
@@ -334,7 +334,7 @@ test('the brief states the path contract without promising a recovery', async ()
         repoKey: 'k', runId: null,
       })
 
-  const result = await cmdBrief(ctx(), { taskId: 't1' })
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
   expect(result.text).toContain('does not satisfy this phase\'s contract')
   expect(result.text).not.toContain('stats those paths and nothing else')
 })
@@ -377,4 +377,48 @@ test('task names the candidates rather than choosing between two live runs', asy
   expect(result.text).toContain(a.run_id)
   expect(result.text).toContain(b.run_id)
   expect(result.text).toContain('--run')
+})
+
+test('brief renders the live run brief when a finished run holds the same task id', async () => {
+  // Issue #36, reproduced: the finished run sorts first and wins today, and its
+  // brief was delivered to a worker that then researched an already-merged issue.
+  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'aaa finished' })
+  done.phase = 'done'
+  await saveRun(dir, done)
+  const live = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'zzz live' })
+  await saveRun(dir, live)
+
+  await cmdTask(ctx(), {
+    branch: 'feat/live', issue: 36, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  // Give the finished run a t1 too, so both hold the id being asked for.
+  const withTask = (await listRuns(dir, 'personal')).find((r) => r.run_id === live.run_id)!
+  const stale = (await listRuns(dir, 'personal')).find((r) => r.run_id === done.run_id)!
+  stale.tasks.push({ ...withTask.tasks[0]!, issue: 9, branch: 'fix/9-artifact-paths' })
+  await saveRun(dir, stale)
+
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('issue #36')
+  expect(result.text).not.toContain('issue #9')
+})
+
+test('brief renders a finished run brief when that run is named', async () => {
+  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'finished' })
+  await saveRun(dir, done)
+  await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 36, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  const saved = (await listRuns(dir, 'personal'))[0]!
+  saved.phase = 'done'
+  await saveRun(dir, saved)
+
+  const bare = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(bare.ok).toBe(false)
+  expect(bare.text).toContain('--run')
+
+  const named = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: saved.run_id })
+  expect(named.ok).toBe(true)
 })

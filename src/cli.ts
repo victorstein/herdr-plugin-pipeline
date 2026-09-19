@@ -213,13 +213,22 @@ export async function cmdTask(ctx: Ctx, input: {
  * task, which mutates the run — so an orchestrator that loses its context has
  * no way back to the text it is supposed to hand over. Measured on a live run.
  */
-export async function cmdBrief(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session))
-    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
-  const task = run?.tasks.find((t) => t.task_id === input.taskId)
-  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+export async function cmdBrief(ctx: Ctx, input: {
+  taskId: string; repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) {
+    return resolveFailure(ctx, query, '--run <run-id> renders it anyway', resolved)
+  }
 
-  return ok(await renderWorkerPrompt(ctx.pluginRoot, run, task))
+  const task = resolved.run.tasks.find((t) => t.task_id === input.taskId)
+  if (!task) return fail(`no such task: ${input.taskId}`)
+
+  return ok(await renderWorkerPrompt(ctx.pluginRoot, resolved.run, task))
 }
 
 export async function cmdDispatchDone(ctx: Ctx, input: { runId?: string }): Promise<CmdResult> {
@@ -501,7 +510,11 @@ async function dispatch(argv: string[]): Promise<number> {
       break
 
     case 'brief':
-      out = await cmdBrief(ctx, { taskId: flag(rest, 'task') ?? '' })
+      out = await cmdBrief(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
       break
 
     case 'dispatch':
