@@ -166,6 +166,14 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   const phase = task ? task.phase : run.phase
   const sentence = (short: string): Awaiting =>
     ({ short, clause: `This phase is waiting for ${short}.` })
+  // `ci` and `merge` deadlock identically on a missing PR and share one way out,
+  // so the command a reader will paste is composed in one place.
+  const missingPr = (t: Task, consequence: string): Awaiting => ({
+    short: 'a PR number this task never recorded',
+    clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+      `${consequence} The rewind is what produces one: \`${hpipe} rewind ` +
+      `${run.run_id} implement --task ${t.task_id}\`.`,
+  })
 
   // A human-owned row waits on a person, not on the pane being probed. Checked
   // before the `manual` branch, which `blocked-on-decision` shares with it and
@@ -217,14 +225,7 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
     // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
     // polled and cannot clear — a different fault from a slow CI run, and the
     // probe is the only thing that will ever say so.
-    if (task.pr === null) {
-      return {
-        short: 'a PR number this task never recorded',
-        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
-          `so CI is never polled for it. The rewind is what produces one: \`${hpipe} rewind ` +
-          `${run.run_id} implement --task ${task.task_id}\`.`,
-      }
-    }
+    if (task.pr === null) return missingPr(task, 'so CI is never polled for it.')
     // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
     // advances the row back to `implement` — one of the fastest ways OUT of ci.
     return {
@@ -237,14 +238,7 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   if (row.signal === 'merged' && task) {
     // `gatherSignals` returns early on a null PR (tasks.ts:278), so `merged` is
     // never true and machine.ts:165-171 never fires.
-    if (task.pr === null) {
-      return {
-        short: 'a PR number this task never recorded',
-        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
-          `so no merge is ever seen. The rewind is what produces one: \`${hpipe} rewind ` +
-          `${run.run_id} implement --task ${task.task_id}\`.`,
-      }
-    }
+    if (task.pr === null) return missingPr(task, 'so no merge is ever seen.')
     // The second sentence is not padding: this row cannot distinguish "not yet
     // merged" from "merged too early to be seen" (machine.ts:167), so a clause
     // asserting the first would be false in the second.

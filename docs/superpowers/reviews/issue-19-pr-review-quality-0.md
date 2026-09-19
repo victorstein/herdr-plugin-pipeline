@@ -88,7 +88,7 @@ so a repeated phrasing is written once.
 
 **Problem, tests.** `test/stall.test.ts:726-737` and `:752-761` have byte-identical bodies apart from
 `phase: 'ci'` vs `phase: 'merge'` and one comment. The file's established shape for "same assertions,
-several phases" is the labelled `for (const phase of [...] as const)` loop — used at `:535`, and four
+several phases" is the labelled `for (const phase of [...] as const)` loop — used at `:536`, and four
 more times by this PR at `:634`, `:644`, `:680` and `phases.test.ts:70`. Two copy-pasted tests is a
 second way to say the same thing, in a file that had already settled on the first.
 
@@ -131,7 +131,7 @@ If `:638` fails the output is `expected "w7:p1" to be "w1:p1"` with no indicatio
 `escalated` row — and `escalated` is precisely the row whose `probeTarget` is the thing under test, so
 this is the assertion most likely to fail and the one that hides the most. `:656` fails as
 `expected 0 to be greater than 3` with five candidates for the culprit. The repo's convention is
-already unambiguous here: `table.test.ts:34-35`, `phases.test.ts:72` and `stall.test.ts:546` all label,
+already unambiguous here: `table.test.ts:34-35`, `phases.test.ts:71` and `stall.test.ts:545` all label,
 and so do the three labelled assertions surrounding these two.
 
 **Concrete fix.** Add the message argument the neighbours already carry:
@@ -161,7 +161,7 @@ LONG_AGO)`, and `stallStateFor` anchors at `Math.max(record.phase_entered_at, ru
 297-minute window, and `probesAtMinute` comes back `[]` — the test's exact assertion silently stops
 testing the replay. This is the kind of constraint `.claude/agents/plugin-dev.md:32-34` reserves
 comments for, and the file comments far less surprising things than this (`:59-60`, `:339-340`,
-`:418`, `:487-490`).
+`:419-420`, `:487-490`).
 
 **Concrete fix.**
 
@@ -218,7 +218,7 @@ These were looked at specifically and are not findings.
   would be novel in this file, so writing it out is the consistent choice.
 - **Where `hpipe` is interpolated.** Every new use is `${hpipe}` inside a template literal in a VALUE,
   never a `{{hpipe}}` token — which is what the docblock at `:160-162` requires, and what
-  `not.toContain('{{')` at `:697`, `:736` and `:760` pins. `gh pr checks` and `gh issue view` are
+  `not.toContain('{{')` at `:699`, `:736` and `:760` pins. `gh pr checks` and `gh issue view` are
   correctly *not* routed through `hpipe`; they are real `gh` invocations, matching `status.ts`.
 - **The rewind sentence mirrors an existing one rather than inventing a shape.** `stall.ts:174-182`
   reproduces `src/lib/status.ts:25` — the same `rewind <run> <phase> --task <id>` ordering and the same
@@ -231,7 +231,7 @@ These were looked at specifically and are not findings.
   escalate) and `:651-655`/`:668-670` (the minute-by-minute 4h57m replay) elapsed time *is* the subject,
   and the file's usual route to escalation — seeding `task.stall = { …, probes: 3 }` and calling
   `applyStalls` once — cannot express either. The loop idiom is also pre-existing in this file at
-  `:338-358`. Its third use at `:786-802` is the marginal one, since escalation there is reachable in a
+  `:338-358`. Its third use at `:787-804` is the marginal one, since escalation there is reachable in a
   single call, but it buys not hand-constructing a `StallState` literal that could drift from
   `stallStateFor`'s shape, and it is a wash rather than a defect.
 - **The `rollUpBucket` assertion's home.** `test/stall.test.ts:719-724` tests `src/lib/gh.ts`, and its
@@ -247,7 +247,7 @@ These were looked at specifically and are not findings.
   false sentence it rules out; `table.test.ts:79-82` and `phases.test.ts:69-70` explain why a test
   that asserts an absence is worth having. The historical register of `stall.ts:158-159`
   (*"#19 found that the hard way"*) is the established house voice, not narration —
-  `stall.test.ts:339-340` (*"The pass-1 blocker"*) and `:40-42` (*"v4's third review round"*) do the
+  `stall.test.ts:339-340` (*"The pass-1 blocker"*) and `:40-41` (*"v4's third review round"*) do the
   same thing.
 - **Nothing dead, nothing commented out.** No orphan symbol, no `stallAwaiting` branch made
   unreachable by the reorder (`blocked-on-decision` still lands on `manual` at `:279`, pinned at
@@ -256,8 +256,8 @@ These were looked at specifically and are not findings.
   handles both arms the same way, so it is symmetry, not dross.
 - **Assertions are behavioural.** The new tests drive the real `taskStallCandidates`, `applyStalls` and
   `stallAwaiting` rather than re-reading the table, and the strongest of them are exact:
-  `expect(probesAtMinute).toEqual([45, 90, 135, 180, 225, 270])` (`:676`) and
-  `expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])` (`:801`). The negative prose
+  `expect(probesAtMinute).toEqual([45, 90, 135, 180, 225, 270])` (`:675`) and
+  `expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])` (`:802`). The negative prose
   assertions each have a positive partner, and `sendEscalation: async () => { throw … }` (`:648`) makes
   the never-escalates claim fail loudly rather than pass by omission.
 - **Fixtures are reused, not rebuilt.** Every new test goes through `runWithTask` / `runWithTasks` /

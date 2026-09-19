@@ -635,7 +635,7 @@ test('every last-mile row is probed via the orchestrator — #19', () => {
     const run = runWithTask({ phase })
     const out = taskStallCandidates([run], NOW, 45, 3)
     expect(out, `${phase} produced no candidate`).toHaveLength(1)
-    expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+    expect(out[0]?.paneId, `${phase} is not probed via the orchestrator`).toBe(ORCHESTRATOR_PANE)
     expect(out[0]?.escalatable, `${phase} must not be escalatable`).toBe(false)
   }
 })
@@ -653,7 +653,7 @@ test('no last-mile row escalates, however many probes go unanswered — #19', as
       now += 45 * 60_000
     }
     expect(task.phase, `${phase} left its row`).toBe(phase)
-    expect(stallStateFor(run, task).probes).toBeGreaterThan(3)
+    expect(stallStateFor(run, task).probes, `${phase} stopped probing`).toBeGreaterThan(3)
   }
 })
 
@@ -661,7 +661,6 @@ test('a 4h57m merge park produces six probes and no escalation — #19', async (
   // t3's real park on the berean-os run of 2026-09-16, replayed minute by minute
   // at the shipped defaults. Measured on a live run.
   const run = runWithTask({ phase: 'merge', phase_entered_at: 0, pr: 42 })
-  run.phase_entered_at = 0
   const task = run.tasks[0] as Task
   let now = 0
   const probesAtMinute: number[] = []
@@ -723,17 +722,23 @@ test('a cancelled check rolls up to fail, which is why the ci clause omits it �
   expect(rollUpBucket([{ bucket: 'pass' }, { bucket: 'cancel' }])).toBe('fail')
 })
 
-test('a ci row with no PR reports the deadlock and its exit — #19', () => {
-  const run = runWithTask({ phase: 'ci', pr: null })
-  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
-  expect(a.short).toBe('a PR number this task never recorded')
-  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
-  expect(a.clause).toContain(run.run_id)
-  expect(a.clause).toContain('implement --task t1')
-  // Must not contradict ladderFor's "clears when whatever it is waiting for
-  // arrives" (stall.ts:227-229), which every probe renders beneath the clause.
-  expect(a.clause).not.toContain('never clear')
-  expect(a.clause).not.toContain('{{')
+test('a row with no PR reports the deadlock and its exit — #19', () => {
+  for (const phase of ['ci', 'merge'] as const) {
+    const run = runWithTask({ phase, pr: null })
+    const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+    expect(a.short, phase).toBe('a PR number this task never recorded')
+    expect(a.clause, phase).toContain(
+      phase === 'ci' ? 'CI is never polled' : 'no merge is ever seen')
+    expect(a.clause, phase).toContain('bun run /p/src/cli.ts rewind')
+    // The run id is load-bearing: without it the rendered command is `rewind
+    // implement --task t1`, which does not run.
+    expect(a.clause, phase).toContain(run.run_id)
+    expect(a.clause, phase).toContain('implement --task t1')
+    // Must not contradict ladderFor's "clears when whatever it is waiting for
+    // arrives" (stall.ts:306-307), which every probe renders beneath the clause.
+    expect(a.clause, phase).not.toContain('never clear')
+    expect(a.clause, phase).not.toContain('{{')
+  }
 })
 
 test('a merge row names the PR and does not assert it is unmerged — #19', () => {
@@ -745,20 +750,10 @@ test('a merge row names the PR and does not assert it is unmerged — #19', () =
   expect(a.clause).toContain('nothing merges automatically')
   // machine.ts:167 is an edge: a PR merged before phase entry is never seen, so
   // a clause asserting "not yet merged" would be false in that deadlock.
-  expect(a.clause).toContain('already')
+  expect(a.clause).toContain('already merged, this phase cannot see it')
   expect(a.clause).toContain('postdates')
 })
 
-test('a merge row with no PR reports the deadlock and its exit — #19', () => {
-  const run = runWithTask({ phase: 'merge', pr: null })
-  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
-  expect(a.short).toBe('a PR number this task never recorded')
-  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
-  expect(a.clause).toContain(run.run_id)
-  expect(a.clause).toContain('implement --task t1')
-  expect(a.clause).not.toContain('never clear')
-  expect(a.clause).not.toContain('{{')
-})
 
 test('a close row names the issue and does not assert it is still open — #19', () => {
   const run = runWithTask({ phase: 'close' })
@@ -768,7 +763,7 @@ test('a close row names the issue and does not assert it is still open — #19',
   expect(a.clause).toContain('closing keyword')
   // A task rewound into `close` from before `merge` has no `merged_at_ms`, so
   // machine.ts:178-181 can never fire however closed the issue is.
-  expect(a.clause).toContain('already')
+  expect(a.clause).toContain('already closed, this phase cannot see it')
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('whatever clears')
 })
