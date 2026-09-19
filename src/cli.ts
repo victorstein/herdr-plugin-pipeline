@@ -293,11 +293,21 @@ export async function cmdRewind(ctx: Ctx, input: {
   return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
 }
 
-export async function cmdRelease(ctx: Ctx, input: { taskId: string }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session))
-    .find((r) => r.tasks.some((t) => t.task_id === input.taskId))
-  const task = run?.tasks.find((t) => t.task_id === input.taskId)
-  if (!run || !task) return fail(`no such task: ${input.taskId}`)
+export async function cmdRelease(ctx: Ctx, input: {
+  taskId: string; repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) {
+    return resolveFailure(ctx, query, '--run <run-id> releases it anyway', resolved)
+  }
+
+  const run = resolved.run
+  const task = run.tasks.find((t) => t.task_id === input.taskId)
+  if (!task) return fail(`no such task: ${input.taskId}`)
 
   // `escalated` is not `terminal` — it carries `escalated_from` so a human can
   // rewind it — but it has stopped moving and is a legitimate release target too.
@@ -559,7 +569,11 @@ async function dispatch(argv: string[]): Promise<number> {
       break
 
     case 'release':
-      out = await cmdRelease(ctx, { taskId: flag(rest, 'task') ?? '' })
+      out = await cmdRelease(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
       break
 
     case 'decide':

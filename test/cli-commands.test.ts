@@ -99,7 +99,7 @@ test('release drops a terminal task files reservation', async () => {
   ])
   await saveRun(dir, run)
 
-  expect((await cmdRelease(ctx(), { taskId: 't1' })).ok).toBe(true)
+  expect((await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: null })).ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.tasks[0]?.files).toEqual([])
@@ -109,7 +109,7 @@ test('release refuses a task that is still in flight', async () => {
   const run = runWithTasks([{ task_id: 't1', phase: 'implement', files: ['a/'] }])
   await saveRun(dir, run)
 
-  const result = await cmdRelease(ctx(), { taskId: 't1' })
+  const result = await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('still in flight')
 
@@ -125,7 +125,7 @@ test('release unblocks a sibling that was waiting on the same files', async () =
   await saveRun(dir, run)
   expect(filesClearFor(run.tasks[1]!, run.tasks)).toBe(false)
 
-  await cmdRelease(ctx(), { taskId: 't1' })
+  await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(filesClearFor(saved!.tasks[1]!, saved!.tasks)).toBe(true)
@@ -421,4 +421,31 @@ test('brief renders a finished run brief when that run is named', async () => {
 
   const named = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: saved.run_id })
   expect(named.ok).toBe(true)
+})
+
+test('release clears the live run reservation, not a finished run with the same task id', async () => {
+  // The title must go through newRun: run_id carries the slug (src/lib/ledger.ts:25)
+  // and listRuns sorts by filename (:57). runWithTasks hardcodes title 'a', so
+  // assigning .title afterwards leaves the sort to newRun's random suffix and
+  // this test becomes a coin flip.
+  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'aaa finished' })
+  done.phase = 'done'
+  done.tasks = [mkTask({ task_id: 't1', phase: 'failed', files: ['a/'] })]
+  await saveRun(dir, done)
+  const live = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'zzz live' })
+  live.tasks = [mkTask({ task_id: 't1', phase: 'failed', files: ['b/'] })]
+  await saveRun(dir, live)
+
+  const result = await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.ok).toBe(true)
+
+  const runs = await listRuns(dir, 'personal')
+  expect(runs.find((r) => r.run_id === live.run_id)?.tasks[0]?.files).toEqual([])
+  expect(runs.find((r) => r.run_id === done.run_id)?.tasks[0]?.files).toEqual(['a/'])
+
+  // Spec testing item 8b: the escape the refusal message offers must work.
+  const named = await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: done.run_id })
+  expect(named.ok).toBe(true)
+  const after = await listRuns(dir, 'personal')
+  expect(after.find((r) => r.run_id === done.run_id)?.tasks[0]?.files).toEqual([])
 })
