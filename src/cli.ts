@@ -9,7 +9,7 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
-import { taskRow } from './lib/phases'
+import { RUN_ROWS, TASK_ROWS, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
@@ -34,6 +34,10 @@ function phraseFor(phases: readonly RunPhase[] | null): string {
 }
 
 const runLine = (run: Run): string => `  ${run.run_id} (${run.phase})`
+
+// taskRow throws on a phase with no row, and cmdRewind can write one.
+const taskIsTerminal = (phase: string): boolean =>
+  TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
 
 /**
  * The sentence a failed resolution prints. #36's brief was wrong for hours
@@ -308,11 +312,18 @@ export async function cmdRelease(ctx: Ctx, input: { taskId: string }): Promise<C
 
 export async function cmdDecide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
+  repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session))
-    .find((r) => r.tasks.some((t) => t.task_id === input.task))
-  const task = run?.tasks.find((t) => t.task_id === input.task)
-  if (!run || !task) return fail(`no such task: ${input.task}`)
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: null, taskId: input.task, allowTerminal: false,
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
+
+  const run = resolved.run
+  const task = run.tasks.find((t) => t.task_id === input.task)
+  if (!task) return fail(`no such task: ${input.task}`)
 
   if (input.recommendation.trim().length === 0) {
     return fail('--recommend is required: a bare question pushes the call up to the orchestrator')
@@ -323,6 +334,13 @@ export async function cmdDecide(ctx: Ctx, input: {
   // itself, stranding the task with no phase to rewind back to.
   if (task.phase === 'blocked-on-decision') {
     return fail(`task ${input.task} already has an open decision: ${openDecisionFor(task)?.id}`)
+  }
+
+  // Mirrors cmdAnswer's guard. Nothing should move a finished task into a live
+  // phase; #38 did exactly that to two tasks whose worktrees were already gone.
+  if (taskIsTerminal(task.phase)) {
+    return fail(`task ${input.task} is finished (phase: ${task.phase}) — ` +
+      'it cannot be blocked on a decision')
   }
 
   task.decision_from = task.phase
@@ -540,6 +558,8 @@ async function dispatch(argv: string[]): Promise<number> {
         task: flag(rest, 'task') ?? '',
         question: flag(rest, 'question') ?? '',
         recommendation: flag(rest, 'recommend') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
       })
       break
 
