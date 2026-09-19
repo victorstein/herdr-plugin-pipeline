@@ -77,7 +77,8 @@ The orchestrator is then prompted to research the work, open one GitHub issue pe
 body is the brief** — and register each with:
 
     hpipe task --branch <branch> --issue <n> --surface <surface> \
-               [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>]
+               [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>] \
+               [--run <run-id>]
 
 When the batch is complete it closes intake with `hpipe dispatch --done`. Everything after that is
 injected: each worker gets its brief at dispatch and its next instruction as each phase completes.
@@ -86,7 +87,7 @@ injected: each worker gets its brief at dispatch and its next instruction as eac
 
 ## Answering a decision
 
-    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human
+    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
 
 The answer is recorded immediately but the worker resumes **only once the answer has actually been
 delivered** to its pane — a worker that is busy stays blocked, and `status` reports
@@ -96,7 +97,8 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 
 | | |
 |---|---|
-| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters, any undelivered answer, and (rewinding to `dispatch`) worktree adoption |
+| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters, any undelivered answer, and (rewinding to `dispatch`) worktree adoption. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
+| Two live runs in one session | Every command that takes `--task` resolves against the repo you are standing in and refuses a finished run. If it still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
