@@ -197,7 +197,7 @@ test('dispatch --done closes intake', async () => {
   const run = await seed()
   expect(run.intake_closed).toBe(false)
 
-  const result = await cmdDispatchDone(ctx(), { runId: run.run_id })
+  const result = await cmdDispatchDone(ctx(), { runId: run.run_id, repoKey: 'k' })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -208,7 +208,7 @@ test('registering a task after dispatch --done reopens intake', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
 
-  await cmdDispatchDone(ctx(), { runId: run.run_id })
+  await cmdDispatchDone(ctx(), { runId: run.run_id, repoKey: 'k' })
   const closed = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(closed?.intake_closed).toBe(true)
 
@@ -269,7 +269,7 @@ test('dispatch --done finds the active run when no id is given', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
 
-  const result = await cmdDispatchDone(ctx(), {})
+  const result = await cmdDispatchDone(ctx(), { runId: null, repoKey: 'k' })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -448,4 +448,22 @@ test('release clears the live run reservation, not a finished run with the same 
   expect(named.ok).toBe(true)
   const after = await listRuns(dir, 'personal')
   expect(after.find((r) => r.run_id === done.run_id)?.tasks[0]?.files).toEqual([])
+})
+
+test('dispatch --done closes the run in the caller repo, not another repo run that sorts first', async () => {
+  // The gap this step closes is the REPO filter: cmdDispatchDone already skips a
+  // terminal run today (src/cli.ts:173), so a done-vs-live fixture would pass
+  // without the fix. Both runs here are live, in different repos.
+  const other = newRun({ session: 'personal', socketPath: '/s', repoKey: '/repos/aaa', repoRoot: '/aaa', title: 'other repo' })
+  await saveRun(dir, other)
+  const mine = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'mine' })
+  await saveRun(dir, mine)
+
+  const result = await cmdDispatchDone(ctx(), { runId: null, repoKey: 'k' })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain(mine.run_id)
+
+  const runs = await listRuns(dir, 'personal')
+  expect(runs.find((r) => r.run_id === mine.run_id)?.intake_closed).toBe(true)
+  expect(runs.find((r) => r.run_id === other.run_id)?.intake_closed).toBe(false)
 })

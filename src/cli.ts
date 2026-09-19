@@ -235,17 +235,17 @@ export async function cmdBrief(ctx: Ctx, input: {
   return ok(await renderWorkerPrompt(ctx.pluginRoot, resolved.run, task))
 }
 
-export async function cmdDispatchDone(ctx: Ctx, input: { runId?: string }): Promise<CmdResult> {
-  const runs = await listRuns(ctx.stateDir, ctx.session)
-  const run = input.runId
-    ? runs.find((r) => r.run_id === input.runId)
-    : runs.find((r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute')
-  if (!run) {
-    return fail(input.runId
-      ? `no such run: ${input.runId}`
-      : 'no run is in the intake, dispatch or execute phase')
+export async function cmdDispatchDone(ctx: Ctx, input: {
+  runId: string | null; repoKey: string | null
+}): Promise<CmdResult> {
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: REGISTRABLE, taskId: null, allowTerminal: false,
   }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
 
+  const run = resolved.run
   run.intake_closed = true
   await saveRun(ctx.stateDir, run)
   return ok(`intake closed for ${run.run_id}`)
@@ -559,7 +559,9 @@ async function dispatch(argv: string[]): Promise<number> {
         console.error('usage: hpipe dispatch --done [--run <run-id>]')
         return 1
       }
-      out = await cmdDispatchDone(ctx, { runId: flag(rest, 'run') ?? undefined })
+      out = await cmdDispatchDone(ctx, {
+        runId: flag(rest, 'run'), repoKey: repo?.repoKey ?? null,
+      })
       break
 
     case 'rewind':
