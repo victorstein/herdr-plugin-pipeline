@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   activeRunForRepo, listRuns, newRun, readOrchestrator,
-  saveRun, writeOrchestrator,
+  resolveRun, saveRun, writeOrchestrator,
 } from '../src/lib/ledger'
 
 let dir: string
@@ -70,4 +70,56 @@ test('a new run carries schema_version 2 and an open intake', () => {
   expect(run.schema_version).toBe(2)
   expect(run.intake_closed).toBe(false)
   expect(run.passes).toEqual({})
+})
+
+// ——— resolveRun ———
+
+/** A saved run with one task, so the task-id filter has something to match. */
+async function seedRun(over: {
+  repoKey?: string; phase?: string; title?: string; taskIds?: string[]
+}): Promise<string> {
+  const run = newRun({
+    session: 'personal', socketPath: '/s',
+    repoKey: over.repoKey ?? 'repo-a', repoRoot: '/r', title: over.title ?? 'a',
+  })
+  if (over.phase) run.phase = over.phase as typeof run.phase
+  for (const id of over.taskIds ?? ['t1']) {
+    run.tasks.push({
+      task_id: id, branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+      keep_worktree: false, workspace_id: null, pane_id: null,
+      agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
+      escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
+      checkout_path: null, registered_at: 0, adopted_at: null,
+      artifacts: { research: null, spec: null, plan: null, verdicts: {} },
+      merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+      decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+    })
+  }
+  await saveRun(dir, run)
+  return run.run_id
+}
+
+const query = (over: Partial<Parameters<typeof resolveRun>[2]> = {}) => ({
+  runId: null, repoKey: null, phases: null, taskId: null, allowTerminal: false, ...over,
+})
+
+test('resolveRun skips a finished run that sorts first', async () => {
+  // The #36/#38 shape: same repo, same task id, the completed run sorts first
+  // because listRuns sorts by filename and its title is alphabetically earlier.
+  const done = await seedRun({ title: 'aaa batch one', phase: 'done' })
+  const live = await seedRun({ title: 'zzz batch two', phase: 'execute' })
+
+  const result = await resolveRun(dir, 'personal', query({ taskId: 't1' }))
+  expect(result.ok).toBe(true)
+  expect(result.ok && result.run.run_id).toBe(live)
+  expect(live).not.toBe(done)
+})
+
+test('resolveRun picks the run for the caller repo', async () => {
+  // The #21 shape: another repo's run sorts first and must not win.
+  await seedRun({ repoKey: '/repos/aaa', title: 'aaa' })
+  const mine = await seedRun({ repoKey: '/repos/zzz', title: 'zzz' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: '/repos/zzz' }))
+  expect(result.ok && result.run.run_id).toBe(mine)
 })

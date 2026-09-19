@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { runRow } from './phases'
 import { readJson, writeJson } from './store'
-import type { Orchestrator, Run, SessionKey } from './types'
+import type { Orchestrator, Run, RunPhase, SessionKey } from './types'
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
 
@@ -110,4 +110,42 @@ export async function allOrchestratorPanes(
     if (entry) panes.add(entry.pane_id)
   }
   return panes
+}
+
+export interface RunQuery {
+  /** An explicit `--run`. Replaces the inference filters, never the legality ones. */
+  runId: string | null
+  repoKey: string | null
+  phases: readonly RunPhase[] | null
+  taskId: string | null
+  /** The caller opts into a finished run by naming it; never inferred. */
+  allowTerminal: boolean
+}
+
+export type RunResolution =
+  | { ok: true; run: Run }
+  | { ok: false; reason: 'no-such-run' }
+  | { ok: false; reason: 'terminal'; run: Run }
+  | { ok: false; reason: 'wrong-phase'; run: Run }
+  | { ok: false; reason: 'unreadable'; run: Run }
+  | { ok: false; reason: 'none'; excluded: Run[] }
+  | { ok: false; reason: 'ambiguous'; candidates: Run[] }
+
+export async function resolveRun(
+  stateDir: string, session: SessionKey, query: RunQuery,
+): Promise<RunResolution> {
+  const runs = await listRuns(stateDir, session)
+
+  const inRepo = runs.filter((r) => query.repoKey === null || r.repo_key === query.repoKey)
+  const withTask = inRepo.filter(
+    (r) => query.taskId === null || r.tasks.some((t) => t.task_id === query.taskId),
+  )
+  const matched = withTask.filter(
+    (r) => !runRow(r.phase).terminal &&
+      (query.phases === null || query.phases.includes(r.phase)),
+  )
+
+  const only = matched[0]
+  if (matched.length === 1 && only) return { ok: true, run: only }
+  return { ok: false, reason: 'none', excluded: withTask }
 }
