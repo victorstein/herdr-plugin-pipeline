@@ -213,6 +213,27 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   if (row.signal === 'pr' && task) {
     return sentence(`a pushed PR for ${task.branch} (#${task.issue})`)
   }
+  if (row.signal === 'ci' && task) {
+    // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
+    // polled and cannot clear — a different fault from a slow CI run, and the
+    // probe is the only thing that will ever say so.
+    if (task.pr === null) {
+      return {
+        short: 'a PR number this task never recorded',
+        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+          `so CI is never polled for it. The rewind is what produces one: \`${hpipe} rewind ` +
+          `${run.run_id} implement --task ${task.task_id}\`.`,
+      }
+    }
+    // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
+    // advances the row back to `implement` — one of the fastest ways OUT of ci.
+    return {
+      short: `CI on PR #${task.pr}`,
+      clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
+        `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
+        'conclusion, and this phase waits on it forever.',
+    }
+  }
   if (row.signal === 'files') {
     return {
       short: 'the files another task holds',

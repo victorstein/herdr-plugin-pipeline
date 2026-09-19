@@ -7,6 +7,7 @@ import {
   type StallDeps, taskStallCandidates,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
@@ -699,4 +700,34 @@ test('blocked-on-decision still names the open decision after the reorder — #1
   const run = runWithTask({ phase: 'blocked-on-decision' })
   expect(stallAwaiting(run, run.tasks[0] as Task, 'hp').short)
     .toBe('an answer to the open decision')
+})
+
+test('a ci row names the check command and not a false forever-wait — #19', () => {
+  const run = runWithTask({ phase: 'ci', pr: 42 })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('CI on PR #42')
+  expect(a.clause).toContain('gh pr checks 42')
+  // rollUpBucket maps `cancel` to `fail` (gh.ts:19), which sends the row back to
+  // `implement` — the opposite of waiting forever.
+  expect(a.clause).not.toContain('cancelled')
+  expect(a.clause).not.toContain('whatever clears')
+})
+
+test('a cancelled check rolls up to fail, which is why the ci clause omits it — #19', () => {
+  // The clause above asserts `cancelled` is not a forever-wait. That is only true
+  // while gh.ts:19 maps it to `fail`; unpinned, the two drift apart in silence —
+  // no test in this repo exercised `cancel` before this one.
+  expect(rollUpBucket([{ bucket: 'pass' }, { bucket: 'cancel' }])).toBe('fail')
+})
+
+test('a ci row with no PR reports the deadlock and its exit — #19', () => {
+  const run = runWithTask({ phase: 'ci', pr: null })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+  expect(a.short).toBe('a PR number this task never recorded')
+  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  expect(a.clause).toContain('implement --task t1')
+  // Must not contradict ladderFor's "clears when whatever it is waiting for
+  // arrives" (stall.ts:227-229), which every probe renders beneath the clause.
+  expect(a.clause).not.toContain('never clear')
+  expect(a.clause).not.toContain('{{')
 })
