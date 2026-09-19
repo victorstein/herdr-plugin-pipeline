@@ -691,6 +691,9 @@ test('an escalated task is not told it awaits a decision it never asked — #19'
   expect(a.clause).not.toContain('open decision')
   expect(a.clause).not.toContain('an answer to')
   expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  // The run id is load-bearing: without it the rendered command is `rewind
+  // implement --task t1`, which does not run. Nothing else here would catch that.
+  expect(a.clause).toContain(run.run_id)
   expect(a.clause).toContain('implement')
   expect(a.clause).toContain('--task t1')
   expect(a.clause).not.toContain('{{')
@@ -725,6 +728,7 @@ test('a ci row with no PR reports the deadlock and its exit — #19', () => {
   const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
   expect(a.short).toBe('a PR number this task never recorded')
   expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  expect(a.clause).toContain(run.run_id)
   expect(a.clause).toContain('implement --task t1')
   // Must not contradict ladderFor's "clears when whatever it is waiting for
   // arrives" (stall.ts:227-229), which every probe renders beneath the clause.
@@ -750,6 +754,7 @@ test('a merge row with no PR reports the deadlock and its exit — #19', () => {
   const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
   expect(a.short).toBe('a PR number this task never recorded')
   expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  expect(a.clause).toContain(run.run_id)
   expect(a.clause).toContain('implement --task t1')
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('{{')
