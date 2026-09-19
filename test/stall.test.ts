@@ -778,3 +778,22 @@ test('a teardown row states the fact and diagnoses no cause — #19', () => {
   // with nothing throwing, so the clause must not assert a throw.
   expect(a.clause).not.toContain('throwing')
 })
+
+test('the escalation text describes the phase being left, not escalated — #19', async () => {
+  const run = runWithTask({ phase: 'implement' })
+  const task = run.tasks[0] as Task
+  const seen: string[] = []
+  const deps = mkDeps({
+    escalationText: async (c, from) => {
+      seen.push(`${from}|${stallAwaiting(c.run, c.task, 'hp').short}`)
+      return 'escalation text'
+    },
+  })
+  let now = NOW
+  for (let i = 0; i < 5; i += 1) {
+    await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+    now += 45 * 60_000
+  }
+  expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])
+  expect(task.phase).toBe('escalated')
+})
