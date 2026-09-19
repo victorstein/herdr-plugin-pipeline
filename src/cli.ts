@@ -352,11 +352,20 @@ export async function cmdDecide(ctx: Ctx, input: {
 
 export async function cmdAnswer(ctx: Ctx, input: {
   task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
+  repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session))
-    .find((r) => r.tasks.some((t) => t.task_id === input.task))
-  const task = run?.tasks.find((t) => t.task_id === input.task)
-  if (!run || !task) return fail(`no such task: ${input.task}`)
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: null, taskId: input.task, allowTerminal: input.runId !== null,
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) {
+    return resolveFailure(ctx, query, '--run <run-id> records an answer on it anyway', resolved)
+  }
+
+  const run = resolved.run
+  const task = run.tasks.find((t) => t.task_id === input.task)
+  if (!task) return fail(`no such task: ${input.task}`)
 
   if (input.by !== 'orchestrator' && input.by !== 'human') {
     return fail(`--by must be 'orchestrator' or 'human', got: ${input.by}`)
@@ -569,6 +578,8 @@ async function dispatch(argv: string[]): Promise<number> {
         decision: flag(rest, 'decision') ?? '',
         answer: flag(rest, 'answer') ?? '',
         by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
       })
       break
 
