@@ -46,18 +46,30 @@ test('blocked-on-files holds no files and has no actor pane', () => {
   expect(taskRow('blocked-on-files').probeTarget).toBe('orchestrator')
 })
 
-test('the stallable set is exactly what #15 assumed — widening it belongs to #19', () => {
+test('the stallable set covers the last mile — #19', () => {
   expect(TASK_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort()).toEqual([
-    'blocked-on-decision', 'blocked-on-files', 'implement', 'plan', 'plan-review',
-    'pr-review-intent', 'pr-review-quality', 'research', 'spec', 'spec-review',
+    'blocked-on-decision', 'blocked-on-files', 'ci', 'close', 'escalated', 'implement',
+    'merge', 'plan', 'plan-review', 'pr-review-intent', 'pr-review-quality', 'research',
+    'spec', 'spec-review', 'teardown',
   ])
   expect(RUN_ROWS.filter((r) => r.stallable).map((r) => r.phase).sort())
     .toEqual(['branch-review', 'dispatch', 'execute'])
 })
 
-test('exactly the four probe-only rows are outside the escalating signals', () => {
+test('exactly the nine probe-only rows are outside the escalating signals', () => {
   const escalating = new Set(['artifact', 'verdict', 'pr'])
   const probeOnly = [...RUN_ROWS, ...TASK_ROWS]
     .filter((r) => r.stallable && !escalating.has(r.signal)).map((r) => r.phase)
-  expect(probeOnly).toEqual(['dispatch', 'execute', 'blocked-on-files', 'blocked-on-decision'])
+  expect(probeOnly).toEqual(['dispatch', 'execute', 'blocked-on-files', 'ci', 'merge',
+    'close', 'teardown', 'blocked-on-decision', 'escalated'])
+})
+
+test('the actorless and human-owned stallable rows name a probe target', () => {
+  // table.test.ts:33 counts only `orchestrator` and `worker` as resolving to a
+  // pane, so these three must declare one; merge and close resolve already.
+  for (const phase of ['ci', 'teardown', 'escalated'] as const) {
+    expect(taskRow(phase).probeTarget, `${phase} needs a probe target`).toBe('orchestrator')
+  }
+  expect(taskRow('merge').probeTarget).toBeUndefined()
+  expect(taskRow('close').probeTarget).toBeUndefined()
 })

@@ -107,7 +107,7 @@ test('a task inside the threshold is not a candidate', () => {
 })
 
 test('a task phase whose row is not stallable is never probed', () => {
-  for (const phase of ['queued', 'ci', 'merge', 'close', 'teardown', 'done'] as const) {
+  for (const phase of ['queued', 'done', 'failed', 'orphaned', 'blocked-on-failure'] as const) {
     const run = runWithTasks([mkTask({ phase })])
     expect(taskStallCandidates([run], NOW, 45, 3)).toHaveLength(0)
   }
@@ -305,12 +305,13 @@ test('the blocked rows name the exit, not the symptom', () => {
 })
 
 test('an unrecognised signal falls back to naming the phase', () => {
-  const run = runAt('execute', LONG_AGO)
-  const ci = mkTask({ phase: 'ci' })
-  run.tasks = [ci]
-  expect(stallAwaiting(run, ci, 'hp')).toEqual({
-    short: 'whatever clears ci',
-    clause: 'This phase is waiting for whatever clears ci.',
+  // Characterisation, not behaviour: after #19 every TASK_ROWS signal has a
+  // branch, so the only row that can reach the fallback is a run row with
+  // `signal: 'registration'` — and no such row is stallable. Same status as
+  // `describeWake`'s null-task arm (tick.ts:59-64).
+  expect(stallAwaiting(runAt('intake', LONG_AGO), null, 'hp')).toEqual({
+    short: 'whatever clears intake',
+    clause: 'This phase is waiting for whatever clears intake.',
   })
 })
 
