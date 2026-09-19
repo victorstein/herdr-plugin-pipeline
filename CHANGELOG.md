@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.8](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.7...v1.2.8) (2026-09-19)
+
+
+### Bug Fixes
+
+* resolve every hpipe command against the caller's repo and a live run ([#44](https://github.com/victorstein/herdr-plugin-pipeline/issues/44)) ([2016ee0](https://github.com/victorstein/herdr-plugin-pipeline/commit/2016ee01f222fd03bb5cc896d9dbf4f7bde299b9)), closes [#21](https://github.com/victorstein/herdr-plugin-pipeline/issues/21) [#36](https://github.com/victorstein/herdr-plugin-pipeline/issues/36) [#38](https://github.com/victorstein/herdr-plugin-pipeline/issues/38)
+
 ## [1.2.7](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.6...v1.2.7) (2026-09-18)
 
 
