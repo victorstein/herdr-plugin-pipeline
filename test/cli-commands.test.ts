@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdBrief, cmdDispatchDone, cmdForget, cmdRelease, cmdResume, cmdRewind, cmdStatus, cmdTask,
+  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdForget, cmdRelease, cmdResume,
+  cmdRewind, cmdStatus, cmdTask,
 } from '../src/cli'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
@@ -143,8 +144,8 @@ test('task registration requires an issue and seeds artifact paths', async () =>
   const result = await cmdTask(ctx(), {
     branch: 'feat/land-first', issue: 210, surface: 'core', notes: 'land first',
     dependsOn: ['t1'], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -165,8 +166,8 @@ test('the three seeded artifact paths are distinct and land in the right directo
   const result = await cmdTask(ctx(), {
     branch: 'feat/paths', issue: 42, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -186,8 +187,8 @@ test('registering a task reopens intake', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/reopen', issue: 7, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -216,8 +217,8 @@ test('registering a task after dispatch --done reopens intake', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/reopen-again', issue: 9, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -286,8 +287,8 @@ test('task registration refuses a missing issue number', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/x', issue: 0, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--issue')
 
@@ -302,8 +303,8 @@ test('task registration refuses an empty branch', async () => {
   const result = await cmdTask(ctx(), {
     branch: '   ', issue: 7, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--branch')
 })
@@ -314,8 +315,8 @@ test('brief renders a worker brief without mutating the run', async () => {
   await cmdTask(ctx(), {
     branch: 'feat/x', issue: 11, surface: 'core', notes: 'land first',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
   const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
@@ -332,8 +333,8 @@ test('the brief states the path contract without promising a recovery', async ()
   await cmdTask(ctx(), {
     branch: 'feat/x', issue: 11, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
   expect(result.text).toContain('does not satisfy this phase\'s contract')
@@ -556,4 +557,48 @@ test('the worker brief names the run it was rendered from', async () => {
 
   const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
   expect(result.text).toContain(run.run_id)
+})
+
+test('a run excluded for its phase is not described as finished', async () => {
+  // `excluded` also holds live runs that are merely past this command's phases —
+  // branch-review and escalated are both non-terminal by design.
+  const late = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'late' })
+  late.phase = 'branch-review'
+  await saveRun(dir, late)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('branch-review')
+  expect(result.text).not.toContain('a finished run cannot be re-entered')
+})
+
+test('an excluded run whose phase is in no row says so', async () => {
+  const broken = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'broken' })
+  broken.phase = 'dnoe' as typeof broken.phase
+  broken.tasks = [mkTask({ task_id: 't1', phase: 'plan' })]
+  await saveRun(dir, broken)
+
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('unrecognised phase')
+  // The generic escape is refused for an unreadable run, so it is not offered.
+  expect(result.text).not.toContain('renders it anyway')
+})
+
+test('a missing --task names the flag rather than printing an empty subject', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  for (const result of [
+    await cmdBrief(ctx(), { taskId: '', repoKey: 'k', runId: null }),
+    await cmdRelease(ctx(), { taskId: '', repoKey: 'k', runId: null }),
+    await cmdDecide(ctx(), { task: '', question: 'q', recommendation: 'r', repoKey: 'k', runId: null }),
+    await cmdAnswer(ctx(), { task: '', decision: 'd1', answer: 'a', by: 'human', repoKey: 'k', runId: null }),
+  ]) {
+    expect(result.ok).toBe(false)
+    expect(result.text).toBe('--task is required')
+  }
 })

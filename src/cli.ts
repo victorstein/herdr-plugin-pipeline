@@ -5,7 +5,8 @@ import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from 
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, saveRun, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, runPhaseState, saveRun,
+  writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
@@ -34,6 +35,14 @@ function phraseFor(phases: readonly RunPhase[] | null): string {
 }
 
 const runLine = (run: Run): string => `  ${run.run_id} (${run.phase})`
+
+// The phase on each line is the reason it was excluded, so a run that is merely
+// past this command's phases is not described as finished — and an unreadable
+// one says so, because `(dnoe)` alone reads like an ordinary phase name.
+const excludedLine = (run: Run): string =>
+  runPhaseState(run) === 'unreadable'
+    ? `  ${run.run_id} (${run.phase}) — unrecognised phase, in no phase row`
+    : runLine(run)
 
 // taskRow throws on a phase with no row, and cmdRewind can write one.
 const taskIsTerminal = (phase: string): boolean =>
@@ -71,10 +80,17 @@ function resolveFailure(
       return fail(`more than one ${scope}:\n` +
         result.candidates.map(runLine).join('\n') +
         '\n  → name one with --run <run-id>')
-    case 'none':
-      return fail(`found no ${scope}` + (result.excluded.length === 0 ? '' :
-        `\n  excluded:\n${result.excluded.map(runLine).join('\n')}\n` +
-        (escape === null ? '  a finished run cannot be re-entered' : `  → ${escape}`)))
+    case 'none': {
+      if (result.excluded.length === 0) return fail(`found no ${scope}`)
+      // Only worth saying when one of them actually is finished: `excluded` also
+      // holds live runs that are simply past this command's phases.
+      const anyTerminal = result.excluded.some((r) => runPhaseState(r) === 'terminal')
+      const tail = !anyTerminal ? ''
+        : escape === null ? '\n  a finished run cannot be re-entered'
+        : `\n  → ${escape}`
+      return fail(`found no ${scope}\n  excluded:\n` +
+        result.excluded.map(excludedLine).join('\n') + tail)
+    }
   }
 }
 
@@ -220,6 +236,8 @@ export async function cmdTask(ctx: Ctx, input: {
 export async function cmdBrief(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
+  if (input.taskId.trim().length === 0) return fail('--task is required')
+
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
     phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
@@ -323,6 +341,8 @@ export async function cmdRewind(ctx: Ctx, input: {
 export async function cmdRelease(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
+  if (input.taskId.trim().length === 0) return fail('--task is required')
+
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
     phases: null, taskId: input.taskId, allowTerminal: input.runId !== null,
@@ -351,6 +371,8 @@ export async function cmdDecide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
+  if (input.task.trim().length === 0) return fail('--task is required')
+
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
     phases: null, taskId: input.task, allowTerminal: false,
@@ -391,6 +413,8 @@ export async function cmdAnswer(ctx: Ctx, input: {
   task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
+  if (input.task.trim().length === 0) return fail('--task is required')
+
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
     phases: null, taskId: input.task, allowTerminal: input.runId !== null,

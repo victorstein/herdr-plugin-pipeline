@@ -169,8 +169,8 @@ test('task rejects a --files entry containing whitespace and mints no task', asy
   const bad = await cmdTask(c, {
     branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
     dependsOn: [], files: ['src/a.ts src/b.ts'], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('src/a.ts src/b.ts')
@@ -194,8 +194,8 @@ test('task rejects a --files entry that is a flag, not a path prefix', async () 
   const bad = await cmdTask(c, {
     branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
     dependsOn: [], files: ['--surface'], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('--surface')
@@ -216,8 +216,8 @@ test('task echoes the file set it recorded while gated', async () => {
   const t2 = await cmdTask(c, {
     branch: 'feat/api', issue: 2, surface: 'api', notes: '',
     dependsOn: ['t1'], files: ['src/lib/gating.ts', 'src/cli.ts'], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   expect(t2.ok).toBe(true)
   expect(t2.text).toContain('task_id: t2')
@@ -235,8 +235,8 @@ test('task echoes files: none on the dispatched return when nothing was declared
   const t1 = await cmdTask(c, {
     branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false,
-        repoKey: 'k', runId: null,
-      })
+    repoKey: 'k', runId: null,
+  })
 
   expect(t1.ok).toBe(true)
   expect(t1.text).toContain('task_id: t1')
