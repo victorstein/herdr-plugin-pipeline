@@ -731,3 +731,26 @@ test('a ci row with no PR reports the deadlock and its exit — #19', () => {
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('{{')
 })
+
+test('a merge row names the PR and does not assert it is unmerged — #19', () => {
+  const run = runWithTask({ phase: 'merge', pr: 42 })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('PR #42 to be merged')
+  expect(a.clause).toContain('PR #42')
+  expect(a.clause).toContain('feat/x')
+  expect(a.clause).toContain('nothing merges automatically')
+  // machine.ts:167 is an edge: a PR merged before phase entry is never seen, so
+  // a clause asserting "not yet merged" would be false in that deadlock.
+  expect(a.clause).toContain('already')
+  expect(a.clause).toContain('postdates')
+})
+
+test('a merge row with no PR reports the deadlock and its exit — #19', () => {
+  const run = runWithTask({ phase: 'merge', pr: null })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+  expect(a.short).toBe('a PR number this task never recorded')
+  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  expect(a.clause).toContain('implement --task t1')
+  expect(a.clause).not.toContain('never clear')
+  expect(a.clause).not.toContain('{{')
+})

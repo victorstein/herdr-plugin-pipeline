@@ -234,6 +234,28 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
         'conclusion, and this phase waits on it forever.',
     }
   }
+  if (row.signal === 'merged' && task) {
+    // `gatherSignals` returns early on a null PR (tasks.ts:278), so `merged` is
+    // never true and machine.ts:165-171 never fires.
+    if (task.pr === null) {
+      return {
+        short: 'a PR number this task never recorded',
+        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+          `so no merge is ever seen. The rewind is what produces one: \`${hpipe} rewind ` +
+          `${run.run_id} implement --task ${task.task_id}\`.`,
+      }
+    }
+    // The second sentence is not padding: this row cannot distinguish "not yet
+    // merged" from "merged too early to be seen" (machine.ts:167), so a clause
+    // asserting the first would be false in the second.
+    return {
+      short: `PR #${task.pr} to be merged`,
+      clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
+        "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
+        "merged, this phase cannot see it: only a merge that postdates this phase's entry " +
+        'counts, so say so rather than waiting.',
+    }
+  }
   if (row.signal === 'files') {
     return {
       short: 'the files another task holds',
