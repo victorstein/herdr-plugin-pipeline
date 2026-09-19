@@ -148,9 +148,9 @@ test('a cancelled check rolls up to fail, which is why the ci clause omits it �
 })
 ```
 
-The step-5 commit message and the expected count at `plan:453` shift by one (`470 pass` end state, and
-`plan:856`'s "469 pass / 0 fail" becomes 470 — 471 if MAJOR 1's assertions land as separate
-expectations inside the existing test, which they do, so 470).
+The per-step counts from step 5 on shift by one, and `plan:856`'s end state becomes **470 pass / 0
+fail** (MAJOR 1's fix adds assertions inside the existing step-7 test, not a new one). I applied both
+fixes to the scratch tree and measured exactly that, with `tsc --noEmit` clean.
 
 ---
 
@@ -234,7 +234,7 @@ in the `bun test` bullet."*
 ## MINOR 4 — live verification is labelled "not optional" by the spec and has no step, owner or trigger
 
 **Claim.** `spec:762-791` is headed *"Live verification — not optional"* and lists nine steps with a
-`TASK_STALL_MINUTES=1` setup. `.claude/agents/plugin-dev.md:56-59` requires that a change touching
+`TASK_STALL_MINUTES=1` setup. `.claude/agents/plugin-dev.md:57-58` requires that a change touching
 delivery *"say in your plan how it would be verified against a real herdr session"* — every probe here
 is a delivery.
 
@@ -244,7 +244,7 @@ unblocks it. It cannot happen pre-merge — the installed plugin is a tag-pinned
 (`spec:631-633`, `.claude/agents/plugin-dev.md:42-49`), so the running supervisor keeps the old table
 until the release lands — which is precisely why it needs an explicit post-release step rather than a
 sentence of regret. This is the surface whose unit suite has passed clean over real defects twice
-(`.claude/agents/plugin-dev.md:55-57`).
+(`.claude/agents/plugin-dev.md:55-56`).
 
 **Concrete fix.** Add a step 13 (post-merge, not a commit) restating spec steps 1, 2, 3 and 5 with the
 `TASK_STALL_MINUTES=1` `config.env` note and the instruction to file a finding rather than patch a
