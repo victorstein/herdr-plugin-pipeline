@@ -96,3 +96,22 @@ test('no --files at all echoes files: none', () => {
   expect(r.code).toBe(0)
   expect(r.out).toContain('files: none')
 })
+
+test('task run from a linked worktree registers into the parent repo run', () => {
+  // A worker's cwd is a worktree, where --show-toplevel is the worktree itself
+  // and never equals the run's repo_key. This is the assertion no unit test can
+  // make: `dispatch` and `repoContext` are only reachable as a subprocess.
+  const f = started()
+  // Under tempDir, not beside f.repo: cleanupFixtures only removes what tempDir
+  // registered, so a sibling path would be left in the system tmpdir by every run.
+  const worktree = join(tempDir('hpipe-argv-wt-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'wt/one', worktree], f.repo)
+
+  const proc = Bun.spawnSync(['bun', 'run', CLI, ...TASK], {
+    cwd: worktree, env: f.env, stdout: 'pipe', stderr: 'pipe',
+  })
+  const out = proc.stdout.toString() + proc.stderr.toString()
+
+  expect(out).toContain('task_id: t1')
+  expect(proc.exitCode).toBe(0)
+})
