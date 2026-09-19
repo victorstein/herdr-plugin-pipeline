@@ -767,3 +767,14 @@ test('a close row names the issue and does not assert it is still open — #19',
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('whatever clears')
 })
+
+test('a teardown row states the fact and diagnoses no cause — #19', () => {
+  const run = runWithTask({ phase: 'teardown' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('its worktree to be removed')
+  expect(a.clause).toContain('not being advanced')
+  expect(a.clause).toContain('orchestrator pane')
+  // pickOneAdvance has three skips (tick.ts:237-248); the third starves a run
+  // with nothing throwing, so the clause must not assert a throw.
+  expect(a.clause).not.toContain('throwing')
+})

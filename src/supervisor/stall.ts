@@ -280,7 +280,10 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   if (row.signal === 'worktree') {
     return task
       ? { short: 'its worktree to be removed',
-          clause: "This phase is waiting for this task's worktree to be removed." }
+          clause: "This phase is waiting for this task's worktree to be removed. Teardown is " +
+            'unconditional and runs first in every tick, so a task still here means this run is ' +
+            "not being advanced — check the supervisor pane's log, and check whether another run " +
+            'already holds this orchestrator pane.' }
       : { short: 'a worktree for a dispatched task',
           clause: 'This phase is waiting for a worktree to be adopted for a dispatched task.' }
   }
