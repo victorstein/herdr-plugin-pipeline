@@ -75,3 +75,10 @@ test('branch-review carries neither worker instruction — it is orchestrator-ow
   expect(text).not.toContain('wait for it within this turn')
   expect(text).not.toContain('Commit and push the verdict')
 })
+
+test('no task row carries a stallWhen — taskStallCandidates never reads one', () => {
+  // stallCandidates consults it (stall.ts:83); taskStallCandidates does not
+  // (:99-104), and its declared parameter is run-shaped (phases.ts:39). A task
+  // row given one today would be silently ignored, so make that fail loudly.
+  expect(TASK_ROWS.filter((r) => r.stallWhen).map((r) => r.phase)).toEqual([])
+})
