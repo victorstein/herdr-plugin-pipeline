@@ -153,8 +153,11 @@ export interface Awaiting {
 
 /**
  * What this phase is waiting for, phrased so the sentence is true of what it
- * names. Keyed on `row.signal` rather than the phase name, so #19 making more
- * rows stallable needs no change here. `hpipe` arrives already rendered:
+ * names. Mostly keyed on `row.signal`, but not only: `escalated` and
+ * `blocked-on-decision` share `signal: 'manual'` and need opposite sentences,
+ * so the human-owned branch is checked first. #19 found that the hard way —
+ * this docblock used to claim signal-keying alone would carry it.
+ * `hpipe` arrives already rendered:
  * `render` never re-scans replacement text (`src/lib/render.ts:8-14`), so a
  * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
  */
@@ -163,6 +166,21 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   const phase = task ? task.phase : run.phase
   const sentence = (short: string): Awaiting =>
     ({ short, clause: `This phase is waiting for ${short}.` })
+
+  // A human-owned row waits on a person, not on the pane being probed. Checked
+  // before the `manual` branch, which `blocked-on-decision` shares with it and
+  // which would otherwise tell an escalated task it is waiting for an answer to a
+  // decision it never asked.
+  if (row.actor === 'human') {
+    const from = (task ? task.escalated_from : run.escalated_from) ?? '<phase>'
+    const flag = task ? ` --task ${task.task_id}` : ''
+    return {
+      short: 'a human to act on the escalation',
+      clause: 'This phase is escalated and waits on the human, not on you. If they have not been ' +
+        'told, tell them now; once they have decided, ' +
+        `\`${hpipe} rewind ${run.run_id} ${from}${flag}\` resumes it.`,
+    }
+  }
 
   if (row.signal === 'artifact' || row.signal === 'verdict') {
     const short = row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict'

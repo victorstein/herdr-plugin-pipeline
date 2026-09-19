@@ -682,3 +682,21 @@ test('a last-mile task in a pane-releasing run is left alone — #19 keeps A26',
     expect(taskStallCandidates([run], NOW, 45, 3), runPhase).toHaveLength(0)
   }
 })
+
+test('an escalated task is not told it awaits a decision it never asked — #19', () => {
+  const run = runWithTask({ phase: 'escalated', escalated_from: 'implement' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'bun run /p/src/cli.ts')
+  expect(a.short).toBe('a human to act on the escalation')
+  expect(a.clause).not.toContain('open decision')
+  expect(a.clause).not.toContain('an answer to')
+  expect(a.clause).toContain('bun run /p/src/cli.ts rewind')
+  expect(a.clause).toContain('implement')
+  expect(a.clause).toContain('--task t1')
+  expect(a.clause).not.toContain('{{')
+})
+
+test('blocked-on-decision still names the open decision after the reorder — #19', () => {
+  const run = runWithTask({ phase: 'blocked-on-decision' })
+  expect(stallAwaiting(run, run.tasks[0] as Task, 'hp').short)
+    .toBe('an answer to the open decision')
+})
