@@ -256,6 +256,20 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
         'counts, so say so rather than waiting.',
     }
   }
+  if (row.signal === 'closed' && task) {
+    // Not "the issue is still open": `closedByMerge` needs `merged_at_ms`, which
+    // only the merge edge writes (machine.ts:168). A task rewound into `close`
+    // from before `merge` has none, so a closed issue never satisfies
+    // machine.ts:178-181 and this row parks with the work already done.
+    return {
+      short: `issue #${task.issue} to close`,
+      clause: `This phase is waiting for issue #${task.issue} to close. Check it with ` +
+        `\`gh issue view ${task.issue} --json closed,state\`; if the PR body used a phrase ` +
+        'GitHub does not treat as a closing keyword, close it by hand. If it is already ' +
+        'closed, this phase cannot see it: it only counts a close it can tie to this ' +
+        "task's recorded merge, so say so rather than waiting.",
+    }
+  }
   if (row.signal === 'files') {
     return {
       short: 'the files another task holds',

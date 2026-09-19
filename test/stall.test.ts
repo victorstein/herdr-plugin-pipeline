@@ -754,3 +754,16 @@ test('a merge row with no PR reports the deadlock and its exit — #19', () => {
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('{{')
 })
+
+test('a close row names the issue and does not assert it is still open — #19', () => {
+  const run = runWithTask({ phase: 'close' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.short).toBe('issue #1 to close')
+  expect(a.clause).toContain('gh issue view 1 --json closed,state')
+  expect(a.clause).toContain('closing keyword')
+  // A task rewound into `close` from before `merge` has no `merged_at_ms`, so
+  // machine.ts:178-181 can never fire however closed the issue is.
+  expect(a.clause).toContain('already')
+  expect(a.clause).not.toContain('never clear')
+  expect(a.clause).not.toContain('whatever clears')
+})
