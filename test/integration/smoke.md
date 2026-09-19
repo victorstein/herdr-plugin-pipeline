@@ -363,8 +363,9 @@ bug.
 A phase that goes quiet is probed every `TASK_STALL_MINUTES` (45) for a task, `STALL_MINUTES` (15)
 for a run, measured from the **last probe** rather than from phase entry — so a supervisor restart
 produces one probe per stalled record, not a burst. After `STALL_PROBE_MAX` (3) unanswered probes a
-row whose signal the probed actor produces itself (`research`, `spec`, the four review rows,
-`implement`, and the run's `branch-review`) is moved to `escalated` and reported by `hpipe status`.
+row whose signal the probed actor produces itself (`research`, `spec`, `plan`, the four review
+rows, `implement`, and the run's `branch-review` — nine in all) is moved to `escalated` and reported
+by `hpipe status`.
 
 Nine rows are probed but **never** escalated: `blocked-on-files`, `blocked-on-decision`, the last
 mile (`ci`, `merge`, `close`, `teardown`), a task already in `escalated`, and the run's `dispatch`
