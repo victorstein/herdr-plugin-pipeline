@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   activeRunForRepo, listRuns, newRun, readOrchestrator,
-  saveRun, writeOrchestrator,
+  resolveRun, saveRun, writeOrchestrator,
 } from '../src/lib/ledger'
 
 let dir: string
@@ -70,4 +70,138 @@ test('a new run carries schema_version 2 and an open intake', () => {
   expect(run.schema_version).toBe(2)
   expect(run.intake_closed).toBe(false)
   expect(run.passes).toEqual({})
+})
+
+// ——— resolveRun ———
+
+/** A saved run with one task, so the task-id filter has something to match. */
+async function seedRun(over: {
+  repoKey?: string; phase?: string; title?: string; taskIds?: string[]
+}): Promise<string> {
+  const run = newRun({
+    session: 'personal', socketPath: '/s',
+    repoKey: over.repoKey ?? 'repo-a', repoRoot: '/r', title: over.title ?? 'a',
+  })
+  if (over.phase) run.phase = over.phase as typeof run.phase
+  for (const id of over.taskIds ?? ['t1']) {
+    run.tasks.push({
+      task_id: id, branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+      keep_worktree: false, workspace_id: null, pane_id: null,
+      agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
+      escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
+      checkout_path: null, registered_at: 0, adopted_at: null,
+      artifacts: { research: null, spec: null, plan: null, verdicts: {} },
+      merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+      decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+    })
+  }
+  await saveRun(dir, run)
+  return run.run_id
+}
+
+const query = (over: Partial<Parameters<typeof resolveRun>[2]> = {}) => ({
+  runId: null, repoKey: null, phases: null, taskId: null, allowTerminal: false, ...over,
+})
+
+test('resolveRun skips a finished run that sorts first', async () => {
+  // The #36/#38 shape: same repo, same task id, the completed run sorts first
+  // because listRuns sorts by filename and its title is alphabetically earlier.
+  const done = await seedRun({ title: 'aaa batch one', phase: 'done' })
+  const live = await seedRun({ title: 'zzz batch two', phase: 'execute' })
+
+  const result = await resolveRun(dir, 'personal', query({ taskId: 't1' }))
+  expect(result.ok).toBe(true)
+  expect(result.ok && result.run.run_id).toBe(live)
+  expect(live).not.toBe(done)
+})
+
+test('resolveRun picks the run for the caller repo', async () => {
+  // The #21 shape: another repo's run sorts first and must not win.
+  await seedRun({ repoKey: '/repos/aaa', title: 'aaa' })
+  const mine = await seedRun({ repoKey: '/repos/zzz', title: 'zzz' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: '/repos/zzz' }))
+  expect(result.ok && result.run.run_id).toBe(mine)
+})
+
+test('resolveRun refuses to choose between two live runs', async () => {
+  const a = await seedRun({ title: 'aaa' })
+  const b = await seedRun({ title: 'bbb' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a' }))
+  expect(result.ok).toBe(false)
+  expect(!result.ok && result.reason).toBe('ambiguous')
+  const ids = !result.ok && result.reason === 'ambiguous'
+    ? result.candidates.map((r) => r.run_id) : []
+  expect(ids.sort()).toEqual([a, b].sort())
+})
+
+test('resolveRun names the finished run that holds the task it could not find', async () => {
+  const done = await seedRun({ phase: 'done', title: 'finished' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a', taskId: 't1' }))
+  expect(!result.ok && result.reason).toBe('none')
+  const excluded = !result.ok && result.reason === 'none'
+    ? result.excluded.map((r) => r.run_id) : []
+  expect(excluded).toEqual([done])
+})
+
+test('resolveRun reports none with nothing excluded when no run holds the task', async () => {
+  await seedRun({ taskIds: ['t1'] })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a', taskId: 't9' }))
+  expect(!result.ok && result.reason).toBe('none')
+  expect(!result.ok && result.reason === 'none' && result.excluded).toEqual([])
+})
+
+test('resolveRun by id ignores the repo and task filters', async () => {
+  const other = await seedRun({ repoKey: '/repos/other', taskIds: ['t1'] })
+
+  const result = await resolveRun(dir, 'personal', query({
+    runId: other, repoKey: '/repos/mine', taskId: 't9',
+  }))
+  expect(result.ok && result.run.run_id).toBe(other)
+})
+
+test('resolveRun by id still applies the phase filter', async () => {
+  // --run overrides inference, not legality. A task registered into a run past
+  // `execute` cannot be removed by any command.
+  const late = await seedRun({ phase: 'branch-review' })
+
+  const result = await resolveRun(dir, 'personal', query({
+    runId: late, phases: ['intake', 'dispatch', 'execute'],
+  }))
+  expect(!result.ok && result.reason).toBe('wrong-phase')
+})
+
+test('resolveRun by id refuses a finished run unless the caller allows it', async () => {
+  const done = await seedRun({ phase: 'done' })
+
+  const refused = await resolveRun(dir, 'personal', query({ runId: done }))
+  expect(!refused.ok && refused.reason).toBe('terminal')
+
+  const allowed = await resolveRun(dir, 'personal', query({ runId: done, allowTerminal: true }))
+  expect(allowed.ok && allowed.run.run_id).toBe(done)
+})
+
+test('resolveRun by id reports an unknown id', async () => {
+  const result = await resolveRun(dir, 'personal', query({ runId: 'nope' }))
+  expect(!result.ok && result.reason).toBe('no-such-run')
+})
+
+test('resolveRun skips a run whose phase is in no row instead of throwing', async () => {
+  // `hpipe rewind` writes its phase argument unvalidated, and runRow throws on a
+  // phase with no row. Before this, one typo made every resolving command throw.
+  const broken = newRun({
+    session: 'personal', socketPath: '/s', repoKey: 'repo-a', repoRoot: '/r', title: 'broken',
+  })
+  broken.phase = 'dnoe' as typeof broken.phase
+  await saveRun(dir, broken)
+  const live = await seedRun({ title: 'zzz live' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a' }))
+  expect(result.ok && result.run.run_id).toBe(live)
+
+  const named = await resolveRun(dir, 'personal', query({ runId: broken.run_id }))
+  expect(!named.ok && named.reason).toBe('unreadable')
 })

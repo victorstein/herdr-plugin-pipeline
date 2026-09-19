@@ -1,8 +1,8 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { runRow } from './phases'
+import { TASK_ROWS, runRow } from './phases'
 import { readJson, writeJson } from './store'
-import type { Orchestrator, Run, SessionKey } from './types'
+import type { Orchestrator, Run, RunPhase, SessionKey } from './types'
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
 
@@ -110,4 +110,77 @@ export async function allOrchestratorPanes(
     if (entry) panes.add(entry.pane_id)
   }
   return panes
+}
+
+export interface RunQuery {
+  /** An explicit `--run`. Replaces the inference filters, never the legality ones. */
+  runId: string | null
+  repoKey: string | null
+  phases: readonly RunPhase[] | null
+  taskId: string | null
+  /** The caller opts into a finished run by naming it; never inferred. */
+  allowTerminal: boolean
+}
+
+export type RunResolution =
+  | { ok: true; run: Run }
+  | { ok: false; reason: 'no-such-run' }
+  | { ok: false; reason: 'terminal'; run: Run }
+  | { ok: false; reason: 'wrong-phase'; run: Run }
+  | { ok: false; reason: 'unreadable'; run: Run }
+  | { ok: false; reason: 'none'; excluded: Run[] }
+  | { ok: false; reason: 'ambiguous'; candidates: Run[] }
+
+/**
+ * Both phase questions below are throw-safe, and both live here rather than in
+ * `phases.ts` beside `runRow`/`taskRow` — one address, so the next caller
+ * reading a phase off disk finds them instead of writing a fourth spelling.
+ *
+ * `runRow` throws on a phase with no row and nothing validates what is on disk,
+ * so every caller of resolveRun would otherwise inherit a stack trace from one
+ * typo'd `hpipe rewind`. An unreadable run is simply not a candidate.
+ */
+export function runPhaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
+  try {
+    return runRow(run.phase).terminal === true ? 'terminal' : 'live'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+export const taskPhaseIsTerminal = (phase: string): boolean =>
+  TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
+
+export async function resolveRun(
+  stateDir: string, session: SessionKey, query: RunQuery,
+): Promise<RunResolution> {
+  const runs = await listRuns(stateDir, session)
+
+  if (query.runId !== null) {
+    const named = runs.find((r) => r.run_id === query.runId)
+    if (!named) return { ok: false, reason: 'no-such-run' }
+    const state = runPhaseState(named)
+    if (state === 'unreadable') return { ok: false, reason: 'unreadable', run: named }
+    if (state === 'terminal' && !query.allowTerminal) {
+      return { ok: false, reason: 'terminal', run: named }
+    }
+    if (query.phases !== null && !query.phases.includes(named.phase)) {
+      return { ok: false, reason: 'wrong-phase', run: named }
+    }
+    return { ok: true, run: named }
+  }
+
+  const inRepo = runs.filter((r) => query.repoKey === null || r.repo_key === query.repoKey)
+  const withTask = inRepo.filter(
+    (r) => query.taskId === null || r.tasks.some((t) => t.task_id === query.taskId),
+  )
+  const matched = withTask.filter(
+    (r) => runPhaseState(r) === 'live' &&
+      (query.phases === null || query.phases.includes(r.phase)),
+  )
+
+  const only = matched[0]
+  if (matched.length === 1 && only) return { ok: true, run: only }
+  if (matched.length > 1) return { ok: false, reason: 'ambiguous', candidates: matched }
+  return { ok: false, reason: 'none', excluded: withTask }
 }

@@ -131,9 +131,9 @@ hpipe dispatch --done
 hpipe status      # assert: run phase is no longer [intake]
 ```
 
-**Failure looks like:** `no run is in the intake, dispatch or execute phase` from `hpipe task`
-(the run is not where you think — check you are in the right session), or `no agent definition at
-…-dev.md` (wrong `--surface`).
+**Failure looks like:** `found no run in intake, dispatch or execute for <repo> in session <session>`
+from `hpipe task` (you are in the wrong repo or session — the message names both), or `no agent
+definition at …-dev.md` (wrong `--surface`).
 
 The orchestrator now creates a worktree per task and adopts its root pane:
 
@@ -270,6 +270,10 @@ hpipe decide --task t1 \
   --recommend "<the path the worker would take, and why>"
 ```
 
+`hpipe decide` resolves against the repo you are standing in, and a worktree resolves to the repo it
+was cut from — so running it in the worker's pane reaches that worker's run. If it ever reports more
+than one candidate, pass `--run <run-id>`; the brief names the run in its first paragraph.
+
 `--recommend` is mandatory; a call without it is rejected on purpose.
 
 ### 4a. Answered by the orchestrator, without the human
@@ -298,6 +302,9 @@ hpipe decide --task t1 \
    ```bash
    hpipe answer --task t1 --decision <decision_id> --answer "<the call and the reason>" --by orchestrator
    ```
+
+   Run this from the orchestrator's pane, inside the repo. From anywhere else it needs
+   `--run <run-id>`, and a run that has already finished needs it too.
 
    Output: `recorded answer to <id> on t1; pending delivery`. **The task is still
    `blocked-on-decision` at this point.** Writing the answer deliberately does not resume the
@@ -539,9 +546,10 @@ from the orchestrator pane.
 | Events look stuck | `hpipe drain` prints and consumes the queue at `$STATE/queue/$SMOKE/`. It is destructive — it unlinks as it reads — so only use it when the supervisor is down. |
 | The plugin itself is misbehaving | `herdr plugin disable stein.pipeline` |
 
-`hpipe rewind` does **not** validate its phase argument against the phase table. A typo puts the
-task in a phase with no row and the next tick throws. If that happens, rewind again to a real phase
-name; the valid task phases are in `src/lib/phases.ts` (`TASK_ROWS`).
+`hpipe rewind` validates its phase argument against the phase table and refuses one that is in no
+row, naming the valid phases. Rewinding a task to a terminal phase (`done`, `failed`, `orphaned`,
+`blocked-on-failure`) also abandons any decision still open on it, so `hpipe status` stops reporting
+a question whose pane is gone.
 
 ---
 

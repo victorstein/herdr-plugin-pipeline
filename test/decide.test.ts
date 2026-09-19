@@ -96,7 +96,7 @@ async function savedRun(runId: string): Promise<Run | undefined> {
 
 test('decide blocks the task and records where it came from', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
-  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
   const saved = await savedRun(run.run_id)
   expect(saved?.tasks[0]?.phase).toBe('blocked-on-decision')
   expect(saved?.tasks[0]?.decision_from).toBe('plan')
@@ -104,10 +104,10 @@ test('decide blocks the task and records where it came from', async () => {
 
 test('decide refuses a task that is already blocked', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
-  const first = await cmdDecide(ctx(), { task: 't1', question: 'q1', recommendation: 'r1' })
+  const first = await cmdDecide(ctx(), { task: 't1', question: 'q1', recommendation: 'r1', repoKey: 'k', runId: null })
   expect(first.ok).toBe(true)
 
-  const second = await cmdDecide(ctx(), { task: 't1', question: 'q2', recommendation: 'r2' })
+  const second = await cmdDecide(ctx(), { task: 't1', question: 'q2', recommendation: 'r2', repoKey: 'k', runId: null })
   expect(second.ok).toBe(false)
 
   const saved = await savedRun(run.run_id)
@@ -120,7 +120,7 @@ test('decide refuses a task that is already blocked', async () => {
 
 test('decide requires a recommendation', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
-  const result = await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: '   ' })
+  const result = await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: '   ', repoKey: 'k', runId: null })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--recommend')
 
@@ -133,13 +133,12 @@ test('decide requires a recommendation', async () => {
 
 test('answer records the answer but leaves the task blocked', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
-  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
   const decided = await savedRun(run.run_id)
   const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
 
   const result = await cmdAnswer(ctx(), {
-    task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator',
-  })
+    task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator', repoKey: 'k', runId: null })
   expect(result.ok).toBe(true)
 
   const saved = await savedRun(run.run_id)
@@ -154,8 +153,7 @@ test('answer records the answer but leaves the task blocked', async () => {
 test('answer refuses a task that is not blocked', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
   const result = await cmdAnswer(ctx(), {
-    task: 't1', decision: 'd1', answer: 'do X', by: 'orchestrator',
-  })
+    task: 't1', decision: 'd1', answer: 'do X', by: 'orchestrator', repoKey: 'k', runId: null })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('plan')
 
@@ -165,19 +163,18 @@ test('answer refuses a task that is not blocked', async () => {
 
 test('answer on a task with a pending answer re-arms delivery', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan' })
-  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
   const decided = await savedRun(run.run_id)
   const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
 
-  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'first answer', by: 'orchestrator' })
+  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'first answer', by: 'orchestrator', repoKey: 'k', runId: null })
 
   const exhausted = await savedRun(run.run_id)
   exhausted!.tasks[0]!.delivery_attempts = 5
   await saveRun(dir, exhausted!)
 
   const result = await cmdAnswer(ctx(), {
-    task: 't1', decision: decisionId, answer: 'second answer', by: 'human',
-  })
+    task: 't1', decision: decisionId, answer: 'second answer', by: 'human', repoKey: 'k', runId: null })
   expect(result.ok).toBe(true)
 
   const saved = await savedRun(run.run_id)
@@ -191,11 +188,11 @@ test('answer on a task with a pending answer re-arms delivery', async () => {
 
 test('answering does not touch passes', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'plan', passes: { plan: 2 } })
-  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
   const decided = await savedRun(run.run_id)
   const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
 
-  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator' })
+  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'do X', by: 'orchestrator', repoKey: 'k', runId: null })
 
   const saved = await savedRun(run.run_id)
   expect(saved?.tasks[0]?.passes).toEqual({ plan: 2 })
@@ -382,4 +379,84 @@ test('the announcement carries the recommendation, not just the question', async
   await announceDecisions(run, deps)
   expect(sent).toHaveLength(1)
   expect(sent[0]?.text).toContain('ship now, add the audit as a follow-up issue')
+})
+
+test('decide refuses a task in a finished run and writes nothing', async () => {
+  // Issue #38, reproduced: this filed both of a live batch's decisions onto a
+  // completed run and dragged two torn-down tasks back to blocked-on-decision.
+  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'aaa finished' })
+  done.phase = 'done'
+  done.tasks = [mkTask({ task_id: 't1', phase: 'done' })]
+  await saveRun(dir, done)
+
+  const result = await cmdDecide(ctx(), {
+    task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(false)
+  // Spec testing item 8b: neither recovery works on a naturally-finished run —
+  // rewind leaves run.phase alone, and resume needs a prior abort.
+  expect(result.text).not.toContain('rewind')
+  expect(result.text).not.toContain('resume')
+
+  const saved = await savedRun(done.run_id)
+  expect(saved?.tasks[0]?.phase).toBe('done')
+  expect(saved?.tasks[0]?.decisions).toHaveLength(0)
+})
+
+test('decide refuses a finished task even inside a live run', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'done' })
+  const result = await cmdDecide(ctx(), {
+    task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('finished')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved?.tasks[0]?.decisions).toHaveLength(0)
+})
+
+test('decide files onto the live run when a finished run holds the same task id', async () => {
+  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'aaa finished' })
+  done.phase = 'done'
+  done.tasks = [mkTask({ task_id: 't1', phase: 'done' })]
+  await saveRun(dir, done)
+  const live = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'zzz live' })
+  live.phase = 'execute'
+  live.tasks = [mkTask({ task_id: 't1', phase: 'plan' })]
+  await saveRun(dir, live)
+
+  const result = await cmdDecide(ctx(), {
+    task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(true)
+
+  expect((await savedRun(live.run_id))?.tasks[0]?.phase).toBe('blocked-on-decision')
+  expect((await savedRun(done.run_id))?.tasks[0]?.phase).toBe('done')
+})
+
+test('answer still records onto a finished run when that run is named', async () => {
+  // The repair path #38's damage needed: rewind into blocked-on-decision,
+  // answer, rewind back. It must keep working on a run that is already done.
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  await cmdDecide(ctx(), {
+    task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null,
+  })
+  const decided = await savedRun(run.run_id)
+  const decisionId = openDecisionFor(decided!.tasks[0]!)!.id
+  decided!.phase = 'done'
+  await saveRun(dir, decided!)
+
+  const bare = await cmdAnswer(ctx(), {
+    task: 't1', decision: decisionId, answer: 'do X', by: 'human',
+    repoKey: 'k', runId: null,
+  })
+  expect(bare.ok).toBe(false)
+  expect(bare.text).toContain('--run')
+
+  const named = await cmdAnswer(ctx(), {
+    task: 't1', decision: decisionId, answer: 'do X', by: 'human',
+    repoKey: 'k', runId: run.run_id,
+  })
+  expect(named.ok).toBe(true)
+  expect((await savedRun(run.run_id))?.tasks[0]?.pending_answer).toBe(decisionId)
 })

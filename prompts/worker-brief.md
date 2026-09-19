@@ -1,6 +1,7 @@
 # {{branch}} — issue #{{issue}}
 
-You own issue #{{issue}} end to end, alone, in this worktree. Your task id is `{{task_id}}`.
+You own issue #{{issue}} end to end, alone, in this worktree. Your task id is `{{task_id}}` in run
+`{{run_id}}` — if a command ever says it cannot tell which run you mean, that id is the answer.
 
 **The issue is your brief, not this file:**
 

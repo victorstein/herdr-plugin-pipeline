@@ -1,3 +1,4 @@
+import { repoContext } from '../lib/repo'
 import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
 import { sessionKey } from '../lib/session'
 
@@ -9,15 +10,13 @@ if (!stateDir || !paneId || !workspaceId) {
   process.exit(1)
 }
 
-// Identify the repo the same way `hpipe start` does — the git toplevel — rather
-// than by herdr's opaque repo_key, so the two agree.
-const proc = Bun.spawn(['git', 'rev-parse', '--show-toplevel'], { stdout: 'pipe', stderr: 'ignore' })
-const repoRoot = (await new Response(proc.stdout).text()).trim()
-await proc.exited
-if (repoRoot.length === 0) {
+// Identify the repo the same way `hpipe start` does, so the two agree.
+const repo = await repoContext()
+if (!repo) {
   console.error('[pipeline] claim must be invoked from inside a git repository')
   process.exit(1)
 }
+const repoRoot = repo.repoRoot
 
 const session = sessionKey()
 await writeOrchestrator(stateDir, session, repoRoot, {
