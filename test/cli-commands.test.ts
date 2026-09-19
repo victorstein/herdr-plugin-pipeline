@@ -545,3 +545,15 @@ test('a terminal rewind keeps the undelivered-answer history entry', async () =>
   expect(saved?.history.some((h) => h.why.includes('discarded, undelivered'))).toBe(true)
   expect(saved?.tasks[0]?.pending_answer).toBeNull()
 })
+
+test('the worker brief names the run it was rendered from', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.text).toContain(run.run_id)
+})

@@ -15,6 +15,7 @@ export async function renderWorkerPrompt(
   )
   const vars = {
     task_id: task.task_id,
+    run_id: run.run_id,
     branch: task.branch,
     issue: String(task.issue),
     surface: task.surface,
