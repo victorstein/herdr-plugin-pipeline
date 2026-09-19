@@ -188,3 +188,20 @@ test('resolveRun by id reports an unknown id', async () => {
   const result = await resolveRun(dir, 'personal', query({ runId: 'nope' }))
   expect(!result.ok && result.reason).toBe('no-such-run')
 })
+
+test('resolveRun skips a run whose phase is in no row instead of throwing', async () => {
+  // `hpipe rewind` writes its phase argument unvalidated, and runRow throws on a
+  // phase with no row. Before this, one typo made every resolving command throw.
+  const broken = newRun({
+    session: 'personal', socketPath: '/s', repoKey: 'repo-a', repoRoot: '/r', title: 'broken',
+  })
+  broken.phase = 'dnoe' as typeof broken.phase
+  await saveRun(dir, broken)
+  const live = await seedRun({ title: 'zzz live' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a' }))
+  expect(result.ok && result.run.run_id).toBe(live)
+
+  const named = await resolveRun(dir, 'personal', query({ runId: broken.run_id }))
+  expect(!named.ok && named.reason).toBe('unreadable')
+})

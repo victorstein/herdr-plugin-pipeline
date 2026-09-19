@@ -131,6 +131,19 @@ export type RunResolution =
   | { ok: false; reason: 'none'; excluded: Run[] }
   | { ok: false; reason: 'ambiguous'; candidates: Run[] }
 
+/**
+ * `runRow` throws on a phase with no row and nothing validates what is on disk,
+ * so every caller of resolveRun would otherwise inherit a stack trace from one
+ * typo'd `hpipe rewind`. An unreadable run is simply not a candidate.
+ */
+function phaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
+  try {
+    return runRow(run.phase).terminal === true ? 'terminal' : 'live'
+  } catch {
+    return 'unreadable'
+  }
+}
+
 export async function resolveRun(
   stateDir: string, session: SessionKey, query: RunQuery,
 ): Promise<RunResolution> {
@@ -139,7 +152,9 @@ export async function resolveRun(
   if (query.runId !== null) {
     const named = runs.find((r) => r.run_id === query.runId)
     if (!named) return { ok: false, reason: 'no-such-run' }
-    if (runRow(named.phase).terminal && !query.allowTerminal) {
+    const state = phaseState(named)
+    if (state === 'unreadable') return { ok: false, reason: 'unreadable', run: named }
+    if (state === 'terminal' && !query.allowTerminal) {
       return { ok: false, reason: 'terminal', run: named }
     }
     if (query.phases !== null && !query.phases.includes(named.phase)) {
@@ -153,7 +168,7 @@ export async function resolveRun(
     (r) => query.taskId === null || r.tasks.some((t) => t.task_id === query.taskId),
   )
   const matched = withTask.filter(
-    (r) => !runRow(r.phase).terminal &&
+    (r) => phaseState(r) === 'live' &&
       (query.phases === null || query.phases.includes(r.phase)),
   )
 
