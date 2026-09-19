@@ -147,5 +147,6 @@ export async function resolveRun(
 
   const only = matched[0]
   if (matched.length === 1 && only) return { ok: true, run: only }
+  if (matched.length > 1) return { ok: false, reason: 'ambiguous', candidates: matched }
   return { ok: false, reason: 'none', excluded: withTask }
 }

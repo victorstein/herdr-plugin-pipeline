@@ -123,3 +123,33 @@ test('resolveRun picks the run for the caller repo', async () => {
   const result = await resolveRun(dir, 'personal', query({ repoKey: '/repos/zzz' }))
   expect(result.ok && result.run.run_id).toBe(mine)
 })
+
+test('resolveRun refuses to choose between two live runs', async () => {
+  const a = await seedRun({ title: 'aaa' })
+  const b = await seedRun({ title: 'bbb' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a' }))
+  expect(result.ok).toBe(false)
+  expect(!result.ok && result.reason).toBe('ambiguous')
+  const ids = !result.ok && result.reason === 'ambiguous'
+    ? result.candidates.map((r) => r.run_id) : []
+  expect(ids.sort()).toEqual([a, b].sort())
+})
+
+test('resolveRun names the finished run that holds the task it could not find', async () => {
+  const done = await seedRun({ phase: 'done', title: 'finished' })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a', taskId: 't1' }))
+  expect(!result.ok && result.reason).toBe('none')
+  const excluded = !result.ok && result.reason === 'none'
+    ? result.excluded.map((r) => r.run_id) : []
+  expect(excluded).toEqual([done])
+})
+
+test('resolveRun reports none with nothing excluded when no run holds the task', async () => {
+  await seedRun({ taskIds: ['t1'] })
+
+  const result = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a', taskId: 't9' }))
+  expect(!result.ok && result.reason).toBe('none')
+  expect(!result.ok && result.reason === 'none' && result.excluded).toEqual([])
+})
