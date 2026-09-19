@@ -142,7 +142,8 @@ test('task registration requires an issue and seeds artifact paths', async () =>
   const result = await cmdTask(ctx(), {
     branch: 'feat/land-first', issue: 210, surface: 'core', notes: 'land first',
     dependsOn: ['t1'], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -163,7 +164,8 @@ test('the three seeded artifact paths are distinct and land in the right directo
   const result = await cmdTask(ctx(), {
     branch: 'feat/paths', issue: 42, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -183,7 +185,8 @@ test('registering a task reopens intake', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/reopen', issue: 7, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -212,7 +215,8 @@ test('registering a task after dispatch --done reopens intake', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/reopen-again', issue: 9, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(true)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
@@ -281,7 +285,8 @@ test('task registration refuses a missing issue number', async () => {
   const result = await cmdTask(ctx(), {
     branch: 'feat/x', issue: 0, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--issue')
 
@@ -296,7 +301,8 @@ test('task registration refuses an empty branch', async () => {
   const result = await cmdTask(ctx(), {
     branch: '   ', issue: 7, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--branch')
 })
@@ -307,7 +313,8 @@ test('brief renders a worker brief without mutating the run', async () => {
   await cmdTask(ctx(), {
     branch: 'feat/x', issue: 11, surface: 'core', notes: 'land first',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
 
   const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
   const result = await cmdBrief(ctx(), { taskId: 't1' })
@@ -324,9 +331,50 @@ test('the brief states the path contract without promising a recovery', async ()
   await cmdTask(ctx(), {
     branch: 'feat/x', issue: 11, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
-  })
+        repoKey: 'k', runId: null,
+      })
 
   const result = await cmdBrief(ctx(), { taskId: 't1' })
   expect(result.text).toContain('does not satisfy this phase\'s contract')
   expect(result.text).not.toContain('stats those paths and nothing else')
+})
+
+test('task registers into this repo run, not another repo run that sorts first', async () => {
+  // Issue #21, reproduced. The foreign run MUST sort first or this test passes
+  // without the fix: newRun prefixes run_id with basename(repoRoot)
+  // (src/lib/ledger.ts:22, :25) and listRuns sorts by filename (:57). repoDir is
+  // a mkdtemp `clicmd-repo-…`, so the foreign run needs a repoRoot that beats
+  // `c` — hence '/aaa', not '/r'.
+  const other = newRun({ session: 'personal', socketPath: '/s', repoKey: '/repos/aaa', repoRoot: '/aaa', title: 'other repo' })
+  await saveRun(dir, other)
+  const mine = newRun({ session: 'personal', socketPath: '/s', repoKey: '/repos/zzz', repoRoot: repoDir, title: 'mine' })
+  await saveRun(dir, mine)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+    repoKey: '/repos/zzz', runId: null,
+  })
+  expect(result.ok).toBe(true)
+
+  const runs = await listRuns(dir, 'personal')
+  expect(runs.find((r) => r.run_id === mine.run_id)?.tasks).toHaveLength(1)
+  expect(runs.find((r) => r.run_id === other.run_id)?.tasks).toHaveLength(0)
+})
+
+test('task names the candidates rather than choosing between two live runs', async () => {
+  const a = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'aaa' })
+  const b = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'bbb' })
+  await saveRun(dir, a)
+  await saveRun(dir, b)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false,
+    repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(a.run_id)
+  expect(result.text).toContain(b.run_id)
+  expect(result.text).toContain('--run')
 })

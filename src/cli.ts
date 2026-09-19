@@ -5,8 +5,9 @@ import { answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, runForWorkspace, saveRun, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, saveRun, writeOrchestrator,
 } from './lib/ledger'
+import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
 import { taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
@@ -22,6 +23,56 @@ export interface CmdResult { ok: boolean; text: string; json?: string }
 
 const ok = (text: string, json?: string): CmdResult => ({ ok: true, text, json })
 const fail = (text: string): CmdResult => ({ ok: false, text })
+
+// No leading article: the call sites supply their own, so both "found no run in
+// intake, dispatch or execute" and "more than one live run" read as sentences.
+function phraseFor(phases: readonly RunPhase[] | null): string {
+  if (phases === null || phases.length === 0) return 'live run'
+  const names = [...phases]
+  const last = names.pop() as RunPhase
+  return names.length === 0 ? `run in ${last}` : `run in ${names.join(', ')} or ${last}`
+}
+
+const runLine = (run: Run): string => `  ${run.run_id} (${run.phase})`
+
+/**
+ * The sentence a failed resolution prints. #36's brief was wrong for hours
+ * because nothing said a second `t1` existed — so a no-match names the runs it
+ * excluded, and only offers a way into a finished one when the command has one.
+ */
+function resolveFailure(
+  ctx: Ctx, query: RunQuery, escape: string | null,
+  result: Exclude<RunResolution, { ok: true }>,
+): CmdResult {
+  const scope = [
+    phraseFor(query.phases),
+    query.taskId === null ? null : `holding ${query.taskId}`,
+    query.repoKey === null ? null : `for ${query.repoKey}`,
+    `in session ${ctx.session}`,
+  ].filter((s): s is string => s !== null).join(' ')
+
+  switch (result.reason) {
+    case 'no-such-run':
+      return fail(`no such run: ${query.runId}`)
+    case 'unreadable':
+      return fail(`${result.run.run_id} is in ${result.run.phase}, which is in no phase row — ` +
+        `rewind it to a real phase: hpipe rewind ${result.run.run_id} <phase>`)
+    case 'terminal':
+      return fail(`run ${result.run.run_id} is finished (phase: ${result.run.phase}) — ` +
+        'a finished run cannot be re-entered')
+    case 'wrong-phase':
+      return fail(`run ${result.run.run_id} is in ${result.run.phase}; ` +
+        `this needs a ${phraseFor(query.phases)}`)
+    case 'ambiguous':
+      return fail(`more than one ${scope}:\n` +
+        result.candidates.map(runLine).join('\n') +
+        '\n  → name one with --run <run-id>')
+    case 'none':
+      return fail(`found no ${scope}` + (result.excluded.length === 0 ? '' :
+        `\n  excluded:\n${result.excluded.map(runLine).join('\n')}\n` +
+        (escape === null ? '  a finished run cannot be re-entered' : `  → ${escape}`)))
+  }
+}
 
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
@@ -50,15 +101,20 @@ export async function cmdStart(ctx: Ctx, input: {
   return ok(text, JSON.stringify({ run_id: run.run_id }))
 }
 
+const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
+
 export async function cmdTask(ctx: Ctx, input: {
   branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
+  repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
-  const runs = await listRuns(ctx.stateDir, ctx.session)
-  const run = runs.find(
-    (r) => r.phase === 'intake' || r.phase === 'dispatch' || r.phase === 'execute',
-  )
-  if (!run) return fail('no run is in the intake, dispatch or execute phase')
+  const query: RunQuery = {
+    runId: input.runId, repoKey: input.repoKey,
+    phases: REGISTRABLE, taskId: null, allowTerminal: false,
+  }
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  if (!resolved.ok) return resolveFailure(ctx, query, null, resolved)
+  const run = resolved.run
 
   // The argv parser defaults a missing --issue to 0 and a missing --branch to
   // "". Without these checks a mistyped command mints a ghost task into a live
@@ -423,6 +479,8 @@ async function dispatch(argv: string[]): Promise<number> {
         dependsOn: listFlag(rest, 'depends-on'),
         files: listFlag(rest, 'files'),
         keepWorktree: rest.includes('--keep-worktree'),
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
       })
       break
 
