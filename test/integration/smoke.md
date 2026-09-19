@@ -197,11 +197,14 @@ watch -n 2 'hpipe status'
   been exercised by unit tests. Watch for one digest where a phase advances and record whether the
   box reads `[research → spec]` rather than `[spec 0m]`.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
-  all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so the footer is
-  the only thing that reports it. Expect it to name the same tasks `hpipe status` flags, and note
-  that a task parked in an orchestrator-owned row is reported **only** on ticks that already produce
-  a digest; a genuinely quiet window shows nothing. That residual gap is issue #19, not a defect
-  here.
+  all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
+  is already sending a digest the footer is what reports it. Expect it to name the same tasks
+  `hpipe status` flags.
+- **Independently of any digest, a task parked in `ci`, `merge`, `close`, `teardown` or `escalated`
+  is probed in the orchestrator's pane every `TASK_STALL_MINUTES`** (#19). In a genuinely quiet
+  window that probe is the only thing that speaks. Confirm one arrives; that its clause names what
+  the row is waiting for rather than `whatever clears <phase>`; and that the task is **never**
+  escalated by it, however long it sits — those five rows are probe-only for ever (§4c).
 - In the **supervisor pane**: no `dropping prompt for task tN — no pane`. That line means a prompt
   was generated for a task whose `pane_id` is null and thrown away; the task will sit until the
   stall probe.
