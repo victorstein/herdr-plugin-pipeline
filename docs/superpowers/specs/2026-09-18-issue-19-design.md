@@ -1,10 +1,12 @@
 # Design — issue #19: the last mile is not stallable
 
-Revision after **pass 0**'s spec review
+Revision after **pass 1**'s spec review
+(`docs/superpowers/reviews/issue-19-spec-review-1.md`, VERDICT: CLEAR — 0 BLOCKERs / 2 MAJORs /
+3 MINORs, all fixed inline here), which followed **pass 0**'s
 (`docs/superpowers/reviews/issue-19-spec-review-0.md`, VERDICT: BLOCKER — 1 BLOCKER / 3 MAJORs /
-6 MINORs) and the **Ownership ruling — `test/integration/smoke.md`, 2026-09-19** now at the bottom of
-`gh issue view 19`. Every finding is accepted; nothing is partially applied. What changed and why is
-the next section.
+6 MINORs) and the **Ownership ruling — `test/integration/smoke.md`, 2026-09-19** at the bottom of
+`gh issue view 19`. All fifteen findings are accepted; nothing is partially applied. What changed
+and why is the next section.
 
 Builds on `docs/superpowers/research/2026-09-18-issue-19-research.md`.
 
@@ -18,7 +20,22 @@ Baseline re-verified at `4d133b4`: `bun test` → **454 pass / 0 fail**, 34 file
 
 ---
 
-## What changed, by finding
+## What changed from the pass-1 review
+
+Pass 1 returned **CLEAR**, having checked each of the ten pass-0 dispositions against the spec's
+current text rather than its own table and found none half-applied, and having verified the
+must-fail list the hard way (the unedited suite fails exactly four tests, exactly the four named).
+Its five findings are fixed here.
+
+| Finding | Disposition |
+| --- | --- |
+| **MAJOR 1** — **P3** counted two permanent deadlocks; `merge` has a third at `machine.ts:167`, which this spec's own research note recorded at `research:67` and pass 0 dropped while citing the same line range | **Accepted.** **P3** now carries it with both reachable routes and its pin (`test/machine-task.test.ts:68-76`); the non-null `merge` clause no longer asserts the PR is unmerged; an error-table row and **NG11** record that the state has no recovery and wants its own issue. |
+| **MAJOR 2** — the `ci` clause called a *cancelled* run a forever-wait | **Accepted.** `rollUpBucket` maps `cancel` to `fail` (`gh.ts:19`), which advances the row back to `implement` — one of the fastest ways *out* of `ci`. The word is gone, the true behaviour is a code comment, and a negative assertion pins it. |
+| **MINOR 1** — live-verification step 7 cannot produce the clause it expects | **Accepted.** Nothing ever clears `task.pr` (`machine.ts:143` and `tasks.ts:224` are the only setters), so a deleted PR takes the non-null arm. The step is restated as a rewind into `ci` with no recorded PR. |
+| **MINOR 2** — the deadlock clauses contradict `ladderFor`'s *"clears when whatever it is waiting for arrives"* | **Accepted, fixed in the clauses rather than in `ladderFor`.** Both are rephrased as what the row *is* waiting for, with the rewind named as what produces it. Changing `ladderFor` would need a new `Awaiting` field and a `main.ts:280` edit, outside t2's holdings; recorded under Rejected alternatives. |
+| **MINOR 3** — **A11** rested on a worker-row precedent that does not cover the new orchestrator-addressed rows | **Accepted.** **A11**'s entry under Rejected alternatives now states the real reasons the template is left alone and concedes it is weak — not wrong — for `merge`, `close` and `escalated`, routing the re-wording to #14. |
+
+## What changed from the pass-0 review
 
 | Finding | Disposition |
 | --- | --- |
@@ -117,14 +134,38 @@ shares with `blocked-on-decision` — an escalated task would be probed about a 
 asked. The comment at `stall.ts:154-158` claims *"Keyed on `row.signal` … so #19 making more rows
 stallable needs no change here."* **That claim is false and this issue disproves it.**
 
-### P3 — two of the five can never clear at all, and nothing says so
+### P3 — three permanent deadlocks across two rows, and nothing says so
+
+**Extended per pass 1's MAJOR 1. The pass-0 text counted two; there are three, and the third is the
+one the new `merge` clause would lie about.**
 
 - `ciTransitions` skips a `ci` row whose `task.pr === null` (`ci.ts:12`), so CI is never polled and
   the row cannot advance.
 - `gatherSignals`' `merge` case returns `base` when `task.pr === null` (`tasks.ts:278`), so
   `s.merged` is never true and `machine.ts:165-171` never fires.
+- **`merge` is an edge, not a level.** `machine.ts:167` returns `null` unless
+  `s.mergedAtMs > task.phase_entered_at`, and `phase_entered_at` only moves forward. A PR merged
+  *before* the task entered `merge` is therefore never seen. The behaviour is deliberate and pinned
+  by `test/machine-task.test.ts:68-76` (*"merge requires mergedAt to postdate phase entry, not
+  merely MERGED"*). **This spec's own research note recorded the condition in full at `research:67`
+  — *"needs `prView().merged` **and** `mergedAtMs > phase_entered_at`"* — and pass 0 dropped the
+  second conjunct while citing the same line range.**
 
-Both are permanent deadlocks that today look exactly like a slow CI run or an unhurried human.
+  Two ordinary routes reach it. (1) The PR is merged before the supervisor moves the task out of
+  `pr-review-quality`/`ci`; merging is explicitly the human's move (`merge.md:9`) and nothing
+  serialises it against the 30s CI poll (`config.ts:32`, `main.ts:142-145`). (2)
+  `hpipe rewind <run> merge --task tN` after a merge — `cmdRewind` re-stamps
+  `task.phase_entered_at` (`cli.ts:206`) and touches neither `task.pr` nor `task.merged_at_ms`, so
+  the rewind *creates* the deadlock. That is the first row of the runbook's own recovery table
+  (`smoke.md:530`).
+
+All three are permanent deadlocks that today look exactly like a slow CI run or an unhurried human.
+
+**The third has no recovery inside the machine, and this spec does not add one (NG9).** Rewinding to
+`merge` re-creates it; rewinding to `close` leaves `merged_at_ms === null` with
+`issue_closed_at_entry === false`, so `machine.ts:178-182`'s `closedByMerge` is unsatisfiable too.
+Making it audible is this issue's job; making it impossible is a `machine.ts` change in a file this
+issue never opens. **NG11** records the follow-up.
 
 ### P4 — a parked `teardown` means the run is not being advanced
 
@@ -193,6 +234,12 @@ dependent to `blocked-on-failure`. The runbook describes the ladder that then ex
 - **NG9 — the `pr === null` deadlocks (P3) are reported, not fixed.** See **A13**.
 - **NG10 — #37 is not fixed here.** This change is its third consecutive occurrence and says so
   (**A16**), but amending a task's holdings is that issue's work.
+- **NG11 — the `merge` edge deadlock (P3's third) is reported, not fixed, and has no recovery.**
+  `machine.ts:167` and the unsatisfiable `closedByMerge` it leads to (`:178-182`) are a `machine.ts`
+  change; this issue only makes the state audible (**A6**). Pass 1's MAJOR 1 found it, and it wants
+  its own issue beside #37 — a task in that state cannot be rewound out of it. The runbook's
+  recovery table (`smoke.md:530-534`) is therefore **not** extended here, because there is no
+  recovery to document; **A10** says so rather than implying the table is complete.
 
 ---
 
@@ -392,16 +439,18 @@ order is the only thing that separates them.
     if (task.pr === null) {
       return {
         short: 'a PR number this task never recorded',
-        clause: 'This phase can never clear on its own: no PR number was recorded for this task, ' +
-          `so CI is never polled for it. \`${hpipe} rewind ${run.run_id} implement ` +
-          `--task ${task.task_id}\` sends it back to the row that produces one.`,
+        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+          `so CI is never polled for it. The rewind is what produces one: \`${hpipe} rewind ` +
+          `${run.run_id} implement --task ${task.task_id}\`.`,
       }
     }
     return {
       short: `CI on PR #${task.pr}`,
+      // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
+      // advances the row back to `implement` — one of the fastest ways OUT of ci.
       clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
-        `\`gh pr checks ${task.pr}\` — a run that is queued, cancelled or was never triggered ` +
-        'reports no conclusion, and this phase waits on it forever.',
+        `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
+        'conclusion, and this phase waits on it forever.',
     }
   }
 
@@ -411,15 +460,20 @@ order is the only thing that separates them.
     if (task.pr === null) {
       return {
         short: 'a PR number this task never recorded',
-        clause: 'This phase can never clear on its own: no PR number was recorded for this task, ' +
-          `so no merge is ever seen. \`${hpipe} rewind ${run.run_id} implement ` +
-          `--task ${task.task_id}\` sends it back to the row that produces one.`,
+        clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
+          `so no merge is ever seen. The rewind is what produces one: \`${hpipe} rewind ` +
+          `${run.run_id} implement --task ${task.task_id}\`.`,
       }
     }
     return {
       short: `PR #${task.pr} to be merged`,
+      // The second sentence is not padding: this row cannot distinguish "not yet
+      // merged" from "merged too early to be seen" (machine.ts:167), so a clause
+      // asserting the first would be false in the second.
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
-        "Merging is yours, not the plugin's; nothing merges automatically.",
+        "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
+        'merged, this phase cannot see it: only a merge that postdates this phase\'s entry ' +
+        'counts, so say so rather than waiting.',
     }
   }
 
@@ -588,6 +642,8 @@ supervisor keeps the old table until the release lands.
 | `agentPrompt` rejects the probe | No bump, no persist, still due next tick — retried every tick, unbounded | Unchanged behaviour (`stall.ts:264`); **#32** owns whether an undeliverable probe should be a rung, **#25** whether it should be bounded. Widening the set adds five rows to that population and changes neither defect |
 | A parked row is probed forever | By design (**A7**) | `ladderFor:227-229` says so in the probe itself |
 | `task.pr === null` in `ci` or `merge` | Clause names the permanent deadlock **and its exit** (**A13**, MINOR 4) | **P3** |
+| A PR merged before the task entered `merge` (`machine.ts:167`) | The row parks forever; the clause states that only a merge postdating phase entry counts, instead of asserting the PR is unmerged | **P3**'s third deadlock, pass 1 MAJOR 1. No recovery exists (**NG11**) |
+| CI reports `cancel` | Not a wait at all: `rollUpBucket` maps it to `fail` (`gh.ts:19`) and the row advances back to `implement` (`machine.ts:158-163`) | Pass 1 MAJOR 2 — the clause must not list it among the forever-waits |
 | `task.escalated_from` is `null` on an escalated task | Clause renders `<phase>` | The same placeholder `status.ts:25` and `tick.ts:37` already use |
 | Run is `escalated` or `done` | None of its tasks produce candidates | A26 (`stall.ts:98`), unchanged |
 | A run is starved by `seen.has(pane)` (`tick.ts:243`) | Its tasks are probed although nothing advances them | Wanted (**P4**); the `teardown` clause states the fact and names both causes rather than diagnosing one |
@@ -663,6 +719,17 @@ scratch tree (review `:133-140`).
   automatically"*; `close` names `gh issue view <n> --json closed,state`; `ci` names
   `gh pr checks <pr>`; `teardown`'s `short` is unchanged while its clause names **both** causes and
   asserts neither — specifically, it does not contain `throwing`.
+- **Pass 1 MAJOR 2, as a negative assertion.** The `ci` clause does **not** contain `cancelled`, for
+  the same reason the `teardown` clause does not contain `throwing`: `rollUpBucket` maps `cancel` to
+  `fail` (`gh.ts:19`), so naming it among the forever-waits is false. A sibling assertion pins the
+  roll-up itself, so the clause and `gh.ts` cannot drift apart silently.
+- **Pass 1 MAJOR 1, as a negative assertion.** The non-null `merge` clause does not assert the PR is
+  unmerged: it contains the postdates-entry sentence, so the probe is true in **P3**'s third
+  deadlock as well as in an ordinary park. Paired with a `machine.ts:167` characterisation test
+  reference — `test/machine-task.test.ts:68-76` already pins the edge, and is **not** edited.
+- **MINOR 2, as a consistency assertion.** Neither deadlock clause contains `never clear`, so no
+  probe pairs a "cannot clear" clause with `ladderFor`'s *"clears when whatever it is waiting for
+  arrives"* (`stall.ts:227-229`).
 - **A6/P2's false sentence, as a regression.** An escalated task's clause contains neither
   `open decision` nor `an answer to`, does contain `rewind`, and renders the run id and
   `--task <id>`; a `blocked-on-decision` task still returns `'an answer to the open decision'`
@@ -710,8 +777,14 @@ The unit suite cannot see delivery, and every probe here is a delivery. With
 5. A task in `escalated`: the probe names the rewind command with the right `--task` flag and the
    right origin phase, and says nothing about an open decision (**P2**).
 6. `hpipe abort` the run, wait past the threshold: **no probe for any of the five** (A26).
-7. A `ci` row whose PR was deleted: the probe reports the deadlock **and its rewind exit** (**A13**).
-8. Walk both rewritten `smoke.md` sites against what the run actually produced (**A10**) — the
+7. A `ci` row with **no recorded PR** — `hpipe rewind <run> ci --task tN` on a task that never
+   produced one. The probe reports the deadlock and its rewind exit (**A13**). **Not** a deleted PR,
+   which pass 1's MINOR 1 showed does not reach this branch: nothing ever clears `task.pr`
+   (`grep -rn "\.pr = " src` → `machine.ts:143`, `tasks.ts:224`, both setters), so a deleted PR takes
+   the non-null arm.
+8. A task parked in `merge` whose PR was merged **before** it entered the row (**P3**'s third
+   deadlock): the probe does not instruct a merge that already happened.
+9. Walk both rewritten `smoke.md` sites against what the run actually produced (**A10**) — the
    runbook is the only place a live observation gets written down, which is exactly why `6605241`
    had to repair it for #13.
 
@@ -750,6 +823,25 @@ Treat any difference between this and `smoke.md` as a finding rather than a test
   whole paragraph *"so the template asserts nothing about its shape"* (`stall.ts:148-149`), and the
   nine worker rows' wording was settled over three review rounds. The clause is the designed
   extension point.
+
+  **Pass 1's MINOR 3 is accepted: that argument was written for worker rows and does not by itself
+  cover the new recipients.** Three of the five new rows address the orchestrator as the actor who
+  must act (`merge`, `close`) or relay (`escalated`), and the template's fixed tail
+  (`stall-probe.md:1`, `:7-8` — *"# Still working?"*, *"If you are still working, ignore this"*)
+  invites exactly the shrug #19 exists to end. It is still not edited here, for two reasons stated
+  rather than assumed: `prompts/*` is outside t2's declared holdings and **A16** is already
+  stretching that twice; and the tail's second sentence — *"If you are stuck or waiting on a human,
+  say so now rather than waiting silently"* — is the one that carries a parked row, so the template
+  is weak for these rows, not wrong. Re-addressing the template belongs with #14, which owns the
+  operator-facing wording of a parked task.
+
+- **Giving `ladderFor` a second non-escalatable sentence** for a clause that has already said the row
+  cannot clear — pass 1's MINOR 2, which found the deadlock clauses colliding with
+  *"clears when whatever it is waiting for arrives"* (`stall.ts:227-229`). Rejected in favour of
+  fixing the clauses: `ladderFor` cannot know what the clause said without a new field on `Awaiting`
+  and a matching change at its call site in `main.ts:280`, which is outside t2's holdings. The
+  deadlock clauses are instead phrased as what the row *is* waiting for — a PR number — with the
+  rewind named as what produces it, which is true and does not contradict the ladder sentence.
 - **Matching `escalated` by phase name rather than `row.actor === 'human'`.** `tick.ts:126-128`
   chooses the opposite for `parkedFooter`, reasoning that *"a future human-owned row has to opt in
   here instead of inheriting this"* — correct there, because the footer is an opt-in list of who to
