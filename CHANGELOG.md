@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.9](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.8...v1.2.9) (2026-09-19)
+
+
+### Bug Fixes
+
+* probe the last mile so a parked task never stops in silence ([#47](https://github.com/victorstein/herdr-plugin-pipeline/issues/47)) ([2e8f9fd](https://github.com/victorstein/herdr-plugin-pipeline/commit/2e8f9fdc57f51b9750013fa78e4decb6eceff96d)), closes [#19](https://github.com/victorstein/herdr-plugin-pipeline/issues/19)
+
 ## [1.2.8](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.7...v1.2.8) (2026-09-19)
 
 
