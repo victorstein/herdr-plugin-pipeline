@@ -46,7 +46,7 @@ test('a nonexistent repo root declares nothing and does not throw', () => {
 })
 
 test('an undeclared repo still gets a line, the way files: does', () => {
-  // src/cli.ts:252-255 records why: a declaration that matches nothing is
+  // src/cli.ts:254-257 records why: a declaration that matches nothing is
   // otherwise silent by construction.
   expect(bootstrapLine({ kind: 'none' })).toBe('bootstrap: none')
 })
@@ -60,7 +60,7 @@ test('a non-executable declaration names the fix', () => {
 })
 
 test('every bootstrap line is exactly one line', () => {
-  // Both emitters put this ABOVE the blank line that prompts/dispatch.md:26-28
+  // Both emitters put this ABOVE the blank line that prompts/dispatch.md:26-30
   // uses to split orchestrator text from worker text. A newline here moves that
   // boundary and the orchestrator pastes its own instructions into the worker's
   // prompt.

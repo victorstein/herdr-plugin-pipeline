@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** Printed verbatim into prompts as well as resolved on disk; one constant for both. */
@@ -20,9 +20,9 @@ export type Bootstrap =
  */
 export function repoBootstrap(repoRoot: string): Bootstrap {
   try {
-    const path = join(repoRoot, BOOTSTRAP_REL)
-    if (!existsSync(path)) return { kind: 'none' }
-    const info = statSync(path)
+    // statSync throws ENOENT on a missing path, so the catch below IS the
+    // not-found path rather than a guard against exotic errors only.
+    const info = statSync(join(repoRoot, BOOTSTRAP_REL))
     // A directory carries the executable bits, so isFile() is what excludes one.
     if (!info.isFile()) return { kind: 'none' }
     return (info.mode & 0o111) === 0 ? { kind: 'not-executable' } : { kind: 'ready' }
@@ -33,7 +33,7 @@ export function repoBootstrap(repoRoot: string): Bootstrap {
 
 /**
  * One line, in the `files:` shape, addressed to the orchestrator. Single-line is
- * a contract rather than a style: see the test that pins it.
+ * a contract rather than a style; `test/bootstrap.test.ts` pins it.
  */
 export function bootstrapLine(b: Bootstrap): string {
   if (b.kind === 'none') return 'bootstrap: none'

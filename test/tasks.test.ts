@@ -531,7 +531,7 @@ test('the dispatch prompt names the repo bootstrap above the blank line', async 
   const text = prompts[0]!.text
   expect(text).toContain('bootstrap: .claude/pipeline-bootstrap')
 
-  // The blank-line split prompts/dispatch.md:26-28 documents: everything before
+  // The blank-line split prompts/dispatch.md:26-30 documents: everything before
   // the first blank line is the orchestrator's, everything after is the worker's.
   const head = text.split('\n\n')[0]!
   expect(head).toContain('bootstrap: .claude/pipeline-bootstrap')

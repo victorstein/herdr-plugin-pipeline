@@ -23,10 +23,11 @@ needs it.
 Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
 issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
 for `{{hpipe}} decide`. Do not summarise it, do not add task text of your own: the issue body is the
-brief, and anything you say here instead of in the issue is lost. When the brief came from `{{hpipe}} task`, the three header
-lines above it — `task_id:`, `files:` and `bootstrap:` — are for you and not for the worker: confirm the
-`files:` line matches what you declared, run what `bootstrap:` names in the new checkout before
-`agent start`, then hand over everything from the blank line onward. `{{hpipe}}
+brief, and anything you say here instead of in the issue is lost. When the brief came from
+`{{hpipe}} task`, the three header lines above it — `task_id:`, `files:` and `bootstrap:` — are for
+you and not for the worker: confirm the `files:` line matches what you declared, run what
+`bootstrap:` names in the new checkout before `agent start`, then hand over everything from the
+blank line onward. `{{hpipe}}
 brief --task <id>` prints the brief bare, with no header lines and no `files:` echo, so hand that
 one over whole — its first blank line falls after the `# <branch> — issue #<n>` heading, and
 stripping to it would drop the heading.
