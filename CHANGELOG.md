@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.11](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.10...v1.2.11) (2026-09-20)
+
+
+### Bug Fixes
+
+* assign each review its own verdict path instead of deriving one ([#52](https://github.com/victorstein/herdr-plugin-pipeline/issues/52)) ([f406173](https://github.com/victorstein/herdr-plugin-pipeline/commit/f40617380d7a52baf6b781d6857e309d8061d2e5)), closes [#26](https://github.com/victorstein/herdr-plugin-pipeline/issues/26)
+
 ## [1.2.10](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.9...v1.2.10) (2026-09-19)
 
 
