@@ -42,3 +42,20 @@ export function bootstrapLine(b: Bootstrap): string {
   }
   return `bootstrap: ${BOOTSTRAP_REL}`
 }
+
+/**
+ * The worker's copy. Conditional on purpose: the orchestrator may have skipped
+ * the line entirely, so this offers a recovery rather than asserting a state.
+ */
+export function briefNote(b: Bootstrap): string {
+  if (b.kind === 'none') return ''
+  // The wrap falls after `run`: break it one word earlier and `should have been
+  // run` spans a newline plus `> `, which weakens the test that holds this note
+  // conditional rather than assertive.
+  const caveat = b.kind === 'not-executable'
+    ? ` It is not executable — \`chmod +x ${BOOTSTRAP_REL}\` before you run it.`
+    : ''
+  return `> This repo declares a worktree bootstrap at \`./${BOOTSTRAP_REL}\`, which should have been run\n` +
+    '> in this checkout before you started. If a build, test or typecheck fails on a missing\n' +
+    `> dependency, run it yourself rather than installing anything by hand.${caveat}`
+}

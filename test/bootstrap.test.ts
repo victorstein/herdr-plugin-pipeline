@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BOOTSTRAP_REL, bootstrapLine, repoBootstrap } from '../src/lib/bootstrap'
+import { BOOTSTRAP_REL, bootstrapLine, briefNote, repoBootstrap } from '../src/lib/bootstrap'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -67,4 +67,21 @@ test('every bootstrap line is exactly one line', () => {
   for (const kind of ['none', 'ready', 'not-executable'] as const) {
     expect(bootstrapLine({ kind })).not.toContain('\n')
   }
+})
+
+test('an undeclared repo adds nothing to the worker brief', () => {
+  expect(briefNote({ kind: 'none' })).toBe('')
+})
+
+test('the worker note offers a recovery, it does not assert the bootstrap ran', () => {
+  // The mechanism instructs, it does not enforce. A worker told flatly that its
+  // checkout is bootstrapped will misdiagnose a real `command not found`.
+  const note = briefNote({ kind: 'ready' })
+  expect(note).toContain('should have been run')
+  expect(note).not.toContain('run for you')
+  expect(note).toContain(BOOTSTRAP_REL)
+})
+
+test('a non-executable declaration tells the worker how to fix it', () => {
+  expect(briefNote({ kind: 'not-executable' })).toContain(`chmod +x ${BOOTSTRAP_REL}`)
 })
