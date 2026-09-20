@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr } from './lib/herdr'
@@ -256,6 +257,11 @@ export async function cmdTask(ctx: Ctx, input: {
   // declaration that matches nothing is silent by construction.
   const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
 
+  // The same line the supervisor's dispatch prompt prints, on the path that
+  // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
+  // supervisor's tick. Measured on the live ledger.
+  const bootLine = bootstrapLine(repoBootstrap(run.repo_root))
+
   const gate = gateStatus(task, run.tasks)
   if (gate.state !== 'ready') {
     return ok(`task_id: ${task.task_id}\n${filesLine}\nqueued: waiting on ${gate.on.join(', ')}`)
@@ -267,7 +273,7 @@ export async function cmdTask(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`task_id: ${task.task_id}\n${filesLine}\n\n${prompt}`)
+  return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\n\n${prompt}`)
 }
 
 /**
