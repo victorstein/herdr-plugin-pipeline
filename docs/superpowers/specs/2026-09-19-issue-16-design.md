@@ -1,10 +1,12 @@
 # Design — issue #16: fresh worktrees are not bootstrapped
 
-Revision after **pass 0**'s spec review
+Revision after the **post-rewind** spec review
+(`docs/superpowers/reviews/issue-16-spec-review-0.md`, VERDICT: CLEAR — 0 BLOCKERs / 1 MAJOR /
+5 MINORs, all fixed inline here), which followed **pass 0**'s
 (`docs/superpowers/reviews/issue-16-spec-review-pass0-preserved.md`, VERDICT: BLOCKER — 1 BLOCKER /
 2 MAJORs / 4 MINORs) and the **Ownership ruling — `src/cli.ts`, 2026-09-19** at the bottom of
-`gh issue view 16`. All seven findings are accepted; none is partially applied. What changed and why
-is the next section.
+`gh issue view 16`. All thirteen findings are accepted; nothing is partially applied. What changed
+and why is the next two sections.
 
 The review file was renamed from `issue-16-spec-review-0.md` before this revision: the rewind into
 `spec` resets this task's pass counter, so the next verdict would be written to the pass-0 path and
@@ -16,7 +18,7 @@ Builds on `docs/superpowers/research/2026-09-19-issue-16-research.md`, cited as 
 **Modelled on `docs/superpowers/specs/2026-09-18-issue-21-design.md`** for section order and on
 `docs/superpowers/specs/2026-09-18-issue-19-design.md` for the *What changed* disposition table that
 a revision pass owes its reviewer. The text builders in **C1** are modelled on
-`src/supervisor/stall.ts:255-289` (`awaitingFor`); the header-line emission in **C3** is modelled on
+`src/supervisor/stall.ts:255-289`, inside `stallAwaiting` (`src/supervisor/stall.ts:164`); the header-line emission in **C3** is modelled on
 `filesLine` at `src/cli.ts:252-255`, which is the specific idiom the ruling directs this work to
 mirror.
 
@@ -25,6 +27,30 @@ Baseline re-verified in this worktree at `78447de`: `bun test` → **503 pass / 
 both independently and got the same.
 
 ---
+
+## What changed from the post-rewind review
+
+It returned **CLEAR**, having re-derived all seven pass-0 findings against the spec's current text
+rather than trusting the disposition table below, and having found six genuinely applied and one
+half-applied. Its six findings are fixed here.
+
+| Finding | Disposition |
+| --- | --- |
+| **MAJOR 1** — C3 claimed `prompts/dispatch.md` "already tells the orchestrator that the lines above the blank line are for you", so the header line "needs no new convention". The prose at `:26-28` in fact says "the **two** header lines above it — `task_id:` and `files:`" and attaches a per-line action to each; C6 never scheduled that sentence for amendment | **Accepted — the citation did not say what I quoted it as saying.** C3 no longer claims the convention is free: it is *extended by one line*, and **C6** now amends `:26-28` in the same change (count → three, enumeration gains `bootstrap:`, and `bootstrap:` gets its own action beside `files:`'s). Testing item 21 pins it so the count cannot drift again. The generic "hand over everything from the blank line onward" rule is what actually keeps the worker's prompt correct, and that part is untouched. The ruling in the issue body makes the same loose paraphrase, which is where I inherited it. |
+| **MINOR 1** — the live-verification checklist cannot run at all until a release ships and the pinned plugin is reinstalled; unstated, so every bullet would read `bootstrap: none` and be recorded as a pass by absence | **Accepted.** The block now states both preconditions (`resolved_commit be181757…` predates this branch; detection needs `.claude/pipeline-bootstrap` on `main`), names the sequence merge → release → `herdr plugin install` → observe, and says outright that a `bootstrap: none` reading before that is uninformative rather than a failure. This is the same pass-by-absence trap the checklist was rewritten to fix for pass 0 — caught here on its second instance. |
+| **MINOR 2** — `cmdBrief` silently gets the worker note but not the header line | **Accepted.** New **NG9** states the exclusion, both binding reasons (ruling condition (2); `prompts/dispatch.md:28-31` already documents `brief --task` as carrying no header lines), and the real consequence for an orchestrator recovering context through it. |
+| **MINOR 3** — three citations wrong, two inside the line range the ruling scopes the edit by | **Accepted, all verified against the source.** `src/cli.ts:258` → `:260` (the queued return), `:263` → `:265` (`:263` is the first line of its comment — the ruling's own range start, which is where the off-by-two came from), `awaitingFor` → `stallAwaiting` (`src/supervisor/stall.ts:164`; `grep -rn awaitingFor src/` → no output), `tasks.ts:148-153` → `:149-155` for the push. |
+| **MINOR 4** — **A13** covered the working-tree-vs-ref mismatch for existence but not for the executable bit, which **C5** also reads from the working tree | **Accepted.** **A13** now names both mode directions, and the error table gains two rows: a `755` working-tree copy against a `644` base ref (which defeats the case **C5** exists to prevent), and `not-executable` reported about a file that is `755` on the base ref (a no-op remediation). |
+| **MINOR 5** — tests 10-13 are routed to `test/cli-commands.test.ts`, the validation-failure file, while the actual precedents for `cmdTask` output-shape assertions live in `test/cli.test.ts:206-246`, named nowhere | **Accepted, with the routing kept.** `test/cli.test.ts:206-246` is now named as the modelled example, fixture by fixture, plus `test/cli-argv.test.ts:52-98`. The tests still go to `test/cli-commands.test.ts` because that is what the ruling grants; taking `test/cli.test.ts` would collide with nothing but would widen the grant without a ruling, which is the habit this batch is trying to break. If the plan phase disagrees, that is a decision to surface. |
+
+**What the post-rewind review confirmed, and what is therefore not re-litigated.** It independently
+reproduced the 17-vs-3 dispatch count, the 503/0 baseline and the clean typecheck; confirmed
+`deliver.ts:250-255` passes only `{run_id, title, pass, verdict_path, repo_root}` to the `dispatch`
+render, so **A11**'s no-new-token constraint is correct; confirmed `src/lib/repo.ts:17-25` yields a
+directory with no ref, so **A13** is the right shape; confirmed `.claude/` is tracked, so shipping
+`.claude/pipeline-bootstrap` works; and confirmed that every existing `files:` assertion is
+`toContain` (`test/cli.test.ts:224,243`, `test/cli-argv.test.ts:57,67,97`), so a third header line
+breaks none of them. It stated it would not change the central judgement.
 
 ## What changed from the pass-0 review
 
@@ -93,7 +119,7 @@ context, and runs in the *plugin's* directory (`research:§4`).
 
 **And there are two dispatch paths, not one.** This is what pass 0 got wrong and what the ruling
 settles. `cmdTask` dispatches a ready task inline at registration —
-`enterTaskPhase(run, task, …, 'dispatched at registration')` at `src/cli.ts:263`, then
+`enterTaskPhase(run, task, …, 'dispatched at registration')` at `src/cli.ts:265`, then
 `renderWorkerPrompt` at `:268` — so the supervisor's `queued` branch at `src/supervisor/tasks.ts:140`
 never fires for it. Counted over every run on disk:
 
@@ -115,7 +141,7 @@ dispatch paths**, with no orchestrator memory involved:
 
 1. `cmdTask`'s inline registration output (`src/cli.ts:255-269`) — the path that carried 17 of the
    last 20 dispatches.
-2. The supervisor's per-task dispatch message (`src/supervisor/tasks.ts:148-153`) — the path for a
+2. The supervisor's per-task dispatch message (`src/supervisor/tasks.ts:149-155`) — the path for a
    task whose gate opens later.
 
 The standing *procedure* — run it in the new checkout after `worktree create`, before `agent start` —
@@ -153,6 +179,16 @@ bootstrapped by the mechanism rather than by hand.
 - **NG7 — Windows.** `herdr-plugin.toml:6` declares `platforms = ["macos", "linux"]`.
 - **NG8 — `cmdRewind` is not touched.** Ruling condition (2): #26's `src/cli.ts` work is in
   `cmdRewind`, and this change stays inside `cmdTask`.
+- **NG9 — `cmdBrief` keeps printing the brief bare.** It gets **C4**'s worker note, because it calls
+  `renderWorkerPrompt`, but **not** the `bootstrap:` header line. Two binding reasons: ruling
+  condition (2) confines the `src/cli.ts` edit to `cmdTask`, and `cmdBrief` is a different function
+  at `:277-287`; and `prompts/dispatch.md:28-31` already documents that `brief --task <id>` "prints
+  the brief bare, with no header lines and no `files:` echo", which extends to `bootstrap:` by the
+  same sentence. The consequence is stated here rather than discovered later: an orchestrator
+  recovering context through `brief --task` — the documented escape hatch, whose docstring at
+  `src/cli.ts:272-276` exists because otherwise "an orchestrator that loses its context has no way
+  back to the text it is supposed to hand over" — must re-read the `bootstrap:` line from its
+  original `hpipe task` output, or re-derive it from the repo.
 
 ## Architecture
 
@@ -197,7 +233,7 @@ already key off it. What it does **not** pin is a git ref: see **A13**.
 
 ### C2 — the supervisor's dispatch message carries the line
 
-`src/supervisor/tasks.ts:148-153` composes the per-task dispatch prompt today:
+`src/supervisor/tasks.ts:149-155` composes the per-task dispatch prompt today:
 
     text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
       `worktree create --cwd ${run.repo_root}:\n\n` +
@@ -217,7 +253,7 @@ header lines above the blank line and already documents why:
     // … so a declaration that matches nothing is silent by construction.
     const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
 
-A `bootstrapLine` is emitted beside it, in both return statements — the `queued` one at `:258` and
+A `bootstrapLine` is emitted beside it, in both return statements — the `queued` one at `:260` and
 the dispatched one at `:269` — so the orchestrator sees it whether or not the task dispatches
 immediately. The shape becomes:
 
@@ -228,8 +264,12 @@ immediately. The shape becomes:
     # fix/16-worktree-bootstrap — issue #16
     …
 
-`prompts/dispatch.md:26-31` already tells the orchestrator that the lines above the blank line are
-"for you and not for the worker", so this needs no new convention and no `{{token}}`.
+`prompts/dispatch.md:26-28` already establishes this convention — but it establishes it *by name and
+count*: "the **two** header lines above it — `task_id:` and `files:`", with a per-line action
+attached to each. A third line makes that sentence stale, so **the convention is not free: it is
+extended by one line, and C6 amends that prose in the same change.** What survives untouched is the
+generic rule in the same sentence — "hand over everything from the blank line onward" — which is what
+keeps the worker's prompt correct, and no `{{token}}` is needed either way (**A11**).
 
 **Holdings.** `src/cli.ts` and `test/cli-commands.test.ts` are this task's per the ruling. Edits are
 confined to `cmdTask` around `:255-269`; `cmdRewind` is not touched (**NG8**); this task merges
@@ -267,7 +307,14 @@ it.
 
 ### C6 — the procedure, this repo's own script, and the README contract
 
-- **`prompts/dispatch.md`** gains a short static subsection: what the `bootstrap:` header line means,
+- **`prompts/dispatch.md`** is amended in **two** places. First, the sentence at `:26-28` — the only
+  place in the repo that instructs the orchestrator *per header line* — is corrected: "the two header
+  lines" → "the three header lines"; the enumeration becomes `task_id:`, `files:` and `bootstrap:`;
+  and `bootstrap:` gets an action of its own beside `files:`'s "confirm the `files:` line matches
+  what you declared" — namely *run the named script in the new checkout before `agent start`*.
+  Leaving the count stale is how a convention silently drifts, and nothing pins that wording today
+  (`test/prompts.test.ts`'s only `dispatch.md` assertion is `:60-66`), so testing item 21 adds the
+  pin. Second, it gains a short static subsection: what the `bootstrap:` header line means,
   that the script is run **in the new checkout** after `worktree create` and before `agent start`
   (`(cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)`), and — per MAJOR 1 — that a
   script **absent from the new checkout is skipped, not escalated**; only a non-zero exit of a script
@@ -295,8 +342,8 @@ Unchanged parts are marked (=). **Both dispatch paths now carry the line.**
     PATH A — registration (17 of the last 20 dispatches)
     (=) hpipe task …                                   src/cli.ts:165-269
          ├─ NEW: repoBootstrap(run.repo_root) → bootstrapLine(...)
-         ├─ (=) gate not ready  → "task_id: / files: / bootstrap: / queued: waiting on …"   :258
-         └─ (=) gate ready      → enterTaskPhase(… 'dispatched at registration')            :263
+         ├─ (=) gate not ready  → "task_id: / files: / bootstrap: / queued: waiting on …"   :260
+         └─ (=) gate ready      → enterTaskPhase(… 'dispatched at registration')            :265
                                   "task_id: / files: / bootstrap:" + "\n\n" + brief         :269
 
     PATH B — supervisor, for a task whose gate opens later (3 of 20)
@@ -304,7 +351,7 @@ Unchanged parts are marked (=). **Both dispatch paths now carry the line.**
          ├─ NEW: repoBootstrap(run.repo_root) → bootstrapLine(...)
          └─ (=) prompt to run.orchestrator_pane:
                 "Dispatch … worktree create --cwd <root>:" + "\n" + bootstrap line
-                                                       + "\n\n" + renderWorkerPrompt(...)  :148-153
+                                                       + "\n\n" + renderWorkerPrompt(...)  :149-155
 
     BOTH → renderWorkerPrompt                          src/lib/worker-prompt.ts:10-36
          └─ NEW: briefNote(...) → {{bootstrap_note}}   prompts/worker-brief.md:15
@@ -334,6 +381,8 @@ and **`schema_version` does not change** — so runs already on disk are unaffec
 | Declared and executable | `bootstrap: .claude/pipeline-bootstrap`; brief note renders | The intended path |
 | Declared, not executable | Line carries `(NOT EXECUTABLE — chmod +x it on the base branch)`; brief note says the same | Turns `permission denied` into a named fix (**C5**) |
 | Declared in `repo_root`'s working tree but **absent from the new worktree** | Orchestrator skips it and starts the worker; no escalation | **A13**: detection sees a working tree, not the base ref. Halting a whole batch on a stale detection is worse than the defect (MAJOR 1) |
+| Declared and executable in `repo_root`'s working tree but `644` in the new worktree | Orchestrator gets `permission denied`; treat it as the `not-executable` case and `chmod +x` on the base branch | **A13**: the mode bit is read from the working tree, exactly like existence, so **C5** cannot catch this one |
+| Reported `not-executable` but `755` on the base ref | The `chmod +x` remediation is a no-op; the script runs | **A13**, the same mismatch the other way. Harmless noise, recorded so it is not re-diagnosed |
 | Script exists in the worktree and exits non-zero | Orchestrator stops and reports; worker not started | The only case where halting is justified (**C6**) |
 | A **directory** at that path | `{ kind: 'none' }` | `existsSync` is true and `mode & 0o111` is set on a directory, so `isFile()` is what excludes it (**A7**; MINOR 3) |
 | `repoRoot` missing, or `statSync` throws (EACCES, ELOOP, dangling symlink) | Caught → `{ kind: 'none' }` | `renderWorkerPrompt` and `cmdTask` must never throw: both are on the dispatch path. `src/lib/herdr.ts:33-41` sets the precedent — degrade, never crash the supervisor loop |
@@ -347,7 +396,7 @@ and **`schema_version` does not change** — so runs already on disk are unaffec
 | **A2** | **Absence is echoed, not silent** — `bootstrap: none`. *Reversed from pass 0.* `filesLine`'s own comment (`src/cli.ts:252-255`) is this repo's recorded reasoning for echoing recorded state: a declaration that matches nothing is otherwise "silent by construction". One word is not nagging, and it distinguishes "this repo declares none" from "the detector did not run" | If it reads as noise, drop it from **C2** only and keep it on **C3**, where the `files:` precedent is literally adjacent |
 | **A3** | **The orchestrator runs it, between `worktree create` and `agent start`.** Taken from the issue's Directions — *"run after `worktree create` and before the worker starts"* — and it is the window the hand-fix actually used (`research:§2`) | The alternative is the worker's first turn, which leaves the worktree broken for anything the orchestrator does in between, and contradicts the issue |
 | **A4** | **The worker is told too**, as recovery, not as a second execution | Unconditional re-running would be safe (**A6**) but doubles `npm ci`-class cost on every task |
-| **A5** | **Two renderers, one reader.** `bootstrapLine` and `briefNote` over one `Bootstrap`, following `awaitingFor`'s `{short, clause}` pair at `src/supervisor/stall.ts:274-283` | One shared string would be wrong for one of the two audiences |
+| **A5** | **Two renderers, one reader.** `bootstrapLine` and `briefNote` over one `Bootstrap`, following `stallAwaiting`'s `{short, clause}` pair at `src/supervisor/stall.ts:274-283` | One shared string would be wrong for one of the two audiences |
 | **A6** | **The script must be idempotent**, stated in the README contract. `bun install`, `npm ci`, `uv sync`, `git submodule update --init` all are | A worker following **C4**'s recovery could damage its checkout |
 | **A7** | `repoBootstrap` requires a **regular file** (`statSync().isFile()`) before the mode test | A directory named `pipeline-bootstrap` would render as `ready` |
 | **A8** | The mechanism **instructs; it does not enforce.** The durability win is that the knowledge is in the repo and re-rendered on every dispatch by both paths, not that execution is guaranteed. There is no non-agent executor in that window (**NG1**) | If enforcement is required, the answer is a herdr feature request, not a plugin change |
@@ -355,7 +404,7 @@ and **`schema_version` does not change** — so runs already on disk are unaffec
 | **A10** | Nothing is added to the ledger; `schema_version` is untouched | A bump makes live runs invisible to the installed supervisor (`.claude/agents/plugin-dev.md`) |
 | **A11** | `prompts/dispatch.md` gets **static** prose only, no `{{token}}`, because its render site is the sibling's file | A token without the matching var in `deliver.ts:251-256` throws at delivery, in an agent's face |
 | **A12** | The name is `pipeline-bootstrap`, flat under `.claude/`, not a `.claude/pipeline/` directory | There is exactly one such file; a directory is speculative |
-| **A13** | *(new, MAJOR 1)* Detection reads `run.repo_root`'s **working tree**, which is assumed to be at or near the base the worktree is cut from (`--base main`, `prompts/dispatch.md:8`). `src/lib/repo.ts:17-25` yields a directory, with no ref in it. A primary checkout parked on an unrelated branch renders a stale line — in either direction | Handled, not prevented: the **C6** procedure is non-fatal on absence, so a false positive costs one skipped command rather than a halted batch. A false negative reverts to today's behaviour. Making it exact would need `git cat-file -e main:…`, which breaks C1's no-spawn/no-throw contract |
+| **A13** | *(new, MAJOR 1)* Detection reads `run.repo_root`'s **working tree**, which is assumed to be at or near the base the worktree is cut from (`--base main`, `prompts/dispatch.md:8`). `src/lib/repo.ts:17-25` yields a directory, with no ref in it. A primary checkout parked on an unrelated branch renders a stale line — in either direction | Handled, not prevented: the **C6** procedure is non-fatal on absence, so a false positive costs one skipped command rather than a halted batch. A false negative reverts to today's behaviour. **The same mismatch applies to the executable bit**, which `repoBootstrap` also reads from the working tree: `not-executable` can be reported about a file that is `755` on the base ref (its `chmod +x` remediation is then a no-op), and a `755` working-tree copy renders a clean `ready` line while the base ref's is `644` — the very case **C5** exists to prevent, defeated by this mismatch. Both directions now have error-table rows. Making any of it exact would need `git cat-file -e main:…`, which breaks C1's no-spawn/no-throw contract |
 | **A14** | *(new, the ruling)* This task holds `src/cli.ts` and `test/cli-commands.test.ts` **by ruling, not by the gate** — the ledger records them on t1 (#26). Therefore: **#16 merges second**; rebase onto `main` after #26 lands and re-run `bun test` and `bun run typecheck` on the rebased result before opening the PR; edits confined to `cmdTask` `:255-269`; **a real rebase conflict is surfaced, not resolved** | If #26 lands changes inside `cmdTask` after all, the conflict is surfaced per the ruling's condition (3) rather than resolved here |
 
 ## Testing strategy
@@ -381,9 +430,25 @@ defects twice, so the live step below is not optional.
 
 **`test/cli-commands.test.ts`** (this task's per the ruling; edits appended, `cmdRewind` untouched)
 
+**Modelled on `test/cli.test.ts:206-246`** — two tests that already assert exactly this contract:
+"task echoes the file set it recorded while gated" (`:206-226`, asserting `task_id: t2`,
+`files: src/lib/gating.ts, src/cli.ts` and `queued: waiting on t1`) is the fixture item 11 needs, and
+"task echoes `files: none` on the dispatched return when nothing was declared" (`:228-246`, whose
+comment reads "The brief still follows, after the header lines") is the fixture items 10, 12 and 13
+need. `test/cli-argv.test.ts:52-98` proves the same contract through the real argv parser in a
+subprocess, and its `fixture()` at `:20-35` already writes `<repo>/.claude/agents/core-dev.md`, one
+`mkdirSync` from also writing `.claude/pipeline-bootstrap`.
+
+**Why the new tests go to `test/cli-commands.test.ts` anyway, and not to the file they are modelled
+on:** the ruling grants this task `src/cli.ts` and `test/cli-commands.test.ts`, and nothing else.
+`test/cli.test.ts` and `test/cli-argv.test.ts` are in neither task's registered `--files`, so taking
+them would collide with nothing — but it would also widen the grant without a ruling, which is the
+habit this batch is trying to break. If the plan phase concludes the tests genuinely belong beside
+their precedents, that is a decision to surface, not to take silently.
+
 10. **Must fail before the change:** `cmdTask` on a run whose `repo_root` contains an executable
     `.claude/pipeline-bootstrap` returns output containing `bootstrap: .claude/pipeline-bootstrap`.
-11. The same, for the **not-ready/queued** return at `src/cli.ts:258` — the line must appear there
+11. The same, for the **not-ready/queued** return at `src/cli.ts:260` — the line must appear there
     too, not only on the dispatched path.
 12. **The blank-line contract (MAJOR 2):** in `cmdTask`'s dispatched output, every line before the
     first blank line is a header (`task_id:`, `files:`, `bootstrap:`), and the first line *after*
@@ -409,13 +474,32 @@ defects twice, so the live step below is not optional.
     added or removed — and `no prompt hardcodes the hpipe binary` (`:68-76`), so the new
     `dispatch.md` prose must not contain the literal `hpipe`.
 20. `README.md` mentions `.claude/pipeline-bootstrap`, in the style of `:88-100`.
+21. **The header-line convention cannot drift again (MAJOR 1):** `prompts/dispatch.md` names
+    `bootstrap:` alongside `task_id:` and `files:`, and no longer says "two header lines". Modelled
+    on `test/prompts.test.ts:60-66`, the existing `dispatch.md` content assertion.
 
 **Whole suite:** `bun test` and `bun run typecheck` both green, **re-run after the rebase onto `main`
 that follows #26** (**A14**), with the real numbers quoted in the PR body. CI is a PR-title lint only
 (`.github/workflows/pr-title-lint.yml`), so nothing else runs them.
 
 **Live verification (required, not a test).** The unit suite cannot prove an orchestrator reads and
-acts on the line. On the next real batch in this repo, whose `.claude/pipeline-bootstrap` **C6**
+acts on the line.
+
+**Two preconditions gate every bullet below, and neither is optional.** (1) The plugin that serves
+`hpipe task` and runs the supervisor is a GitHub install pinned to a commit — currently
+`resolved_commit be181757…`, i.e. `main` before this branch existed (`herdr plugin list --json`) — so
+**C1**, **C2** and **C3** are invisible to a live run until a release lands and
+`herdr plugin install victorstein/herdr-plugin-pipeline` refreshes that pinned copy. The obvious
+shortcut is forbidden by `.claude/agents/plugin-dev.md:46-49`: never link or run the checkout's
+`src/cli.ts` against live state. (2) Detection reads `run.repo_root`'s working tree (**A13**) — the
+primary checkout on `main` — so `.claude/pipeline-bootstrap` only exists there once #16 has merged.
+
+The sequence is therefore: merge #16 (**second**, per **A14**) → release-please cuts a version →
+reinstall the plugin → only then observe. **A `bootstrap: none` reading before that sequence
+completes is uninformative, not a failure** — recording it as a pass is precisely the
+pass-by-absence trap this checklist was rewritten to avoid.
+
+On the next real batch in this repo after that sequence, whose `.claude/pipeline-bootstrap` **C6**
 ships:
 
 - **the `hpipe task` output carries `bootstrap: .claude/pipeline-bootstrap`** — this is the check
