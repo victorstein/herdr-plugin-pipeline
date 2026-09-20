@@ -1,12 +1,21 @@
 # A verdict path assigned once under a stable key — design (#26)
 
-Pass 3. Written against this worktree at `ca142fb` (branch `fix/26-verdict-overwrite`), building on
-`docs/superpowers/research/2026-09-19-issue-26-research.md`, answering
-`docs/superpowers/reviews/issue-26-spec-review-0.md`, and governed by the `Ruling` section on issue
-#26 (2026-09-19) **as clarified by the orchestrator after that review**. The two earlier reviews are
-`docs/superpowers/reviews/issue-26-spec-review-pass0-preserved.md` and `…-pass1-preserved.md`; they
-were renamed at `b43b73f` by this issue's own hand-applied workaround. Every claim about current
-behaviour carries a `file:line` or the command that produced it.
+Pass 3, revised in place after its review cleared. Written against this worktree at `91fc730`
+(branch `fix/26-verdict-overwrite`), building on
+`docs/superpowers/research/2026-09-19-issue-26-research.md` and governed by the `Ruling` section on
+issue #26 (2026-09-19) **as clarified by the orchestrator** after the third review.
+
+Four reviews stand behind it, in order:
+
+| Review | Verdict | Where it landed |
+|---|---|---|
+| `…/issue-26-spec-review-pass0-preserved.md` | BLOCKER (1/3/6) | rewrote pass 0 into pass 1 |
+| `…/issue-26-spec-review-pass1-preserved.md` | BLOCKER (1/2/5) | triggered the ruling; pass 2 |
+| `…/issue-26-spec-review-0.md` | BLOCKER (1/1/6) | triggered the clarification; pass 3 |
+| `…/issue-26-spec-review-1.md` | **CLEAR** (0/2/4) | both MAJORs and all four MINORs applied below |
+
+The first two filenames are this issue's own bug, hand-worked-around at `b43b73f`. Every claim about
+current behaviour carries a `file:line` or the command that produced it.
 
 **Modelled on** `src/lib/gating.ts` for a pure `src/lib/` module imported by both `src/cli.ts` (`:5`)
 and `src/supervisor/tasks.ts` (`:4`); `src/lib/predicates.ts:1` for a `src/lib/` module that stats the
@@ -86,8 +95,24 @@ reports. The other is a *wedge*: after a rewind the key regresses onto a file ol
 `phase_entered_at`, `isFresh` (`src/lib/predicates.ts:10-20`, read at `src/supervisor/main.ts:196`)
 can never accept it, and the row waits for the stall ladder. Measured on this task, on 2026-09-19:
 `phase: spec-review`, `passes: {}`, `phase_entered_at` 22:56:44, `issue-26-spec-review-0.md` mtime
-16:56:38 — six hours stale, `artifacts.verdicts: {}`. Both faces have the same root cause, and both
-are closed by a key that cannot regress.
+16:56:38 — six hours stale, `artifacts.verdicts: {}`. That measurement is specifically a rewind
+**onto** the review row — this run's own t1 history reads
+`22:56:44 rewind -> spec-review | manual rewind` — which matters, because the two faces are not
+closed to the same degree:
+
+- **The clobber is closed everywhere.** No commissioned review is ever handed a filename another
+  review holds.
+- **The wedge is closed for a rewind onto a producer row** (`spec`, `plan`, `implement`), where the
+  following transition renders a prompt and reserves immediately.
+- **For a rewind onto a review row the wedge is made non-destructive, not shorter.** The reserved
+  path does not exist yet, so `isFresh` is false there too (`statSync` throws →
+  `src/lib/predicates.ts:17-18`), `advanceTask` returns `null` (`src/lib/machine.ts:151`) and
+  `src/supervisor/tasks.ts:172-173` `continue`s without rendering. The row still waits for the human
+  or the stall ladder; what the fix removes is the overwrite at the end of that wait. A6 owns this
+  cost, and it is the documented escalation recovery rather than an edge case.
+
+On this very task that wait was 18 minutes and ended with a human `git mv` (`b43b73f`, 23:02:30) and
+a transition at 23:14:56. Under this design the `git mv` becomes unnecessary; the 18 minutes do not.
 
 ## Goal
 
@@ -137,12 +162,16 @@ which is the case `passes` cannot express.
     $ grep -rn "supervisor/" src/ | grep -v "^src/supervisor/"
     (no output)
 
-`src/cli.ts:2-21` imports only from `./lib/`; `src/supervisor/deliver.ts:2-10` only from `../lib/`.
+`src/cli.ts:4-21` imports only from `./lib/` (`:2-3` are `node:fs`/`node:path`);
+`src/supervisor/deliver.ts:2-10` only from `../lib/`.
 
     export const REVIEWS_DIR = 'docs/superpowers/reviews'   // moved from src/supervisor/deliver.ts:95
 
     /** The ONE place a verdict filename is spelled. Always REPO-RELATIVE. */
     export function verdictFilename(prefix: string, phase: string, ordinal: number): string
+
+    /** The ONE place the prefix is chosen: `issue-${task.issue}` or `run.run_id`. */
+    export function verdictPrefix(run: Run, task: Task | null): string
 
     /** The ONE base a verdict path resolves against. Absolute. */
     export function verdictBase(run: Run, task: Task | null): string   // task?.checkout_path ?? run.repo_root
@@ -155,10 +184,12 @@ which is the case `passes` cannot express.
     }
 
     /** THE WRITE. Chooses a filename once, records it under the next key, never revisits. */
-    export function reserveVerdict(record, prefix, phase, base): string
+    export function reserveVerdict(run: Run, task: Task | null, phase: string): string
 
 `reserveVerdict`:
 
+0. `record` is `task ?? run`; the prefix and base come from `verdictPrefix`/`verdictBase`, so
+   neither is chosen at a call site (pass-3 MINOR 1).
 1. `const seq = record.verdict_seq?.[phase] ?? 0` — the key is `verdictKey(phase, seq)`, and it has
    never been used, because `verdict_seq` never regresses.
 2. Choose the **filename**: the lowest `ordinal >= seq` whose `verdictFilename(prefix, phase, ordinal)`
@@ -218,7 +249,8 @@ not `runRow`; C3's run branch needs both.
 
 A rewind onto a review row renders no prompt — `advanceTask` returns `null` for a row whose verdict is
 not fresh (`src/supervisor/tasks.ts:270-275`, `src/lib/machine.ts:147-156`), so
-`src/supervisor/tasks.ts:172-175` returns early — yet the human has commissioned a new review. That is
+`src/supervisor/tasks.ts:172-173` `continue`s before the render at `:175` — yet the human has
+commissioned a new review. That is
 the ruling's own criterion. Rewinding to `spec` commissions nothing and reserves nothing; the
 following `spec → spec-review` transition renders and reserves.
 
@@ -300,10 +332,19 @@ prefix, and `run.repo_root` as the base.
 | The probe exhausts its bound (A8) | Records the **floor** filename (`ordinal === seq`) under the key and logs the exhaustion, so the reader and the prompt still agree. Pass 2 specified returning ordinal 0 and recording nothing, which reproduced its own BLOCKER (pass-2 MINOR 4). |
 | `cmdRewind` given a phase in no row | Rejected before C4 runs (`src/cli.ts:311-321`), so the guard's row lookups cannot throw (A10). |
 | A reservation written but the process then fails | `src/cli.ts:372` and `src/supervisor/main.ts:242` both `saveRun` after the write; a lost tick re-reads and the key resolves. Nothing is re-allocated. |
+| A reservation is never delivered — the send fails, or a second `hpipe rewind` lands on the same row | The key and filename are spent and the gap is permanent. `saveRun` (`src/supervisor/main.ts:242`) runs *before* delivery (`:248-261`), and that loop drops a failed prompt rather than re-queueing it, rebuilding `pending` next tick. The row idles exactly as it does today, but today's derived path is reproduced on the next render and a reserved one is not. Numbering acquires gaps (`-0`, `-1`, `-3`); A13 does not prune them (pass-3 MINOR 3). |
 
 ## Assumptions
 
-**A1 — the legacy fallback keeps today's derivation and is the only derivation left.** A record
+**A1 — the legacy fallback keeps today's derivation and is the only derivation left, and the reader
+ignores `artifacts.verdicts` unless `verdict_seq` is set.** That second clause is a real narrowing of
+a documented read: today `artifactPathFor` honours any recorded key (`src/supervisor/deliver.ts:102`,
+`:106`), and after C2 a recorded entry with no `verdict_seq` is invisible. It is safe in production —
+`grep -rn "verdicts" src/` shows the only writes are the `{}` initialisers at `src/cli.ts:229` and
+`src/lib/ledger.ts:35`, so no record on disk has an entry — but it is the contract, and
+`test/deliver.test.ts:156-161` is the test that documented the old one. **It must not be "repaired"
+by teaching `verdictFor` to scan the map when `verdict_seq` is absent**: that puts a selection rule
+back on the read side and undoes the clarification this pass exists to honour. A record
 mid-review at upgrade has `verdict_seq` absent and an agent already writing `…-${counterFor}.md`;
 returning `null` would make the freshness gate unsatisfiable and deadlock every in-flight review. The
 branch stops being reachable for a row once it next commissions a review.
@@ -343,16 +384,25 @@ this issue did not ask for and would alter `absoluteArtifactPath` for six rows.
 That is the accepted cost of not re-delivering the prompt, not a bug to report later. `hpipe status`
 still prints `pass N` from `counterFor` (`src/lib/status.ts:102-105`); the ordinal is not shown there.
 
+**And this is the main path, not an exotic one.** `prompts/escalate.md:15` is the standing
+instruction after every 2-pass escalation — `{{hpipe}} rewind {{run_id}} {{phase}}{{task_flag}}` —
+where `{{phase}}` is `task.escalated_from` (`src/supervisor/tasks.ts:87`), which
+`src/lib/machine.ts:92` set to the review row the task escalated *from*. So the documented recovery
+from every escalated review is exactly the rewind that leaves the row idle. This task's own history
+is that instruction being followed. Live-verification steps 2 and 3 are therefore the primary check,
+and step 1 (`rewind … spec`) is the case that is fully automatic.
+
 **A7 — `{{pass}}` and the file ordinal are expected to disagree.** `pass` is
 `String(counterFor(task, task.phase))` (`src/supervisor/tasks.ts:54`) and titles every review prompt
 (`prompts/spec-review.md:1`). After a rewind or a loop re-entry a review headed *"pass 0"* can be
 written to `…-2.md`. Nothing parses `{{pass}}` back, so this is cosmetic — but the reviews are the
 audit trail this issue protects, so it is stated: the ordinal is file identity, `{{pass}}` is the
-escalation budget (pass-2 MINOR 3).
+escalation budget (pass-2 MINOR 3). Ordinals may also have permanent gaps, because an undelivered
+reservation is still spent — see the error table's last row.
 
 **A8 — the probe is bounded at 64 ordinals**, degrading to the floor filename as the error table says.
 It runs inside the supervisor tick; `src/supervisor/deliver.ts:139-148` is the `try`/`catch` that
-guards the neighbouring loop for the same reason (`:130-137` is its explanatory comment — pass-2
+guards the neighbouring `Bun.spawn` for the same reason (`:130-137` is its explanatory comment — pass-2
 MINOR 4).
 
 **A9 — rewind's documented behaviour does not change, so `README.md:100` stays true.** `passes` is
@@ -367,8 +417,14 @@ for one commission burns a key and a filename. `promptForTaskPhase` is reached o
 transition (`src/supervisor/tasks.ts:171-178`), but **`promptForRunPhase` has two callers** —
 `src/supervisor/deliver.ts:242` and `src/supervisor/main.ts:217`. The second is currently unreachable:
 `runPhaseBefore` is captured at `src/supervisor/main.ts:184` *after* `evaluateRun` mutated `run.phase`
-at `:182`, and the only other `run.phase` writers are `src/cli.ts` and `src/supervisor/stall.ts:371`, whose
-`stallDeps` block is constructed at `src/supervisor/main.ts:266` — after `:215`. Named here so a later change to the tick order does not
+at `:182`. The other `run.phase` writers are three, not two: `src/cli.ts`;
+`src/supervisor/stall.ts:371`, whose `stallDeps` block is constructed at `src/supervisor/main.ts:266`,
+after `:215`; and **`enterRunPhase` (`src/lib/machine.ts:45-51`), which is the only one that could
+fire inside the window this argues about** — it is reached only from `advanceRun`
+(`src/lib/machine.ts:58`, `:65`, `:71-72`, `:77`, `:80`, `:82`), `advanceRun` only from `evaluateRun`
+(`src/supervisor/deliver.ts:236`), and `evaluateRun` only from `src/supervisor/main.ts:182`, all
+before `:184`. Nothing in `advanceTasks`, `deliverPendingAnswers` or `announceDecisions` writes
+`run.phase`. Pass 2 named all three and pass 3 dropped one (pass-3 MINOR 2). Named here so a later change to the tick order does not
 silently burn a key per tick (pass-2 MINOR 1, which pass 1 raised and pass 2 dropped).
 
 **A12 — the `pr-review-intent` re-entry is fixed silently, and the PR says so.** Same defect, same
@@ -407,10 +463,27 @@ temp dirs at `:18-25`:
 - The bound records the floor filename under the key (A8).
 - `verdictBase` returns `checkout_path` when set and `repo_root` when `null` (A3).
 
-**Unit — `src/supervisor/deliver.ts`** (`test/deliver.test.ts`): the A1 fallback keeps
-`:148-154`, `:156-161` and `:227-232` green — the first and third have empty maps, and the second
-seeds `verdicts['branch-review-0']`, which is the key `verdict_seq` yields once it is 1. A recorded
-path wins over `passes` entirely. The run-level reservation uses the `run_id` prefix.
+**Unit — `src/supervisor/deliver.ts`** (`test/deliver.test.ts`). The A1 fallback keeps `:148-154` and
+`:227-232` green: both have empty maps and no `verdict_seq`, so both keep asserting on `counterFor`.
+
+**`:156-161` goes red and is rewritten — pass 3 claimed it stays green and was wrong** (pass-3
+MAJOR 1). It seeds `verdicts['branch-review-0']` on a `mkRun()` fixture that never sets
+`verdict_seq`, so `verdictFor` takes its `seq === 0` early return, the A1 fallback wins, and the
+derived path is returned rather than `custom.md`. The rewrite seeds
+`run.verdict_seq = { 'branch-review': 1 }` alongside the entry and is renamed to what it now pins —
+*a recorded verdict path is returned for the key `verdict_seq` names*. A companion test asserts the
+converse, which is the new contract and is currently untested: **a seeded `verdicts` entry with no
+`verdict_seq` is ignored and the A1 fallback applies.**
+
+Also here: a recorded path wins over `passes` entirely, and the run-level reservation uses the
+`run_id` prefix from `verdictPrefix`.
+
+**A note on this class of error, because it is now three passes old.** Pass 0 asserted three tests
+would move that did not; pass 1 asserted `test/cli-commands.test.ts:228-239` stayed green when its
+own seed would have thrown; pass 3 asserted `:156-161` stayed green on a condition the fixture does
+not meet. Every one was a claim about a fixture I did not re-read while writing the claim. The
+implementer should run `bun test` against each named test **before** trusting any "stays green" line
+in this document, and treat the list as a hypothesis rather than a finding.
 
 **Unit — `src/supervisor/tasks.ts`** (`test/tasks.test.ts`): `:301-312` passes today by coincidence of
 ordering — it reads `absoluteArtifactPath` before rendering, and `designArtifacts()` (`:242-247`) plus
