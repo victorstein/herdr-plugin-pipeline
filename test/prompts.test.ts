@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -185,4 +185,17 @@ test('the dispatch prompt names all three header lines, not two', async () => {
   expect(text).toContain('bootstrap:')
   expect(text).toContain('three header')
   expect(text).not.toContain('two header')
+})
+
+test('the README documents the per-repo bootstrap contract', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).toContain('.claude/pipeline-bootstrap')
+})
+
+test('this repo declares its own bootstrap, and it is executable', () => {
+  // Dogfood: a fresh worktree of this repo has no node_modules, so
+  // `bun run typecheck` cannot find tsc until this runs.
+  const path = join(ROOT, '.claude', 'pipeline-bootstrap')
+  expect(existsSync(path)).toBe(true)
+  expect(statSync(path).mode & 0o111).toBeGreaterThan(0)
 })

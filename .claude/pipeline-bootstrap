@@ -1,0 +1,4 @@
+#!/bin/sh
+# A fresh worktree has no node_modules, and `bun run typecheck` needs tsc from it.
+set -e
+bun install
