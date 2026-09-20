@@ -3,8 +3,9 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  shouldRetry, taskSignalsFor,
+  promptForRunPhase, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
+import type { Config } from '../src/lib/config'
 import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -384,4 +385,27 @@ test('a worker delivery never carries the footer', () => {
       footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move' },
   ])
   expect(out[0]?.text).toBe('worker prompt')
+})
+
+test('branch-review reserves a run-level verdict path under the run id', async () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+
+  const text = await promptForRunPhase(run, {} as Config)
+
+  expect(run.verdict_seq?.['branch-review']).toBe(1)
+  expect(run.artifacts.verdicts['branch-review-0'])
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(text)
+    .toContain(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+})
+
+test('a run phase that is not a review reserves nothing', async () => {
+  const run = mkRun()
+  run.phase = 'dispatch'
+
+  await promptForRunPhase(run, {} as Config)
+
+  expect(run.verdict_seq).toBeUndefined()
+  expect(run.artifacts.verdicts).toEqual({})
 })

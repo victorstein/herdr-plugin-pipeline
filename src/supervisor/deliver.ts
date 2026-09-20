@@ -252,6 +252,7 @@ export async function evaluateRun(
 
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
+  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase)
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
