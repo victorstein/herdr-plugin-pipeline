@@ -8,6 +8,7 @@ import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
+import { reserveVerdict } from '../lib/verdict-path'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts } from './deliver'
 import { runTeardown } from './teardown'
@@ -46,6 +47,11 @@ export interface TaskDeps {
 export async function promptForTaskPhase(
   run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
 ): Promise<string> {
+  // The commission happens here, not at the read: this is the one moment a task is
+  // told where to write. Guarded on `signal`, not on a missing `artifact` — `ci`,
+  // `merge`, `close` and `implement` also have no artifact slot and must not reserve.
+  if (taskRow(task.phase).signal === 'verdict') reserveVerdict(run, task, task.phase)
+
   const common = {
     run_id: run.run_id,
     branch: task.branch,

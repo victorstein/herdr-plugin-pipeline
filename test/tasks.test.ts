@@ -472,3 +472,26 @@ test('the supervisor default dedup set is what production actually uses', async 
   expect(run.tasks[0]?.phase).toBe('research')
   expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
 })
+
+test('a review row reserves its verdict path before the prompt names it', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  const task = run.tasks[0] as Task
+
+  const text = await promptForTaskPhase(run, task, deps(), 'spec')
+  const watched = absoluteArtifactPath(run, task)
+
+  expect(task.verdict_seq?.['spec-review']).toBe(1)
+  expect(watched)
+    .toBe('/r/.worktrees/feat-x/docs/superpowers/reviews/issue-1-spec-review-0.md')
+  expect(text).toContain(watched as string)
+})
+
+test('a row that is not a review reserves nothing', async () => {
+  const run = mkRun([mkTask({ phase: 'spec', artifacts: designArtifacts() })])
+  const task = run.tasks[0] as Task
+
+  await promptForTaskPhase(run, task, deps(), 'research')
+
+  expect(task.verdict_seq).toBeUndefined()
+  expect(task.artifacts.verdicts).toEqual({})
+})
