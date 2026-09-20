@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
-  REVIEWS_DIR, verdictBase, verdictFilename, verdictFor, verdictPrefix,
+  REVIEWS_DIR, reserveVerdict, verdictBase, verdictFilename, verdictFor, verdictPrefix,
 } from '../src/lib/verdict-path'
 import { newRun } from '../src/lib/ledger'
-import { cleanupFixtures } from './helpers/git-worktree'
+import { cleanupFixtures, tempDir } from './helpers/git-worktree'
 import type { Run, Task } from '../src/lib/types'
 
 afterEach(cleanupFixtures)
@@ -65,4 +67,111 @@ test('a recorded entry with no verdict_seq is invisible to the reader', () => {
     },
   })
   expect(verdictFor(task, 'spec-review')).toBeNull()
+})
+
+function checkoutHolding(...relatives: string[]): string {
+  const dir = tempDir('hpipe-verdict-')
+  mkdirSync(join(dir, REVIEWS_DIR), { recursive: true })
+  for (const rel of relatives) writeFileSync(join(dir, rel), 'VERDICT: CLEAR\n')
+  return dir
+}
+
+test('the first reservation takes ordinal 0 and the reader agrees', () => {
+  const run = mkRun()
+  const task = mkTask({ checkout_path: checkoutHolding() })
+
+  const reserved = reserveVerdict(run, task, 'spec-review')
+
+  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  expect(task.verdict_seq?.['spec-review']).toBe(1)
+  expect(verdictFor(task, 'spec-review')).toBe(reserved)
+})
+
+test('the reader agrees with the reserver even when the map has a gap', () => {
+  const run = mkRun()
+  const task = mkTask({
+    checkout_path: checkoutHolding(),
+    verdict_seq: { 'spec-review': 3 },
+    artifacts: {
+      research: null, spec: null, plan: null,
+      verdicts: { 'spec-review-2': 'docs/superpowers/reviews/issue-26-spec-review-9.md' },
+    },
+  })
+
+  const reserved = reserveVerdict(run, task, 'spec-review')
+
+  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-3.md')
+  expect(verdictFor(task, 'spec-review')).toBe(reserved)
+})
+
+test('a filename already on disk is skipped', () => {
+  const run = mkRun()
+  const task = mkTask({
+    checkout_path: checkoutHolding(
+      'docs/superpowers/reviews/issue-26-spec-review-0.md',
+      'docs/superpowers/reviews/issue-26-spec-review-1.md',
+    ),
+  })
+
+  expect(reserveVerdict(run, task, 'spec-review'))
+    .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
+})
+
+test('freeing a name on disk never moves what an existing key resolves to', () => {
+  const run = mkRun()
+  const checkout = checkoutHolding('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  const task = mkTask({ checkout_path: checkout })
+
+  const first = reserveVerdict(run, task, 'spec-review')
+  expect(first).toBe('docs/superpowers/reviews/issue-26-spec-review-1.md')
+
+  // The `git mv` preservation workaround, applied four times in this repo's history.
+  rmSync(join(checkout, 'docs/superpowers/reviews/issue-26-spec-review-0.md'))
+  const second = reserveVerdict(run, task, 'spec-review')
+
+  expect(task.artifacts.verdicts['spec-review-0']).toBe(first)
+  expect(second).not.toBe(first)
+  expect(second).not.toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+})
+
+test('a filename already held in the map is skipped even when absent from disk', () => {
+  const run = mkRun()
+  const task = mkTask({
+    checkout_path: checkoutHolding(),
+    verdict_seq: { 'spec-review': 1 },
+    artifacts: {
+      research: null, spec: null, plan: null,
+      verdicts: { 'spec-review-0': 'docs/superpowers/reviews/issue-26-spec-review-1.md' },
+    },
+  })
+
+  expect(reserveVerdict(run, task, 'spec-review'))
+    .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
+})
+
+test('an exhausted probe records the floor so the key and the prompt still agree', () => {
+  const run = mkRun()
+  const held: Record<string, string> = {}
+  for (let i = 0; i < 64; i++) {
+    held[`held-${i}`] = `docs/superpowers/reviews/issue-26-spec-review-${i}.md`
+  }
+  const task = mkTask({
+    checkout_path: checkoutHolding(),
+    artifacts: { research: null, spec: null, plan: null, verdicts: held },
+  })
+
+  const reserved = reserveVerdict(run, task, 'spec-review')
+
+  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  expect(verdictFor(task, 'spec-review')).toBe(reserved)
+})
+
+test('a run reserves under its run id against the repo root', () => {
+  const run = mkRun()
+  run.repo_root = checkoutHolding()
+
+  const reserved = reserveVerdict(run, null, 'branch-review')
+
+  expect(reserved).toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(verdictFor(run, 'branch-review')).toBe(reserved)
 })
