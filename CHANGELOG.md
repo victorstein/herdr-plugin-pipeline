@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.0...v1.3.1) (2026-09-20)
+
+
+### Documentation
+
+* tell the stall-escalation reader that a rewind moves the verdict path ([2d2f39d](https://github.com/victorstein/herdr-plugin-pipeline/commit/2d2f39d5d732a01bf2b23c8810f44fbea5073555))
+
 ## [1.3.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.11...v1.3.0) (2026-09-20)
 
 
