@@ -177,3 +177,12 @@ test('a rendered worker brief leaves no placeholder behind', async () => {
   const text = await renderWorkerPrompt(ROOT, run, run.tasks[0]!)
   expect(text).not.toContain('{{')
 })
+
+test('the dispatch prompt names all three header lines, not two', async () => {
+  // cmdTask emits task_id:, files: and bootstrap:. A stale count here is how the
+  // convention drifts, and nothing else pins it.
+  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(text).toContain('bootstrap:')
+  expect(text).toContain('three header')
+  expect(text).not.toContain('two header')
+})
