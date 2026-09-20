@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { newRun } from '../src/lib/ledger'
+import { counterFor } from '../src/lib/machine'
 import type { Run, Task } from '../src/lib/types'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
@@ -494,4 +495,25 @@ test('a row that is not a review reserves nothing', async () => {
 
   expect(task.verdict_seq).toBeUndefined()
   expect(task.artifacts.verdicts).toEqual({})
+})
+
+test('re-entering pr-review-intent after a quality blocker does not reuse the first review', async () => {
+  // `pr-review-quality`'s BLOCKER bumps ITS counter and sends the task to
+  // `implement`; `implement` clears back to `pr-review-intent`, whose own counter
+  // never moved — so before #26 the second intent review was handed the first
+  // one's filename, with no rewind involved.
+  const run = mkRun([mkTask({ phase: 'pr-review-intent', pr: 7, artifacts: designArtifacts() })])
+  const task = run.tasks[0] as Task
+
+  await promptForTaskPhase(run, task, deps(), 'implement')
+  const first = absoluteArtifactPath(run, task)
+
+  task.passes = { 'pr-review-quality': 1 }
+  await promptForTaskPhase(run, task, deps(), 'implement')
+  const second = absoluteArtifactPath(run, task)
+
+  expect(counterFor(task, 'pr-review-intent')).toBe(0)
+  expect(first).toContain('issue-1-pr-review-intent-0.md')
+  expect(second).toContain('issue-1-pr-review-intent-1.md')
+  expect(second).not.toBe(first)
 })

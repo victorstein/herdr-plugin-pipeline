@@ -6,6 +6,8 @@ import { cmdAnswer, cmdDecide } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import { type AnswerDeps, announceDecisions, deliverPendingAnswers } from '../src/supervisor/tasks'
+import { artifactPathFor } from '../src/supervisor/deliver'
+import { verdictFor } from '../src/lib/verdict-path'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
 function taskFixture(phase: TaskPhase): Task {
@@ -459,4 +461,42 @@ test('answer still records onto a finished run when that run is named', async ()
   })
   expect(named.ok).toBe(true)
   expect((await savedRun(run.run_id))?.tasks[0]?.pending_answer).toBe(decisionId)
+})
+
+test('answering a decision raised on a review row does not move the verdict path', async () => {
+  // The invariant the orchestrator's ruling on #26 exists to protect: a resume
+  // re-enters the phase but commissions no review, so the agent keeps the path it
+  // was handed. Pass 1 of that design keyed the path on phase entries and broke it.
+  const run = newRun({
+    session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a',
+  })
+  const task = mkTask({ task_id: 't1', phase: 'spec-review', pane_id: 'w7:p1' })
+  task.verdict_seq = { 'spec-review': 1 }
+  task.artifacts.verdicts = {
+    'spec-review-0': 'docs/superpowers/reviews/issue-1-spec-review-0.md',
+  }
+  const decision = openDecision(task, { question: 'narrow it?', recommendation: 'narrow' })
+  answerDecision(task, decision.id, 'narrow it', 'human')
+  task.phase = 'blocked-on-decision'
+  task.decision_from = 'spec-review'
+  task.pending_answer = decision.id
+  run.tasks = [task]
+
+  // The path handed to the agent when the review was commissioned, read off the
+  // review row rather than off `task.phase` — the task is parked in
+  // `blocked-on-decision` right now, which resolves to a different row entirely.
+  const handed = verdictFor(task, 'spec-review')
+  expect(handed).toBe('docs/superpowers/reviews/issue-1-spec-review-0.md')
+
+  await deliverPendingAnswers(run, answerDeps())
+
+  // Read through `run.tasks` so the literal assignment above does not narrow the
+  // comparison type to `blocked-on-decision`.
+  expect(run.tasks[0]?.phase).toBe('spec-review')
+  expect(task.verdict_seq).toEqual({ 'spec-review': 1 })
+  expect(task.artifacts.verdicts).toEqual({
+    'spec-review-0': 'docs/superpowers/reviews/issue-1-spec-review-0.md',
+  })
+  expect(verdictFor(task, 'spec-review')).toBe(handed)
+  expect(artifactPathFor(run, task)).toBe(handed)
 })

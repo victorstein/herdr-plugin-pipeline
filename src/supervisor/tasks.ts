@@ -344,6 +344,9 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
 
     task.pending_answer = null
     task.delivery_attempts = 0
+    // No prompt is rendered here, deliberately: `answer.md` has already been sent,
+    // and rendering the row's own prompt would reserve a second verdict path and
+    // move the file the agent was told to write. A resume is not a new review.
     enterTaskPhase(run, task, resumeTo, `decision ${decision.id} answered`)
     task.decision_from = null
   }
