@@ -36,7 +36,7 @@ conflict.
 
 **The ownership ruling is honoured, and the escape hatches were used rather than paraphrased.**
 `git diff origin/main...HEAD -- src/cli.ts` is 8 insertions / 2 deletions: the import at `:4`, the
-`bootLine` computation at `src/cli.ts:260-264`, and the two `return ok(...)` lines at
+`bootLine` computation at `src/cli.ts:260-263`, and the two `return ok(...)` lines at
 `src/cli.ts:267` and `src/cli.ts:276`. `cmdRewind` is byte-identical to `main`; `cmdBrief` is
 untouched (**NG9**). The ruling's condition (3) — surface a real rebase conflict rather than resolve
 it — was met in fact, not only in prose: the live ledger
@@ -47,7 +47,7 @@ resolution the branch actually applied). The PR body's "was authorised rather th
 unilaterally" is a true statement with a record behind it.
 
 **Every spec testing item lands.** Items 1–9 in `test/bootstrap.test.ts:23-87`; 10–13 in
-`test/cli-commands.test.ts:693-756` (item 12's contract asserted as exact array equality on the
+`test/cli-commands.test.ts:693-757` (item 12's contract asserted as exact array equality on the
 header block, which is stronger than the spec asked); item 11's queued return in
 `test/cli-commands.test.ts:759-779`; 14–16 in `test/tasks.test.ts:521-545`; 17–21 in
 `test/prompts.test.ts:157-201`. The tests exercise behaviour rather than restate implementation:
@@ -56,7 +56,7 @@ and the `0o644` case (`test/cli-commands.test.ts:727`) asserts the caveat reache
 rather than asserting the branch was taken.
 
 **Spec components all implemented, none half-done.** C1 `src/lib/bootstrap.ts:1-61` (no-spawn,
-no-throw, `isFile()` before the mode test, per **A7**); C2 `src/supervisor/tasks.ts:157-160`, with
+no-throw, `isFile()` before the mode test, per **A7**); C2 `src/supervisor/tasks.ts:156-160`, with
 the `\n\n` → `\n` + line + `\n\n` shape that preserves the single blank line; C3
 `src/cli.ts:260-276` on *both* returns; C4 `src/lib/worker-prompt.ts:2,33` +
 `prompts/worker-brief.md:16`; C5 the `not-executable` state, now exercised at both the orchestrator
@@ -108,7 +108,7 @@ not a placement that reorganises the document.
 **Fix, inline:** move the `## Bootstrapping the new checkout` block (`prompts/dispatch.md:34-51`) to
 the end of the file, after the `{{hpipe}} dispatch --done` block at `:62-66`, where it nests
 nothing. The cross-reference at `:26-29` already points the reader at `bootstrap:`, so nothing
-depends on the section sitting where it is, and the `test/prompts.test.ts:179-186` pin
+depends on the section sitting where it is, and the `test/prompts.test.ts:181-188` pin
 (`bootstrap:` / `three header` / not `two header`) is placement-independent and stays green.
 
 ---
