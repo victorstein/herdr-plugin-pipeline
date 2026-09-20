@@ -6,6 +6,7 @@ import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdForget, cmdRelease, cmdResume,
   cmdRewind, cmdStatus, cmdTask,
 } from '../src/cli'
+import { artifactPathFor } from '../src/supervisor/deliver'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
 import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
@@ -618,4 +619,67 @@ test('an empty --run names the flag rather than searching for a run called ""', 
     expect(result.ok).toBe(false)
     expect(result.text).toBe('--run needs a run id')
   }
+})
+
+test('a rewind onto a review row does not re-issue a path an earlier review holds', async () => {
+  const occupant = 'docs/superpowers/reviews/issue-1-spec-review-0.md'
+  mkdirSync(join(repoDir, 'docs', 'superpowers', 'reviews'), { recursive: true })
+  writeFileSync(join(repoDir, occupant), 'VERDICT: CLEAR\n')
+
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec-review', checkout_path: repoDir }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec-review', taskId: 't1' })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('issue-1-spec-review-1.md')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+  expect(artifactPathFor(saved, saved.tasks[0] as Task)).not.toBe(occupant)
+  expect(artifactPathFor(saved, saved.tasks[0] as Task))
+    .toBe('docs/superpowers/reviews/issue-1-spec-review-1.md')
+})
+
+test('a rewind to a producer row reserves nothing and does not reset verdict_seq', async () => {
+  // Seeded, not absent: an implementation that CLEARS verdict_seq alongside
+  // `passes` would satisfy `toBeUndefined()` on an empty fixture while destroying
+  // the one property the key rests on — that it never regresses.
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'spec-review', checkout_path: repoDir,
+    verdict_seq: { 'spec-review': 2 },
+    artifacts: {
+      research: null, spec: null, plan: null,
+      verdicts: { 'spec-review-1': 'docs/superpowers/reviews/issue-1-spec-review-1.md' },
+    },
+  }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: 't1' })
+  expect(result.ok).toBe(true)
+  expect(result.text).not.toContain('next verdict')
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.tasks[0]?.passes).toEqual({})
+  expect(saved?.tasks[0]?.verdict_seq).toEqual({ 'spec-review': 2 })
+  expect(saved?.tasks[0]?.artifacts.verdicts)
+    .toEqual({ 'spec-review-1': 'docs/superpowers/reviews/issue-1-spec-review-1.md' })
+})
+
+test('a rewind onto branch-review reserves a run-level path under the run id', async () => {
+  const run = newRun({
+    session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a',
+  })
+  run.phase = 'escalated'
+  run.escalated_from = 'branch-review'
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), {
+    runId: run.run_id, phase: 'branch-review', taskId: null,
+  })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain(`${run.run_id}-branch-review-0.md`)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(saved?.verdict_seq?.['branch-review']).toBe(1)
+  expect(saved?.artifacts.verdicts['branch-review-0'])
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })

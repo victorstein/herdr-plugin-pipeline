@@ -10,13 +10,14 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
-import { RUN_ROWS, TASK_ROWS, taskRow } from './lib/phases'
+import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus } from './lib/status'
+import { reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
@@ -320,6 +321,12 @@ export async function cmdRewind(ctx: Ctx, input: {
       `${isTask ? 'task' : 'run'} phases are ${rows.map((r) => r.phase).join(', ')}`)
   }
 
+  // A rewind ONTO a review row commissions a new review but renders no prompt —
+  // `advanceTask` returns null for a row whose verdict is not fresh, so the task
+  // loop never reaches `promptForTaskPhase`. Without reserving here the next review
+  // is handed the previous one's filename, which is this issue.
+  let reserved: string | null = null
+
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
@@ -355,6 +362,9 @@ export async function cmdRewind(ctx: Ctx, input: {
     task.phase_entered_at = Date.now()
     task.escalated_from = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
+    if (taskRow(task.phase).signal === 'verdict') {
+      reserved = reserveVerdict(run, task, task.phase)
+    }
   } else {
     run.phase = input.phase as RunPhase
     run.passes = {}
@@ -367,10 +377,16 @@ export async function cmdRewind(ctx: Ctx, input: {
       for (const t of run.tasks) if (t.workspace_id !== null) t.adopted_at = null
     }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
+    if (runRow(run.phase).signal === 'verdict') {
+      reserved = reserveVerdict(run, null, run.phase)
+    }
   }
 
   await saveRun(ctx.stateDir, run)
-  return ok(`rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared`)
+  return ok(
+    `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
+    (reserved === null ? '' : `; next verdict → ${reserved}`),
+  )
 }
 
 export async function cmdRelease(ctx: Ctx, input: {
