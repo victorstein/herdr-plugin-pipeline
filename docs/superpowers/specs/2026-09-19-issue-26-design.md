@@ -1,111 +1,73 @@
-# A verdict path a rewind cannot re-issue — design (#26)
+# A verdict path that is assigned once and never re-derived — design (#26)
 
-Pass 1. Written against this worktree at `192142b` (branch `fix/26-verdict-overwrite`), building on
-`docs/superpowers/research/2026-09-19-issue-26-research.md` and answering
-`docs/superpowers/reviews/issue-26-spec-review-0.md`. Every claim about current behaviour carries a
-`file:line` or the command that produced it.
+Pass 2. Written against this worktree at `6688ffc` (branch `fix/26-verdict-overwrite`), building on
+`docs/superpowers/research/2026-09-19-issue-26-research.md`, answering
+`docs/superpowers/reviews/issue-26-spec-review-1.md`, and **governed by the `Ruling` section added to
+issue #26 on 2026-09-19** after the two-pass escalation. Every claim about current behaviour carries
+a `file:line` or the command that produced it.
 
-**Modelled on** `counterFor`/`bumpCounter` (`src/lib/machine.ts:7-21`) for the new counter — same
-shape, same module, same monotonicity comment; `enterRunPhase`/`enterTaskPhase`
-(`src/lib/machine.ts:45-51`, `:90-96`) for the single write point, which is where `phase_entered_at`
-is already stamped; **`src/lib/gating.ts`** for a pure `src/lib/` module imported by both `src/cli.ts`
-(`:5`) and `src/supervisor/tasks.ts` (`:4`), which is the shape C4 now needs; the artifact-adoption
-write-back at `src/supervisor/tasks.ts:264-267` for recording a resolved artifact path onto the
-record so later prompts cite it; `logAmbiguous` (`src/supervisor/tasks.ts:184-200`) for a
-once-per-entry diagnostic; and `test/deliver.test.ts:148-161` plus `test/cli-commands.test.ts:228-239`
-for where the tests live. No new pattern is introduced.
+**Modelled on** `src/lib/gating.ts` for a pure `src/lib/` module imported by both `src/cli.ts` (`:5`)
+and `src/supervisor/tasks.ts` (`:4`) — the shape the reserver needs; `src/lib/predicates.ts:1` for a
+`src/lib/` module that touches the filesystem; the artifact-adoption write-back at
+`src/supervisor/tasks.ts:264-267` for recording a resolved artifact path onto the record so later
+prompts cite it and the resolution is idempotent — **which is now the whole design, applied to the
+verdict slot instead of the artifact slot**; `logAmbiguous` (`src/supervisor/tasks.ts:184-200`) for a
+once-per-entry diagnostic; and `test/gating.test.ts` for a lib-module test file. No new pattern is
+introduced.
 
-## What changed from pass 0, by finding
+## What the ruling changed, and what it deleted
 
-Review 0 returned `VERDICT: BLOCKER` — 1 BLOCKER, 3 MAJORs, 6 MINORs. I verified every finding
-against the code before accepting it. **All ten hold and all ten are applied.** Nothing was rejected;
-one MINOR is *escalated*, because verifying it showed the defect is worse than the review said.
+The ruling upheld pass-1 BLOCKER 1 and replaced the mechanism. Passes 0 and 1 both keyed the filename
+on a *count*; the ruling's instruction is **"Stop deriving the path; assign it once and record it."**
+Applied here, that deletes more than it adds:
 
-**BLOCKER 1 — the spec contradicted itself about C4, and the one live case was uncovered.**
-Accepted; it is the reason this pass exists. Pass 0's `:166-169` said C4 cannot run after a rewind
-straight onto a review row, and its `:199-202` claimed C4 redirects in exactly that case. Confirmed
-the first is the one that matches the code:
+| Pass-1 component | Status under the ruling |
+|---|---|
+| `phase_entries` field on `Task`/`Run` (pass-1 C1) | **Deleted.** No `src/lib/types.ts` change at all. |
+| `bumpEntries` in `enterRunPhase`/`enterTaskPhase` | **Deleted.** "Do not bump on `enterTaskPhase` generally." |
+| Bumps at the four direct `.phase =` sites (pass-1 C2) | **Deleted**, and with them assumption A6. |
+| The `passes`-derived seed in `cmdRewind` | **Deleted**, and with it pass-1's MINOR 2 escalation *and* the pass-1 MINOR that it did not compile. |
+| `Math.max(entriesFor - 1, counterFor)` (pass-1 C3) | **Deleted** as the mechanism; survives only as the legacy read fallback (C4), which is the one derivation left. |
+| `src/lib/verdict-path.ts` + the reservation (pass-1 C4) | **Kept and promoted** from backstop to the whole mechanism. |
+| Reservation in `cmdRewind` | **Kept** (A3). |
 
-    src/supervisor/tasks.ts:171-178
-      const cameFrom = task.phase
-      if (!advanceTask(run, task, signals)) continue
-      if (task.phase === cameFrom) continue
-      const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
+Pass-1 BLOCKER 1 is answered by construction rather than by a rule: a resume re-enters a phase but
+renders no prompt, and a path is allocated only where a prompt is rendered, so nothing moves under a
+live agent. I verified the resume path the reviewer named: `src/supervisor/tasks.ts:326-341` renders
+`answer.md` and sends it, then calls `enterTaskPhase(run, task, resumeTo, …)` at `:341` — it never
+reaches `promptForTaskPhase` (`:175`, inside `advanceTasks`, which runs earlier at
+`src/supervisor/main.ts:185`). `grep -n "verdict_path" prompts/answer.md` returns nothing, so the
+answered agent is holding the path it was originally handed, and under this design that is still the
+recorded path. `cmdResume` (`src/cli.ts:500-516`) sends nothing at all and is inert the same way.
 
-After `hpipe rewind <run> spec-review --task t1` the task is already in `spec-review`
-(`src/cli.ts:352`), `verdictFor` returns `null` for want of a fresh file
-(`src/supervisor/tasks.ts:270-275`), `advanceTask` returns `null`, and the loop `continue`s.
-`grep -rn "verdict_path" src/` returns only `src/supervisor/tasks.ts:55` and
-`src/supervisor/deliver.ts:253`; neither is on this path. **C4 has moved to `cmdRewind`** — the
-reviewer's fix (a) — and that move has an architectural consequence the review did not name, handled
-in C4 below.
+**MAJOR 1 and MAJOR 2** are answered by C1: one exported function spells a verdict filename, used by
+the reserver and the reader, and the relative/absolute contract is stated once and enforced by the
+signature (A6, A7).
 
-**MAJOR 1 — the C2 seed threw on exactly the legacy records it exists for.** Accepted.
-`record.phase_entries` is `undefined` on a pre-change record (A2 makes it optional), and pass 0
-ordered the seed *before* the bump that creates the map, so `record.phase_entries[phase]` was a
-`TypeError`. `test/cli-commands.test.ts:35-47` builds tasks from a hand-written literal, not a
-constructor, so `test/cli-commands.test.ts:228-239` — which A11 claims stays green — would have
-thrown. C2 now states the lazy init, the error table has its own row for it, and A11 is amended.
+**The pass-1 MINOR that turned out to be a second instance of this bug.** The reviewer noted that
+"normal loop, unchanged from today's filenames" is false, and it is worth promoting out of the MINORs
+because **issue #26 has a second instance that neither the issue nor the research note names, and it
+involves no rewind at all**:
 
-**MAJOR 2 — C4's guard was inverted and its call site fires for artifact rows.** Accepted, and
-verified twice over. `src/supervisor/tasks.ts:49-60` builds `common` **before** the `switch`, so
-`verdict_path` is computed for every task phase. And `absoluteArtifactPath` does not return `null`
-for an artifact row — `src/supervisor/deliver.ts:98-100` returns the artifact's own slot, and
-`src/cli.ts:216-233` fills all three slots at registration, so `null` only ever comes from a test
-literal (`test/deliver.test.ts:21`). The reviewer's further point is confirmed: `ci` has no
-`artifact` either (`src/lib/phases.ts:122-124`) and therefore falls through to the verdict branch
-today, so the guard must test `signal === 'verdict'`, not `artifact === undefined`. C4 now carries
-that guard at all three sites and the error table row is replaced.
+    src/lib/phases.ts:111-116
+      { phase: 'pr-review-intent',  onClear: 'pr-review-quality', onBlocker: 'implement',
+        counter: 'pr-review-intent' },
+      { phase: 'pr-review-quality', onClear: 'ci', onBlocker: 'implement',
+        counter: 'pr-review-quality' },
 
-**MAJOR 3 — after a rewind onto a review row the watched path moved and nothing said so.**
-Accepted and resolved by A12, which is the reviewer's option (c) plus the reporting half of its
-option (a) — both of which the BLOCKER 1 fix makes free, since `cmdRewind` now knows the path. Its
-options (a)-in-full (teach `hpipe status` the ordinal) and (b) (re-deliver the row's prompt) are
-rejected with reasons under *Rejected alternatives*. A12 records the residual gap explicitly rather
-than leaving it unstated, and *Why this was not an `hpipe decide`* says why I settled it here.
-
-**MINOR 1 — C4's idempotence rationale was false.** Accepted. `src/supervisor/main.ts:184` captures
-`runPhaseBefore` *after* `evaluateRun` has already mutated `run.phase` at `:182`, so `:215`'s
-`run.phase === runPhaseBefore` is always true for a transition `evaluateRun` made. Verified further
-than the review did: `grep -n "enterRunPhase\|run.phase" src/supervisor/tasks.ts src/supervisor/teardown.ts`
-returns no assignment, so nothing between `:184` and `:215` can change `run.phase` and `:215-217` is
-unreachable in practice. The step is kept; the reason is replaced (C4, step 2).
-
-**MINOR 2 — escalated from "the rationale is wrong" to "the seed can undercount".** The review said
-`spent + 1` is a safe upper bound whose *justification* was wrong, while noting in the same sentence
-that a `CLEAR` lets the true entry count exceed `spent` — which makes it not an upper bound. I traced
-it: under today's code a file's ordinal is `counterFor` at entry, so a stretch that reached `passes 1`
-leaves `-0` and `-1`; a rewind clears the counter, and a following `CLEAR` at `passes 0` leaves
-`spent = 0`, so **the seed does not fire at all** and the next entry resolves to `-0` with `-1`
-already on disk. The honest statement is now in C2: the seed is a lower-bound heuristic that is safe
-only when it fires, and the filesystem reservation in C4 is what actually guarantees no collision on
-a legacy record. This is why C4-at-`cmdRewind` is load-bearing and not a backstop.
-
-**MINOR 3 — "0, 1, 2 over a normal loop" contradicted `MAX_PASSES = 2`.** Accepted.
-`src/lib/config.ts:26` is `2` and `src/lib/machine.ts:121-123` escalates on `count >= maxPasses`, so
-a default loop yields `-0` and `-1`. The testing strategy now says `0, 1`, and the three-entry trace
-is stated as a test that passes `maxPasses: 3` explicitly.
-
-**MINOR 4 — the comment C4 falsifies was not in the change set.** Accepted.
-`src/supervisor/deliver.ts:91-94` asserts no writer for `artifacts.verdicts`; C4 makes that false
-while its conclusion (`:180`, pinned by `test/deliver.test.ts:287-295`) stays correct. Added to C5,
-as the research note asked (`research:183-186`) and `.claude/agents/plugin-dev.md:32-34` requires.
-
-**MINOR 5 — three citation slips.** All three confirmed and corrected: `src/lib/machine.ts:45` is
-`enterRunPhase` and `:90` is `enterTaskPhase` (pass 0 paired them in the wrong order); the suite's
-literals are `test/deliver.test.ts:14-25` and `:27-31`, not `:149-153`; the task constructor is
-`src/cli.ts:216-233`, not `:225-232`.
-
-**MINOR 6 — the red test could not live where it was specified.** Accepted.
-`test/deliver.test.ts:1-10` does not import `cmdRewind`. The red test moves to
-`test/cli-commands.test.ts`, and the BLOCKER 1 fix makes it a *genuine* red rather than a test of
-code that does not compile yet: it asserts on `artifactPathFor` after `cmdRewind`, using only APIs
-that exist today, and fails today because `cmdRewind` reserves nothing.
+`pr-review-intent` clears at counter 0 (file `…-pr-review-intent-0.md`); `pr-review-quality` then
+returns `BLOCKER`, which bumps **its own** counter and sends the task to `implement`
+(`src/lib/machine.ts:120-126`); `implement` clears back to `pr-review-intent`, whose counter is still
+0 — so the second intent review is handed `…-pr-review-intent-0.md` again and overwrites the first.
+No `hpipe rewind` is involved. Every issue on disk has exactly one file of each name
+(`ls docs/superpowers/reviews/ | grep pr-review` → 12 files, 6 issues), which is consistent with the
+loop never having fired *or* with a silent clobber; I am not claiming an observed loss, only a
+reachable one. This design closes it without a special case, because the reserver asks what is
+already taken rather than what the counter says. A counter-based fix closes it only by accident.
 
 ## Problem
 
-The verdict path is derived from a counter that `hpipe rewind` clears, so after a rewind the next
-review is told to write to a filename an earlier review already holds.
+The verdict path is derived, on every read, from a counter that `hpipe rewind` clears.
 
     src/supervisor/deliver.ts:101-103
       const key = `${task.phase}-${counterFor(task, task.phase)}`
@@ -127,425 +89,358 @@ docs/superpowers/reviews/issue-15-spec-review-0.md` → `f672bfe`, whose `--stat
 `git mv` repairs (`432f4d7`, `944210d`, `ddd5086`, all 2026-09-17) and four surviving `*-preserved.md`
 files are the workaround. 13 rewinds across four live ledgers in three days.
 
-**The constraint that kills the obvious fix.** `verdictFor` gates on
+**Why "refuse to overwrite" alone deadlocks.** `verdictFor` gates on
 `isFresh(absolute, t.phase_entered_at)` (`src/supervisor/main.ts:193-199`,
 `src/lib/predicates.ts:10-20`) and `cmdRewind` re-stamps `phase_entered_at` (`src/cli.ts:355`,
-`:361`). After a rewind the occupant reads stale, so the row only advances when the reviewer
-overwrites it. A fix shaped purely as "refuse to write an occupied path" converts silent data loss
-into a silent deadlock. Any refusal must also hand over a different path.
+`:361`). After a rewind the occupant reads stale, so the row only advances when it is overwritten.
+A refusal must hand over a different path, which is what reservation does.
 
 ## Goal
 
-After any sequence of rewinds — including onto a review row, including on a record written before
-this change — two different reviews never share a filename, and the pipeline keeps moving without a
-human `git mv`.
+Two different reviews never share a filename, and the path a live agent was handed never moves under
+it. Both must hold across `hpipe rewind`, across a resume, and on the records already on disk.
 
 ## Non-goals
 
-- No `schema_version` bump. `isCurrentSchemaRun` is `run.schema_version === 2`
-  (`src/supervisor/main.ts:32-34`) and `src/lib/status.ts:112-117` tells the human to abort anything
-  else; bumping it strands the four live runs rather than migrating them.
-- No change to `MAX_PASSES` semantics or to what `passes` means. `passes` remains the escalation
-  budget (`src/lib/machine.ts:120-123`, `:78-81`), and rewind keeps clearing it.
-- No change to `hpipe status` (A12), and no rename of the four `*-preserved.md` files (A9).
+- **No new persisted field, and no `schema_version` bump.** `artifacts.verdicts` already exists on
+  both records (`src/lib/types.ts:83`, `:100`) and is already initialised by both constructors
+  (`src/lib/ledger.ts:35`, `src/cli.ts:229`). `isCurrentSchemaRun` stays satisfied
+  (`src/supervisor/main.ts:32-34`).
+- **No change to `passes`, `counterFor`, `bumpCounter` or any phase-transition function.**
+  `src/lib/machine.ts` is not edited. `passes` remains the escalation budget
+  (`src/lib/machine.ts:120-123`, `:78-81`) and rewind keeps clearing it, so `README.md:100` stays
+  true (A8).
+- No change to `hpipe status` (A5), and no rename of the four `*-preserved.md` files.
 - No edit to `README.md`, `prompts/dispatch.md`, `src/hooks/`, `src/lib/config.ts` or
-  `test/config.test.ts` — sibling-owned this batch. The design is chosen partly so `README.md:100`'s
-  description of rewind stays literally true (A7).
+  `test/config.test.ts` — sibling-owned. Per the ruling, **my `src/cli.ts` work is confined to
+  `cmdRewind`**; t2 holds the `cmdTask` header lines around `:255-269` and rebases onto my merge.
 - Not #22's broader rewind validation; the phase-argument check already landed at
-  `src/cli.ts:311-321`, and C4 depends on it (A13).
+  `src/cli.ts:311-321`, and C3 depends on it (A9).
 
 ## Architecture
 
-Five changes. C1–C3 are the deterministic mechanism; C4 is the ground truth that makes legacy records
-safe; C5 is documentation.
+Four changes. There is no counter anywhere in them.
 
-### C1 (load-bearing) — a monotone phase-entry counter in `src/lib/machine.ts`
+### C1 (load-bearing) — `src/lib/verdict-path.ts`: one speller, one reader, one reserver
 
-New optional field on both records, mirroring `passes`:
-
-    // src/lib/types.ts
-    Task.phase_entries?: Partial<Record<TaskPhase, number>>
-    Run.phase_entries?:  Partial<Record<RunPhase, number>>
-
-and, beside `counterFor`/`bumpCounter` (`src/lib/machine.ts:7-21`):
-
-    export function entriesFor(record: HasEntries, phase: string): number
-    export function bumpEntries(record: HasEntries, phase: string): number   // lazily creates the map
-
-`bumpEntries` is called from `enterRunPhase` (`src/lib/machine.ts:45-51`) and `enterTaskPhase`
-(`:90-96`) — the same two functions that already stamp `phase_entered_at`, and the only place the
-state machine changes a phase.
-
-**Why an entry count and not a pass count.** A `CLEAR` verdict consumes a filename but never calls
-`bumpCounter` (`src/lib/machine.ts:117-119` returns before it). Any design keyed on the blocker
-counter still collides on *review clears → human rewinds onto that row*, which is a used path:
-`t4:spec-review` on `berean-os-20260917-working-on-open-issues-xilp` is a rewind directly onto a
-review row. Counting entries is the only counter incremented by everything that consumes a name.
-
-**Why not count `run.history`.** History is a human log with inconsistent `to` semantics:
-`src/actions/claim.ts:32` pushes `to: run.phase` for an orchestrator rebind that is not a transition,
-and `src/lib/orchestrator.ts:56-59` pushes `to: resolved` — a *pane id* in the `to` field. Counting
-`to === phase` would move the branch-review ordinal on every claim.
-
-### C2 — the four direct phase assignments outside the machine, and the seed
-
-`grep -rn "\.phase = " src/` returns exactly six sites; two are the machine (C1). The other four
-bypass it:
-
-| Site | Command |
-|---|---|
-| `src/cli.ts:352` | `cmdRewind`, task branch |
-| `src/cli.ts:359` | `cmdRewind`, run branch |
-| `src/cli.ts:495` | `cmdAbort` (→ `done`) |
-| `src/cli.ts:511` | `cmdResume` (→ `escalated_from`, which can be `branch-review`) |
-
-All four call `bumpEntries`, which owns the lazy `record.phase_entries ??= {}` (MAJOR 1).
-`cmdAbort`'s target is terminal and carries no verdict; it is included so the rule is "every phase
-assignment bumps", with no site to remember (A6).
-
-`cmdRewind` additionally **seeds** the counter for records that predate this change, immediately
-before `passes` is cleared. The map is created first, or this throws on exactly the records it serves:
-
-    record.phase_entries ??= {}
-    for (const [phase, spent] of Object.entries(record.passes)) {
-      if (spent > 0) record.phase_entries[phase] ??= spent + 1
-    }
-
-`??=` on the inner assignment and not `=`: on a post-change record the key already exists and is
-exact, and overwriting it would open gaps in the numbering.
-
-**The seed is a heuristic, not a guarantee, and C4 is why that is acceptable** (MINOR 2, escalated).
-When it fires it cannot undercount: under today's code a file's ordinal is `counterFor` at entry, so
-no ordinal above `spent` can exist, and `spent + 1` clears them all. But it does not fire when
-`spent` is 0, and `spent` is 0 after a rewind followed by a `CLEAR` — while `-0` and `-1` may both be
-on disk from an earlier stretch. Nothing derivable from `passes` distinguishes that case, which is
-A1's point turned on the seed itself. C4 asks the filesystem instead.
-
-### C3 — `artifactPathFor` reads the new counter, with a floor
-
-    // src/supervisor/deliver.ts:97-107, delegating the key to src/lib/verdict-path.ts
-    const n = Math.max(entriesFor(record, phase) - 1, counterFor(record, phase))
-    const key = `${phase}-${n}`
-    return record.artifacts.verdicts[key] ?? join(REVIEWS_DIR, `<prefix>-${key}.md`)
-
-`- 1` because `bumpEntries` runs on entry, so the first entry reads 1 and must render `…-0.md`.
-
-`Math.max(…, counterFor(…))` is the back-compat floor, and it does three things at once:
-
-1. A legacy run mid-review at upgrade has no `phase_entries`: `entriesFor` is 0, `-1` loses to
-   `counterFor`, and the path is **byte-identical to today's**. Nothing in flight moves.
-2. A record whose phase was set with no entry recorded — every `mkTask`/`mkRun` literal in the suite
-   (`test/deliver.test.ts:14-25`, `:27-31`; `test/cli-commands.test.ts:35-47`) omits the field — reads
-   `max(-1, 0) = 0`, so today's default survives.
-3. It is monotone in both inputs, so neither counter can drag the path backwards.
-
-The `artifacts.verdicts[key]` override keeps precedence exactly as today, which
-`test/deliver.test.ts:156-161` pins — and C4 is its first writer.
-
-### C4 — reservation against the filesystem, in `src/lib/verdict-path.ts`
-
-**The move the review's fix (a) forces, which the review did not name.** `cmdRewind` must reserve the
-path, and `src/cli.ts` cannot reach `src/supervisor/`:
+`src/cli.ts` cannot reach `src/supervisor/`, which is why this is a `src/lib/` module:
 
     $ grep -rn "supervisor/" src/ | grep -v "^src/supervisor/"
     (no output)
 
-`src/cli.ts:2-21` imports only from `./lib/`, and `src/supervisor/deliver.ts:2-10` imports only from
-`../lib/`. So the key derivation and the reservation move to a new pure module, **`src/lib/verdict-path.ts`**,
-imported by `src/cli.ts` and by `src/supervisor/deliver.ts`. `src/lib/gating.ts` is the existing
-example of exactly this — imported by `src/cli.ts:5` and `src/supervisor/tasks.ts:4` — and
-`src/lib/predicates.ts:1` establishes that a `src/lib/` module may touch the filesystem.
-`artifactPathFor`/`absoluteArtifactPath` stay in `src/supervisor/deliver.ts` and delegate, so no
-caller and no existing test import moves.
+`src/cli.ts:2-21` imports only from `./lib/`; `src/supervisor/deliver.ts:2-10` imports only from
+`../lib/`. `src/lib/gating.ts` is the existing module imported by both sides.
 
-    export function reserveVerdictPath(run: Run, task: Task | null): string | null
+    export const REVIEWS_DIR = 'docs/superpowers/reviews'   // moved from src/supervisor/deliver.ts:95
 
-1. **Guard (MAJOR 2).** Return `null`, changing nothing, unless the record's current row is a verdict
-   row — `taskRow(task.phase).signal === 'verdict'` for a task, `runRow(run.phase).signal === 'verdict'`
-   for a run (`src/lib/phases.ts:96-98`, `:101-103`, `:111-116`, `:64-66`). Not
-   `artifact === undefined`: `ci` has no artifact and would otherwise qualify
-   (`src/lib/phases.ts:122-124`), and `merge`, `close`, `implement` and the blocked rows fall through
-   the same way.
-2. If `artifacts.verdicts[key]` is already set, return it unchanged. **This is what makes the write
-   and every later read agree** — `verdictFor` re-derives the path through `artifactPathFor` on every
-   tick (`src/supervisor/main.ts:193-198`). (Pass 0 justified this step with a double-render that
-   cannot happen; see MINOR 1.)
-3. Otherwise `existsSync` the absolute default. If free, return it and write nothing (A4).
-4. If occupied, walk `n+1, n+2, …` to the first free ordinal (bounded, A5), record the winner at
-   `artifacts.verdicts[key]`, log one line, and return it.
+    /** The ONE place a verdict filename is spelled. Always REPO-RELATIVE. */
+    export function verdictFilename(prefix: string, phase: string, ordinal: number): string
 
-Called from **three** sites — the two that hand a path to an agent, and the one that creates the
-collision:
+    /** The recorded path for this phase: the highest ordinal present. REPO-RELATIVE, or null. */
+    export function recordedVerdict(verdicts: Record<string, string>, phase: string): string | null
 
-| Site | Why |
+    /** Allocates, records and returns the next free path. REPO-RELATIVE. */
+    export function reserveVerdict(
+      verdicts: Record<string, string>, prefix: string, phase: string, base: string,
+    ): string
+
+`prefix` is `issue-${task.issue}` for a task and `run.run_id` for a run — the two spellings currently
+inline at `src/supervisor/deliver.ts:103` and `:106`, which is the duplication pass-1 MAJOR 1 flagged.
+`base` is the absolute checkout the probe resolves against, and is used for nothing else.
+
+`reserveVerdict` picks the lowest `ordinal` for which **both** are true:
+
+1. `verdicts[`${phase}-${ordinal}`]` is absent — the map is authoritative and, because earlier keys
+   are never removed, a path once issued can never be re-issued, which is the monotonicity the ruling
+   requires across `hpipe rewind`;
+2. `existsSync(join(base, verdictFilename(…)))` is false — ground truth for files the map does not
+   know about: every record written before this change, and any human `git mv`.
+
+It then writes `verdicts[`${phase}-${ordinal}`] = verdictFilename(…)` and returns it. The write is
+what makes it idempotent for the reader; it is **not** idempotent across two calls in one phase, which
+is why C2 and C3 pin exactly where it may be called (A2).
+
+### C2 — reserve at prompt-render time, and read everywhere else
+
+`artifactPathFor` (`src/supervisor/deliver.ts:97-107`) stops deriving and becomes a pure read:
+
+    if (task) {
+      const row = taskRow(task.phase)
+      if (row.artifact) return task.artifacts[row.artifact]        // unchanged
+      if (row.signal !== 'verdict') return <today's derivation>     // unchanged, see A4
+      return recordedVerdict(task.artifacts.verdicts, task.phase)
+        ?? join(REVIEWS_DIR, `issue-${task.issue}-${task.phase}-${counterFor(task, task.phase)}.md`)
+    }
+
+The `??` branch is **the only derivation left in the design** and exists solely for a record in flight
+at upgrade, whose map is empty and whose agent was already handed today's path (A1). Every reader —
+`verdictFor` on every tick (`src/supervisor/main.ts:193-198`), `absoluteArtifactPath`
+(`src/supervisor/deliver.ts:110-115`), the `{{verdict_path}}` renders — goes through this one function
+and therefore sees the reserved path.
+
+`reserveVerdict` is called from exactly the two sites that hand a path to an agent:
+
+| Site | Guard |
 |---|---|
-| `src/supervisor/tasks.ts:46-60` (`promptForTaskPhase`) | the task `verdict_path` render |
-| `src/supervisor/deliver.ts:246-255` (`promptForRunPhase`) | the run `verdict_path` render |
-| `src/cli.ts:372` (`cmdRewind`, before `saveRun`) | **the only site that closes BLOCKER 1** |
+| `src/supervisor/tasks.ts:46-60` (`promptForTaskPhase`) | `taskRow(task.phase).signal === 'verdict'` |
+| `src/supervisor/deliver.ts:246-255` (`promptForRunPhase`) | `runRow(run.phase).signal === 'verdict'` |
 
-The first two compute `common`/`verdictPath` for *every* phase (`src/supervisor/tasks.ts:49-60`,
-`src/supervisor/deliver.ts:250-255`), which is why step 1's guard is not optional.
+Both build their `common` object **before** the `switch` (`src/supervisor/tasks.ts:49-60`,
+`src/supervisor/deliver.ts:250-255`), so `verdict_path` is computed for every phase and the guard is
+not optional — pass-1 MAJOR 2. The guard tests `signal`, not `artifact === undefined`: `ci`
+(`src/lib/phases.ts:122-124`), `merge`, `close`, `implement` and the blocked rows all lack an
+`artifact` and would otherwise qualify.
 
-`cmdRewind` reserves for the phase it is rewinding *to*, after the seed and the bump. It can: the
-phase argument is already validated against the row table (`src/cli.ts:311-321`, A13), so
-`taskRow`/`runRow` cannot throw; `task.checkout_path` is absolute
-(`herdr-plugin-pipeline-20260918-…-v0qh` → `/Volumes/stein/.herdr/worktrees/…/fix-21-run-resolution`),
-so the probe works from the orchestrator's cwd; and the run is saved at `src/cli.ts:372` immediately
-after. A torn-down worktree makes `existsSync` false, which yields the default path — correct, since
-there is no review there to lose.
+`promptForTaskPhase` is reached only on a real transition (`src/supervisor/tasks.ts:171-178` returns
+early when `advanceTask` yields nothing or the phase is unchanged), so one transition into a review
+row allocates exactly one path.
 
-### C5 — two documentation corrections
+### C3 — `cmdRewind` reserves when it rewinds *onto* a verdict row
+
+This is the one allocation outside a prompt render, and it is deliberate. A rewind onto a review row
+renders no prompt — `advanceTask` returns `null` for a row whose verdict file is not fresh
+(`src/supervisor/tasks.ts:270-275`, `src/lib/machine.ts:147-156`), so `src/supervisor/tasks.ts:175` is
+never reached — yet the human has just commissioned a new review. The ruling's own test applies:
+*"it must be incremented where a new review is commissioned, not where a phase is re-entered."*
+Rewinding onto `spec-review` commissions one; rewinding to `spec` does not, and reserves nothing,
+because the `spec → spec-review` transition that follows will render a prompt and reserve then (A2).
+
+`cmdRewind` has what it needs at `src/cli.ts:372`: the phase argument is already validated against the
+row table (`src/cli.ts:311-321`, A9) so `taskRow`/`runRow` cannot throw; `task.checkout_path` is
+absolute (verified on the live ledger — `herdr-plugin-pipeline-20260918-…-v0qh` task `t1` →
+`/Volumes/stein/.herdr/worktrees/herdr-plugin-pipeline/fix-21-run-resolution`), so the probe resolves
+from the orchestrator's cwd; and `saveRun` at `src/cli.ts:372` persists the record immediately after.
+
+Its success text (`src/cli.ts:373`) names the reserved path, because nothing else will (A5).
+
+### C4 — two documentation corrections
 
 - `prompts/escalate.md:17` says rewind "resets the pass count for that phase". `src/cli.ts:353`
-  clears the whole map. Corrected. This file is mine this batch; `README.md`'s equivalent line needs
-  no change (A7).
-- `src/supervisor/deliver.ts:91-94` asserts *"nothing ever populates `artifacts.verdicts` …
-  and `adoptableArtifacts` filters by prefix instead"*. C4 makes the premise false while the
-  conclusion (`:180`, pinned by `test/deliver.test.ts:287-295`) stays correct. Rewritten to say the
-  filter is by prefix because verdicts are *written only on a collision*, so the `claimed` set still
-  cannot enumerate them (MINOR 4).
+  clears the whole map. Corrected. `README.md`'s equivalent line is sibling-owned and needs no change
+  (A8).
+- `src/supervisor/deliver.ts:91-94` asserts *"nothing ever populates `artifacts.verdicts` —
+  `artifactPathFor` reads it and no writer exists — so the `claimed` set cannot exclude them and
+  `adoptableArtifacts` filters by prefix instead."* This design is that writer. The conclusion still
+  holds — `adoptableArtifacts` filters by prefix (`:180`, pinned by `test/deliver.test.ts:287-295`) —
+  but the reason changes: verdict paths are now recorded, yet `adoptableArtifacts` is called for
+  artifact rows only (`src/supervisor/tasks.ts:254`), so the prefix filter is what keeps a review out
+  of an artifact slot. Rewritten to say that.
 
 ## Data and control flow
 
-Normal loop, unchanged from today's filenames. `MAX_PASSES` is `2` (`src/lib/config.ts:26`) and
-`src/lib/machine.ts:121-123` escalates on `count >= maxPasses`, so a default loop produces two files:
+Values in `artifacts.verdicts` are **repo-relative**; only `absoluteArtifactPath`
+(`src/supervisor/deliver.ts:110-115`) and `reserveVerdict`'s probe join them to a base (A7).
 
-| Step | `phase_entries['spec-review']` | `passes['spec-review']` | `n` | File |
-|---|---|---|---|---|
-| enter `spec-review` | 1 | 0 | `max(0,0)=0` | `issue-26-spec-review-0.md` |
-| `BLOCKER` → `spec` → `spec-review` | 2 | 1 | `max(1,1)=1` | `…-1.md` |
-| `BLOCKER` → `count 2 >= 2` | 2 | 2 | — | `escalated` |
+Normal loop. `MAX_PASSES` is 2 (`src/lib/config.ts:26`) and `src/lib/machine.ts:121-123` escalates on
+`count >= maxPasses`, so a default spec loop commissions two reviews:
 
-`hpipe rewind <run> spec --task t1` (rewind to the producer row — the most common rewind in the
-ledger, research `:141-144`):
+| Event | Reserve? | `verdicts` after | Path |
+|---|---|---|---|
+| `spec → spec-review`, prompt renders | yes | `{spec-review-0: …-0.md}` | `…-spec-review-0.md` |
+| `BLOCKER` → `spec` (no render for the review row) | no | unchanged | — |
+| `spec → spec-review`, prompt renders | yes | `+ {spec-review-1: …-1.md}` | `…-spec-review-1.md` |
+| `BLOCKER` → `count 2 >= 2` → `escalated` | no | unchanged | — |
 
-| Step | `phase_entries['spec-review']` | `passes` | `n` | File |
-|---|---|---|---|---|
-| seed (`??=`, key present) | 2 | `{spec-review: 2}` → `{}` | — | — |
-| bump target `spec`; C4 guard: `taskRow('spec').signal` is `artifact`, so **no reservation** | 2 | `{}` | — | — |
-| enter `spec-review` | 3 | 0 | `max(2,0)=2` | `…-2.md` |
+`hpipe rewind <run> spec --task t1` — the most common rewind in the ledger (research `:141-144`):
+`taskRow('spec').signal` is `artifact`, so C3 reserves nothing. `passes` is cleared as today. The
+`spec → spec-review` transition then renders and reserves: ordinals 0 and 1 are in the map, so it
+takes **2**. The clobber is gone, and it is the map — not a counter — that prevents it.
 
-`hpipe rewind <run> spec-review --task t1` on a **post-change** record whose review cleared at pass 0:
-the seed does not fire (`passes['spec-review']` is 0), `bumpEntries` takes the counter 1 → 2,
-`n = max(1, 0) = 1`, C4's guard passes, `…-1.md` is free, nothing is recorded, and the success text
-names it (A12).
+`hpipe rewind <run> spec-review --task t1`, **post-change**: C3 reserves. Ordinals 0 and 1 are taken,
+so `…-2.md`, recorded and named in the command's output.
 
-The same command on a **legacy** record — BLOCKER 1's case, and the one `t4:spec-review` matches:
-`phase_entries` is absent, the seed does not fire, `bumpEntries` gives 1, `n = max(0, 0) = 0`, and the
-default `…-0.md` **is occupied by the earlier CLEAR review**. C4 step 4 walks to `…-1.md`, records
-`artifacts.verdicts['spec-review-0'] = 'docs/superpowers/reviews/issue-4-spec-review-1.md'`, logs,
-and names it. The supervisor's next `verdictFor` reads the same path through `artifactPathFor`'s
-override branch (`src/supervisor/deliver.ts:102`). **This is the branch pass 0 left open.**
+`hpipe rewind <run> spec-review --task t4`, **legacy** — the case that made pass 1 a BLOCKER and the
+one `t4:spec-review` matches (research `:144`): the map is empty, so condition 1 admits ordinal 0, but
+`existsSync` finds the earlier CLEAR review at `…-0.md` and condition 2 rejects it. Ordinal 1 is free
+on both counts, so `verdicts['spec-review-1'] = '…-spec-review-1.md'` is recorded and named. The
+supervisor's next `verdictFor` reads it through `recordedVerdict`. **No counter could have known this;
+the filesystem did.**
 
-Run-level `branch-review` is the same flow with `run.artifacts.verdicts`, the
-`${run.run_id}-${key}.md` prefix (`src/supervisor/deliver.ts:105-106`), and `runRow` in the guard.
+**A decision answered on a review row** (pass-1 BLOCKER 1): `deliverPendingAnswers` sends `answer.md`
+and calls `enterTaskPhase` (`src/supervisor/tasks.ts:326-341`). No `promptForTaskPhase`, so no
+reservation; `recordedVerdict` returns the same path the agent is already writing to. Inert by
+construction. `hpipe abort` + `hpipe resume` onto `branch-review` (`src/cli.ts:500-516`) is inert the
+same way.
+
+Run-level `branch-review` follows the same flow against `run.artifacts.verdicts`, the `run.run_id`
+prefix, and `run.repo_root` as the base.
 
 ## Error handling
 
 | Condition | Behaviour |
 |---|---|
-| `phase_entries` absent on a record read from disk | `entriesFor` returns 0; the floor yields today's path. No migration, no throw. |
-| `bumpEntries` or the C2 seed on a record whose `phase_entries` is absent | The map is created in place (`??= {}`) before either writes. Without this the seed throws `TypeError` on every legacy record and on `test/cli-commands.test.ts:228-239` (MAJOR 1). |
-| `reserveVerdictPath` on a row that is not a verdict row | Returns `null` and writes nothing. The guard is `signal === 'verdict'`, because `ci`, `merge`, `close`, `implement` and the blocked rows all have no `artifact` and would otherwise pass an `artifact === undefined` test (MAJOR 2, `src/lib/phases.ts:122-124`). |
-| Default verdict path already occupied | C4 redirects and logs once: `[pipeline] t1 (#26): spec-review-0 is occupied by <path> — writing to <new> instead`, in the shape of `logAmbiguous` (`src/supervisor/tasks.ts:196-199`). |
-| C4's probe exhausts its bound (A5) | Returns the default path and logs the exhaustion. Degrades to today's behaviour rather than looping; the supervisor tick must not hang. |
-| C4 in `cmdRewind` with a torn-down or missing worktree | `existsSync` is false, so the default path is used. There is no review there to lose. |
-| `existsSync` on an unreadable directory | Returns `false`; the default is used. No throw, consistent with `src/supervisor/tasks.ts:244`. |
-| `cmdRewind` given a phase in no row | Already rejected before C2/C4 run (`src/cli.ts:311-321`), so `taskRow`/`runRow` in the guard cannot throw (A13). |
-| A reserved path recorded but the tick then fails | `src/cli.ts:372` and `src/supervisor/main.ts:242` both save after the write; a retried render returns the recorded path via C4 step 2. |
+| Nothing recorded for a verdict row (a record in flight at upgrade) | `recordedVerdict` returns `null`; C2's `??` yields today's `counterFor`-derived path, so the agent already writing it is undisturbed (A1). |
+| `reserveVerdict` on a row that is not a verdict row | Never called: both call sites guard on `signal === 'verdict'`. `ci`, `merge`, `close` and `implement` have no `artifact` and would pass an `artifact === undefined` test (`src/lib/phases.ts:122-124`), which is why the guard is on `signal`. |
+| A path is occupied on disk but absent from the map | Condition 2 rejects the ordinal and the walk continues. This is the legacy and `git mv` case, and the reason the probe exists at all. |
+| A path is in the map but absent from disk (the agent has not written yet) | Condition 1 rejects the ordinal. The map alone prevents re-issue, so a reservation made and not yet fulfilled is never handed to a second agent. |
+| `task.checkout_path` is `null` | `absoluteArtifactPath` already falls back to `run.repo_root` (`src/supervisor/deliver.ts:113`); `reserveVerdict`'s `base` uses the same expression, so the probe never resolves against the process cwd. |
+| `existsSync` on a missing or unreadable directory (a torn-down worktree) | Returns `false`, so the ordinal is accepted. There is no review there to lose. |
+| The probe exhausts its bound (A10) | Records nothing, returns ordinal 0's path, and logs the exhaustion. Degrades to today's behaviour rather than looping; the supervisor tick must not hang. |
+| `cmdRewind` given a phase in no row | Rejected before C3 runs (`src/cli.ts:311-321`), so the guard's `taskRow`/`runRow` cannot throw (A9). |
+| A reservation is written but the process then fails | `src/cli.ts:372` and `src/supervisor/main.ts:242` both `saveRun` after the write. A lost tick re-reads the record and `recordedVerdict` returns the reservation; it is not re-allocated. |
 
 ## Assumptions
 
 Each is a behavioural choice, stated so the review can attack it.
 
-**A1 — the ordinal counts phase entries, not review passes.** A `CLEAR` consumes a filename without
-bumping `passes` (`src/lib/machine.ts:117-119`), so a pass-derived ordinal still collides on
-clear-then-rewind. Rejecting A1 means accepting that hole.
+**A1 — the legacy fallback keeps today's derivation, and is the only derivation left.** A record
+mid-review at upgrade has an empty map and an agent already writing `…-${counterFor}.md`. Returning
+`null` instead would make `verdictFor` unsatisfiable and deadlock every in-flight review. The branch
+becomes unreachable for a record once its row next renders a prompt; it is not removed, because a
+`hpipe rewind` onto a legacy row is still reachable indefinitely.
 
-**A2 — `phase_entries` is optional, not required.** Required would force an edit to every `mkTask`
-and `mkRun` literal in the suite (`grep -l "passes: {}" test/*.ts | wc -l` → 12 files) and to both
-constructors, for no behavioural gain; optional is what makes the floor in C3 meaningful and the
-upgrade silent. The constructors (`src/lib/ledger.ts:24-41`, `src/cli.ts:216-233`) still initialise
-it to `{}` so new runs are explicit.
+**A2 — a path is allocated at exactly two kinds of moment: a rendered verdict prompt, and a rewind
+onto a verdict row.** Nothing else allocates, which is what makes a resume inert. `reserveVerdict` is
+deliberately *not* idempotent — calling it twice for one phase entry burns an ordinal — so the guard
+is "call it only here", enforced by there being only three call sites, not by the function.
 
-**A3 — no `schema_version` bump.** The field is additive and absent-safe, and
-`src/supervisor/main.ts:32-34` is a hard gate that refuses to advance anything that is not exactly
-`2`.
+**A3 — `cmdRewind` allocating is a deliberate reading of the ruling's "reserve at prompt-render time,
+and only then".** A rewind onto a review row renders no prompt, so a literal reading leaves the
+original defect open on exactly the command the issue is about. The ruling's own criterion — *"where a
+new review is commissioned"* — resolves it, and the ruling separately says my `src/cli.ts` work stays
+in `cmdRewind`. This is the assumption most worth attacking.
 
-**A4 — C4 records a path only when it redirects.** Recording every minted path would give
-`artifacts.verdicts` a uniform writer, but it grows the ledger on every review and makes the on-disk
-name depend on a write that used to be derivable. The derived default stays the norm; the record is
-the exception that documents a collision. This is also what keeps C5's rewritten comment true.
+**A4 — non-verdict, non-artifact rows keep today's meaningless derived path.** `ci`, `merge`, `close`,
+`implement` and the blocked rows currently resolve to `issue-N-<phase>-0.md`
+(`src/supervisor/deliver.ts:101-103`), which no prompt consumes — `grep -n "verdict_path" prompts/`
+lists only the five review prompts. Changing it to `null` is tempting but is scope this issue did not
+ask for and would alter what `absoluteArtifactPath` returns for six rows.
 
-**A5 — C4's probe is bounded at 64 ordinals.** `existsSync` terminates naturally, but this runs
-inside the supervisor tick and an unbounded loop over a pathological reviews directory is the kind of
-hang `src/supervisor/deliver.ts:130-137` already guards against for `Bun.spawn`.
+**A5 — `cmdRewind` names the reserved path; `hpipe status` is not taught it.** After a rewind onto a
+review row no prompt is rendered, so `src/cli.ts:373` is the only place the human learns the path:
 
-**A6 — every direct `.phase =` assignment bumps, including `cmdAbort`'s terminal one.** A rule with
-no exceptions is cheaper to keep true than four remembered sites; `done` carries no verdict, so the
-extra key is inert.
+    rewound t1 to spec-review; counters cleared; next verdict → docs/superpowers/reviews/issue-26-spec-review-2.md
 
-**A7 — rewind's documented behaviour does not change, so `README.md:100` stays true.** `passes` is
-still cleared wholesale. The success text at `src/cli.ts:373` gains a clause (A12) but loses nothing.
-This is deliberate: `README.md` is sibling-owned this batch.
-
-**A8 — `{{pass}}` in the prompts keeps meaning the escalation pass, not the file ordinal.** It is
-rendered from `counterFor` (`src/supervisor/tasks.ts:54`, `src/supervisor/deliver.ts:252`) and is
-what `MAX_PASSES` bounds. After a rewind a reviewer sees "pass 0" writing to `…-2.md`, which is the
-honest reading: the budget restarted, the audit trail did not.
-
-**A9 — the four `*-preserved.md` files stay where they are.** Renaming them back would re-open the
-names this change stops anyone from reusing.
-
-**A10 (rewritten after BLOCKER 1) — no in-place migration; legacy safety comes from C4, not from the
-seed.** Pass 0 claimed "the floor in C3 plus the seed in C2 plus the backstop in C4 cover every legacy
-case", which was false while C4 could not run on a rewind onto a review row. The claim is now: C3's
-floor keeps legacy records rendering today's path, C2's seed handles the legacy cases it can see, and
-**C4 at `cmdRewind` is the only thing that makes the rest safe** — because it asks the filesystem
-rather than inferring from `passes`. `src/supervisor/main.ts:28-31` states this repo does no load-time
-migration, and none is added.
-
-**A11 (amended after MAJOR 1) — four existing tests stay green, *given* C2's lazy init.**
-`test/deliver.test.ts:148-154` sets `run.passes['branch-review'] = 1` and expects a changed path: the
-floor gives `max(-1, 1) = 1`. `test/deliver.test.ts:227-232` seeds `passes: { 'spec-review': 1 }` with
-no `phase_entries` and expects `spec-review-1` — the clearest demonstration that the back-compat path
-is what the suite already pins. `test/cli.test.ts:117-129` builds its run with `newRun()`, so A2's
-constructor init covers it. `test/cli-commands.test.ts:228-239` builds a task from a raw literal
-(`test/cli-commands.test.ts:35-47`) and is **the one that MAJOR 1 would have broken**; it stays green
-only because `bumpEntries` and the seed create the map. Recorded because the research note asserted
-all of these would have to move, and pass 0 asserted the fourth was safe for the wrong reason.
-
-**A12 (new, answering MAJOR 3) — `cmdRewind` names the reserved path; `hpipe status` is not
-taught the ordinal.** After a rewind onto a review row no prompt is rendered (BLOCKER 1, evidence 1),
-so the reserved path reaches no agent on its own. `src/cli.ts:373` therefore gains it:
-
-    rewound t1 to spec-review; counters cleared; next verdict → docs/superpowers/reviews/issue-26-spec-review-1.md
-
-That is the moment the information is needed, by the person who just typed the command.
 `src/lib/status.ts:102-105` keeps printing `pass N` from `counterFor`, which remains the escalation
-budget (A8) — so **the residual gap is explicit: `hpipe status` does not show the file ordinal, and a
-human who rewound in an earlier session discovers it with `ls docs/superpowers/reviews/`.** Naming
-the path is free because C4 already computes it there; teaching `status.ts` is not, and is rejected
-below.
+budget. **The residual gap is explicit:** `hpipe status` does not show the file ordinal, and a human
+who rewound in an earlier session finds it in the ledger or with `ls`.
 
-**A13 — C4's row lookups rely on `cmdRewind`'s existing phase validation.** `src/cli.ts:311-321`
-rejects a phase that is in no row before any of C2 or C4 runs, so `taskRow`/`runRow`
-(`src/lib/phases.ts:77-81`, `:156-160`) cannot throw inside the guard. If that validation is ever
-removed, C4 must gain its own throw-safe lookup — `runPhaseState` (`src/lib/ledger.ts:143-149`) is the
-in-repo shape for that.
+**A6 — one function spells a verdict filename.** `verdictFilename` is used by `reserveVerdict` and by
+C2's fallback, and `REVIEWS_DIR` moves out of `src/supervisor/deliver.ts:95` so there is no second
+copy. `adoptableArtifacts` (`:180`) imports it rather than keeping its own.
 
-### Why this was not an `hpipe decide`
+**A7 — every value in `artifacts.verdicts` is repo-relative.** `verdictFilename` returns relative,
+`reserveVerdict` records what it returns, `recordedVerdict` returns it unchanged, and
+`absoluteArtifactPath` is the only joiner. Pass-1 MAJOR 2 was the mixed contract; the signature now
+carries it, and `join('/w', '/abs')` → `/w/abs` is the corruption this prevents.
 
-The review called MAJOR 3 "a call the implementer cannot make alone". I settled it here because the
-BLOCKER 1 fix removes the cost from the conservative option: `cmdRewind` must compute the reserved
-path anyway, so naming it in a string it already returns adds no scope, no new surface and nothing
-irreversible. The two options that *would* need a human — changing `src/lib/status.ts`'s contract, or
-making `cmdRewind` deliver prompts — are both rejected below with reasons, and A12 states the residual
-gap plainly rather than burying it. If the human disagrees, the PR review is a cheaper place to say so
-than a mid-phase interrupt.
+**A8 — rewind's documented behaviour does not change, so `README.md:100` stays true.** `passes` is
+still cleared wholesale; the success text gains a clause and loses nothing.
+
+**A9 — C3's row lookups rely on `cmdRewind`'s existing phase validation** (`src/cli.ts:311-321`). If
+that is ever removed, C3 needs a throw-safe lookup; `runPhaseState` (`src/lib/ledger.ts:143-149`) is
+the in-repo shape.
+
+**A10 — the probe is bounded at 64 ordinals.** It terminates naturally, but it runs inside the
+supervisor tick, and `src/supervisor/deliver.ts:130-137` already guards that loop against a
+synchronous throw for the same reason.
+
+**A11 — the map is never pruned.** `artifacts.verdicts` grows by one entry per review commissioned —
+at most a handful per task — and pruning is what would let an ordinal be re-issued.
+
+**A12 — the second instance (`pr-review-intent` re-entry) is fixed silently, and the PR says so.**
+It is in scope because it is the same defect with the same blast radius, and the fix costs nothing
+extra. It is called out here and belongs in the PR body, because a reviewer comparing the issue text
+to the diff would otherwise find behaviour the issue never asked for.
 
 ## Testing strategy
 
-TDD: the red test first, run, then the minimum code, run again.
+TDD: the red test first, run it, then the minimum code, run it again.
 
-**The red test** (`test/cli-commands.test.ts`, beside the rewind tests at `:228-239` — *not*
-`test/deliver.test.ts`, which does not import `cmdRewind`, `test/deliver.test.ts:1-10`). It is BLOCKER
-1's case, and it compiles and runs red against today's code because it touches no new type:
+**The red test** — `test/cli-commands.test.ts`, beside the rewind tests at `:228-239`. It is the
+legacy rewind-onto-a-review-row case, it uses only APIs that exist today, and it fails today because
+`cmdRewind` reserves nothing and `artifactPathFor` re-derives:
 
     test('a rewind onto a review row does not re-issue a path an earlier review holds', …)
-      // task in spec-review, checkout containing issue-N-spec-review-0.md
+      // task in spec-review, checkout containing issue-1-spec-review-0.md, verdicts: {}
       // cmdRewind(… phase: 'spec-review', taskId: 't1')
-      // expect(artifactPathFor(run, task)).not.toBe('docs/superpowers/reviews/issue-N-spec-review-0.md')
+      // expect(artifactPathFor(run, task)).not.toBe('docs/superpowers/reviews/issue-1-spec-review-0.md')
 
-Today `cmdRewind` reserves nothing and `artifactPathFor` returns the occupied path, so it fails.
+**Unit — `src/lib/verdict-path.ts`** (new `test/verdict-path.test.ts`, modelled on
+`test/gating.test.ts`):
 
-**Unit, `src/lib/machine.ts`** (`test/machine-task.test.ts`, `test/machine-run.test.ts`, beside the
-`bumpCounter` tests at `test/machine-task.test.ts:143-147`):
+- `verdictFilename` returns a repo-relative path for both prefixes (A6, A7).
+- `recordedVerdict` returns the highest ordinal recorded, `null` on an empty map.
+- `reserveVerdict` skips an ordinal held in the map, skips one held on disk but absent from the map
+  (the legacy case), and skips one held by both.
+- **The contract test:** after `reserveVerdict`, `recordedVerdict` returns exactly what it returned.
+- Two reservations for one phase yield different paths and both keys survive (A11).
+- The bound stops the walk and returns ordinal 0 (A10).
 
-- `entriesFor` reads 0 on a record with no `phase_entries`; `bumpEntries` creates the map.
-- `enterRunPhase`/`enterTaskPhase` bump the phase entered, and only that phase.
-- No transition, including `onBlocker` re-entry, ever decrements it.
+**Unit — `src/supervisor/deliver.ts`** (`test/deliver.test.ts`):
 
-**Unit, `src/lib/verdict-path.ts`** (new `test/verdict-path.test.ts`, modelled on
-`test/gating.test.ts` as the tests for a lib module used by both entry points):
+- A verdict row with an empty map falls back to today's `counterFor` path (A1) — this keeps
+  `test/deliver.test.ts:148-154` and `:227-232` green unchanged.
+- A verdict row with a recorded path returns it and ignores `passes` entirely.
+- `test/deliver.test.ts:156-161` seeds `verdicts['branch-review-0']` and expects it to win; under
+  `recordedVerdict` it still does, because it is the highest ordinal present.
+- The run-level `branch-review` reservation uses the `run_id` prefix and `run.repo_root`.
 
-- The ordinal sequence over a default loop is `0, 1` (`MAX_PASSES` is 2); a trace passing
-  `maxPasses: 3` explicitly yields `0, 1, 2`.
-- A record with no `phase_entries` and `passes: {spec-review: 1}` renders `…-1.md` (back-compat).
-- `reserveVerdictPath` returns `null` and writes nothing for `research`, `spec`, `plan`, `ci`,
-  `merge`, `close` and `implement` — the guard, with `ci` named explicitly (MAJOR 2).
-- It leaves the record untouched when the default is free (A4).
-- It redirects around an occupied file, records it under the entry key, and a second call returns the
-  recorded path rather than probing again (C4 step 2).
-- It stops at the bound and returns the default (A5).
+**Unit — `src/supervisor/tasks.ts`** (`test/tasks.test.ts`): `test/tasks.test.ts:301-312` asserts that
+a design row's prompt names the path its own predicate will check, over `research`, `spec`,
+`spec-review`, `plan` and `plan-review`. It reads `absoluteArtifactPath` **before** calling
+`promptForTaskPhase`, so it now spans a reservation. It passes — the checkout in the fixture does not
+exist, so the probe accepts ordinal 0 and the fallback also yields ordinal 0 — but it passes by
+coincidence of ordering. A new test makes the invariant explicit rather than incidental: render the
+prompt first, then assert `absoluteArtifactPath` equals the path the prompt names. (Pass 1 omitted
+this test from A11; the pass-1 review was right to flag it.)
 
-**Unit, `src/cli.ts`** (`test/cli-commands.test.ts`):
+**Unit — `src/cli.ts`** (`test/cli-commands.test.ts`): `cmdRewind` reserves and reports when the
+target is a verdict row; reserves nothing when the target is `spec`; still clears `passes`
+(`:228-239` green); and does not throw on a record whose `verdicts` map is empty.
 
-- `cmdRewind` bumps the target phase and leaves `passes` cleared (`:228-239` still green).
-- It seeds `phase_entries` from spent `passes` on a record that has none, does not overwrite one that
-  does, and **does not throw on a record whose `phase_entries` is absent** (MAJOR 1).
-- It reserves and reports the path when rewinding onto a review row, and reserves nothing when
-  rewinding to `spec` (A12, MAJOR 2).
-- `cmdResume` bumps the phase it returns to.
+Filesystem tests use `tempDir`/`commitIn` from `test/helpers/git-worktree.ts`, as
+`test/deliver.test.ts:255-300` already does.
 
-**Unit, `src/supervisor/deliver.ts`** (`test/deliver.test.ts`): the run-level `branch-review` twin of
-the reservation, with the `run_id` prefix.
+**Regression, unchanged:** `test/deliver.test.ts:287-295` (`adoptableArtifacts` still excludes the
+reviews prefix, now importing `REVIEWS_DIR`), and `test/prompts.test.ts` (the declared prompt set and
+review-trailer contract, which C4 touches).
 
-Filesystem tests use `tempDir`/`commitIn` from `test/helpers/git-worktree.ts`, already used by
-`test/deliver.test.ts:255-300`.
-
-**Regression, unchanged:** the four tests in A11, plus `test/deliver.test.ts:287-295`
-(`adoptableArtifacts` still excludes the reviews prefix) and `test/prompts.test.ts` (the declared
-prompt set and review-trailer contract, which C5 touches).
-
-**Gates:** `bun test` and `bun run typecheck` both green before push, with the measured numbers quoted
-in the PR body. Baseline to beat: 503 pass, 0 fail, 1265 expect() calls, 34 files; `tsc --noEmit`
-exit 0. CI is a PR-title lint only (`.github/workflows/pr-title-lint.yml`), so these are run by hand.
+**Gates:** `bun test` and `bun run typecheck` green before push, with the measured numbers quoted in
+the PR body. Baseline to beat: 503 pass, 0 fail, 1265 expect() calls, 34 files; `tsc --noEmit` exit 0.
+CI is a PR-title lint only (`.github/workflows/pr-title-lint.yml`), so these are run by hand.
 
 **Live verification**, required by `.claude/agents/plugin-dev.md` because this changes delivery. The
-unit suite uses injected fakes and has passed clean over real defects twice, so it cannot settle this.
-The installed plugin is pinned to a GitHub commit (`herdr plugin list` → `…@be181757…`), so this code
-is not live until the release lands. After it does:
+unit suite uses injected fakes and has passed clean over real defects twice. The installed plugin is
+pinned to a GitHub commit (`herdr plugin list` → `…@be181757…`), so this code is not live until the
+release lands. After it does:
 
-1. On a task in `spec-review` with `…-spec-review-0.md` committed, `hpipe rewind <run> spec --task <t>`,
-   then watch the pane for the re-rendered prompt and confirm `{{verdict_path}}` names `…-2.md`, with
-   `-0` and `-1` untouched in `git status`.
+1. `hpipe rewind <run> spec --task <t>` on a task with `…-spec-review-0.md` and `…-1.md` committed.
+   Watch the pane for the re-rendered prompt and confirm `{{verdict_path}}` names `…-2.md`, that
+   `artifacts.verdicts` in the ledger carries all three keys, and that `-0` and `-1` are untouched in
+   `git status`.
 2. `hpipe rewind <run> spec-review --task <t>` directly onto the row, on a task whose last verdict was
-   `CLEAR`. Confirm the command's own output names the reserved path, that `artifacts.verdicts` in the
-   ledger carries it, and that no committed review changed. **This is BLOCKER 1's case and the one no
-   unit test proves end to end**, because it depends on a real `cmdRewind` process writing a ledger the
-   supervisor then reads.
-3. Confirm `hpipe status` still prints `pass N` from the escalation budget and not the ordinal — A12's
-   residual gap, observed rather than asserted.
+   `CLEAR`. Confirm the command's own output names the reserved path and that the ledger agrees. **This
+   is the case no unit test proves end to end**, because it needs a real `cmdRewind` process writing a
+   ledger the supervisor then reads.
+3. Raise a decision on a task sitting in `spec-review`, answer it with `hpipe answer`, and confirm the
+   path in `artifacts.verdicts` **does not move** and the worker resumes onto the same file. This is
+   pass-1 BLOCKER 1, and it is the one the ruling exists to prevent.
+4. Confirm `hpipe status` still prints `pass N` from the escalation budget and not the ordinal (A5).
 
 Any difference between this runbook and what is observed is a finding, not a test to make pass.
 
 ## Rejected alternatives
 
-**Refuse to write an occupied path and stop.** The issue's second direction, taken literally. It
-deadlocks the row: `isFresh` is measured against the re-stamped `phase_entered_at`
-(`src/supervisor/main.ts:196`, `src/cli.ts:355`), so nothing but an overwrite advances it. C4
-redirects rather than refuses.
+**Key the filename on a count of phase entries** (passes 0 and 1). Rejected by the ruling and by
+pass-1 BLOCKER 1: `enterTaskPhase` has callers that are resumes, so the watched path moves under a
+live agent — this issue's own bug in a new form.
 
-**Stop clearing `passes` at rewind; give escalation a separate resettable floor.** Inverts which
-counter resets and needs no path change. Rejected: it still collides on clear-then-rewind (A1), and it
-changes what `hpipe rewind` does — the one thing `README.md:100`, a sibling's file, documents.
+**Key it on `passes`/`counterFor` alone** (today). The original defect: `hpipe rewind` clears the map
+(`src/cli.ts:353`, `:360`) and the name regresses. It also misses the `pr-review-intent` re-entry,
+which no rewind is involved in.
 
-**Derive the ordinal by counting `run.history`.** Retroactively exact and needs no new field, but
-`src/actions/claim.ts:32` writes `to: run.phase` for a non-transition and
-`src/lib/orchestrator.ts:56-59` writes a pane id into `to`. The ordinal would move on an orchestrator
-rebind.
+**Refuse to write an occupied path and stop.** Deadlocks the row, because `isFresh` is measured
+against the re-stamped `phase_entered_at` and only an overwrite advances it.
 
-**Put the phase-entry timestamp in the filename.** Collision-free by construction, but
-`issue-26-spec-review-1758243011947.md` destroys what the current names do well: `prompts/spec.md:21`,
-`prompts/plan.md:18` and `prompts/implement.md:15` all tell a worker to find "the review for this
-issue under `docs/superpowers/reviews/`", and a human reads the ordinal to know which pass they are
-looking at.
+**Reserve on every read instead of at render.** Makes `artifactPathFor` mutate, and it is called on
+every tick from `verdictFor` (`src/supervisor/main.ts:193-198`) — the path would advance once per
+second.
 
-**Teach `hpipe status` the file ordinal** (the review's MAJOR 3 option (a), in full). Rejected: it
-contradicts A8, adds a second number to a line whose `pass N` already means the escalation budget
-(`src/lib/status.ts:102-105`), and solves at a distance what A12 solves at the moment of the command.
+**Teach `hpipe status` the file ordinal.** Adds a second number to a line whose `pass N` already means
+the escalation budget (`src/lib/status.ts:102-105`), and solves at a distance what A5 solves at the
+moment of the command.
 
-**Make `cmdRewind` re-deliver the review row's prompt** (option (b)). Rejected: `cmdRewind` holds no
-`Herdr` client and sends nothing today, so this turns a ledger edit into pane I/O — a different
-command, and arguably #22's scope. The supervisor, not the CLI, owns delivery.
+**Make `cmdRewind` re-deliver the review row's prompt.** `cmdRewind` holds no `Herdr` client and sends
+nothing today; this turns a ledger edit into pane I/O, which is the supervisor's job and arguably
+#22's scope.
