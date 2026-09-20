@@ -30,3 +30,15 @@ export function repoBootstrap(repoRoot: string): Bootstrap {
     return { kind: 'none' }
   }
 }
+
+/**
+ * One line, in the `files:` shape, addressed to the orchestrator. Single-line is
+ * a contract rather than a style: see the test that pins it.
+ */
+export function bootstrapLine(b: Bootstrap): string {
+  if (b.kind === 'none') return 'bootstrap: none'
+  if (b.kind === 'not-executable') {
+    return `bootstrap: ${BOOTSTRAP_REL} (NOT EXECUTABLE — chmod +x it on the base branch)`
+  }
+  return `bootstrap: ${BOOTSTRAP_REL}`
+}

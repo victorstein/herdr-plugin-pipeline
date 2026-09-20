@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { repoBootstrap } from '../src/lib/bootstrap'
+import { BOOTSTRAP_REL, bootstrapLine, repoBootstrap } from '../src/lib/bootstrap'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -43,4 +43,28 @@ test('a directory at that path declares nothing', () => {
 
 test('a nonexistent repo root declares nothing and does not throw', () => {
   expect(repoBootstrap('/nonexistent-repo-root-for-issue-16')).toEqual({ kind: 'none' })
+})
+
+test('an undeclared repo still gets a line, the way files: does', () => {
+  // src/cli.ts:252-255 records why: a declaration that matches nothing is
+  // otherwise silent by construction.
+  expect(bootstrapLine({ kind: 'none' })).toBe('bootstrap: none')
+})
+
+test('a ready declaration names the path', () => {
+  expect(bootstrapLine({ kind: 'ready' })).toBe(`bootstrap: ${BOOTSTRAP_REL}`)
+})
+
+test('a non-executable declaration names the fix', () => {
+  expect(bootstrapLine({ kind: 'not-executable' })).toContain('chmod +x')
+})
+
+test('every bootstrap line is exactly one line', () => {
+  // Both emitters put this ABOVE the blank line that prompts/dispatch.md:26-28
+  // uses to split orchestrator text from worker text. A newline here moves that
+  // boundary and the orchestrator pastes its own instructions into the worker's
+  // prompt.
+  for (const kind of ['none', 'ready', 'not-executable'] as const) {
+    expect(bootstrapLine({ kind })).not.toContain('\n')
+  }
 })
