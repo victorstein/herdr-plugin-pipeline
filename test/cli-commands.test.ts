@@ -755,3 +755,25 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   expect(head!.split('\n')).toEqual(['task_id: t1', 'files: none', 'bootstrap: none'])
   expect(rest.join('\n\n')).toStartWith('# feat/quiet — issue #2')
 })
+
+test('task echoes the repo bootstrap on the queued return as well', async () => {
+  // Modelled on test/cli.test.ts:206-226, "task echoes the file set it recorded
+  // while gated": t1 dispatches into `research`, which is not terminal, so t2
+  // stays gated and the `queued:` return is the one that runs.
+  declareBootstrap()
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  await cmdTask(ctx(), {
+    branch: 'feat/first', issue: 1, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  const gated = await cmdTask(ctx(), {
+    branch: 'feat/second', issue: 2, surface: 'core', notes: '',
+    dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect(gated.ok).toBe(true)
+  expect(gated.text).toContain('queued: waiting on t1')
+  expect(gated.text).toContain('bootstrap: .claude/pipeline-bootstrap')
+})

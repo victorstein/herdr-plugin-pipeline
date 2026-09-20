@@ -264,7 +264,7 @@ export async function cmdTask(ctx: Ctx, input: {
 
   const gate = gateStatus(task, run.tasks)
   if (gate.state !== 'ready') {
-    return ok(`task_id: ${task.task_id}\n${filesLine}\nqueued: waiting on ${gate.on.join(', ')}`)
+    return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
