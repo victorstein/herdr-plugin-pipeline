@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
-import { REVIEWS_DIR, verdictBase, verdictFilename, verdictPrefix } from '../src/lib/verdict-path'
+import {
+  REVIEWS_DIR, verdictBase, verdictFilename, verdictFor, verdictPrefix,
+} from '../src/lib/verdict-path'
 import { newRun } from '../src/lib/ledger'
 import { cleanupFixtures } from './helpers/git-worktree'
 import type { Run, Task } from '../src/lib/types'
@@ -39,4 +41,28 @@ test('the base is the checkout when set and the repo root when not', () => {
   expect(verdictBase(run, mkTask({ checkout_path: '/w' }))).toBe('/w')
   expect(verdictBase(run, mkTask({ checkout_path: null }))).toBe('/r')
   expect(verdictBase(run, null)).toBe('/r')
+})
+
+test('nothing is recorded until a review is commissioned', () => {
+  expect(verdictFor(mkTask(), 'spec-review')).toBeNull()
+})
+
+test('a recorded verdict is read back under the key verdict_seq names', () => {
+  const task = mkTask({
+    verdict_seq: { 'spec-review': 2 },
+    artifacts: {
+      research: null, spec: null, plan: null,
+      verdicts: { 'spec-review-0': 'first.md', 'spec-review-1': 'second.md' },
+    },
+  })
+  expect(verdictFor(task, 'spec-review')).toBe('second.md')
+})
+
+test('a recorded entry with no verdict_seq is invisible to the reader', () => {
+  const task = mkTask({
+    artifacts: {
+      research: null, spec: null, plan: null, verdicts: { 'spec-review-0': 'first.md' },
+    },
+  })
+  expect(verdictFor(task, 'spec-review')).toBeNull()
 })
