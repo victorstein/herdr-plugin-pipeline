@@ -31,6 +31,21 @@ brief --task <id>` prints the brief bare, with no header lines and no `files:` e
 one over whole — its first blank line falls after the `# <branch> — issue #<n>` heading, and
 stripping to it would drop the heading.
 
+**Still registering?** New tasks go in with an issue first, then:
+
+    {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
+               [--depends-on <id,id>] [--files <prefix,prefix>] \
+               [--notes "<batch context that does not belong in a public issue>"]
+
+There is no `--text` flag. Never run two agents against the same files in parallel — serialize them
+with `--files`, or with `--depends-on` when one needs the other's result.
+
+**When the last task is registered:**
+
+    {{hpipe}} dispatch --done
+
+Nothing infers that the batch is complete, and the run cannot finish until you say so.
+
 ## Bootstrapping the new checkout
 
 A fresh worktree is a bare `git` checkout: no `node_modules`, no `.venv`, no submodules, no built
@@ -49,18 +64,3 @@ a reason to stop and report instead of starting the worker: that one hands the w
 it will not discover until `implement`. The one exception is a bare `permission denied`, which means
 the checkout's copy is not executable rather than broken — `chmod +x` it in the new checkout, run it,
 and carry on.
-
-**Still registering?** New tasks go in with an issue first, then:
-
-    {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
-               [--depends-on <id,id>] [--files <prefix,prefix>] \
-               [--notes "<batch context that does not belong in a public issue>"]
-
-There is no `--text` flag. Never run two agents against the same files in parallel — serialize them
-with `--files`, or with `--depends-on` when one needs the other's result.
-
-**When the last task is registered:**
-
-    {{hpipe}} dispatch --done
-
-Nothing infers that the batch is complete, and the run cannot finish until you say so.
