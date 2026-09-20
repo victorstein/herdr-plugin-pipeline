@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
@@ -516,4 +516,30 @@ test('re-entering pr-review-intent after a quality blocker does not reuse the fi
   expect(first).toContain('issue-1-pr-review-intent-0.md')
   expect(second).toContain('issue-1-pr-review-intent-1.md')
   expect(second).not.toBe(first)
+})
+
+test('the dispatch prompt names the repo bootstrap above the blank line', async () => {
+  const repo = tempDir('hpipe-bootrepo-')
+  mkdirSync(join(repo, '.claude'), { recursive: true })
+  writeFileSync(join(repo, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\ntrue\n')
+  chmodSync(join(repo, '.claude', 'pipeline-bootstrap'), 0o755)
+
+  const run = mkRun([mkTask({})])
+  run.repo_root = repo
+  const prompts = await advanceTasks(run, deps())
+
+  const text = prompts[0]!.text
+  expect(text).toContain('bootstrap: .claude/pipeline-bootstrap')
+
+  // The blank-line split prompts/dispatch.md:26-28 documents: everything before
+  // the first blank line is the orchestrator's, everything after is the worker's.
+  const head = text.split('\n\n')[0]!
+  expect(head).toContain('bootstrap: .claude/pipeline-bootstrap')
+  expect(text.split('\n\n').slice(1).join('\n\n')).toStartWith('# feat/x — issue #1')
+})
+
+test('a repo declaring no bootstrap still says so in the dispatch prompt', async () => {
+  const run = mkRun([mkTask({})])   // mkRun uses repoRoot '/r', which does not exist
+  const prompts = await advanceTasks(run, deps())
+  expect(prompts[0]!.text).toContain('bootstrap: none')
 })
