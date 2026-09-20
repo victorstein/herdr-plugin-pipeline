@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  REVIEWS_DIR, reserveVerdict, verdictBase, verdictFilename, verdictFor, verdictPrefix,
+  REVIEWS_DIR, reserveVerdict, verdictFilename, verdictFor, verdictPrefix,
 } from '../src/lib/verdict-path'
 import { newRun } from '../src/lib/ledger'
 import { cleanupFixtures, tempDir } from './helpers/git-worktree'
@@ -27,7 +27,8 @@ const mkRun = (): Run =>
   newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
 
 test('a verdict filename is repo-relative and carries prefix, phase and ordinal', () => {
-  expect(REVIEWS_DIR).toBe('docs/superpowers/reviews')
+  // The exact wire format `artifactPathFor`'s legacy `??` branch must keep
+  // reproducing for a record that entered this change mid-review.
   expect(verdictFilename('issue-26', 'spec-review', 2))
     .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
 })
@@ -36,13 +37,6 @@ test('the prefix is the issue for a task and the run id for a run', () => {
   const run = mkRun()
   expect(verdictPrefix(run, mkTask({ issue: 26 }))).toBe('issue-26')
   expect(verdictPrefix(run, null)).toBe(run.run_id)
-})
-
-test('the base is the checkout when set and the repo root when not', () => {
-  const run = mkRun()
-  expect(verdictBase(run, mkTask({ checkout_path: '/w' }))).toBe('/w')
-  expect(verdictBase(run, mkTask({ checkout_path: null }))).toBe('/r')
-  expect(verdictBase(run, null)).toBe('/r')
 })
 
 test('nothing is recorded until a review is commissioned', () => {
@@ -160,10 +154,25 @@ test('an exhausted probe records the floor so the key and the prompt still agree
     artifacts: { research: null, spec: null, plan: null, verdicts: held },
   })
 
-  const reserved = reserveVerdict(run, task, 'spec-review')
+  const warnings: string[] = []
+  const reserved = reserveVerdict(run, task, 'spec-review', (m) => warnings.push(m))
 
   expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
   expect(verdictFor(task, 'spec-review')).toBe(reserved)
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('are taken')
+  // The core reports without a prefix; the supervisor adds `[pipeline]`.
+  expect(warnings[0]).not.toContain('[pipeline]')
+})
+
+test('a reservation that finds a free name says nothing', () => {
+  const run = mkRun()
+  const task = mkTask({ checkout_path: checkoutHolding() })
+  const warnings: string[] = []
+
+  reserveVerdict(run, task, 'spec-review', (m) => warnings.push(m))
+
+  expect(warnings).toEqual([])
 })
 
 test('a run reserves under its run id against the repo root', () => {

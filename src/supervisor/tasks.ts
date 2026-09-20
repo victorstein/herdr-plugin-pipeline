@@ -7,10 +7,10 @@ import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
+import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
-import { reserveVerdict } from '../lib/verdict-path'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath, adoptableArtifacts } from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -50,7 +50,7 @@ export async function promptForTaskPhase(
   // The commission happens here, not at the read: this is the one moment a task is
   // told where to write. Guarded on `signal`, not on a missing `artifact` — `ci`,
   // `merge`, `close` and `implement` also have no artifact slot and must not reserve.
-  if (taskRow(task.phase).signal === 'verdict') reserveVerdict(run, task, task.phase)
+  if (taskRow(task.phase).signal === 'verdict') reserveVerdict(run, task, task.phase, warnToTick)
 
   const common = {
     run_id: run.run_id,
@@ -106,7 +106,7 @@ export async function promptForTaskPhase(
 function taskArtifactPath(run: Run, task: Task, slot: 'research' | 'spec' | 'plan'): string {
   const rel = task.artifacts[slot]
   if (rel === null) return ''
-  return join(task.checkout_path ?? run.repo_root, rel)
+  return join(artifactBase(run, task), rel)
 }
 
 export interface TaskPrompt {

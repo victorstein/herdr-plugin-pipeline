@@ -146,7 +146,7 @@ test('an agent still working or blocked is not ready', () => {
   expect(isAgentReady('unknown')).toBe(false)
 })
 
-test('a review path is keyed by the phase counter, so a re-review is a new file', () => {
+test('a record with no verdict_seq still keys on the phase counter', () => {
   const run = mkRun()
   run.phase = 'branch-review'
   const first = artifactPathFor(run, null)

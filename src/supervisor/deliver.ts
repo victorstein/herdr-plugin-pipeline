@@ -4,10 +4,11 @@ import type { Herdr } from '../lib/herdr'
 import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
-import {
-  REVIEWS_DIR, reserveVerdict, verdictBase, verdictFilename, verdictFor, verdictPrefix,
-} from '../lib/verdict-path'
 import { renderPrompt } from '../lib/render'
+import {
+  artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
+  verdictPrefix,
+} from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Run, Task } from '../lib/types'
@@ -83,6 +84,9 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
   return out
 }
 
+/** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
+export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
+
 const RETRYABLE = new Set(['agent_blocked', 'pane_not_found', 'not_found', 'unparseable'])
 
 export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
@@ -118,7 +122,7 @@ export function artifactPathFor(run: Run, task: Task | null): string | null {
 export function absoluteArtifactPath(run: Run, task: Task | null): string | null {
   const rel = artifactPathFor(run, task)
   if (rel === null) return null
-  return join(verdictBase(run, task), rel)
+  return join(artifactBase(run, task), rel)
 }
 
 /**
@@ -252,7 +256,7 @@ export async function evaluateRun(
 
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
-  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase)
+  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {

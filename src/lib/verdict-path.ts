@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Run, Task } from './types'
+import type { Run, RunArtifacts, Task } from './types'
 
 export const REVIEWS_DIR = 'docs/superpowers/reviews'
 
@@ -14,17 +14,18 @@ export function verdictPrefix(run: Run, task: Task | null): string {
   return task ? `issue-${task.issue}` : run.run_id
 }
 
-/** The ONE base a repo-relative verdict path resolves against. */
-export function verdictBase(run: Run, task: Task | null): string {
+/**
+ * The ONE base any repo-relative artifact path resolves against — verdicts, but
+ * also the research/spec/plan slots, which is why it is not named for verdicts.
+ * A task's artifacts live in its linked worktree; a run's in the main checkout.
+ */
+export function artifactBase(run: Run, task: Task | null): string {
   return task?.checkout_path ?? run.repo_root
 }
 
-/**
- * Structural, so one implementation serves both records — the same reason
- * `HasPasses` exists in `machine.ts:5`.
- */
+/** Structural, so one implementation serves both records — as `HasPasses` does. */
 interface VerdictRecord {
-  artifacts: { verdicts: Record<string, string> }
+  artifacts: RunArtifacts
   verdict_seq?: Record<string, number | undefined>
 }
 
@@ -48,6 +49,14 @@ export function verdictFor(record: VerdictRecord, phase: string): string | null 
 const PROBE_LIMIT = 64
 
 /**
+ * How a caller hears that the reviews directory is pathological. Defaults to a
+ * no-op because `src/lib/` is the pure core and owns no log: the supervisor
+ * prefixes the tick's, and a one-shot `hpipe rewind` says what it did through its
+ * own result text instead.
+ */
+export type ReserveWarn = (message: string) => void
+
+/**
  * Allocates the path for one commissioned review: chooses a filename once, records
  * it under the next key, and never revisits it.
  *
@@ -59,10 +68,12 @@ const PROBE_LIMIT = 64
  * NOT idempotent. A second call for one commission burns a key and a filename, so
  * the call sites are the discipline: the two prompt renders and `cmdRewind`.
  */
-export function reserveVerdict(run: Run, task: Task | null, phase: string): string {
+export function reserveVerdict(
+  run: Run, task: Task | null, phase: string, warn: ReserveWarn = () => {},
+): string {
   const record: VerdictRecord = task ?? run
   const prefix = verdictPrefix(run, task)
-  const base = verdictBase(run, task)
+  const base = artifactBase(run, task)
   const seq = record.verdict_seq?.[phase] ?? 0
   const held = new Set(Object.values(record.artifacts.verdicts))
 
@@ -79,8 +90,8 @@ export function reserveVerdict(run: Run, task: Task | null, phase: string): stri
     // even when every candidate is taken, or the supervisor watches a file no agent
     // was told to write.
     chosen = verdictFilename(prefix, phase, seq)
-    console.error(
-      `[pipeline] ${prefix}: ${PROBE_LIMIT} verdict paths from ${phase}-${seq} are taken — ` +
+    warn(
+      `${prefix}: ${PROBE_LIMIT} verdict paths from ${phase}-${seq} are taken — ` +
       `falling back to ${chosen}, which may already hold a review`,
     )
   }
