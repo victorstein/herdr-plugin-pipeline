@@ -153,3 +153,27 @@ test('the escalation prompt does not understate what rewind clears', async () =>
   expect(text).not.toContain('resets the pass count')
   expect(text).toContain('clears every pass counter')
 })
+
+test('the worker brief carries the bootstrap note', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
+  expect(text).toContain('{{bootstrap_note}}')
+})
+
+test('a rendered worker brief leaves no placeholder behind', async () => {
+  // render() throws on an unresolved {{token}} at DELIVERY time, in front of an
+  // agent — modelled on 'a rendered probe leaves no placeholder behind' above.
+  const { renderWorkerPrompt } = await import('../src/lib/worker-prompt')
+  const { newRun } = await import('../src/lib/ledger')
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.tasks = [{
+    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core', depends_on: [], files: [],
+    keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown',
+    phase: 'research', phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
+    pr: null, ci: null, checkout_path: null, registered_at: 0, adopted_at: null,
+    artifacts: { research: 'a.md', spec: 'b.md', plan: 'c.md', verdicts: {} },
+    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: 'n',
+  }]
+  const text = await renderWorkerPrompt(ROOT, run, run.tasks[0]!)
+  expect(text).not.toContain('{{')
+})
