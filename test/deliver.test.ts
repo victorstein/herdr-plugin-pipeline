@@ -153,11 +153,20 @@ test('a review path is keyed by the phase counter, so a re-review is a new file'
   expect(artifactPathFor(run, null)).not.toBe(first)
 })
 
-test('a seeded verdict path wins over the default', () => {
+test('a recorded verdict path is returned for the key verdict_seq names', () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.verdict_seq = { 'branch-review': 1 }
+  run.artifacts.verdicts['branch-review-0'] = 'docs/superpowers/reviews/custom.md'
+  expect(artifactPathFor(run, null)).toBe('docs/superpowers/reviews/custom.md')
+})
+
+test('a recorded entry with no verdict_seq is ignored and the pre-#26 path applies', () => {
   const run = mkRun()
   run.phase = 'branch-review'
   run.artifacts.verdicts['branch-review-0'] = 'docs/superpowers/reviews/custom.md'
-  expect(artifactPathFor(run, null)).toBe('docs/superpowers/reviews/custom.md')
+  expect(artifactPathFor(run, null))
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
 test('an escalated task is settled, so a run holding one still leaves execute', () => {
