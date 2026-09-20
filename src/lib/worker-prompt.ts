@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { briefNote, repoBootstrap } from './bootstrap'
 import { renderPrompt } from './render'
 import type { Run, Task } from './types'
 
@@ -29,6 +30,7 @@ export async function renderWorkerPrompt(
         '`pnpm install && pnpm turbo build --filter=@repo/core` before your first edit and again ' +
         'before opening the PR — the apps consume the built `dist`, not the source.'
       : '',
+    bootstrap_note: briefNote(repoBootstrap(run.repo_root)),
   }
 
   const brief = await renderPrompt(pluginRoot, 'worker-brief', vars)

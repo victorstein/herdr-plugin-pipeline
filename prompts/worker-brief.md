@@ -13,6 +13,8 @@ worktree, only on `{{branch}}`.
 
 {{dist_note}}
 
+{{bootstrap_note}}
+
 Batch context the public issue does not carry: {{notes}}
 
 ## The loop

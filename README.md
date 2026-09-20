@@ -67,6 +67,22 @@ appeared, that is why. (`herdr server reload-config` does not trigger it either.
 **Run `hpipe` from inside a pane of the session you mean.** Outside one, it silently falls back to
 the `default` session's ledger.
 
+### Bootstrapping worker worktrees
+
+Each task runs in a fresh `git` worktree, which has none of the build inputs your repo does not
+track — `node_modules`, `.venv`, submodules, built `dist`. Declare how to restore them in an
+executable `.claude/pipeline-bootstrap` at the repo root:
+
+    #!/bin/sh
+    set -e
+    git submodule update --init
+    uv sync
+
+The orchestrator is told to run it in each new checkout before starting the worker, and the worker's
+brief names it as the recovery if a build fails on a missing dependency. It runs from the worktree
+root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
+the file; every dispatch then reports `bootstrap: none`.
+
 ## Use
 
 From the orchestrator's pane:

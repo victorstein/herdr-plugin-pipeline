@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { openDecisionFor } from '../lib/decisions'
 import { gateStatus, releasableFromFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
@@ -154,7 +155,8 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
-          `worktree create --cwd ${run.repo_root}:\n\n` +
+          `worktree create --cwd ${run.repo_root}:\n` +
+          `${bootstrapLine(repoBootstrap(run.repo_root))}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
         taskId: task.task_id,

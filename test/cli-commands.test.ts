@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -682,4 +682,98 @@ test('a rewind onto branch-review reserves a run-level path under the run id', a
   expect(saved?.verdict_seq?.['branch-review']).toBe(1)
   expect(saved?.artifacts.verdicts['branch-review-0'])
     .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+})
+
+/** Adds a bootstrap script to the fixture repo created in beforeEach. */
+function declareBootstrap(mode = 0o755): void {
+  writeFileSync(join(repoDir, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\ntrue\n')
+  chmodSync(join(repoDir, '.claude', 'pipeline-bootstrap'), mode)
+}
+
+test('task echoes the repo bootstrap on the dispatched return', async () => {
+  // Modelled on test/cli.test.ts:228-246, "task echoes files: none on the
+  // dispatched return when nothing was declared".
+  declareBootstrap()
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('bootstrap: .claude/pipeline-bootstrap')
+})
+
+test('the dispatched return keeps every header line above the one blank line', async () => {
+  declareBootstrap()
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  const [head, ...rest] = result.text.split('\n\n')
+  expect(head!.split('\n')).toEqual([
+    'task_id: t1',
+    'files: none',
+    'bootstrap: .claude/pipeline-bootstrap',
+  ])
+  // prompts/dispatch.md tells the orchestrator to hand over everything from the
+  // blank line onward; the brief's heading must be the first thing it finds.
+  expect(rest.join('\n\n')).toStartWith('# feat/boot — issue #1')
+})
+
+test('a non-executable declaration is reported to the orchestrator, not hidden', async () => {
+  declareBootstrap(0o644)
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/notexec', issue: 3, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect(result.text).toContain('NOT EXECUTABLE')
+})
+
+test('a repo declaring no bootstrap says so rather than staying silent', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/quiet', issue: 2, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
+  // path is the one every repo hits today, so it gets the shape contract too.
+  const [head, ...rest] = result.text.split('\n\n')
+  expect(head!.split('\n')).toEqual(['task_id: t1', 'files: none', 'bootstrap: none'])
+  expect(rest.join('\n\n')).toStartWith('# feat/quiet — issue #2')
+})
+
+test('task echoes the repo bootstrap on the queued return as well', async () => {
+  // Modelled on test/cli.test.ts:206-226, "task echoes the file set it recorded
+  // while gated": t1 dispatches into `research`, which is not terminal, so t2
+  // stays gated and the `queued:` return is the one that runs.
+  declareBootstrap()
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+
+  await cmdTask(ctx(), {
+    branch: 'feat/first', issue: 1, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  const gated = await cmdTask(ctx(), {
+    branch: 'feat/second', issue: 2, surface: 'core', notes: '',
+    dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect(gated.ok).toBe(true)
+  expect(gated.text).toContain('queued: waiting on t1')
+  expect(gated.text).toContain('bootstrap: .claude/pipeline-bootstrap')
 })
