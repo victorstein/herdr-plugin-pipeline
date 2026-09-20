@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.11...v1.3.0) (2026-09-20)
+
+
+### Features
+
+* bootstrap fresh worktrees from a script the repo declares ([#54](https://github.com/victorstein/herdr-plugin-pipeline/issues/54)) ([7b22d07](https://github.com/victorstein/herdr-plugin-pipeline/commit/7b22d072630e555b9d5fead19ea11f73b6b76bc9)), closes [#16](https://github.com/victorstein/herdr-plugin-pipeline/issues/16)
+
 ## [1.2.11](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.2.10...v1.2.11) (2026-09-20)
 
 
