@@ -88,6 +88,12 @@ export interface Task {
   /** True when the issue was already closed at `merge` completion. */
   issue_closed_at_entry: boolean
   passes: Partial<Record<TaskPhase, number>>
+  /**
+   * Reviews commissioned per phase, and therefore the key of the current one.
+   * Only `reserveVerdict` advances it — never a transition, a resume, or a
+   * rewind's counter reset — which is what keeps a live agent's path stable.
+   */
+  verdict_seq?: Partial<Record<TaskPhase, number>>
   decisions: Decision[]
   decision_from: TaskPhase | null
   pending_answer: string | null
@@ -117,6 +123,8 @@ export interface Run {
   schema_version: number
   intake_closed: boolean
   passes: Partial<Record<RunPhase, number>>
+  /** Per-phase review count; see the note on `Task.verdict_seq`. */
+  verdict_seq?: Partial<Record<RunPhase, number>>
   stall?: StallState
 }
 

@@ -5,6 +5,10 @@ import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
+import {
+  artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
+  verdictPrefix,
+} from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Run, Task } from '../lib/types'
@@ -80,6 +84,9 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
   return out
 }
 
+/** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
+export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
+
 const RETRYABLE = new Set(['agent_blocked', 'pane_not_found', 'not_found', 'unparseable'])
 
 export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
@@ -87,31 +94,35 @@ export function shouldRetry(code: string | undefined, attempts: number, max: num
   return code !== undefined && RETRYABLE.has(code)
 }
 
-/** Artifact path for the phase the run or task is currently in. */
-// Verdicts land here as well as artifacts, and nothing ever populates
-// `artifacts.verdicts` — `artifactPathFor` reads it and no writer exists — so the
-// `claimed` set cannot exclude them and `adoptableArtifacts` filters by prefix
-// instead. Every completed branch carries three to five.
-const REVIEWS_DIR = 'docs/superpowers/reviews'
-
+/**
+ * Artifact path for the phase the run or task is currently in.
+ *
+ * Verdict paths are recorded, not derived: `reserveVerdict` writes one when a review
+ * is commissioned and this only reads it back, so the path a live agent was handed
+ * cannot move under it. The `??` branch is the pre-#26 derivation and is reached only
+ * by a record that entered this change mid-review; it is also what every non-verdict,
+ * non-artifact row still gets, because nothing ever reserves for those.
+ *
+ * `adoptableArtifacts` still filters by prefix rather than by the `claimed` set: it
+ * runs for artifact rows only, so the filter is what keeps a review out of an
+ * artifact slot.
+ */
 export function artifactPathFor(run: Run, task: Task | null): string | null {
   if (task) {
     const row = taskRow(task.phase)
     if (row.artifact) return task.artifacts[row.artifact]
-    const key = `${task.phase}-${counterFor(task, task.phase)}`
-    return task.artifacts.verdicts[key]
-      ?? join(REVIEWS_DIR, `issue-${task.issue}-${key}.md`)
+    return verdictFor(task, task.phase)
+      ?? verdictFilename(verdictPrefix(run, task), task.phase, counterFor(task, task.phase))
   }
-  const key = `${run.phase}-${counterFor(run, run.phase)}`
-  return run.artifacts.verdicts[key] ?? join(REVIEWS_DIR, `${run.run_id}-${key}.md`)
+  return verdictFor(run, run.phase)
+    ?? verdictFilename(verdictPrefix(run, null), run.phase, counterFor(run, run.phase))
 }
 
 /** Task artifacts live in the worker's linked worktree; run artifacts in the main checkout. */
 export function absoluteArtifactPath(run: Run, task: Task | null): string | null {
   const rel = artifactPathFor(run, task)
   if (rel === null) return null
-  const base = task?.checkout_path ?? run.repo_root
-  return join(base, rel)
+  return join(artifactBase(run, task), rel)
 }
 
 /**
@@ -245,6 +256,7 @@ export async function evaluateRun(
 
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
+  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {

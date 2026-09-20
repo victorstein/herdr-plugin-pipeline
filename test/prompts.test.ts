@@ -146,3 +146,10 @@ test('a rendered probe leaves no placeholder behind', async () => {
   })
   expect(text).not.toContain('{{')
 })
+
+test('the escalation prompt does not understate what rewind clears', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'escalate.md')).text()
+  // `cmdRewind` clears the whole counter map (`src/cli.ts:360`, `:370`), not one phase's.
+  expect(text).not.toContain('resets the pass count')
+  expect(text).toContain('clears every pass counter')
+})

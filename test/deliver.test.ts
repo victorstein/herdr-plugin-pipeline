@@ -3,8 +3,9 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  shouldRetry, taskSignalsFor,
+  promptForRunPhase, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
+import type { Config } from '../src/lib/config'
 import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -145,7 +146,7 @@ test('an agent still working or blocked is not ready', () => {
   expect(isAgentReady('unknown')).toBe(false)
 })
 
-test('a review path is keyed by the phase counter, so a re-review is a new file', () => {
+test('a record with no verdict_seq still keys on the phase counter', () => {
   const run = mkRun()
   run.phase = 'branch-review'
   const first = artifactPathFor(run, null)
@@ -153,11 +154,20 @@ test('a review path is keyed by the phase counter, so a re-review is a new file'
   expect(artifactPathFor(run, null)).not.toBe(first)
 })
 
-test('a seeded verdict path wins over the default', () => {
+test('a recorded verdict path is returned for the key verdict_seq names', () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.verdict_seq = { 'branch-review': 1 }
+  run.artifacts.verdicts['branch-review-0'] = 'docs/superpowers/reviews/custom.md'
+  expect(artifactPathFor(run, null)).toBe('docs/superpowers/reviews/custom.md')
+})
+
+test('a recorded entry with no verdict_seq is ignored and the pre-#26 path applies', () => {
   const run = mkRun()
   run.phase = 'branch-review'
   run.artifacts.verdicts['branch-review-0'] = 'docs/superpowers/reviews/custom.md'
-  expect(artifactPathFor(run, null)).toBe('docs/superpowers/reviews/custom.md')
+  expect(artifactPathFor(run, null))
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
 test('an escalated task is settled, so a run holding one still leaves execute', () => {
@@ -375,4 +385,27 @@ test('a worker delivery never carries the footer', () => {
       footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move' },
   ])
   expect(out[0]?.text).toBe('worker prompt')
+})
+
+test('branch-review reserves a run-level verdict path under the run id', async () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+
+  const text = await promptForRunPhase(run, {} as Config)
+
+  expect(run.verdict_seq?.['branch-review']).toBe(1)
+  expect(run.artifacts.verdicts['branch-review-0'])
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(text)
+    .toContain(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+})
+
+test('a run phase that is not a review reserves nothing', async () => {
+  const run = mkRun()
+  run.phase = 'dispatch'
+
+  await promptForRunPhase(run, {} as Config)
+
+  expect(run.verdict_seq).toBeUndefined()
+  expect(run.artifacts.verdicts).toEqual({})
 })

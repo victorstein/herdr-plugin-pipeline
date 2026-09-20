@@ -7,9 +7,10 @@ import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { renderPrompt } from '../lib/render'
+import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath, adoptableArtifacts } from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import { runTeardown } from './teardown'
 
 export interface TaskDeps {
@@ -46,6 +47,11 @@ export interface TaskDeps {
 export async function promptForTaskPhase(
   run: Run, task: Task, deps: TaskDeps, cameFrom: TaskPhase,
 ): Promise<string> {
+  // The commission happens here, not at the read: this is the one moment a task is
+  // told where to write. Guarded on `signal`, not on a missing `artifact` — `ci`,
+  // `merge`, `close` and `implement` also have no artifact slot and must not reserve.
+  if (taskRow(task.phase).signal === 'verdict') reserveVerdict(run, task, task.phase, warnToTick)
+
   const common = {
     run_id: run.run_id,
     branch: task.branch,
@@ -100,7 +106,7 @@ export async function promptForTaskPhase(
 function taskArtifactPath(run: Run, task: Task, slot: 'research' | 'spec' | 'plan'): string {
   const rel = task.artifacts[slot]
   if (rel === null) return ''
-  return join(task.checkout_path ?? run.repo_root, rel)
+  return join(artifactBase(run, task), rel)
 }
 
 export interface TaskPrompt {
@@ -338,6 +344,9 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
 
     task.pending_answer = null
     task.delivery_attempts = 0
+    // No prompt is rendered here, deliberately: `answer.md` has already been sent,
+    // and rendering the row's own prompt would reserve a second verdict path and
+    // move the file the agent was told to write. A resume is not a new review.
     enterTaskPhase(run, task, resumeTo, `decision ${decision.id} answered`)
     task.decision_from = null
   }
