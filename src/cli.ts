@@ -196,6 +196,9 @@ export async function cmdStart(ctx: Ctx, input: {
 }
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
+const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
+  'queued', 'research', 'spec', 'spec-review', 'plan', 'plan-review', 'blocked-on-files', 'implement',
+])
 
 type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<FiledIssue | GhFailure>
 
@@ -627,6 +630,17 @@ async function rewind(ctx: Ctx, input: {
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
     task.escalated_from = null
+    // `implement` persists the first PR it finds and never asks again, and `merge`
+    // is a level: a task sent back to rework after its PR merged would otherwise
+    // carry the old PR through `merge` on its old mergedAt, with the new work
+    // never merged. `prForBranch` lists open PRs only, so it finds the new one.
+    if (PHASES_BEFORE_A_PR.has(task.phase)) {
+      task.pr = null
+      task.ci = null
+      task.head_sha_at_entry = null
+      task.merged_at_ms = null
+      task.issue_closed_at_entry = false
+    }
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (taskRow(task.phase).signal === 'verdict') {
       reserved = reserveVerdict(run, task, task.phase)

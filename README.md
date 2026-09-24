@@ -168,9 +168,13 @@ Two rules in the current design exist because breaking them shipped real bugs, t
 - **Retry counters are monotone.** Every row that can send a record back to a producer carries a
   counter keyed by itself, and nothing resets it on forward progress. Two earlier drafts reset on a
   forward transition and each time deleted a bound — once the review loop, once the CI retry budget.
-- **A phase advances on an edge, not a level.** Predicates compare against `phase_entered_at`, or
-  against the event that should have caused them. A level predicate re-fires forever and makes
-  `hpipe rewind` a no-op on the row it was offered as the escape for.
+- **A phase advances on an edge, not a level** — with two named exceptions. Predicates compare
+  against `phase_entered_at`, or against the event that should have caused them. A level predicate
+  re-fires forever and makes `hpipe rewind` a no-op on the row it was offered as the escape for.
+  The exceptions are the run's `dispatch` (every dispatched task has a worktree) and a task's
+  `merge` (its PR is merged): there the awaited state *is* the row's goal, a rewind into either
+  sends no prompt and has nothing to re-trigger, and as edges both deadlocked on a state reached
+  before the row was entered (#22).
 
 `test/integration/smoke.md` is the live runbook, and its findings section records a full run: two
 issues, two workers, two merged PRs, run `done`. That run found five bugs no unit test reached — the

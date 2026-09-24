@@ -176,20 +176,20 @@ means herdr saw no working state within 5s of submitting — `herdr pane read` t
 brief left unsubmitted from one that never arrived. Passing the brief on the `agent start` line instead
 fails every task with `invalid_agent_argument`; that is the defect this step replaced (#11).
 
-Once **both** tasks are bound, the run reads `[execute]` within a tick or two — even though the
-orchestrator dispatched them from the briefs `hpipe task` printed, before the run itself had entered
-`dispatch`. That ordering is the normal one, and it is what #22 deadlocked on.
-
-**Failure looks like:** the run sitting in `[dispatch]` with both tasks bound and advancing past
-`research`. That is the #22 deadlock back; the ledger will show both tasks' `adopted_at` older than the
-run's `phase_entered_at`.
-
 **Failure looks like:** the task still shows `unknown` and `hpipe status` never names a pane. The
 binding comes from two separate events — `worktree.created` (matched on `branch`, sets
 `workspace_id`/`checkout_path`) and `pane.agent_detected` (sets `pane_id`); a confirmed `dispatch
 --task` also sets `pane_id`, so a lost detection event cannot unbind a briefed worker. If the worktree bound
 but the pane did not, the agent was started somewhere the plugin did not see. `hpipe forget
 <workspace_id>` unbinds so you can retry.
+
+Once **both** tasks are bound, the run reads `[execute]` within a tick or two — even when the
+orchestrator dispatched them straight after registering them, before the run itself had entered
+`dispatch`. That ordering is the normal one, and it is what #22 deadlocked on.
+
+**Failure looks like (dispatch → execute):** the run sitting in `[dispatch]` with both tasks bound
+and advancing past `research`. That is the #22 deadlock back; the ledger will show both tasks'
+`adopted_at` older than the run's `phase_entered_at`.
 
 **The unstarted-worker check (#12).** For one extra task, run `worktree create` and stop — no
 `agent start`. `herdr agent get <root_pane_id>` answers `agent_not_found`, and `pane list` shows the

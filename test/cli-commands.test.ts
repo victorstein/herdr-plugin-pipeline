@@ -406,6 +406,41 @@ test('rewind clears the whole counter map rather than spending a pass', async ()
   expect(saved?.tasks[0]?.passes).toEqual({})
 })
 
+const MERGED_PR_STATE: Partial<Task> = {
+  pr: 5, ci: 'pass', head_sha_at_entry: 'aaa', merged_at_ms: 9_000, issue_closed_at_entry: true,
+}
+
+test('rewind to implement or earlier forgets the PR, so a merged one cannot finish the task', async () => {
+  // `merge` is a level: a sticky pr pointing at an already-merged PR would carry
+  // the reworked task straight through merge on the old PR's mergedAt.
+  for (const phase of ['implement', 'blocked-on-files', 'plan', 'research'] as const) {
+    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    await saveRun(dir, run)
+
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+    expect(task?.pr, phase).toBeNull()
+    expect(task?.ci, phase).toBeNull()
+    expect(task?.head_sha_at_entry, phase).toBeNull()
+    expect(task?.merged_at_ms, phase).toBeNull()
+    expect(task?.issue_closed_at_entry, phase).toBe(false)
+  }
+})
+
+test('rewind onto a phase that works the current PR keeps it', async () => {
+  for (const phase of ['pr-review-intent', 'ci', 'merge', 'close'] as const) {
+    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    await saveRun(dir, run)
+
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+    expect(task?.pr, phase).toBe(5)
+    expect(task?.merged_at_ms, phase).toBe(9_000)
+  }
+})
+
 test('rewind clears a pending answer and records the discard', async () => {
   const run = runWithTasks([
     { task_id: 't1', phase: 'blocked-on-decision', pending_answer: 'd1' },
