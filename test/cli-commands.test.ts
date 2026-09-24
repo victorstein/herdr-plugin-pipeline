@@ -874,6 +874,21 @@ test('dispatch --task reports a failed handoff instead of claiming it landed', a
   expect(result.ok).toBe(false)
   expect(result.text).toContain('agent_prompt_stalled')
   expect(result.text).toContain('pane read w1-2')
+  expect(result.text).toContain('send it twice')
+})
+
+test('dispatch --task does not warn of a double send when herdr rejected before sending', async () => {
+  await registerReadyTask()
+  const { send } = recordingSend({ ok: false, code: 'agent_not_found', message: 'not found' })
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('agent_not_found')
+  expect(result.text).toContain('nothing was sent')
+  expect(result.text).not.toContain('send it twice')
 })
 
 test('dispatch --task refuses a task whose gate has not opened', async () => {

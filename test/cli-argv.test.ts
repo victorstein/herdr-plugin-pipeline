@@ -242,13 +242,44 @@ test('a command named after an Object.prototype key is unknown, not a crash', ()
   expect(r.out).not.toContain('TypeError')
 })
 
-test('a help flag in a flag value slot is that value, not a help request', () => {
+test('a help flag in a free-text value slot is that value, not a help request', () => {
   const f = started()
   expect(hpipe([...TASK], f).code).toBe(0)
 
   const r = hpipe(['decide', '--task', 't1', '--question', '-h', '--recommend', 'r'], f)
   expect(r.out).not.toContain('usage:')
   expect(r.out).toContain('opened decision')
+})
+
+function registeredTasks(f: Fixture): unknown[] {
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  return (JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8')) as {
+    tasks: unknown[]
+  }).tasks
+}
+
+test('a help flag in an identifier slot is a help request and registers nothing', () => {
+  // Round 2 of #64: `task --branch -h` registered a real task on branch `-h`.
+  const f = started()
+  for (const helpFlag of ['-h', '--help']) {
+    const r = hpipe(['task', '--branch', helpFlag, '--issue', '1', '--surface', 'core'], f)
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('usage: hpipe task')
+  }
+  expect(registeredTasks(f)).toEqual([])
+})
+
+test('an identifier flag whose value looks like a flag is a usage error', () => {
+  const f = started()
+  for (const args of [
+    ['task', '--branch', '-x', '--issue', '1', '--surface', 'core'],
+    ['task', '--branch', '--issue', '1', '--surface', 'core'],
+  ]) {
+    const r = hpipe(args, f)
+    expect(r.code, args.join(' ')).toBe(1)
+    expect(r.out).toContain('--branch needs a value')
+  }
+  expect(registeredTasks(f)).toEqual([])
 })
 
 async function withFakeHerdr(f: Fixture, responses: Record<string, unknown>): Promise<string> {

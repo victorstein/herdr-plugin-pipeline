@@ -102,6 +102,16 @@ test('task rejects a surface with no agent definition', async () => {
   expect(bad.text).toContain('kore-dev.md')
 })
 
+test('task rejects a branch that starts with a dash and registers nothing', async () => {
+  const c = ctx()
+  await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
+
+  const bad = await cmdTask(c, { branch: '-h', issue: 9, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('--branch cannot start with "-"')
+  expect((await activeRunForRepo(dir, 'personal', 'k'))!.tasks).toEqual([])
+})
+
 test('task rejects a dependency id that names no task', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })

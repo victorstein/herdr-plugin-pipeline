@@ -186,6 +186,7 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`--issue must be a positive issue number, got: ${input.issue || '(missing)'}`)
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
+  if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
@@ -349,10 +350,15 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sent = await send(input.paneId, brief)
   if (!sent.ok) {
-    return fail(`brief for ${task.task_id} not confirmed in ${input.paneId}: ` +
-      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}\n` +
-      `  → herdr pane read ${input.paneId} before retrying: a stalled submission can ` +
-      'already be sitting in the input box, and a retry would send it twice')
+    const reason = `brief for ${task.task_id} not confirmed in ${input.paneId}: ` +
+      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
+    // Only these two come back after herdr accepted the text; every other code
+    // is a rejection before anything reached the pane.
+    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
+    return fail(mayHaveLanded
+      ? `${reason}\n  → herdr pane read ${input.paneId} before retrying: the brief was ` +
+        'submitted and may already be in the pane, and a retry would send it twice'
+      : `${reason}\n  → nothing was sent; fix the cause and run it again`)
   }
   return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`)
 }
@@ -665,13 +671,30 @@ const fullUsage = (): string =>
 
 const HELP_FLAGS = new Set(['--help', '-h'])
 const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
+// Prose can legitimately be `-h`. An identifier never can: taking one as a value
+// registered a task on branch `-h`.
+const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes'])
+// cmdTask names this one's argv accident more precisely than a usage line can.
+const SELF_VALIDATING_FLAGS = new Set(['--files'])
 
-/** A help flag in a flag's value slot is that flag's value: `decide --question -h`. */
 const wantsHelp = (args: string[]): boolean => args.some((arg, i) => {
   if (!HELP_FLAGS.has(arg)) return false
   const previous = args[i - 1]
-  return previous === undefined || !previous.startsWith('--') || VALUELESS_FLAGS.has(previous)
+  return previous === undefined || !FREE_TEXT_FLAGS.has(previous)
 })
+
+/** The first identifier flag whose value is missing or looks like a flag. */
+function identifierWithoutValue(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const name = args[i] as string
+    if (!name.startsWith('--') || VALUELESS_FLAGS.has(name)) continue
+    if (FREE_TEXT_FLAGS.has(name) || SELF_VALIDATING_FLAGS.has(name)) { i++; continue }
+    const value = args[i + 1]
+    if (value === undefined || value.startsWith('-')) return name
+    i++
+  }
+  return null
+}
 
 const DISPATCH_CONFIRM_TIMEOUT_MS = 30_000
 
@@ -699,6 +722,11 @@ async function dispatch(argv: string[]): Promise<number> {
   }
   if (command === 'dispatch' && rest.includes('--done') === (flag(rest, 'task') !== null)) {
     console.error(commandUsage(usage))
+    return 1
+  }
+  const valueless = command === 'start' ? null : identifierWithoutValue(rest)
+  if (valueless !== null) {
+    console.error(`hpipe: ${valueless} needs a value\n${commandUsage(usage)}`)
     return 1
   }
 
