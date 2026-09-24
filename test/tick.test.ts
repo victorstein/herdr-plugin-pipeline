@@ -698,3 +698,22 @@ test('a dead pane is unbound, so a rewind out of failed reads as unstarted, not 
     expect(overdueUnstartedWorker(run, task, UNSTARTED_GRACE_MS)).not.toBeNull()
   }
 })
+
+test('a new pane on a row the orchestrator owns does not re-arm its ladder — #12', () => {
+  const run = mkRun([mkTask({ phase: 'merge', pane_id: 'w7:p1', phase_entered_at: 5 })])
+  const task = run.tasks[0]!
+  task.stall = { at: 5, run_at: run.phase_entered_at, last_probe_at: 6, probes: 2, undelivered: 0, holds: 0 }
+  applyEvents([run], [{
+    kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p2', workspace_id: 'w7',
+  }], 'personal', new Set())
+  expect(task.pane_id).toBe('w7:p2')
+  expect(task.stall?.probes).toBe(2)
+})
+
+test('a dead pane stays nameable after it is unbound — #12', () => {
+  const run = mkRun([mkTask({ phase: 'implement' })])
+  applyEvents([run], [{
+    kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7',
+  }], 'personal', new Set())
+  expect(run.tasks[0]!.last_pane_id).toBe('w7:p1')
+})

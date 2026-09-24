@@ -307,7 +307,8 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
     `agent:      ${task.agent_status}`,
     `workspace:  ${orNone(task.workspace_id)}`,
-    `pane:       ${orNone(task.pane_id)}`,
+    `pane:       ${orNone(task.pane_id)}` +
+      (task.pane_id === null && task.last_pane_id ? ` (last: ${task.last_pane_id})` : ''),
     `checkout:   ${orNone(task.checkout_path)}`,
     `research:   ${orNone(task.artifacts.research)}`,
     `spec:       ${orNone(task.artifacts.spec)}`,

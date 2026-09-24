@@ -97,6 +97,7 @@ export interface ApplyResult {
  * it and every probe went to a pane that cannot answer.
  */
 function releaseWorkerPane(task: Task): void {
+  if (task.pane_id !== null) task.last_pane_id = task.pane_id
   task.pane_id = null
 }
 

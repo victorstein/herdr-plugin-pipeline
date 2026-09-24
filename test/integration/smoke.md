@@ -198,7 +198,7 @@ its escalation. If the task is still flagged once its agent is working, the pane
 is the failure above, not this one.
 
 Kill that worker's pane (`herdr pane close`): the task goes to `failed` and `hpipe show` reports
-`pane: none`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
+`pane: none (last: <pane>)`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
 not as bound to the dead pane.
 
 ---

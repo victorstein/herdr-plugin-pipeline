@@ -43,6 +43,9 @@ export function overdueUnstartedWorker(run: Run, task: Task, now: number): Unsta
 export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number): boolean {
   if (task.pane_id === paneId) return false
   task.pane_id = paneId
+  // Any other row's ladder probes the orchestrator, whose silence a new worker
+  // pane does not change.
+  if (taskRow(task.phase).actor !== 'worker') return true
   task.stall = {
     at: task.phase_entered_at, run_at: run.phase_entered_at,
     last_probe_at: now, probes: 0, undelivered: 0, holds: 0,

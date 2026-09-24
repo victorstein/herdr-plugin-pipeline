@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask,
+  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask, recordWorkerPane,
 } from '../src/cli'
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
-import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
 let dir: string
@@ -1059,14 +1059,67 @@ test('dispatch --task records nothing when the handoff was not confirmed — #12
   expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
 })
 
-test('dispatch --task does not record the orchestrator\'s own pane as the worker — #12', async () => {
+test('dispatch --task refuses the orchestrator\'s own pane before sending anything — #12', async () => {
   await registerReadyTask()
   await supervisorWrites((run) => { run.orchestrator_pane = 'w1-1' })
-  const { send } = recordingSend()
+  const { sent, send } = recordingSend()
   const result = await cmdDispatchTask(ctx(), {
     taskId: 't1', paneId: 'w1-1', repoKey: 'k', runId: null,
   }, send)
+  expect(result.ok).toBe(false)
   expect(result.text).toContain('orchestrator pane')
+  expect(sent).toEqual([])
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+})
+
+test('dispatch --task refuses a pane already bound to another task before sending — #12', async () => {
+  // Recorded on both, the pane's exit and idle events would reach whichever task
+  // findTask meets first.
+  await registerReadyTask()
+  await supervisorWrites((run) => {
+    run.tasks.push({ ...run.tasks[0]!, task_id: 't2', branch: 'feat/y', pane_id: 'w2-1', workspace_id: 'w2' })
+  })
+  const { sent, send } = recordingSend()
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w2-1', repoKey: 'k', runId: null,
+  }, send)
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain("already t2's worker pane")
+  expect(sent).toEqual([])
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+})
+
+test('a delivered brief whose pane was not recorded never says to run dispatch again — #12', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send, async () => 'the ledger kept changing under the save')
+  expect(result.ok).toBe(true)
+  expect(sent).toHaveLength(1)
+  expect(result.text).toContain('delivered to w1-2')
+  expect(result.text).toContain('but its pane was not recorded (the ledger kept changing under the save)')
+  expect(result.text).toContain('Do not run `dispatch --task` again')
+  expect(result.text).not.toContain('run it again')
+})
+
+test('recording the pane reports an unlanded save instead of throwing — #12', async () => {
+  await registerReadyTask()
+  const run = (await listRuns(dir, 'personal'))[0]!
+  const reason = await recordWorkerPane(ctx(), {
+    runId: run.run_id, taskId: 't1', paneId: 'w1-2', briefedPhase: 'research',
+  }, async (_dir, r) => { throw new StaleRunError(r.run_id) })
+  expect(reason).toBe('the ledger kept changing under the save')
+})
+
+test('recording the pane leaves a task that failed during the handoff unbound — #12', async () => {
+  await registerReadyTask()
+  await supervisorWrites((run) => { run.tasks[0]!.phase = 'failed' })
+  const run = (await listRuns(dir, 'personal'))[0]!
+  const reason = await recordWorkerPane(ctx(), {
+    runId: run.run_id, taskId: 't1', paneId: 'w1-2', briefedPhase: 'research',
+  })
+  expect(reason).toBeNull()
   expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
 })
 

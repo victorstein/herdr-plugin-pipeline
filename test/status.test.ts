@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { actionFor, formatStatus } from '../src/lib/status'
+import { actionFor, formatStatus, formatTaskDetail } from '../src/lib/status'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -388,4 +388,11 @@ test('status does not flag a worktree whose agent may still be booting — #12',
   run.tasks = [mkTask({ phase: 'research', pane_id: null, adopted_at: now })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now))
     .not.toContain('no agent')
+})
+
+test('hpipe show names the pane a failed worker last ran in — #12', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'failed', pane_id: null, last_pane_id: 'w7:p1' })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('pane:       none (last: w7:p1)')
 })
