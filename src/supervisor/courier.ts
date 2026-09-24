@@ -66,17 +66,56 @@ export function inputBoxText(screen: string): string | null {
   return null
 }
 
+/** How a long paste collapses in a Claude input box, measured live: `[Pasted text #1 +40 lines]`. */
+const PASTE_PLACEHOLDER = /\[Pasted text #\d+[^\]]*\]/g
+const squashSpace = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
 /**
- * Presses `ctrl+c` only when all three hold: the agent reads idle (on a working
- * one it interrupts the turn), the screen shows a Claude input box with text in it
- * (on an empty box it arms exit), and the pane's guard grants the press.
+ * Whether every line of the box could only have come from this send: a paste
+ * placeholder, or a piece of the exact text sent — a piece, because the box
+ * soft-wraps and #18 measured a send arriving as a fragment of its tail. A line
+ * that is neither is someone else's typing, and the box is not ours to clear.
+ *
+ * The residual: a box holding nothing but a placeholder is read as ours, because
+ * a long supervisor send collapses to exactly that. A human pasting into an idle
+ * WORKER's box at the moment the supervisor's send stalls is the one case that
+ * would clear their paste; the orchestrator pane, where humans type, is never
+ * cleared at all.
  */
-async function clearInputBox(io: PromptIO, paneId: string, clears: ClearGuard): Promise<boolean> {
-  if (!isAgentReady(await io.agentStatus(paneId))) return false
+export function boxHoldsOnly(box: string, sent: string): boolean {
+  const ours = squashSpace(sent)
+  return box.split('\n').every((line) => {
+    const rest = squashSpace(line.replace(PASTE_PLACEHOLDER, ' '))
+    return rest.length === 0 || ours.includes(rest)
+  })
+}
+
+/** Text the supervisor did not write is sitting in the pane's input box. */
+export const STUCK_INPUT = 'stuck_input'
+
+type BoxOutcome = 'cleared' | 'stuck' | 'untouched'
+
+/**
+ * Presses `ctrl+c` only when every one of these holds, and says `stuck` when the
+ * box holds text it must not touch:
+ * - the pane is not one a human types in (the orchestrator's never is cleared);
+ * - the agent reads idle — on a working one `ctrl+c` interrupts the turn — read
+ *   again immediately before the press, so a human's Enter in between is caught;
+ * - the screen shows a Claude input box, and it is not empty: on an empty box
+ *   `ctrl+c` arms Claude's exit;
+ * - everything in the box is this send's own text (`boxHoldsOnly`);
+ * - the pane's `ClearGuard` grants the press.
+ */
+async function clearInputBox(
+  io: PromptIO, paneId: string, sent: string, clears: ClearGuard, humanTypesIn: boolean,
+): Promise<BoxOutcome> {
+  if (!isAgentReady(await io.agentStatus(paneId))) return 'untouched'
   const box = inputBoxText(await io.paneRead(paneId, SCREEN_LINES))
-  if (box === null || box.length === 0) return false
-  if (!clears.claim(paneId)) return false
-  return (await io.agentSendKeys(paneId, ['ctrl+c'])).ok
+  if (box === null || box.length === 0) return 'untouched'
+  if (humanTypesIn || !boxHoldsOnly(box, sent)) return 'stuck'
+  if (!clears.claim(paneId)) return 'untouched'
+  if (!isAgentReady(await io.agentStatus(paneId))) return 'untouched'
+  return (await io.agentSendKeys(paneId, ['ctrl+c'])).ok ? 'cleared' : 'untouched'
 }
 
 /**
@@ -93,20 +132,30 @@ async function clearInputBox(io: PromptIO, paneId: string, clears: ClearGuard): 
  *
  * The prompt is re-sent whole rather than submitted with a bare Enter: a send can
  * arrive as a fragment of its tail (#18), and submitting a fragment executes it.
+ *
+ * A stall is therefore resolved as not delivered unless the agent is seen working,
+ * and that costs at most ONE duplicate per stall: a Claude that submitted late but
+ * has not yet flipped to working reads idle with an empty box, nothing is pressed,
+ * and the next confirmed send repeats the prompt. Phase prompts are fixed text
+ * with their verdict path already reserved, so the agent reading one twice is
+ * harmless; a stall that leaves the box empty must not be read as "never arrived".
  */
 export async function sendConfirmed(
   io: PromptIO, paneId: string, text: string, timeoutMs: number, clears: ClearGuard,
+  humanTypesIn = false,
 ): Promise<CallResult<unknown>> {
   const sent = await io.agentPromptConfirmed(paneId, text, timeoutMs)
   if (sent.ok || !MAY_HAVE_LANDED.has(sent.code ?? '')) return sent
 
   const status = await io.agentStatus(paneId)
   if (status === 'working' || status === 'blocked') return { ok: true }
-  await clearInputBox(io, paneId, clears)
+  if (await clearInputBox(io, paneId, text, clears, humanTypesIn) === 'stuck') {
+    return { ok: false, code: STUCK_INPUT, message: `input box of ${paneId} holds text the supervisor did not send` }
+  }
   return sent
 }
 
-export type HoldReason = 'pane_gone' | 'backoff' | 'budget'
+export type HoldReason = 'pane_gone' | 'backoff' | 'budget' | typeof STUCK_INPUT
 
 export interface SendOutcome {
   ok: boolean
@@ -124,6 +173,12 @@ export interface GateConfig {
   /** Sends of every kind per tick — digests, answers, decisions and probes share it. */
   sendsPerTick: number
   backoffMaxMs: number
+  /**
+   * Wall time after which a tick admits no more sends. A stalled confirmed send
+   * costs herdr's 5s take-up window, and eight of them in series would hold one
+   * tick for 40s, reading every later run against idle states that old.
+   */
+  tickBudgetMs: number
 }
 
 interface PaneHealth {
@@ -146,8 +201,10 @@ interface PaneHealth {
 export class DeliveryGate {
   private readonly health = new Map<string, PaneHealth>()
   private readonly reportedGone = new Set<string>()
+  private readonly stuck = new Set<string>()
   private livePanes: ReadonlySet<string> = new Set()
   private sentThisTick = 0
+  private tickStartedAt = 0
   private budgetReported = false
 
   constructor(
@@ -164,6 +221,7 @@ export class DeliveryGate {
   beginTick(livePanes: ReadonlySet<string>): void {
     this.livePanes = livePanes
     this.sentThisTick = 0
+    this.tickStartedAt = this.now()
     this.budgetReported = false
     for (const pane of this.reportedGone) {
       if (livePanes.has(pane)) {
@@ -179,7 +237,11 @@ export class DeliveryGate {
     if (health) health.nextAttemptAt = 0
   }
 
-  holdFor(paneId: string): HoldReason | null {
+  /**
+   * Admits one send to the pane, taking its slot from the tick's budget at once so
+   * sends to several panes in flight together cannot overspend it — or says why not.
+   */
+  admit(paneId: string): HoldReason | null {
     if (this.livePanes.size > 0 && !this.livePanes.has(paneId)) {
       if (!this.reportedGone.has(paneId)) {
         this.reportedGone.add(paneId)
@@ -189,14 +251,27 @@ export class DeliveryGate {
     }
     const health = this.health.get(paneId)
     if (health && this.now() < health.nextAttemptAt) return 'backoff'
-    if (this.sentThisTick >= this.config.sendsPerTick) {
+    const outOfTime = this.now() - this.tickStartedAt >= this.config.tickBudgetMs
+    if (this.sentThisTick >= this.config.sendsPerTick || outOfTime) {
       if (!this.budgetReported) {
         this.budgetReported = true
-        this.log(`delivery budget of ${this.config.sendsPerTick} sends spent this tick; the rest wait`)
+        this.log(outOfTime
+          ? `delivery spent ${this.config.tickBudgetMs}ms this tick; the rest wait`
+          : `delivery budget of ${this.config.sendsPerTick} sends spent this tick; the rest wait`)
       }
       return 'budget'
     }
+    this.sentThisTick += 1
     return null
+  }
+
+  /** A pane whose last send found text it did not write in the input box. */
+  isStuck(paneId: string): boolean {
+    return this.stuck.has(paneId)
+  }
+
+  unstick(paneId: string): void {
+    if (this.stuck.delete(paneId)) this.log(`input box of ${paneId} is clear again; delivering to it`)
   }
 
   /**
@@ -205,7 +280,11 @@ export class DeliveryGate {
    * other prompt addressed there.
    */
   record(paneId: string, result: { ok: boolean; code?: string }): void {
-    this.sentThisTick += 1
+    if (result.code === STUCK_INPUT && !this.stuck.has(paneId)) {
+      this.stuck.add(paneId)
+      this.log(`stuck input in ${paneId}: its input box holds text the supervisor did not send, ` +
+        'so nothing more is sent there until it is submitted or cleared — `hpipe status` lists it')
+    }
     const health = this.health.get(paneId)
     if (result.ok) {
       if (health) {
@@ -230,13 +309,28 @@ export class DeliveryGate {
   }
 }
 
+export interface CourierOptions {
+  clears?: ClearGuard
+  /** Panes a human types in — every orchestrator pane — whose input box is never cleared. */
+  humanTypesIn?: (paneId: string) => boolean
+}
+
 export function makeCourier(
-  gate: DeliveryGate, io: PromptIO, confirmMs: number, clears: ClearGuard = new ClearGuard(),
+  gate: DeliveryGate, io: PromptIO, confirmMs: number, options: CourierOptions = {},
 ): Send {
+  const clears = options.clears ?? new ClearGuard()
+  const humanTypesIn = options.humanTypesIn ?? (() => false)
   return async (paneId, text) => {
-    const held = gate.holdFor(paneId)
+    // Another send into a box holding someone else's text would be appended to it
+    // and submitted with it, so a stuck pane gets nothing until the box is empty.
+    if (gate.isStuck(paneId)) {
+      const box = inputBoxText(await io.paneRead(paneId, SCREEN_LINES))
+      if (box !== null && box.length > 0) return { ok: false, code: STUCK_INPUT, held: STUCK_INPUT }
+      gate.unstick(paneId)
+    }
+    const held = gate.admit(paneId)
     if (held !== null) return { ok: false, code: held, held }
-    const result = await sendConfirmed(io, paneId, text, confirmMs, clears)
+    const result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
     gate.record(paneId, result)
     return result.ok ? { ok: true } : { ok: false, code: result.code ?? 'unknown' }
   }
@@ -296,15 +390,22 @@ export function outboxPending(run: Run, footer?: string): PendingPrompt[] {
 /**
  * Sends each delivery and reports, per run, what became of the outbox entries in
  * it. A held delivery changes nothing, so it produces no settlement and no save.
+ *
+ * Panes are independent, so they are sent to concurrently; one pane's deliveries
+ * go in order, because two prompts typed into one box at once interleave. A tick
+ * with a stalled send on every pane then costs one take-up window, not one each.
  */
 export async function flushDeliveries(
   deliveries: readonly Delivery[], send: Send, log: (message: string) => void = warnToTick,
 ): Promise<Map<Run, Settlement[]>> {
-  const settled = new Map<Run, Settlement[]>()
+  const byPane = new Map<string, Delivery[]>()
   for (const delivery of deliveries) {
-    const outcome = await send(delivery.paneId, delivery.text)
-    if (outcome.held !== undefined) continue
+    byPane.set(delivery.paneId, [...(byPane.get(delivery.paneId) ?? []), delivery])
+  }
 
+  const settled = new Map<Run, Settlement[]>()
+  const settle = (delivery: Delivery, outcome: SendOutcome) => {
+    if (outcome.held !== undefined) return
     const permanent = !outcome.ok && !isRetryable(outcome.code ?? 'unknown')
     if (permanent && delivery.sources.length > 0) {
       log(`giving up on ${delivery.sources.length} prompt(s) to ${delivery.paneId}: ` +
@@ -316,5 +417,9 @@ export async function flushDeliveries(
       settled.set(run, list)
     }
   }
+
+  await Promise.all([...byPane.values()].map(async (queue) => {
+    for (const delivery of queue) settle(delivery, await send(delivery.paneId, delivery.text))
+  }))
   return settled
 }

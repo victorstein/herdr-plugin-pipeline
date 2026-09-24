@@ -109,6 +109,11 @@ export function outboxWarnings(
     const latest = entries.reduce<OutboxEntry>(
       (a, b) => ((b.last_attempt_at ?? 0) > (a.last_attempt_at ?? 0) ? b : a), first)
     const count = `${entries.length} prompt${entries.length === 1 ? '' : 's'}`
+    if (latest.last_code === 'stuck_input' && pane !== null) {
+      return `  ⚠ stuck input in ${pane}: ${count} for ${recipientLabel(first)} held ` +
+        `${ageMinutes(oldest, now)}m because its input box holds text the supervisor did not ` +
+        'send — submit or clear that text and delivery resumes'
+    }
     const why = pane === null
       ? 'it has no pane'
       : livePanes.size > 0 && !livePanes.has(pane)

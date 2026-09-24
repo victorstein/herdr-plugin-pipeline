@@ -117,26 +117,45 @@ test('herdr\'s transient codes count against the pane rather than giving up at o
   for (const code of [
     'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
     'agent_prompt_stalled', 'timeout', 'server_unavailable', 'server_not_running',
-    'spawn_failed',
+    'spawn_failed', 'agent_not_running', 'agent_pane_busy', 'agent_pane_unavailable',
+    'agent_launch_pending', 'agent_not_idle',
   ]) expect(isRetryable(code), code).toBe(true)
 })
 
-test('a permanent herdr code gives up at once', () => {
-  expect(isRetryable('workspace_not_found')).toBe(false)
-  expect(isRetryable('empty_agent_prompt')).toBe(false)
+test('a code nobody has listed holds rather than dropping what is queued', () => {
+  expect(isRetryable('some_code_herdr_adds_next_release')).toBe(true)
 })
 
-test('a delivery names the outbox entries it carries, from every run in it', () => {
+test('only a code about the text itself gives up at once', () => {
+  for (const code of ['empty_agent_prompt', 'invalid_agent_argument', 'invalid_params', 'invalid_request']) {
+    expect(isRetryable(code), code).toBe(false)
+  }
+})
+
+test('a delivery names the outbox entries it carries', () => {
   const run = mkRun()
-  const other = mkRun()
-  other.orchestrator_pane = 'w1:p1'
   const [delivery, ...rest] = deliveriesFor([
     { paneId: 'w1:p1', run, text: 'a', isOrchestrator: true, events: [], outboxId: 'x1' },
     { paneId: 'w1:p1', run, text: '', isOrchestrator: true, events: ['e1'] },
-    { paneId: 'w1:p1', run: other, text: 'b', isOrchestrator: true, events: [], outboxId: 'y1' },
   ])
   expect(rest).toHaveLength(0)
-  expect(delivery?.sources).toEqual([{ run, outboxId: 'x1' }, { run: other, outboxId: 'y1' }])
+  expect(delivery?.sources).toEqual([{ run, outboxId: 'x1' }])
+})
+
+test('two runs sharing a pane get a digest each, under their own header', () => {
+  const run = mkRun()
+  const other = mkRun()
+  other.run_id = 'other-run'
+  other.orchestrator_pane = 'w1:p1'
+  const out = deliveriesFor([
+    { paneId: 'w1:p1', run, text: 'a', isOrchestrator: true, events: [], outboxId: 'x1' },
+    { paneId: 'w1:p1', run: other, text: 'b', isOrchestrator: true, events: [], outboxId: 'y1' },
+  ])
+  expect(out.map((d) => [d.run.run_id, d.sources.map((s) => s.outboxId)])).toEqual([
+    [run.run_id, ['x1']], ['other-run', ['y1']],
+  ])
+  expect(out[1]?.text).toContain('[pipeline] run other-run')
+  expect(out[1]?.text).not.toContain(run.run_id)
 })
 
 test('a blocked worker line inlines its pane tail', () => {

@@ -62,24 +62,27 @@ export interface PendingPrompt {
 }
 
 /**
- * Grouped by pane. The previous design returned ONE delivery per tick and
+ * Grouped by pane and run. The previous design returned ONE delivery per tick and
  * discarded the rest, which was safe only because every prompt-producing row had
  * the same recipient. With eight worker-owned rows a tick routinely produces
  * prompts for several panes, and a dropped one is never regenerated because the
- * run is already saved.
+ * run is already saved. The run is in the key because an `escalated` run releases
+ * its pane to the next run started there, and one digest header names one run.
  */
 export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
-  const byPane = new Map<string, PendingPrompt[]>()
+  const byRecipient = new Map<string, PendingPrompt[]>()
   for (const p of pending) {
     if (p.text.length === 0 && p.events.length === 0) continue
-    const list = byPane.get(p.paneId) ?? []
+    const key = `${p.paneId}\0${p.run.run_id}`
+    const list = byRecipient.get(key) ?? []
     list.push(p)
-    byPane.set(p.paneId, list)
+    byRecipient.set(key, list)
   }
 
   const out: Delivery[] = []
-  for (const [paneId, group] of byPane) {
+  for (const group of byRecipient.values()) {
     const first = group[0] as PendingPrompt
+    const paneId = first.paneId
     const body = group.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
     const events = group.flatMap((p) => p.events)
     const text = first.isOrchestrator
@@ -100,20 +103,18 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
 export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
 
-// The herdr 0.9.0 codes that say the recipient cannot answer yet — an agent not
-// detected or not ready, a busy PTY, a prompt not taken up, a server restarting —
-// rather than that the text itself will never be accepted. A retryable failure
-// backs the pane off and keeps the prompt queued; any other code drops that
-// prompt, so it cannot hold up everything else addressed to the same pane.
-const RETRYABLE: ReadonlySet<string> = new Set([
-  'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
-  'agent_prompt_stalled', 'timeout',
-  'pane_not_found', 'not_found', 'server_unavailable', 'server_not_running', 'unparseable',
-  'spawn_failed',
+// The only codes that say herdr will never accept this TEXT, however often it is
+// sent — so the prompt is dropped rather than left to block its pane. A deny-list,
+// not an allow-list: dropping is the outbox's one irreversible step, and herdr
+// 0.9.0 has recipient-side codes (`agent_not_running`, `agent_pane_busy`,
+// `agent_pane_unavailable`, `agent_launch_pending`, `agent_not_idle`, …) that no
+// allow-list here had heard of. An unknown code holds and backs the pane off.
+const ABOUT_THE_TEXT: ReadonlySet<string> = new Set([
+  'empty_agent_prompt', 'invalid_agent_argument', 'invalid_params', 'invalid_request',
 ])
 
 export function isRetryable(code: string): boolean {
-  return RETRYABLE.has(code)
+  return !ABOUT_THE_TEXT.has(code)
 }
 
 /**

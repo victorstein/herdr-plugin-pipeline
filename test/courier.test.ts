@@ -4,9 +4,9 @@ import { newRun } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
-  BACKOFF_BASE_MS, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate, flushDeliveries,
+  BACKOFF_BASE_MS, boxHoldsOnly, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate, flushDeliveries,
   inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
-  sendConfirmed,
+  sendConfirmed, STUCK_INPUT,
 } from '../src/supervisor/courier'
 import { deliveriesFor } from '../src/supervisor/deliver'
 
@@ -17,10 +17,14 @@ const RULE = '─'.repeat(40)
 const claudeScreen = (box: string) =>
   ['', '  ◐ medium · /effort', RULE, `❯ ${box}`, RULE, '  ⏵⏵ auto mode on'].join('\n')
 const STUCK = claudeScreen('merge it')
+/** A send whose text STUCK's box holds a piece of. */
+const SENT = 'Your PR is green. Please merge it once CI is green.'
 
 function fakeIO(opts: {
   prompt?: (pane: string) => CallResult<unknown>
   status?: AgentStatus
+  /** Read in order, one per status call, before falling back to `status`. */
+  statuses?: AgentStatus[]
   screen?: string
 } = {}): FakeIO {
   const calls: string[] = []
@@ -30,7 +34,10 @@ function fakeIO(opts: {
       calls.push(`prompt ${pane} ${text}`)
       return opts.prompt ? opts.prompt(pane) : { ok: true }
     },
-    agentStatus: async (pane) => { calls.push(`status ${pane}`); return opts.status ?? 'idle' },
+    agentStatus: async (pane) => {
+      calls.push(`status ${pane}`)
+      return opts.statuses?.shift() ?? opts.status ?? 'idle'
+    },
     agentSendKeys: async (pane, keys) => { calls.push(`keys ${pane} ${keys.join(' ')}`); return { ok: true } },
     paneRead: async (pane) => { calls.push(`read ${pane}`); return opts.screen ?? STUCK },
   }
@@ -43,13 +50,13 @@ const presses = (io: FakeIO) => io.calls.filter((c) => c.startsWith('keys'))
 
 test('a prompt the agent took up is delivered with no read-back', async () => {
   const io = fakeIO()
-  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok).toBe(true)
-  expect(io.calls).toEqual(['prompt w1:p1 hi'])
+  expect((await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())).ok).toBe(true)
+  expect(io.calls).toEqual([`prompt w1:p1 ${SENT}`])
 })
 
 test('a stalled prompt left in an idle agent\'s box is cleared and reported failed — #18', async () => {
   const io = fakeIO({ prompt: stalled, status: 'idle' })
-  const result = await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+  const result = await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())
   expect(result).toMatchObject({ ok: false, code: 'agent_prompt_stalled' })
   expect(presses(io)).toEqual(['keys w1:p1 ctrl+c'])
 })
@@ -57,36 +64,36 @@ test('a stalled prompt left in an idle agent\'s box is cleared and reported fail
 test('a stalled prompt the agent has since taken up counts as delivered, and nothing is pressed', async () => {
   for (const status of ['working', 'blocked'] as const) {
     const io = fakeIO({ prompt: stalled, status })
-    expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok, status).toBe(true)
+    expect((await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())).ok, status).toBe(true)
     expect(presses(io), status).toEqual([])
   }
 })
 
 test('a stalled prompt on an agent that no longer reads as one is not touched', async () => {
   const io = fakeIO({ prompt: stalled, status: 'unknown' })
-  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok).toBe(false)
+  expect((await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())).ok).toBe(false)
   expect(presses(io)).toEqual([])
 })
 
 test('an empty box is never pressed: ctrl+c there arms Claude\'s exit', async () => {
   const io = fakeIO({ prompt: stalled, screen: claudeScreen('') })
-  await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+  await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())
   expect(presses(io)).toEqual([])
 })
 
 test('a screen with no recognisable input box is never pressed', async () => {
   for (const screen of ['', 'some shell $ ', `${RULE}\n   Rewind\n   ❯ (current)\n   Esc to cancel`]) {
     const io = fakeIO({ prompt: stalled, screen })
-    await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+    await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())
     expect(presses(io), JSON.stringify(screen)).toEqual([])
   }
 })
 
 test('a rejection before anything was written needs no read-back', async () => {
   const io = fakeIO({ prompt: () => ({ ok: false, code: 'agent_not_found' }) })
-  const result = await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+  const result = await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard())
   expect(result.code).toBe('agent_not_found')
-  expect(io.calls).toEqual(['prompt w1:p1 hi'])
+  expect(io.calls).toEqual([`prompt w1:p1 ${SENT}`])
 })
 
 // ——— the ctrl+c invariant ———
@@ -108,8 +115,9 @@ test('no pane is ever sent two ctrl+c inside CLEAR_MIN_INTERVAL_MS, however ofte
   }
   for (let step = 0; step < 2000; step++) {
     clock.now += [0, 1, 250, 900, 1999, 3000][step % 6] as number
-    await sendConfirmed(io, step % 3 === 0 ? 'w7:p1' : 'w1:p1', 'hi', 15000, clears)
+    await sendConfirmed(io, step % 3 === 0 ? 'w7:p1' : 'w1:p1', SENT, 15000, clears)
   }
+  expect([...pressedAt.keys()].sort()).toEqual(['w1:p1', 'w7:p1'])
   for (const [pane, times] of pressedAt) {
     expect(times.length, pane).toBeGreaterThan(1)
     for (let i = 1; i < times.length; i++) {
@@ -129,9 +137,9 @@ test('the press interval is per pane: one pane\'s clear does not block another\'
 test('a press refused by a failed check does not consume the pane\'s interval', async () => {
   const clock = { now: 0 }
   const clears = new ClearGuard(() => clock.now)
-  await sendConfirmed(fakeIO({ prompt: stalled, screen: claudeScreen('') }), 'w1:p1', 'hi', 1, clears)
+  await sendConfirmed(fakeIO({ prompt: stalled, screen: claudeScreen('') }), 'w1:p1', SENT, 1, clears)
   const io = fakeIO({ prompt: stalled })
-  await sendConfirmed(io, 'w1:p1', 'hi', 1, clears)
+  await sendConfirmed(io, 'w1:p1', SENT, 1, clears)
   expect(presses(io)).toEqual(['keys w1:p1 ctrl+c'])
 })
 
@@ -144,10 +152,78 @@ test('the input box is read from between the two rules that frame it', () => {
 })
 
 
+// ——— whose text is in the box ———
+
+/** The reviewer's fixture: a human's half-typed message with a paste in it. */
+const DRAFT = [RULE, '❯ hey claude, before you merge, can you also check the',
+  '  migration order [Pasted text #1 +40 lines]', RULE].join('\n')
+
+test('a box holding a human\'s draft and a paste is never cleared, and is reported stuck', async () => {
+  const io = fakeIO({ prompt: stalled, screen: DRAFT })
+  const result = await sendConfirmed(io, 'w7:p1', 'Digest: t1 entered spec-review', 15000, new ClearGuard())
+  expect(result.code).toBe(STUCK_INPUT)
+  expect(presses(io)).toEqual([])
+})
+
+test('the orchestrator pane is never cleared, even when the box holds only this send', async () => {
+  const io = fakeIO({ prompt: stalled, screen: claudeScreen('[Pasted text #1 +40 lines]') })
+  const result = await sendConfirmed(io, 'w1:p1', SENT, 15000, new ClearGuard(), true)
+  expect(result.code).toBe(STUCK_INPUT)
+  expect(presses(io)).toEqual([])
+})
+
+test('a worker box holding only this send — collapsed, wrapped or a tail fragment — is cleared', async () => {
+  for (const box of [
+    '[Pasted text #1 +40 lines]',
+    'Your PR is green. Please\n  merge it once CI is green.',
+    '[Pasted text #1]e merge it once',
+  ]) {
+    const io = fakeIO({ prompt: stalled, screen: claudeScreen(box) })
+    await sendConfirmed(io, 'w7:p1', SENT, 15000, new ClearGuard())
+    expect(presses(io), box).toEqual(['keys w7:p1 ctrl+c'])
+  }
+})
+
+test('boxHoldsOnly accepts only placeholders and pieces of the sent text', () => {
+  expect(boxHoldsOnly('merge it', SENT)).toBe(true)
+  expect(boxHoldsOnly('[Pasted text #3 +2 lines]', SENT)).toBe(true)
+  expect(boxHoldsOnly('merge it\nand also', SENT)).toBe(false)
+  expect(boxHoldsOnly('ship it', SENT)).toBe(false)
+})
+
+test('an agent that leaves idle between the box read and the press is not pressed', async () => {
+  // Status reads: after the stall, before the box read, immediately before the press.
+  const io = fakeIO({ prompt: stalled, statuses: ['idle', 'idle', 'working'] })
+  await sendConfirmed(io, 'w7:p1', SENT, 15000, new ClearGuard())
+  expect(presses(io)).toEqual([])
+})
+
+test('a stuck pane gets nothing more until its box is empty, then delivery resumes', async () => {
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w7:p1']))
+  let screen = DRAFT
+  let prompts = 0
+  const io: PromptIO = {
+    agentPromptConfirmed: async () => { prompts += 1; return prompts === 1 ? stalled() : { ok: true } },
+    agentStatus: async () => 'idle',
+    agentSendKeys: async () => ({ ok: true }),
+    paneRead: async () => screen,
+  }
+  const send = makeCourier(gate, io, 15000)
+  expect((await send('w7:p1', 'a')).code).toBe(STUCK_INPUT)
+  gate.wake('w7:p1')
+  expect(await send('w7:p1', 'b')).toEqual({ ok: false, code: STUCK_INPUT, held: STUCK_INPUT })
+  expect(prompts).toBe(1)
+
+  screen = claudeScreen('')
+  expect((await send('w7:p1', 'b')).ok).toBe(true)
+  expect(prompts).toBe(2)
+})
+
 // ——— DeliveryGate ———
 
-const gateAt = (clock: { now: number }, sendsPerTick = 8, backoffMaxMs = 300_000) =>
-  new DeliveryGate({ sendsPerTick, backoffMaxMs }, () => clock.now, () => {})
+const gateAt = (clock: { now: number }, sendsPerTick = 8, backoffMaxMs = 300_000, tickBudgetMs = 20_000) =>
+  new DeliveryGate({ sendsPerTick, backoffMaxMs, tickBudgetMs }, () => clock.now, () => {})
 
 test('a pane missing from herdr\'s pane list is held without a send — #24', async () => {
   const clock = { now: 0 }
@@ -162,7 +238,7 @@ test('a pane missing from herdr\'s pane list is held without a send — #24', as
 test('a failed pane list does not hold every pane', async () => {
   const gate = gateAt({ now: 0 })
   gate.beginTick(new Set())
-  expect(gate.holdFor('w7:p1')).toBeNull()
+  expect(gate.admit('w7:p1')).toBeNull()
 })
 
 test('a pane that fails is backed off exponentially up to the cap — #25', () => {
@@ -173,7 +249,7 @@ test('a pane that fails is backed off exponentially up to the cap — #25', () =
   for (let i = 0; i < 4; i++) {
     gate.record('w1:p1', { ok: false, code: 'agent_not_found' })
     const start = clock.now
-    while (gate.holdFor('w1:p1') === 'backoff') clock.now += 1000
+    while (gate.admit('w1:p1') === 'backoff') clock.now += 1000
     delays.push(clock.now - start)
     gate.beginTick(new Set(['w1:p1']))
   }
@@ -200,9 +276,9 @@ test('a pane that reports ready again is tried at once, not at the end of its ba
   const gate = gateAt(clock)
   gate.beginTick(new Set(['w1:p1']))
   for (let i = 0; i < 6; i++) gate.record('w1:p1', { ok: false, code: 'agent_not_found' })
-  expect(gate.holdFor('w1:p1')).toBe('backoff')
+  expect(gate.admit('w1:p1')).toBe('backoff')
   gate.wake('w1:p1')
-  expect(gate.holdFor('w1:p1')).toBeNull()
+  expect(gate.admit('w1:p1')).toBeNull()
 })
 
 test('a success clears the pane\'s failure streak', () => {
@@ -211,14 +287,14 @@ test('a success clears the pane\'s failure streak', () => {
   gate.record('w1:p1', { ok: false, code: 'agent_blocked' })
   gate.record('w1:p1', { ok: true })
   expect(gate.failuresFor('w1:p1')).toBe(0)
-  expect(gate.holdFor('w1:p1')).toBeNull()
+  expect(gate.admit('w1:p1')).toBeNull()
 })
 
 test('a code about the text, not the pane, does not back the pane off', () => {
   const gate = gateAt({ now: 0 })
   gate.beginTick(new Set(['w1:p1']))
   gate.record('w1:p1', { ok: false, code: 'empty_agent_prompt' })
-  expect(gate.holdFor('w1:p1')).toBeNull()
+  expect(gate.admit('w1:p1')).toBeNull()
 })
 
 test('the per-tick budget is shared by every send and resets each tick — #25', async () => {
@@ -341,4 +417,72 @@ test('a refused delivery is given up on, loudly, so it cannot block its pane', a
   )
   expect(settled.get(run)?.[0]).toMatchObject({ ok: false, permanent: true })
   expect(logged[0]).toContain('giving up on 1 prompt(s) to w7:p1: invalid_agent_argument')
+})
+
+test('an unknown herdr code keeps the prompt queued and backs the pane off — it is not dropped', async () => {
+  const run = mkRun()
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'a' }, 0)
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w1:p1']))
+  const io = fakeIO({ prompt: () => ({ ok: false, code: 'agent_not_running' }) })
+  const settled = await flushDeliveries(deliveriesFor(outboxPending(run)), makeCourier(gate, io, 15000))
+  expect(settled.get(run)?.[0]).toMatchObject({ ok: false, code: 'agent_not_running', permanent: false })
+  expect(gate.failuresFor('w1:p1')).toBe(1)
+})
+
+test('a tick whose every pane stalls costs one take-up window, not one per pane — #25', async () => {
+  // Fake clock: each stalled send takes herdr's 5s window from when it starts,
+  // so the tick's length is the longest chain of sends to any one pane.
+  const clock = { now: 0 }
+  const panes = Array.from({ length: 8 }, (_, i) => `w${i + 2}:p1`)
+  const gate = gateAt(clock)
+  gate.beginTick(new Set(panes))
+  const io: PromptIO = {
+    agentPromptConfirmed: async () => {
+      const startedAt = clock.now
+      await Bun.sleep(0)
+      clock.now = Math.max(clock.now, startedAt + 5000)
+      return stalled()
+    },
+    agentStatus: async () => 'idle',
+    agentSendKeys: async () => ({ ok: true }),
+    paneRead: async () => claudeScreen(''),
+  }
+  const run = mkRun()
+  const deliveries = panes.map((paneId) => ({ paneId, text: 'x', run, sources: [] }))
+  await flushDeliveries(deliveries, makeCourier(gate, io, 15000))
+  expect(clock.now).toBe(5000)
+})
+
+test('one pane\'s deliveries go in order, never two at once into one box', async () => {
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w1:p1']))
+  let inFlight = 0
+  let most = 0
+  const io = fakeIO()
+  io.agentPromptConfirmed = async () => {
+    inFlight += 1
+    most = Math.max(most, inFlight)
+    await Bun.sleep(1)
+    inFlight -= 1
+    return { ok: true }
+  }
+  const run = mkRun()
+  const other = mkRun()
+  await flushDeliveries([
+    { paneId: 'w1:p1', text: 'a', run, sources: [] },
+    { paneId: 'w1:p1', text: 'b', run: other, sources: [] },
+  ], makeCourier(gate, io, 15000))
+  expect(most).toBe(1)
+})
+
+test('a tick that has used its time budget admits no more sends', () => {
+  const clock = { now: 0 }
+  const gate = gateAt(clock, 8, 300_000, 20_000)
+  gate.beginTick(new Set(['w1:p1', 'w7:p1']))
+  expect(gate.admit('w1:p1')).toBeNull()
+  clock.now = 20_000
+  expect(gate.admit('w7:p1')).toBe('budget')
+  gate.beginTick(new Set(['w1:p1', 'w7:p1']))
+  expect(gate.admit('w7:p1')).toBeNull()
 })

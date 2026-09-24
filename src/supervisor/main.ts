@@ -18,7 +18,7 @@ import {
 import {
   DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
 } from './courier'
-import { enqueue, pruneOutbox, settleOutbox } from '../lib/outbox'
+import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
@@ -32,6 +32,8 @@ import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import type { AgentStatus, Run } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
+/** Two ticks' worth: a healthy tick never reaches it, a tick slowed by stalled sends does. */
+const IDLE_READ_MAX_AGE_MS = 2_000
 
 /**
  * No in-place migration: a v4 run mid-`plan` has an orchestrator holding work no
@@ -58,6 +60,26 @@ export function makeSettledIdleReader(
     })())
   }
   return async (paneId: string) => (await results.get(paneId)) ?? false
+}
+
+/**
+ * The tick's idle reader, rebuilt when it is older than `maxAgeMs` at the moment
+ * a run asks it. Confirmed sends inside the advancing loop — answers, decisions —
+ * can each spend herdr's 5s take-up window, and a later run evaluated against
+ * readings that old would advance on an idle its actor has since left.
+ */
+export function refreshingIdleReader(
+  build: () => (paneId: string) => Promise<boolean>, now: () => number, maxAgeMs: number,
+): (paneId: string) => Promise<boolean> {
+  let builtAt = now()
+  let reader = build()
+  return (paneId) => {
+    if (now() - builtAt > maxAgeMs) {
+      builtAt = now()
+      reader = build()
+    }
+    return reader(paneId)
+  }
 }
 
 async function main(): Promise<void> {
@@ -117,8 +139,16 @@ async function main(): Promise<void> {
   const gate = new DeliveryGate({
     sendsPerTick: config.DELIVERY_SENDS_PER_TICK,
     backoffMaxMs: config.DELIVERY_BACKOFF_MAX_SECONDS * 1000,
+    tickBudgetMs: config.DELIVERY_TICK_BUDGET_MS,
   })
-  const send = makeCourier(gate, herdr, config.PROMPT_CONFIRM_MS)
+  // Read at the moment of a clear, not snapshotted: a rebind mid-tick moves a run
+  // onto a new orchestrator pane, and that pane is one a human types in at once.
+  let claimedPanes = new Set<string>()
+  let knownRuns: Run[] = []
+  const send = makeCourier(gate, herdr, config.PROMPT_CONFIRM_MS, {
+    humanTypesIn: (paneId) =>
+      claimedPanes.has(paneId) || knownRuns.some((r) => r.orchestrator_pane === paneId),
+  })
   const ambiguityLog = new Set<string>()
   let lastCiPollMs = 0
 
@@ -131,6 +161,8 @@ async function main(): Promise<void> {
         : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
       ).filter(isCurrentSchemaRun)
       const panes = await allOrchestratorPanes(stateDir, session)
+      claimedPanes = panes
+      knownRuns = allRuns
       gate.beginTick(new Set((await herdr.paneList()).map((p) => p.pane_id)))
       for (const pane of readyPanes(events)) gate.wake(pane)
 
@@ -149,6 +181,7 @@ async function main(): Promise<void> {
           warn: (message) => console.error(message),
         })
         : { runs: tickRuns, wake: applied.wake }
+      knownRuns = [...allRuns, ...runs]
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -173,8 +206,10 @@ async function main(): Promise<void> {
           .flatMap((r) => [r.orchestrator_pane, ...r.tasks.map((t) => t.pane_id)])
           .filter((p): p is string => p !== null),
       )]
-      const liveIdle = makeSettledIdleReader(
-        actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane),
+      const liveIdle = refreshingIdleReader(
+        () => makeSettledIdleReader(actorPanes, config.ACTOR_SETTLE_MS, (pane) => herdr.agentStatus(pane)),
+        Date.now,
+        IDLE_READ_MAX_AGE_MS,
       )
 
       // One stamp and one CLI spelling per tick, so every line in one digest agrees
@@ -307,8 +342,16 @@ async function main(): Promise<void> {
 
       for (const run of deliverFrom) pending.push(...outboxPending(run, footers.get(run)))
       const settlements = await flushDeliveries(deliveriesFor(pending), send)
-      for (const [run, settled] of settlements) {
-        const settle = (target: Run) => settleOutbox(target, settled, Date.now())
+      for (const run of deliverFrom) {
+        const settled = settlements.get(run) ?? []
+        // Pruned here too, not only in the advancing loop: a run that is never
+        // advanced would otherwise keep every superseded prompt on disk for good.
+        const hasStale = (run.outbox ?? []).some((entry) => !isCurrent(run, entry))
+        if (settled.length === 0 && !hasStale) continue
+        const settle = (target: Run) => {
+          settleOutbox(target, settled, Date.now())
+          pruneOutbox(target)
+        }
         settle(run)
         try {
           if (await saveOrReapply(stateDir, run, [settle]) === 'reapplied') unsaved.add(run)
@@ -339,7 +382,8 @@ async function main(): Promise<void> {
             awaiting: awaiting.clause,
             ladder: ladderFor(c, probeMax),
           })
-          return send(c.paneId, text)
+          const sent = await send(c.paneId, text)
+          return { ...sent, deferred: sent.held === 'budget' }
         },
         escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
           run_id: c.run.run_id,

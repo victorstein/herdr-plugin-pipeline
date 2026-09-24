@@ -101,6 +101,15 @@ test('status names a recipient whose prompts keep failing, with the age and the 
   expect(line).toContain('2 failed attempts, last agent_not_found')
 })
 
+test('status says a pane is stuck on someone else\'s input, and how to free it', () => {
+  const run = mkRun()
+  const entry = enqueue(run, { to: 'orchestrator', taskId: null, text: 'x' }, 0)
+  settleOutbox(run, [{ id: entry.id, ok: false, code: 'stuck_input' }], MINUTE)
+  const [line] = outboxWarnings(run, new Set(['w1:p1']), 3 * MINUTE)
+  expect(line).toContain('stuck input in w1:p1: 1 prompt for the orchestrator held 3m')
+  expect(line).toContain('submit or clear that text')
+})
+
 test('status names a gone pane even before any attempt, since nothing is being tried', () => {
   const run = mkRun()
   enqueue(run, { to: 'worker', taskId: 't1', text: 'a' }, 0)

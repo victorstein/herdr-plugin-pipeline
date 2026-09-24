@@ -394,9 +394,11 @@ export interface StallDeps {
    * deliberately skipped because the pane cannot answer. Either is retried and,
    * once undeliverable for a whole threshold, climbs as an undelivered rung, so a
    * filter that stops sending must still return here rather than drop the
-   * candidate.
+   * candidate. `deferred` is neither: the supervisor ran out of its own send
+   * budget, which says nothing about the pane, so nothing is recorded and the
+   * probe is simply due again next tick.
    */
-  probe: (c: StallCandidate) => Promise<{ ok: boolean }>
+  probe: (c: StallCandidate) => Promise<{ ok: boolean; deferred?: boolean }>
   /**
    * Rendered BEFORE the transition, so it describes the phase being left —
    * `escalated`'s own row is `signal: 'manual'` and would describe nothing.
@@ -472,7 +474,9 @@ async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutco
   // matters most (#32). `noteUndelivered` decides when.
   if (c.action === 'probe') {
     const now = deps.now()
-    const delivered = (await deps.probe(c)).ok
+    const sent = await deps.probe(c)
+    if (sent.deferred === true) return
+    const delivered = sent.ok
     const bookkeeping = stallEffectFor(c, delivered
       ? (run, record) => { bumpStall(run, record, 'probes', now) }
       : (run, record) => noteUndelivered(run, record, now, c.thresholdMs))

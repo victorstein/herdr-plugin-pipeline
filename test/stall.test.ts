@@ -468,6 +468,19 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
   return { ...base, ...over, sent }
 }
 
+test('a probe deferred by the supervisor\'s own send budget records nothing — it is no sign of the pane', async () => {
+  const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  const due = 45 * 60_000
+  let persisted = 0
+  await applyStalls(taskStallCandidates([run], due, 45, 3), mkDeps({
+    now: () => due,
+    persist: async () => { persisted += 1 },
+    probe: async () => ({ ok: false, deferred: true }),
+  }))
+  expect(run.tasks[0]?.stall).toBeUndefined()
+  expect(persisted).toBe(0)
+})
+
 test('a probe that fails once and lands next tick costs no rung — #32', async () => {
   const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
   const task = run.tasks[0] as Task
