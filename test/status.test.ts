@@ -184,3 +184,34 @@ test('an ABORTED run is not reported as escalated', () => {
   run.phase = 'done'
   expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('needs a human')
 })
+
+test('an idle worker with no artifact is called out with its phase, age and path', () => {
+  const run = mkRun()
+  const entered = Date.now() - 12 * 60_000
+  run.tasks = [mkTask({
+    phase: 'research', phase_entered_at: entered, agent_status: 'idle',
+    artifact_missing: { at: entered, path: '/wt/docs/research/r.md', candidates: [] },
+  })]
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain('⚠ t1 idle in research 12m with nothing at /wt/docs/research/r.md')
+  expect(out).toContain('its branch added no document to adopt')
+})
+
+test('an ambiguous missing artifact names every candidate', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({
+    phase: 'spec', phase_entered_at: 0,
+    artifact_missing: { at: 0, path: '/wt/s.md', candidates: ['docs/a.md', 'docs/b.md'] },
+  })]
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain('2 candidates, too many to adopt: docs/a.md, docs/b.md')
+})
+
+test('a missing-artifact record from an earlier phase entry is not reported', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({
+    phase: 'spec', phase_entered_at: 99,
+    artifact_missing: { at: 0, path: '/wt/r.md', candidates: [] },
+  })]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('with nothing at')
+})

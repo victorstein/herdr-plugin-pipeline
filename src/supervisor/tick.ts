@@ -2,6 +2,7 @@ import { abandonDecisions } from '../lib/decisions'
 import { filesOverlap, isInFlight } from '../lib/gating'
 import { enterTaskPhase } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
+import { adoptionOutcome, currentMissingArtifact } from '../lib/status'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
@@ -38,7 +39,14 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
     return `needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``
   }
   if (row.actor === 'orchestrator') return 'YOUR move'
-  if (row.actor === 'worker') return "worker's move"
+  if (row.actor === 'worker') {
+    // An idle worker with no artifact otherwise reads exactly like a busy one, and
+    // the orchestrator waits on it until the stall ladder's first rung.
+    const missing = currentMissingArtifact(task)
+    return missing
+      ? `worker's move, but nothing is at ${missing.path} (${adoptionOutcome(missing)})`
+      : "worker's move"
+  }
   if (task.phase === 'blocked-on-files') {
     // Mirrors `src/lib/status.ts:51-60`: only a holder that has stopped moving is
     // releasable, and this row has no escalation path of its own — `files` is not

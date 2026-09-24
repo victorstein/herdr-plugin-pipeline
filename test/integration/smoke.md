@@ -196,6 +196,13 @@ watch -n 2 'hpipe status'
   supervisor that drove its own run was the released plugin, so the transition box has only ever
   been exercised by unit tests. Watch for one digest where a phase advances and record whether the
   box reads `[research → spec]` rather than `[spec 0m]`.
+- **An idle worker in `research`, `spec` or `plan` with nothing at its artifact path** (#23) must
+  not read as a plain `worker's move`: its line reads `worker's move, but nothing is at <path>`
+  followed by what the adoption scan found — `its branch added no document to adopt` or
+  `N candidates, too many to adopt: …` — and `hpipe status` carries a matching
+  `⚠ <task> idle in <phase> <age>m with nothing at <path>` line. To provoke it, answer a worker's
+  research prompt without writing the note. A line that says `worker's move` alone for that pane
+  is a **finding**; so is the `⚠` line surviving once the worker is busy again.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
   all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
   is already sending a digest the footer is what reports it. Expect it to name the same tasks

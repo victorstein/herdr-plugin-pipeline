@@ -236,6 +236,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'research':
     case 'spec':
     case 'plan': {
+      delete task.artifact_missing
       if (!actorIdle) return base
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
@@ -265,6 +266,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         if (candidates.length > 1) {
           logAmbiguous(run, task, candidates, deps.ambiguityLog ?? defaultAmbiguityLog)
         }
+        task.artifact_missing = { at: task.phase_entered_at, path: absolute, candidates }
         return base
       }
       if (!(await isSettled(join(checkout, adopted), deps.fileSettleMs))) return base

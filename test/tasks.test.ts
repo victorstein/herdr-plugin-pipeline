@@ -432,6 +432,69 @@ test('two candidates are ambiguous, nothing is adopted, and it is logged once', 
   expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
 })
 
+test('an idle worker with two candidates records the missing artifact and both candidates', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
+  commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  const original = console.error
+  console.error = () => {}
+  try {
+    await advanceTasks(run, deps())
+  } finally {
+    console.error = original
+  }
+
+  expect(run.tasks[0]?.artifact_missing).toEqual({
+    at: 5,
+    path: join(worktree, designArtifacts().research as string),
+    candidates: ['docs/superpowers/notes/one.md', 'docs/superpowers/notes/two.md'],
+  })
+})
+
+test('an idle worker whose branch added nothing records the missing artifact with no candidates', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  await advanceTasks(run, deps())
+
+  expect(run.tasks[0]?.artifact_missing).toEqual({
+    at: 5, path: join(worktree, designArtifacts().research as string), candidates: [],
+  })
+})
+
+test('a working worker clears a missing-artifact record instead of reporting it', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+    artifact_missing: { at: 5, path: '/somewhere', candidates: [] },
+  })])
+  await advanceTasks(run, deps({ liveIdle: async () => false }))
+
+  expect(run.tasks[0]?.artifact_missing).toBeUndefined()
+})
+
+test('a present-but-stale artifact is not reported as missing', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const artifacts = designArtifacts()
+  mkdirSync(join(worktree, dirname(artifacts.spec as string)), { recursive: true })
+  writeFileSync(join(worktree, artifacts.spec as string), 'the previous pass\n')
+
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: Date.now() + 60_000, checkout_path: worktree, artifacts,
+  })])
+  await advanceTasks(run, deps())
+
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifact_missing).toBeUndefined()
+})
+
 test('with no checkout the scan never falls back to the main checkout', async () => {
   const mainCheckout = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
   commitIn(mainCheckout, 'docs/superpowers/notes/somebody-elses.md', 'not ours\n')
