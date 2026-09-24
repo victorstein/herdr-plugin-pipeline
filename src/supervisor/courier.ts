@@ -9,10 +9,75 @@ export interface PromptIO {
   agentPromptConfirmed(target: string, text: string, timeoutMs: number): Promise<CallResult<unknown>>
   agentStatus(target: string): Promise<AgentStatus>
   agentSendKeys(target: string, keys: string[]): Promise<CallResult<unknown>>
+  paneRead(target: string, lines: number): Promise<string>
 }
 
 /** The two codes herdr returns after it has already written the text and the Enter. */
 const MAY_HAVE_LANDED: ReadonlySet<string> = new Set(['agent_prompt_stalled', 'timeout'])
+
+/**
+ * A second `ctrl+c` inside Claude's "press again to exit" window quits the agent,
+ * and that window measured under 2s. Five times that, so no clock jitter or slow
+ * herdr call can bring two presses inside it.
+ */
+export const CLEAR_MIN_INTERVAL_MS = 10_000
+
+/**
+ * The one place a supervisor `ctrl+c` is allowed through: at most one per pane per
+ * CLEAR_MIN_INTERVAL_MS, whatever the delivery backoff says. Held in memory only —
+ * a restarted supervisor cannot press within the window of its predecessor's
+ * press, because its first clear follows a send herdr spends 5s declaring stalled.
+ */
+export class ClearGuard {
+  private readonly lastPressAt = new Map<string, number>()
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** Claims the pane's next press, or refuses it; a refused claim records nothing. */
+  claim(paneId: string): boolean {
+    const last = this.lastPressAt.get(paneId)
+    const now = this.now()
+    if (last !== undefined && now - last < CLEAR_MIN_INTERVAL_MS) return false
+    this.lastPressAt.set(paneId, now)
+    return true
+  }
+}
+
+const INPUT_BOX_RULE = /^─{10,}$/
+const SCREEN_LINES = 40
+
+/**
+ * The text in a Claude input box — the `❯` line and any continuation lines between
+ * the two horizontal rules that frame it — or `null` when the screen shows no box
+ * this recognises, which callers must read as "do not touch". The last framed box
+ * wins; Claude's rewind menu also draws `❯`, but indented and unframed.
+ */
+export function inputBoxText(screen: string): string | null {
+  const lines = screen.split('\n')
+  for (let close = lines.length - 1; close > 0; close--) {
+    if (!INPUT_BOX_RULE.test((lines[close] ?? '').trim())) continue
+    let open = close - 1
+    while (open >= 0 && !INPUT_BOX_RULE.test((lines[open] ?? '').trim())) open--
+    if (open < 0) return null
+    const box = lines.slice(open + 1, close)
+    if (!(box[0] ?? '').startsWith('❯')) continue
+    return box.map((line, i) => (i === 0 ? line.slice(1) : line)).join('\n').trim()
+  }
+  return null
+}
+
+/**
+ * Presses `ctrl+c` only when all three hold: the agent reads idle (on a working
+ * one it interrupts the turn), the screen shows a Claude input box with text in it
+ * (on an empty box it arms exit), and the pane's guard grants the press.
+ */
+async function clearInputBox(io: PromptIO, paneId: string, clears: ClearGuard): Promise<boolean> {
+  if (!isAgentReady(await io.agentStatus(paneId))) return false
+  const box = inputBoxText(await io.paneRead(paneId, SCREEN_LINES))
+  if (box === null || box.length === 0) return false
+  if (!clears.claim(paneId)) return false
+  return (await io.agentSendKeys(paneId, ['ctrl+c'])).ok
+}
 
 /**
  * Delivered means herdr saw the agent take the prompt up, not that the bytes were
@@ -24,23 +89,20 @@ const MAY_HAVE_LANDED: ReadonlySet<string> = new Set(['agent_prompt_stalled', 't
  *
  * `ctrl+c` is the only single key that empties a Claude input box whole: `ctrl+u`
  * deletes one line of a multi-line box, and `esc esc` on an empty box opens
- * Claude's rewind menu. On an empty box `ctrl+c` only arms "again to exit" for
- * under 2s. Measured against Claude Code in a live herdr 0.9.0 session. It is
- * pressed only on an agent that reads idle, because on a working one it
- * interrupts the turn.
+ * Claude's rewind menu. Measured against Claude Code in a live herdr 0.9.0 session.
  *
  * The prompt is re-sent whole rather than submitted with a bare Enter: a send can
  * arrive as a fragment of its tail (#18), and submitting a fragment executes it.
  */
 export async function sendConfirmed(
-  io: PromptIO, paneId: string, text: string, timeoutMs: number,
+  io: PromptIO, paneId: string, text: string, timeoutMs: number, clears: ClearGuard,
 ): Promise<CallResult<unknown>> {
   const sent = await io.agentPromptConfirmed(paneId, text, timeoutMs)
   if (sent.ok || !MAY_HAVE_LANDED.has(sent.code ?? '')) return sent
 
   const status = await io.agentStatus(paneId)
   if (status === 'working' || status === 'blocked') return { ok: true }
-  if (isAgentReady(status)) await io.agentSendKeys(paneId, ['ctrl+c'])
+  await clearInputBox(io, paneId, clears)
   return sent
 }
 
@@ -55,11 +117,7 @@ export interface SendOutcome {
 
 export type Send = (paneId: string, text: string) => Promise<SendOutcome>
 
-/**
- * The first retry waits past both herdr's own 5s take-up window and Claude's
- * sub-2s double-`ctrl+c` exit window, so two clears never land close enough to
- * quit the agent.
- */
+/** The first retry waits past herdr's own 5s take-up window. */
 export const BACKOFF_BASE_MS = 5_000
 
 export interface GateConfig {
@@ -172,11 +230,13 @@ export class DeliveryGate {
   }
 }
 
-export function makeCourier(gate: DeliveryGate, io: PromptIO, confirmMs: number): Send {
+export function makeCourier(
+  gate: DeliveryGate, io: PromptIO, confirmMs: number, clears: ClearGuard = new ClearGuard(),
+): Send {
   return async (paneId, text) => {
     const held = gate.holdFor(paneId)
     if (held !== null) return { ok: false, code: held, held }
-    const result = await sendConfirmed(io, paneId, text, confirmMs)
+    const result = await sendConfirmed(io, paneId, text, confirmMs, clears)
     gate.record(paneId, result)
     return result.ok ? { ok: true } : { ok: false, code: result.code ?? 'unknown' }
   }

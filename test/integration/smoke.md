@@ -478,9 +478,14 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
 4. **Stuck input box.** In an idle worker pane, type text without submitting it, then trigger a
    prompt to that worker (a rewind into its phase). **Record** what happens: herdr's `agent prompt`
    does not clear the box, so the prompt is submitted with your text prepended — measured with
-   Claude Code 2.1 in an isolated herdr 0.9.0 session. The supervisor only clears the box (one
-   `ctrl+c`, idle agent only) after a send herdr reports as `agent_prompt_stalled`, and then re-sends
-   the whole prompt on a later tick. Whether a real stall reproduces on demand is still open.
+   Claude Code 2.1 in an isolated herdr 0.9.0 session. The supervisor only clears the box after a
+   send herdr reports as `agent_prompt_stalled`, and then re-sends the whole prompt on a later tick.
+   It presses one `ctrl+c` only if the agent reads idle **and** `pane read --source visible` shows
+   text between the two rules framing the `❯` box, and never twice to one pane within 10s — a
+   second press inside Claude's "again to exit" window quits the agent. **Check** in the supervisor
+   log and the pane that no clear ever hit an empty box or a working agent, and that the box parser
+   still recognises the Claude version in use (a changed layout makes it press nothing, which is
+   the safe failure). Whether a real stall reproduces on demand is still open.
 5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
    for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
    its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see

@@ -4,16 +4,24 @@ import { newRun } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
-  BACKOFF_BASE_MS, DeliveryGate, flushDeliveries, makeCourier, outboxPending, type PromptIO,
-  queuePending, readyPanes, type Send, sendConfirmed,
+  BACKOFF_BASE_MS, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate, flushDeliveries,
+  inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
+  sendConfirmed,
 } from '../src/supervisor/courier'
 import { deliveriesFor } from '../src/supervisor/deliver'
 
 interface FakeIO extends PromptIO { calls: string[] }
 
+const RULE = '─'.repeat(40)
+/** What `pane read --source visible` returned for an idle Claude, measured live. */
+const claudeScreen = (box: string) =>
+  ['', '  ◐ medium · /effort', RULE, `❯ ${box}`, RULE, '  ⏵⏵ auto mode on'].join('\n')
+const STUCK = claudeScreen('merge it')
+
 function fakeIO(opts: {
   prompt?: (pane: string) => CallResult<unknown>
   status?: AgentStatus
+  screen?: string
 } = {}): FakeIO {
   const calls: string[] = []
   return {
@@ -24,45 +32,117 @@ function fakeIO(opts: {
     },
     agentStatus: async (pane) => { calls.push(`status ${pane}`); return opts.status ?? 'idle' },
     agentSendKeys: async (pane, keys) => { calls.push(`keys ${pane} ${keys.join(' ')}`); return { ok: true } },
+    paneRead: async (pane) => { calls.push(`read ${pane}`); return opts.screen ?? STUCK },
   }
 }
 
 const stalled = (): CallResult<unknown> => ({ ok: false, code: 'agent_prompt_stalled' })
+const presses = (io: FakeIO) => io.calls.filter((c) => c.startsWith('keys'))
 
 // ——— sendConfirmed ———
 
 test('a prompt the agent took up is delivered with no read-back', async () => {
   const io = fakeIO()
-  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000)).ok).toBe(true)
+  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok).toBe(true)
   expect(io.calls).toEqual(['prompt w1:p1 hi'])
 })
 
-test('a stalled prompt on an idle agent is cleared from the input box and reported failed — #18', async () => {
+test('a stalled prompt left in an idle agent\'s box is cleared and reported failed — #18', async () => {
   const io = fakeIO({ prompt: stalled, status: 'idle' })
-  const result = await sendConfirmed(io, 'w1:p1', 'hi', 15000)
+  const result = await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
   expect(result).toMatchObject({ ok: false, code: 'agent_prompt_stalled' })
-  expect(io.calls).toEqual(['prompt w1:p1 hi', 'status w1:p1', 'keys w1:p1 ctrl+c'])
+  expect(presses(io)).toEqual(['keys w1:p1 ctrl+c'])
 })
 
 test('a stalled prompt the agent has since taken up counts as delivered, and nothing is pressed', async () => {
   for (const status of ['working', 'blocked'] as const) {
     const io = fakeIO({ prompt: stalled, status })
-    expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000)).ok, status).toBe(true)
-    expect(io.calls.some((c) => c.startsWith('keys')), status).toBe(false)
+    expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok, status).toBe(true)
+    expect(presses(io), status).toEqual([])
   }
 })
 
 test('a stalled prompt on an agent that no longer reads as one is not touched', async () => {
   const io = fakeIO({ prompt: stalled, status: 'unknown' })
-  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000)).ok).toBe(false)
-  expect(io.calls.some((c) => c.startsWith('keys'))).toBe(false)
+  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())).ok).toBe(false)
+  expect(presses(io)).toEqual([])
+})
+
+test('an empty box is never pressed: ctrl+c there arms Claude\'s exit', async () => {
+  const io = fakeIO({ prompt: stalled, screen: claudeScreen('') })
+  await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+  expect(presses(io)).toEqual([])
+})
+
+test('a screen with no recognisable input box is never pressed', async () => {
+  for (const screen of ['', 'some shell $ ', `${RULE}\n   Rewind\n   ❯ (current)\n   Esc to cancel`]) {
+    const io = fakeIO({ prompt: stalled, screen })
+    await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+    expect(presses(io), JSON.stringify(screen)).toEqual([])
+  }
 })
 
 test('a rejection before anything was written needs no read-back', async () => {
   const io = fakeIO({ prompt: () => ({ ok: false, code: 'agent_not_found' }) })
-  expect((await sendConfirmed(io, 'w1:p1', 'hi', 15000)).code).toBe('agent_not_found')
+  const result = await sendConfirmed(io, 'w1:p1', 'hi', 15000, new ClearGuard())
+  expect(result.code).toBe('agent_not_found')
   expect(io.calls).toEqual(['prompt w1:p1 hi'])
 })
+
+// ——— the ctrl+c invariant ———
+
+test('no pane is ever sent two ctrl+c inside CLEAR_MIN_INTERVAL_MS, however often sends stall', async () => {
+  // Deliberately bypasses the delivery gate: the invariant must hold on its own,
+  // whatever the backoff, the budget or a wake does to how often a pane is tried.
+  const clock = { now: 0 }
+  const clears = new ClearGuard(() => clock.now)
+  const pressedAt = new Map<string, number[]>()
+  const io: PromptIO = {
+    agentPromptConfirmed: async () => stalled(),
+    agentStatus: async () => 'idle',
+    paneRead: async () => STUCK,
+    agentSendKeys: async (pane) => {
+      pressedAt.set(pane, [...(pressedAt.get(pane) ?? []), clock.now])
+      return { ok: true }
+    },
+  }
+  for (let step = 0; step < 2000; step++) {
+    clock.now += [0, 1, 250, 900, 1999, 3000][step % 6] as number
+    await sendConfirmed(io, step % 3 === 0 ? 'w7:p1' : 'w1:p1', 'hi', 15000, clears)
+  }
+  for (const [pane, times] of pressedAt) {
+    expect(times.length, pane).toBeGreaterThan(1)
+    for (let i = 1; i < times.length; i++) {
+      expect((times[i] as number) - (times[i - 1] as number), pane)
+        .toBeGreaterThanOrEqual(CLEAR_MIN_INTERVAL_MS)
+    }
+  }
+})
+
+test('the press interval is per pane: one pane\'s clear does not block another\'s', () => {
+  const clears = new ClearGuard(() => 0)
+  expect(clears.claim('w1:p1')).toBe(true)
+  expect(clears.claim('w1:p1')).toBe(false)
+  expect(clears.claim('w7:p1')).toBe(true)
+})
+
+test('a press refused by a failed check does not consume the pane\'s interval', async () => {
+  const clock = { now: 0 }
+  const clears = new ClearGuard(() => clock.now)
+  await sendConfirmed(fakeIO({ prompt: stalled, screen: claudeScreen('') }), 'w1:p1', 'hi', 1, clears)
+  const io = fakeIO({ prompt: stalled })
+  await sendConfirmed(io, 'w1:p1', 'hi', 1, clears)
+  expect(presses(io)).toEqual(['keys w1:p1 ctrl+c'])
+})
+
+test('the input box is read from between the two rules that frame it', () => {
+  expect(inputBoxText(STUCK)).toBe('merge it')
+  expect(inputBoxText(claudeScreen(''))).toBe('')
+  expect(inputBoxText([RULE, '❯ first stray', '  second stray', RULE].join('\n')))
+    .toBe('first stray\n  second stray')
+  expect(inputBoxText('no box here')).toBeNull()
+})
+
 
 // ——— DeliveryGate ———
 
