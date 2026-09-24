@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  detectCycle, filesClearFor, filesOverlap, gateStatus, releasableFromFiles,
+  detectCycle, filesClearFor, filesOverlap, gateStatus, planDeclaredFiles,
+  releasableFromFiles, widenFiles,
 } from '../src/lib/gating'
 import type { Task } from '../src/lib/types'
 
@@ -104,6 +105,46 @@ test('at most one task leaves an overlapping group per tick', () => {
   const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/'] })
   const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] })
   expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+})
+
+test('a plan declares files on column-0 FILES lines, comma-separated and repeatable', () => {
+  const plan = [
+    '# Plan',
+    'FILES: src/lib/gating.ts, `test/gating.test.ts`',
+    'FILES: ./prompts/plan.md',
+    '',
+  ].join('\n')
+  expect(planDeclaredFiles(plan)).toEqual([
+    'src/lib/gating.ts', 'test/gating.test.ts', 'prompts/plan.md',
+  ])
+})
+
+test('an indented or fenced FILES line is documentation, not a declaration', () => {
+  const plan = [
+    '    FILES: quoted/example.ts',
+    '```ts',
+    'FILES: inside/a/fence.ts',
+    '```',
+    'FILES: real.ts',
+  ].join('\n')
+  expect(planDeclaredFiles(plan)).toEqual(['real.ts'])
+})
+
+test('widening adds only what the held prefixes do not already cover', () => {
+  expect(widenFiles(['a/', 'b.ts'], ['a/x.ts', 'b.ts', 'c.ts', 'c.ts'])).toEqual(['c.ts'])
+  expect(widenFiles(['a/'], [])).toEqual([])
+})
+
+test('two waiters that each discover the other\'s files are serialised, not deadlocked', () => {
+  const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/', 'b/'] })
+  const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['b/', 'a/'] })
+  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+
+  a.phase = 'implement'
+  expect(releasableFromFiles([a, b])).toEqual([])
+
+  a.phase = 'done'
+  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t2'])
 })
 
 test('detectCycle names a cycle', () => {

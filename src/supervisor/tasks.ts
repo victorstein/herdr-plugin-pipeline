@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { openDecisionFor } from '../lib/decisions'
-import { gateStatus, releasableFromFiles } from '../lib/gating'
+import { gateStatus, planDeclaredFiles, releasableFromFiles, widenFiles } from '../lib/gating'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
@@ -143,6 +143,13 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // `done` in the same call, skipping that phase's own settle.
   await runTeardown([run], deps.removeWorktree)
 
+  // Every waiter at once, before any is released: `releasableFromFiles` compares
+  // waiters with each other, so widening only the one being evaluated would let
+  // two mutual discoverers each see the other's intake-time list and both go.
+  for (const task of run.tasks) {
+    if (task.phase === 'blocked-on-files') await widenFromPlan(run, task)
+  }
+
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
       const gate = gateStatus(task, run.tasks)
@@ -187,6 +194,25 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   }
 
   return prompts
+}
+
+/**
+ * #37. Intake declares `--files` before any research exists, so the honest list
+ * is only knowable once a plan is written. Read here, at the gate, rather than
+ * when `plan` clears: a CLEAR plan-review fixes MAJORs inline and may add files
+ * to the plan after that. Widening only ever happens while a task holds no
+ * files, so no task waits on a lock while holding one — which is what keeps two
+ * mutual discoverers from deadlocking.
+ */
+async function widenFromPlan(run: Run, task: Task): Promise<void> {
+  const planPath = taskArtifactPath(run, task, 'plan')
+  if (planPath === '' || !existsSync(planPath)) return
+  const added = widenFiles(task.files, planDeclaredFiles(await Bun.file(planPath).text()))
+  if (added.length === 0) return
+  task.files = [...task.files, ...added]
+  console.error(
+    `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ${added.join(', ')}`,
+  )
 }
 
 // Reported once per phase entry rather than once per 1s tick for the 45 minutes

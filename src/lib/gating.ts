@@ -20,6 +20,42 @@ export function filesOverlap(a: string[], b: string[]): boolean {
   return a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)))
 }
 
+// Column 0, outside fences, for the same reason as the VERDICT trailer
+// (predicates.ts): the plan prompt documents the line as an indented example, and
+// a plan's code steps may quote one. A quoted copy must not claim files.
+const FILES_LINE = /^FILES:(.*)$/
+const FENCE = /^\s*(```|~~~)/
+
+export function planDeclaredFiles(planText: string): string[] {
+  const declared: string[] = []
+  let fenced = false
+  for (const line of planText.split('\n').map((l) => l.replace(/\r$/, ''))) {
+    if (FENCE.test(line)) { fenced = !fenced; continue }
+    if (fenced) continue
+    const match = FILES_LINE.exec(line)
+    if (!match) continue
+    for (const entry of (match[1] ?? '').split(',')) {
+      const path = entry.trim().replace(/^`|`$/g, '').replace(/^\.\//, '')
+      if (path.length > 0) declared.push(path)
+    }
+  }
+  return declared
+}
+
+/**
+ * The declared entries `held` does not already cover. Widen-only: a plan that
+ * names fewer files than intake did must not release a lock the orchestrator
+ * asked for.
+ */
+export function widenFiles(held: string[], declared: string[]): string[] {
+  const added: string[] = []
+  for (const path of declared) {
+    if ([...held, ...added].some((prefix) => path.startsWith(prefix))) continue
+    added.push(path)
+  }
+  return added
+}
+
 export function isInFlight(task: Task): boolean {
   const rule = taskRow(task.phase).holdsFiles
   if (rule === 'inherit') {
