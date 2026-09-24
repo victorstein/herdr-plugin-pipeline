@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.2...v1.5.0) (2026-09-24)
+
+
+### Features
+
+* file and register an issue-less task in one hpipe task call ([#75](https://github.com/victorstein/herdr-plugin-pipeline/issues/75)) ([553b6b4](https://github.com/victorstein/herdr-plugin-pipeline/commit/553b6b43fe19f344a0502771b0b4a20b401a801a))
+
 ## [1.4.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.1...v1.4.2) (2026-09-24)
 
 
