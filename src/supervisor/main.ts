@@ -349,7 +349,10 @@ async function main(): Promise<void> {
         stallCandidates(savedRuns, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
       )
       await applyStalls(
-        taskStallCandidates(savedRuns, Date.now(), config.TASK_STALL_MINUTES, probeMax), stallDeps,
+        taskStallCandidates(
+          savedRuns, Date.now(), config.TASK_STALL_MINUTES, probeMax, config.STALL_MINUTES,
+        ),
+        stallDeps,
       )
     } catch (error) {
       console.error('[pipeline] tick error:', error)

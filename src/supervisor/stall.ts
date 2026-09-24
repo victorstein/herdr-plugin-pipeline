@@ -3,6 +3,7 @@ import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
+import { overdueUnstartedWorker, startWorkerCommand, unstartedWorker } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
@@ -99,8 +100,14 @@ export function stallCandidates(
   return out
 }
 
+/**
+ * `unstartedThresholdMinutes` is the orchestrator's own cadence: a worktree with
+ * no agent in it is the orchestrator's fault and its probe goes there, so waiting
+ * out a worker's threshold would only leave the pane empty for longer.
+ */
 export function taskStallCandidates(
   runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
+  unstartedThresholdMinutes: number = thresholdMinutes,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
@@ -110,7 +117,10 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-      const c = candidateFor(run, task, row, task, now, thresholdMinutes, probeMax)
+      const minutes = overdueUnstartedWorker(run, task, now) === null
+        ? thresholdMinutes
+        : Math.min(thresholdMinutes, unstartedThresholdMinutes)
+      const c = candidateFor(run, task, row, task, now, minutes, probeMax)
       if (c) out.push(c)
     }
   }
@@ -227,6 +237,18 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
       clause: 'This phase is escalated and waits on the human, not on you. If they have not been ' +
         'told, tell them now; once they have decided, ' +
         `\`${resumeCommand(hpipe, run, task)}\` resumes it.`,
+    }
+  }
+
+  // Ahead of the artifact branch, whose "nothing has appeared" would have the
+  // orchestrator wait on a worker that does not exist.
+  const unstarted = task === null ? null : unstartedWorker(run, task)
+  if (task !== null && unstarted !== null) {
+    return {
+      short: 'an agent in its worktree, where none was ever started',
+      clause: `No agent has been seen in this task's worktree (workspace ${unstarted.workspaceId}) ` +
+        'since it was created, so nothing is working on it and it waits on you, not on a worker. ' +
+        `Start one: ${startWorkerCommand(task, unstarted.workspaceId, hpipe)}.`,
     }
   }
 

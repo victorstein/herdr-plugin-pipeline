@@ -365,3 +365,27 @@ test('a paneless worker does not report a missing artifact the supervisor never 
   })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('with nothing at')
 })
+
+test('status lists a worktree no agent was ever started in as waiting on you — #12', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    task_id: 't1', phase: 'research', workspace_id: 'w23', pane_id: null,
+    phase_entered_at: now - 12 * 60_000, adopted_at: now - 12 * 60_000,
+  })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('waiting on you:')
+  expect(text).toContain('t1 feat/x (#1) [research 12m] — YOUR move: no agent was ever started in its worktree')
+  expect(text).toContain('herdr pane list --workspace w23')
+  expect(text).toContain(`\`${HP} dispatch --task t1 --pane <pane>\``)
+})
+
+test('status does not flag a worktree whose agent may still be booting — #12', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({ phase: 'research', pane_id: null, adopted_at: now })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now))
+    .not.toContain('no agent')
+})

@@ -182,6 +182,17 @@ binding comes from two separate events — `worktree.created` (matched on `branc
 but the pane did not, the agent was started somewhere the plugin did not see. `hpipe forget
 <workspace_id>` unbinds so you can retry.
 
+**The unstarted-worker check (#12).** For one extra task, run `worktree create` and stop — no
+`agent start`. `herdr agent get <root_pane_id>` answers `agent_not_found`, and `pane list` shows the
+pane with no `agent` field. For the first five minutes nothing flags it (the bootstrap grace). After
+that, `hpipe status` lists the task under `waiting on you:` and the next digest's `also waiting on
+you:` footer lists it too, both as `YOUR move: no agent was ever started in its worktree` with the
+`agent start` + `dispatch --task` to run, and `STALL_MINUTES` (15)
+after phase entry the **orchestrator** is probed with that same sentence rather than "nothing has
+appeared at <path>". Then start the agent and dispatch: all three go quiet within a tick of
+`pane.agent_detected`. If the task is still flagged once its agent is working, the pane never bound,
+which is the failure above, not this one.
+
 ---
 
 ## 2. Two workers at `spec` simultaneously — the fan-out check

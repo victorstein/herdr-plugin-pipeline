@@ -4,6 +4,7 @@ import { counterFor } from './machine'
 import { runIsDriven } from './ledger'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
+import { overdueUnstartedWorker, startWorkerCommand } from './unstarted'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -85,7 +86,7 @@ export function resumeCommand(
   return `${hpipe} rewind ${run.run_id} ${from ?? '<phase>'}${task ? ` --task ${task.task_id}` : ''}`
 }
 
-function moveFor(run: Run, task: Task, hpipe: string): Move {
+function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
   const notYours = (clause: string): Move => ({ waitsOnYou: false, clause })
@@ -95,6 +96,11 @@ function moveFor(run: Run, task: Task, hpipe: string): Move {
   if (task.phase === 'escalated') return yours(`needs a human: \`${resumeCommand(hpipe, run, task)}\``)
   if (row.actor === 'orchestrator') return yours('YOUR move')
   if (row.actor === 'worker') {
+    const unstarted = overdueUnstartedWorker(run, task, now)
+    if (unstarted) {
+      return yours('YOUR move: no agent was ever started in its worktree — ' +
+        startWorkerCommand(task, unstarted.workspaceId, hpipe))
+    }
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
     const missing = currentMissingArtifact(run, task)
@@ -121,8 +127,8 @@ function moveFor(run: Run, task: Task, hpipe: string): Move {
  * The digest footer's predicate. It passes no CLI because only the clause needs
  * one, and the footer renders its clause through `actionFor` separately.
  */
-export function waitsOnYou(run: Run, task: Task): boolean {
-  return moveFor(run, task, '').waitsOnYou
+export function waitsOnYou(run: Run, task: Task, now: number = Date.now()): boolean {
+  return moveFor(run, task, '', now).waitsOnYou
 }
 
 /**
@@ -131,8 +137,10 @@ export function waitsOnYou(run: Run, task: Task): boolean {
  * digest, its parked-task footer and `hpipe status`, so the three cannot hand an
  * operator different recovery commands for the same task.
  */
-export function actionFor(run: Run, task: Task, hpipe: string): string {
-  return moveFor(run, task, hpipe).clause
+export function actionFor(
+  run: Run, task: Task, hpipe: string, now: number = Date.now(),
+): string {
+  return moveFor(run, task, hpipe, now).clause
 }
 
 /**
@@ -143,7 +151,7 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
 function waitingOnYou(run: Run, hpipe: string, now: number): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const lines = byId.flatMap((task) => {
-    const move = moveFor(run, task, hpipe)
+    const move = moveFor(run, task, hpipe, now)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
     return [`    ${task.task_id} ${task.branch} (#${task.issue}) [${task.phase} ${age}m] — ${move.clause}`]

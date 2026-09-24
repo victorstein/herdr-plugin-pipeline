@@ -637,3 +637,26 @@ test('the footer agrees with hpipe status on the rows no actor column can see', 
     '(src/b.ts) — have it commit and push',
   )
 })
+
+test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12', () => {
+  const now = 10_000_000
+  const run = mkRun([])
+  const unstarted = mkTask({ phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: 0 })
+  run.tasks = [unstarted]
+  const clause = actionFor(run, unstarted, 'hp', now)
+  expect(clause).toStartWith('YOUR move: no agent was ever started in its worktree')
+  expect(clause).toContain('`hp dispatch --task t1 --pane <pane>`')
+
+  const booting = mkTask({ phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: now })
+  expect(actionFor(run, booting, 'hp', now)).toBe("worker's move")
+})
+
+test('the footer lists an unstarted worker a quiet digest would otherwise hide — #12', () => {
+  const now = 10_000_000
+  const run = mkRun([mkTask({
+    phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: 0, phase_entered_at: 0,
+  })])
+  const footer = parkedFooter(run, new Set(), now, 'hp')
+  expect(footer).toContain('also waiting on you:')
+  expect(footer).toContain('t1 feat/x (#1) [research 166m] — YOUR move: no agent was ever started')
+})

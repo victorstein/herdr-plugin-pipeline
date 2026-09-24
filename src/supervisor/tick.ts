@@ -53,7 +53,7 @@ export function describeWake(line: WakeLine, now: number, hpipe: string): string
 
   const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
   const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
-    `${line.event} — ${actionFor(run, task, hpipe)}`
+    `${line.event} — ${actionFor(run, task, hpipe, now)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
@@ -74,14 +74,14 @@ export function parkedFooter(
     .filter((task) => !covered.has(task.task_id))
     // Dead ends are left to `hpipe status`: they never move again, so the footer
     // would repeat them on every digest for the rest of the run.
-    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task))
+    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
   if (parked.length === 0) return ''
 
   const lines = parked.map((task) =>
     `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
-    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe)}`)
+    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now)}`)
   return ['also waiting on you:', ...lines].join('\n')
 }
 
