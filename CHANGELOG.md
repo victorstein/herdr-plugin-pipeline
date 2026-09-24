@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.2...v1.5.3) (2026-09-24)
+
+
+### Bug Fixes
+
+* hold a run in execute while any task is escalated ([#62](https://github.com/victorstein/herdr-plugin-pipeline/issues/62)) ([c6444bd](https://github.com/victorstein/herdr-plugin-pipeline/commit/c6444bdbaae7f1d2be202dd1c97653acdeb5d2d9))
+
 ## [1.5.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.1...v1.5.2) (2026-09-24)
 
 
