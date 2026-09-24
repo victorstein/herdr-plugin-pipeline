@@ -10,6 +10,7 @@ import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
+import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
 let dir: string
@@ -644,7 +645,7 @@ test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12'
   const unstarted = mkTask({ phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: 0 })
   run.tasks = [unstarted]
   const clause = actionFor(run, unstarted, 'hp', now)
-  expect(clause).toStartWith('YOUR move: no agent was ever started in its worktree')
+  expect(clause).toStartWith('YOUR move: no agent detected in its worktree')
   expect(clause).toContain('`hp dispatch --task t1 --pane <pane>`')
 
   const booting = mkTask({ phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: now })
@@ -658,5 +659,42 @@ test('the footer lists an unstarted worker a quiet digest would otherwise hide �
   })])
   const footer = parkedFooter(run, new Set(), now, 'hp')
   expect(footer).toContain('also waiting on you:')
-  expect(footer).toContain('t1 feat/x (#1) [research 166m] — YOUR move: no agent was ever started')
+  expect(footer).toContain('t1 feat/x (#1) [research 166m] — YOUR move: no agent detected in its worktree')
+})
+
+test('binding a worker pane re-arms the stall ladder, and a repeat bind does not — #12', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: null, phase_entered_at: 5 })])
+  const task = run.tasks[0]!
+  task.stall = { at: 5, run_at: run.phase_entered_at, last_probe_at: 6, probes: 3, undelivered: 1, holds: 0 }
+  const detected: QueuedEvent = {
+    kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p2', workspace_id: 'w7',
+  }
+
+  applyEvents([run], [detected], 'personal', new Set())
+  expect(task.pane_id).toBe('w7:p2')
+  expect(task.stall?.probes).toBe(0)
+  expect(task.stall?.undelivered).toBe(0)
+  const rearmedAt = task.stall?.last_probe_at
+
+  task.stall!.probes = 1
+  applyEvents([run], [detected], 'personal', new Set())
+  expect(task.stall?.probes).toBe(1)
+  expect(task.stall?.last_probe_at).toBe(rearmedAt!)
+})
+
+test('a dead pane is unbound, so a rewind out of failed reads as unstarted, not bound — #12', () => {
+  for (const event of [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+    { kind: 'pane.agent_detected', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', released: true },
+  ] as QueuedEvent[]) {
+    const run = mkRun([mkTask({ phase: 'implement', adopted_at: 0 })])
+    const task = run.tasks[0]!
+    applyEvents([run], [event], 'personal', new Set())
+    expect(task.phase).toBe('failed')
+    expect(task.pane_id).toBeNull()
+    expect(task.workspace_id).toBe('w7')
+
+    task.phase = 'implement'
+    expect(overdueUnstartedWorker(run, task, UNSTARTED_GRACE_MS)).not.toBeNull()
+  }
 })

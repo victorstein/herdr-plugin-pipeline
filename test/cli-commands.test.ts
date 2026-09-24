@@ -1026,7 +1026,48 @@ test('dispatch --task hands the bare brief to the pane, not the header lines', a
   expect(result.text).toContain('w1-2')
   expect(sent).toEqual([{ paneId: 'w1-2', text: brief.text }])
   expect(sent[0]!.text).not.toContain('task_id:')
-  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+  const after = (await listRuns(dir, 'personal'))[0]!
+  expect(after.tasks[0]!.pane_id).toBe('w1-2')
+  after.tasks[0]!.pane_id = null
+  delete after.tasks[0]!.stall
+  const { revision: _after, ...afterRest } = after
+  const { revision: _before, ...beforeRest } = JSON.parse(before) as Run
+  expect(afterRest).toEqual(beforeRest)
+})
+
+test('dispatch --task records the pane over a supervisor write made during the handoff — #12', async () => {
+  // A lost `pane.agent_detected` must not leave a briefed worker looking agentless.
+  await registerReadyTask()
+  const send = async () => {
+    await supervisorWrites((run) => { run.tasks[0]!.notes = 'written mid-send' })
+    return { ok: true }
+  }
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(true)
+  const task = (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+  expect(task.pane_id).toBe('w1-2')
+  expect(task.notes).toBe('written mid-send')
+})
+
+test('dispatch --task records nothing when the handoff was not confirmed — #12', async () => {
+  await registerReadyTask()
+  const { send } = recordingSend({ ok: false, code: 'agent_not_found', message: 'not found' })
+  await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+})
+
+test('dispatch --task does not record the orchestrator\'s own pane as the worker — #12', async () => {
+  await registerReadyTask()
+  await supervisorWrites((run) => { run.orchestrator_pane = 'w1-1' })
+  const { send } = recordingSend()
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-1', repoKey: 'k', runId: null,
+  }, send)
+  expect(result.text).toContain('orchestrator pane')
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
 })
 
 test('dispatch --task reports a failed handoff instead of claiming it landed', async () => {

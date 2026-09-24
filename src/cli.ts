@@ -20,6 +20,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { bindWorkerPane } from './lib/unstarted'
 import { reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
@@ -498,8 +499,32 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
         'submitted and may already be in the pane, and a retry would send it twice'
       : `${reason}\n  → nothing was sent; fix the cause and run it again`)
   }
-  return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`)
+  const recorded = await recordWorkerPane(ctx, {
+    runId: run.run_id, taskId: task.task_id, paneId: input.paneId,
+  })
+  return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up` +
+    (recorded.ok ? '' : `\n  ⚠ ${recorded.text}`))
 }
+
+/**
+ * Written only after herdr confirmed the handoff, and re-read rather than reusing
+ * the copy the send began with: the supervisor saves the run many times during
+ * a confirmation wait. Recording the pane here, as well as on
+ * `pane.agent_detected`, is what keeps a lost hook event from leaving a briefed
+ * worker looking as though no agent was ever started for it.
+ */
+const recordWorkerPane = retryingOnStale(async (ctx: Ctx, input: {
+  runId: string; taskId: string; paneId: string
+}): Promise<CmdResult> => {
+  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  const task = run?.tasks.find((t) => t.task_id === input.taskId)
+  if (!run || !task) return fail(`${input.taskId} is gone from the ledger; its pane was not recorded`)
+  if (input.paneId === run.orchestrator_pane) {
+    return fail(`${input.paneId} is this run's orchestrator pane, so it was not recorded as ${task.task_id}'s worker`)
+  }
+  if (bindWorkerPane(run, task, input.paneId, Date.now())) await saveRun(ctx.stateDir, run)
+  return ok('')
+})
 
 async function closeIntake(ctx: Ctx, input: {
   runId: string | null; repoKey: string | null

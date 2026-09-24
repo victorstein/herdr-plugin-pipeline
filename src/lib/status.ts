@@ -98,7 +98,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
   if (row.actor === 'worker') {
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
-      return yours('YOUR move: no agent was ever started in its worktree — ' +
+      return yours('YOUR move: no agent detected in its worktree — ' +
         startWorkerCommand(task, unstarted.workspaceId, hpipe))
     }
     // An idle worker that has stopped short otherwise reads exactly like a busy

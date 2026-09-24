@@ -3,7 +3,7 @@ import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
-import { overdueUnstartedWorker, startWorkerCommand, unstartedWorker } from '../lib/unstarted'
+import { overdueUnstartedWorker, startWorkerCommand } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
@@ -213,7 +213,9 @@ export interface Awaiting {
  * `render` never re-scans replacement text (`src/lib/render.ts:8-14`), so a
  * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
  */
-export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Awaiting {
+export function stallAwaiting(
+  run: Run, task: Task | null, hpipe: string, now: number = Date.now(),
+): Awaiting {
   const row = task ? taskRow(task.phase) : runRow(run.phase)
   const phase = task ? task.phase : run.phase
   const sentence = (short: string): Awaiting =>
@@ -242,13 +244,13 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
 
   // Ahead of the artifact branch, whose "nothing has appeared" would have the
   // orchestrator wait on a worker that does not exist.
-  const unstarted = task === null ? null : unstartedWorker(run, task)
+  const unstarted = task === null ? null : overdueUnstartedWorker(run, task, now)
   if (task !== null && unstarted !== null) {
     return {
-      short: 'an agent in its worktree, where none was ever started',
-      clause: `No agent has been seen in this task's worktree (workspace ${unstarted.workspaceId}) ` +
-        'since it was created, so nothing is working on it and it waits on you, not on a worker. ' +
-        `Start one: ${startWorkerCommand(task, unstarted.workspaceId, hpipe)}.`,
+      short: 'an agent detected in its worktree',
+      clause: `No agent has been detected in this task's worktree (workspace ` +
+        `${unstarted.workspaceId}) since it was created, so this phase cannot advance and it waits ` +
+        `on you, not on a worker: ${startWorkerCommand(task, unstarted.workspaceId, hpipe)}.`,
     }
   }
 

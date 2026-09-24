@@ -3,6 +3,7 @@ import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
+import { bindWorkerPane } from '../lib/unstarted'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 export interface WakeLine {
@@ -90,6 +91,15 @@ export interface ApplyResult {
   wake: WakeLine[]
 }
 
+/**
+ * A pane with no agent left in it is not the worker's pane. Kept, it would make a
+ * task rewound out of `failed` look bound, so the unstarted-worker check skipped
+ * it and every probe went to a pane that cannot answer.
+ */
+function releaseWorkerPane(task: Task): void {
+  task.pane_id = null
+}
+
 function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; task: Task } | null {
   for (const run of runs) {
     const task = run.tasks.find(predicate)
@@ -138,11 +148,12 @@ export function applyEvents(
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)
         enterTaskPhase(run, task, 'failed', 'agent released')
+        releaseWorkerPane(task)
         wake.push({
           run, task, phaseAtEvent, event: 'agent released',
         })
       } else if (event.pane_id) {
-        task.pane_id = event.pane_id
+        bindWorkerPane(run, task, event.pane_id, Date.now())
       }
       changed = true
       continue
@@ -151,6 +162,7 @@ export function applyEvents(
     if (event.kind === 'pane.exited') {
       if (task.phase === 'blocked-on-decision') abandonDecisions(task)
       enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
+      releaseWorkerPane(task)
       wake.push({
         run, task, phaseAtEvent,
         event: `pane exited${task.pr ? '' : ', no PR'}`,
