@@ -4,8 +4,7 @@ import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
-import { Herdr } from './lib/herdr'
-import type { CallResult } from './lib/herdr'
+import { Herdr, type CallResult } from './lib/herdr'
 import {
   activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, runPhaseState, saveRun,
   taskPhaseIsTerminal, writeOrchestrator,
@@ -338,6 +337,14 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   if (taskPhaseIsTerminal(task.phase)) {
     return fail(`task ${task.task_id} is finished (phase: ${task.phase}) — there is no worker to brief`)
   }
+  // Past the gate's first phase a worker already holds the brief. Re-sending it
+  // would restart that worker's instructions mid-phase, and `--until working`
+  // matches at once on a busy agent, so the confirmation would prove nothing.
+  const briefedPhase = taskRow('queued').onClear as TaskPhase
+  if (task.phase !== briefedPhase) {
+    return fail(`task ${task.task_id} is already in ${task.phase}, past ${briefedPhase} — ` +
+      `its worker has the brief; \`hpipe brief --task ${task.task_id}\` prints it to reread`)
+  }
 
   const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sent = await send(input.paneId, brief)
@@ -656,7 +663,15 @@ const fullUsage = (): string =>
   `usage: hpipe <${Object.keys(USAGE).join('|')}> …\n\n` +
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
-const wantsHelp = (args: string[]): boolean => args.includes('--help') || args.includes('-h')
+const HELP_FLAGS = new Set(['--help', '-h'])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
+
+/** A help flag in a flag's value slot is that flag's value: `decide --question -h`. */
+const wantsHelp = (args: string[]): boolean => args.some((arg, i) => {
+  if (!HELP_FLAGS.has(arg)) return false
+  const previous = args[i - 1]
+  return previous === undefined || !previous.startsWith('--') || VALUELESS_FLAGS.has(previous)
+})
 
 const DISPATCH_CONFIRM_TIMEOUT_MS = 30_000
 
@@ -667,12 +682,12 @@ async function dispatch(argv: string[]): Promise<number> {
   const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
   const [command, ...rest] = argv
 
-  if (command === undefined || command === 'help' || wantsHelp([command])) {
+  if (command === 'help' || (command !== undefined && HELP_FLAGS.has(command))) {
     console.log(fullUsage())
-    return command === undefined ? 1 : 0
+    return 0
   }
-  const usage = USAGE[command]
-  if (usage === undefined) {
+  const usage = command !== undefined && Object.hasOwn(USAGE, command) ? USAGE[command] : undefined
+  if (command === undefined || usage === undefined) {
     console.error(fullUsage())
     return 1
   }
@@ -681,6 +696,10 @@ async function dispatch(argv: string[]): Promise<number> {
   if (wantsHelp(rest)) {
     console.log(commandUsage(usage))
     return 0
+  }
+  if (command === 'dispatch' && rest.includes('--done') === (flag(rest, 'task') !== null)) {
+    console.error(commandUsage(usage))
+    return 1
   }
 
   // Every command that resolves a run needs the caller's repo to filter by, so
@@ -749,12 +768,8 @@ async function dispatch(argv: string[]): Promise<number> {
         })
         break
       }
-      if (flag(rest, 'task') === null) {
-        console.error(commandUsage(usage))
-        return 1
-      }
       out = await cmdDispatchTask(ctx, {
-        taskId: flag(rest, 'task') ?? '',
+        taskId: flag(rest, 'task')!,
         paneId: flag(rest, 'pane') ?? '',
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),

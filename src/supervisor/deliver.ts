@@ -87,7 +87,12 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
 export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
 
-const RETRYABLE = new Set(['agent_blocked', 'pane_not_found', 'not_found', 'unparseable'])
+// `agent_not_found` is herdr 0.9.0's answer to `agent prompt` at a target with no
+// detected agent, a missing pane included. Until Herdr.call read stderr it
+// arrived as `unparseable` and was retried, so it stays retryable.
+const RETRYABLE = new Set([
+  'agent_blocked', 'agent_not_found', 'pane_not_found', 'not_found', 'unparseable',
+])
 
 export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
   if (attempts >= max) return false

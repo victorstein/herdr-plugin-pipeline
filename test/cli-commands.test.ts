@@ -898,6 +898,23 @@ test('dispatch --task refuses a task whose gate has not opened', async () => {
   expect(sent).toEqual([])
 })
 
+test('dispatch --task refuses a task whose worker is already past its first phase', async () => {
+  await registerReadyTask()
+  const [run] = await listRuns(dir, 'personal')
+  run!.tasks[0]!.phase = 'implement'
+  await saveRun(dir, run!)
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('already in implement')
+  expect(result.text).toContain('brief --task t1')
+  expect(sent).toEqual([])
+})
+
 test('dispatch --task needs a pane', async () => {
   await registerReadyTask()
   const { sent, send } = recordingSend()

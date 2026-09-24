@@ -4,7 +4,8 @@ import { join } from 'node:path'
 /**
  * Writes an executable that echoes a canned JSON response per argv prefix and
  * appends every invocation to `calls.log`. Responses are matched on the longest
- * prefix, so 'pane list' wins over 'pane'.
+ * prefix, so 'pane list' wins over 'pane'. An `error` envelope goes to stderr
+ * with exit 1 and nothing on stdout, which is what herdr 0.9.0 does.
  */
 export async function makeFakeBin(
   dir: string,
@@ -28,11 +29,13 @@ const key = Object.keys(table)
   .filter((k) => joined === k || joined.startsWith(k + ' '))
   .sort((a, b) => b.length - a.length)[0]
 if (key === undefined) {
-  process.stdout.write(JSON.stringify({ error: { code: 'unstubbed', message: joined } }))
+  process.stderr.write(JSON.stringify({ error: { code: 'unstubbed', message: joined } }))
   process.exit(1)
 }
-process.stdout.write(JSON.stringify(table[key]))
-process.exit(codes[key] ?? 0)
+const response = table[key]
+const isError = typeof response === 'object' && response !== null && 'error' in response
+;(isError ? process.stderr : process.stdout).write(JSON.stringify(response))
+process.exit(codes[key] ?? (isError ? 1 : 0))
 `)
   chmodSync(path, 0o755)
   return path

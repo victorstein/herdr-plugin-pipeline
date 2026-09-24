@@ -121,6 +121,10 @@ test('an unknown pane is retryable — it may be restoring', () => {
   expect(shouldRetry('pane_not_found', 1, 5)).toBe(true)
 })
 
+test('an agent herdr has not detected yet is retryable, as it was while it read as unparseable', () => {
+  expect(shouldRetry('agent_not_found', 1, 5)).toBe(true)
+})
+
 test('a blocked worker line inlines its pane tail', () => {
   const run = mkRun()
   run.tasks.push(mkTask({ agent_status: 'blocked' }))
