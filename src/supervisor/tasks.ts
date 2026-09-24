@@ -9,7 +9,7 @@ import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
-import { resumeCommand } from '../lib/status'
+import { abandonParagraph, resumeCommand } from '../lib/status'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
@@ -128,6 +128,7 @@ export async function promptForTaskPhase(
         phase: from,
         pass: String(counterFor(task, from)),
         resume_command: resumeCommand(hpipeCommand(deps.pluginRoot), run, task),
+        abandon: abandonParagraph(hpipeCommand(deps.pluginRoot), run, task),
       })
     }
     default:

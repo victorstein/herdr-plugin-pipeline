@@ -5,16 +5,15 @@ import { TASK_ROWS } from '../lib/phases'
 import type { Run, Task, TaskPhase } from '../lib/types'
 
 /**
- * "Has this task stopped moving", which is NOT the same question as `terminal`.
- * `escalated` is settled — nothing will move it on its own — but it is not
- * terminal, because it has a `returnsTo` and a human can rewind it. Derive this
- * from `terminal` alone and a run holding one escalated task never leaves
- * `execute`.
+ * "Will this task never move again", which is NOT "has it stopped moving".
+ * `escalated` has stopped, but it is waiting on a human who resumes it with one
+ * rewind, and its unmerged work is still on its branch. Counting it here once
+ * let a run leave `execute` for the final review with a task abandoned
+ * mid-`implement`, and announce the batch merged. Measured on a live run.
  */
-export const SETTLED: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  ...TASK_ROWS.filter((r) => r.terminal).map((r) => r.phase),
-  'escalated',
-])
+export const FINISHED: ReadonlySet<TaskPhase> = new Set<TaskPhase>(
+  TASK_ROWS.filter((r) => r.terminal).map((r) => r.phase),
+)
 
 /** `gone`: herdr no longer knows the workspace, so there is nothing left for it to remove. */
 export type WorktreeRemoval = 'removed' | 'gone' | 'failed'

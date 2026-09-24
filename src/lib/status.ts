@@ -86,6 +86,25 @@ export function resumeCommand(
   return `${hpipe} rewind ${run.run_id} ${from ?? '<phase>'}${task ? ` --task ${task.task_id}` : ''}`
 }
 
+/**
+ * The other way out of a task escalation. An escalated task holds its run in
+ * `execute` until a human either resumes or abandons it, so every text that names
+ * the resume names this too — or the agent told to fetch the human has no way to
+ * offer the second choice. A run has no equivalent: `failed` is a task phase.
+ */
+export function abandonCommand(hpipe: string, run: Run, task: Task): string {
+  return `${hpipe} rewind ${run.run_id} failed --task ${task.task_id}`
+}
+
+/** The rendered `{{abandon}}` of escalate.md and stall-escalate.md; empty for a run. */
+export function abandonParagraph(hpipe: string, run: Run, task: Task | null): string {
+  if (task === null) return ''
+  return '\n\nIf they decide to drop the task instead:\n\n' +
+    `    ${abandonCommand(hpipe, run, task)}\n\n` +
+    'The run waits in `execute` until one of the two is run, and the dependents of this task ' +
+    'stay queued; abandoning it moves them to `blocked-on-failure`.'
+}
+
 function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
@@ -93,7 +112,13 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
 
   if (task.phase === 'done') return notYours('nothing for you — this task is finished')
   if (row.terminal === true) return yours('dead end, needs a human')
-  if (task.phase === 'escalated') return yours(`needs a human: \`${resumeCommand(hpipe, run, task)}\``)
+  if (task.phase === 'escalated') {
+    return yours(
+      `needs a human: \`${resumeCommand(hpipe, run, task)}\` resumes it, ` +
+      `\`${abandonCommand(hpipe, run, task)}\` abandons it` +
+      (run.phase === 'execute' ? ' — the run holds in execute until one is run' : ''),
+    )
+  }
   if (row.actor === 'orchestrator') return yours('YOUR move')
   if (row.actor === 'worker') {
     const unstarted = overdueUnstartedWorker(run, task, now)
@@ -203,9 +228,12 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
 function intakeWarning(run: Run, hpipe: string): string[] {
   if (run.phase !== 'execute' || run.intake_closed || run.tasks.length === 0) return []
   if (!run.tasks.every(hasStoppedMoving)) return []
+  const escalated = run.tasks.filter((t) => t.phase === 'escalated').map((t) => t.task_id)
   return [
     '  ⚠ every task is settled but intake was never closed — ' +
-    `run \`${hpipe} dispatch --done\` to let this run advance`,
+    (escalated.length === 0
+      ? `run \`${hpipe} dispatch --done\` to let this run advance`
+      : `run \`${hpipe} dispatch --done\`; the run then still waits on ${escalated.join(', ')} (escalated)`),
   ]
 }
 

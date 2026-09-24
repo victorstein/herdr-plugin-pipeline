@@ -167,6 +167,21 @@ test('a queued task whose dependency failed becomes blocked-on-failure', async (
   expect(run.tasks[1]?.phase).toBe('blocked-on-failure')
 })
 
+test('a queued task whose dependency is escalated stays queued until it finishes', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
+    mkTask({ task_id: 't2', depends_on: ['t1'] }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('queued')
+
+  const t1 = run.tasks[0] as Task
+  t1.phase = 'done'
+  t1.escalated_from = null
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('research')
+})
+
 test('an idle worker with a fresh PR advances to pr-review-intent', async () => {
   const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   await advanceTasks(run, deps({
@@ -258,6 +273,7 @@ test('an escalated task yields the escalation prompt naming its task flag', asyn
   }))
   expect(run.tasks[0]?.phase).toBe('escalated')
   expect(prompts.map((p) => p.text).join('\n')).toContain('--task t1')
+  expect(prompts.map((p) => p.text).join('\n')).toMatch(/rewind \S+ failed --task t1/)
 })
 
 test('a worker-owned phase addresses its prompt to the worker pane, not the orchestrator', async () => {

@@ -12,8 +12,8 @@ import {
 } from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
-import type { Run, Task } from '../lib/types'
-import { SETTLED } from './teardown'
+import type { Run, Task, TaskPhase } from '../lib/types'
+import { FINISHED } from './teardown'
 
 export interface DigestInput {
   run: Run
@@ -256,7 +256,7 @@ export function taskSignalsFor(run: Run) {
       ? Math.max(...run.tasks.map((t) => t.registered_at))
       : null,
     newestAdoptedAt: adopted.length > 0 ? Math.max(...adopted) : null,
-    tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => SETTLED.has(t.phase)),
+    tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => FINISHED.has(t.phase)),
     anyTaskDone: run.tasks.some((t) => t.phase === 'done'),
   }
 }
@@ -309,6 +309,48 @@ export async function evaluateRun(
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
 }
 
+const UNLANDED_MEANING: Partial<Record<TaskPhase, string>> = {
+  'failed': 'its work never merged',
+  'orphaned': 'it merged, but its worktree was not removed; its code is on the base branch',
+  'escalated': 'it is waiting on a human and its work has not merged',
+}
+
+/**
+ * Gating before #46 cascaded the dependents of an escalated task too, and that
+ * phase is terminal, so a run on disk can hold one whose dependency was later
+ * resumed and landed. Name the dependency's real outcome rather than "failed".
+ */
+function neverStarted(run: Run, task: Task): string {
+  const unlanded = task.depends_on.filter((id) => {
+    const dep = run.tasks.find((t) => t.task_id === id)
+    return dep === undefined || dep.phase !== 'done'
+  })
+  return unlanded.length > 0
+    ? `it never started, because ${unlanded.join(', ')} did not land`
+    : 'it never started: it was blocked on a dependency that has since landed, and was never re-queued'
+}
+
+/**
+ * The final review's opening claim about the batch. A fixed "every task is
+ * merged" sent a reviewer after a task whose branch held no source change at
+ * all. Measured on a live run.
+ */
+export function taskOutcomesFor(run: Run): string {
+  const unlanded = run.tasks.filter((t) => t.phase !== 'done')
+  if (unlanded.length === 0) return `Every task in **${run.title}** is merged and torn down.`
+  const lines = unlanded.map((t) =>
+    `- \`${t.task_id}\` (#${t.issue}, \`${t.branch}\`) stopped at \`${t.phase}\`` +
+    ` — ${t.phase === 'blocked-on-failure' ? neverStarted(run, t) : UNLANDED_MEANING[t.phase] ?? 'it did not finish'}`)
+  return [
+    `Not every task in **${run.title}** landed. Every task is merged and torn down except:`,
+    '',
+    ...lines,
+    '',
+    'Review what is on the base branch. Do not report the absence of work that never merged ' +
+    'as a finding against the tasks that did — the human already knows these stopped.',
+  ].join('\n')
+}
+
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
@@ -324,13 +366,16 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
   switch (run.phase) {
     case 'intake': return renderPrompt(pluginRoot, 'intake', common)
     case 'dispatch': return renderPrompt(pluginRoot, 'dispatch', common)
-    case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', common)
+    case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', {
+      ...common, task_outcomes: taskOutcomesFor(run),
+    })
     case 'escalated': {
       const from = run.escalated_from ?? run.phase
       return renderPrompt(pluginRoot, 'escalate', {
         run_id: run.run_id, phase: from,
         pass: String(counterFor(run, from)),
         resume_command: resumeCommand(hpipeCommand(pluginRoot), run),
+        abandon: '',
       })
     }
     default: return ''

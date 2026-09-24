@@ -16,4 +16,4 @@ When they have answered, resume with:
 
 which clears every pass counter on that record, not only `{{phase}}`'s, and — when `{{phase}}` is a
 review row — reserves a fresh verdict path and prints it. Write the next review there, not to the
-previous pass's file.
+previous pass's file.{{abandon}}

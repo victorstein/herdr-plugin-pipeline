@@ -9,7 +9,7 @@ import {
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
-import { resumeCommand } from '../lib/status'
+import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
@@ -325,6 +325,7 @@ async function main(): Promise<void> {
           awaiting_short: stallAwaiting(c.run, c.task, hpipe).short,
           // Rendered before the transition writes `escalated_from`, so `from` is passed.
           resume_command: resumeCommand(hpipe, c.run, c.task, from),
+          abandon: abandonParagraph(hpipe, c.run, c.task),
         }),
         sendEscalation: async (c, text) => {
           const pane = c.run.orchestrator_pane

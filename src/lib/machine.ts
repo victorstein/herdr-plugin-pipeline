@@ -68,8 +68,8 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
     case 'execute': {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
       return s.anyTaskDone
-        ? enterRunPhase(run, 'branch-review', 'all tasks settled')
-        : enterRunPhase(run, 'escalated', 'every task settled without one reaching done')
+        ? enterRunPhase(run, 'branch-review', 'every task finished')
+        : enterRunPhase(run, 'escalated', 'every task finished without one reaching done')
     }
 
     case 'branch-review': {

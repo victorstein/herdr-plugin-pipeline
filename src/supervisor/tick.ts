@@ -5,6 +5,7 @@ import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
+import { FINISHED } from './teardown'
 
 export interface WakeLine {
   run: Run
@@ -238,6 +239,19 @@ export async function saveEventedRuns(
 }
 
 /**
+ * A run held in `execute` by escalated tasks alone has nothing the supervisor can
+ * move: only a human's rewind, which the CLI writes, changes it. It stands in for
+ * the run-level `escalated` it used to reach, which released the pane, so it must
+ * release it too. The escalated tasks' stall probes are drawn from every run, not
+ * the picked ones, so the standing nudge survives.
+ */
+function waitsOnlyOnHumans(run: Run): boolean {
+  if (run.phase !== 'execute' || !run.intake_closed) return false
+  return run.tasks.some((t) => t.phase === 'escalated') &&
+    run.tasks.every((t) => t.phase === 'escalated' || FINISHED.has(t.phase))
+}
+
+/**
  * At most one orchestrator-owned advance per orchestrator per tick. Runs in a
  * pane-releasing phase are skipped: their `orchestrator_pane` is never cleared,
  * so without this such a run holds its pane forever and the next `hpipe start`
@@ -247,7 +261,7 @@ export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
-    if (!runIsDriven(run)) continue
+    if (!runIsDriven(run) || waitsOnlyOnHumans(run)) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)
