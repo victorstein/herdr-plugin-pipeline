@@ -7,11 +7,11 @@ import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  activeRunForRepo, isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun,
-  runForWorkspace, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
+  isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForWorkspace,
+  runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
   writeOrchestrator,
 } from './lib/ledger'
-import type { RunQuery, RunResolution } from './lib/ledger'
+import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
@@ -19,7 +19,7 @@ import { drain } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
-import { formatStatus, formatTaskDetail } from './lib/status'
+import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
@@ -63,10 +63,14 @@ const runLine = (run: Run): string => `  ${run.run_id} (${run.phase})`
 // The phase on each line is the reason it was excluded, so a run that is merely
 // past this command's phases is not described as finished — and an unreadable
 // one says so, because `(dnoe)` alone reads like an ordinary phase name.
-const excludedLine = (run: Run): string =>
-  runPhaseState(run) === 'unreadable'
-    ? `  ${run.run_id} (${run.phase}) — unrecognised phase, in no phase row`
-    : runLine(run)
+function excludedLine(run: Run, hpipe: string): string {
+  const state = runPhaseState(run)
+  if (state === 'unreadable') return `  ${run.run_id} (${run.phase}) — unrecognised phase, in no phase row`
+  if (state === 'live' && !runIsDriven(run)) {
+    return `${runLine(run)} — parked; \`${resumeCommand(hpipe, run)}\` resumes it`
+  }
+  return runLine(run)
+}
 
 /**
  * The sentence a failed resolution prints. #36's brief was wrong for hours
@@ -83,16 +87,20 @@ function resolveFailure(
     query.repoKey === null ? null : `for ${query.repoKey}`,
     `in session ${ctx.session}`,
   ].filter((s): s is string => s !== null).join(' ')
+  const hpipe = hpipeCommand(ctx.pluginRoot)
 
   switch (result.reason) {
     case 'no-such-run':
       return fail(`no such run: ${query.runId}`)
     case 'unreadable':
       return fail(`${result.run.run_id} is in ${result.run.phase}, which is in no phase row — ` +
-        `rewind it to a real phase: hpipe rewind ${result.run.run_id} <phase>`)
+        `rewind it to a real phase: ${hpipe} rewind ${result.run.run_id} <phase>`)
     case 'terminal':
       return fail(`run ${result.run.run_id} is finished (phase: ${result.run.phase}) — ` +
         'a finished run cannot be re-entered')
+    case 'parked':
+      return fail(`run ${result.run.run_id} is parked in ${result.run.phase}; the supervisor ` +
+        `drives nothing on it until a human rewinds it — \`${resumeCommand(hpipe, result.run)}\` resumes it`)
     case 'wrong-phase':
       return fail(`run ${result.run.run_id} is in ${result.run.phase}; ` +
         `this needs a ${phraseFor(query.phases)}`)
@@ -109,7 +117,7 @@ function resolveFailure(
         : escape === null ? '\n  a finished run cannot be re-entered'
         : `\n  → ${escape}`
       return fail(`found no ${scope}\n  excluded:\n` +
-        result.excluded.map(excludedLine).join('\n') + tail)
+        result.excluded.map((r) => excludedLine(r, hpipe)).join('\n') + tail)
     }
   }
 }
@@ -140,7 +148,7 @@ async function resolveFor(
  */
 async function resolveTask(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
-  allowTerminal: boolean; escape: string | null
+  reach: RunReach; escape: string | null
 }): Promise<Resolved<{ run: Run; task: Task }>> {
   if (input.taskId.trim().length === 0) {
     return { ok: false, result: fail('--task is required') }
@@ -148,7 +156,7 @@ async function resolveTask(ctx: Ctx, input: {
 
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
-    phases: null, taskId: input.taskId, allowTerminal: input.allowTerminal,
+    phases: null, taskId: input.taskId, reach: input.reach,
   }
   const found = await resolveFor(ctx, query, input.escape)
   if (!found.ok) return found
@@ -158,11 +166,28 @@ async function resolveTask(ctx: Ctx, input: {
   return { ok: true, value: { run: found.value, task } }
 }
 
+/**
+ * Any unfinished run blocks a start, and so does one in no phase row: the old
+ * first-match lookup threw on it, and silently starting beside it would leave
+ * two runs claiming one repo.
+ */
+async function existingRunForRepo(ctx: Ctx, repoKey: string): Promise<Run | null> {
+  const resolved = await resolveRun(ctx.stateDir, ctx.session, {
+    runId: null, repoKey, phases: null, taskId: null, reach: 'unfinished',
+  })
+  if (resolved.ok) return resolved.run
+  if (resolved.reason === 'ambiguous') return resolved.candidates[0] ?? null
+  if (resolved.reason === 'none') {
+    return resolved.excluded.find((r) => runPhaseState(r) === 'unreadable') ?? null
+  }
+  return null
+}
+
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
 }): Promise<CmdResult> {
-  const existing = await activeRunForRepo(ctx.stateDir, ctx.session, input.repoKey)
+  const existing = await existingRunForRepo(ctx, input.repoKey)
   if (existing) {
     return fail(`a run is already active for this repo: ${existing.run_id} (phase ${existing.phase}). ` +
       `Finish it, or run: hpipe abort ${existing.run_id}`)
@@ -210,7 +235,7 @@ async function registerTask(
 ): Promise<CmdResult> {
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
-    phases: REGISTRABLE, taskId: null, allowTerminal: false,
+    phases: REGISTRABLE, taskId: null, reach: 'unfinished',
   }
   const found = await resolveFor(ctx, query, null)
   if (!found.ok) return found.result
@@ -412,7 +437,7 @@ export async function cmdBrief(ctx: Ctx, input: {
 }): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: input.runId !== null, escape: '--run <run-id> renders it anyway',
+    reach: 'finished-if-named', escape: '--run <run-id> renders it anyway',
   })
   if (!found.ok) return found.result
 
@@ -425,7 +450,7 @@ export async function cmdShow(ctx: Ctx, input: {
 }): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: input.runId !== null, escape: '--run <run-id> shows it anyway',
+    reach: 'finished-if-named', escape: '--run <run-id> shows it anyway',
   })
   if (!found.ok) return found.result
   return ok(formatTaskDetail(found.value.run, found.value.task))
@@ -442,9 +467,13 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief): Promise<CmdResult> {
+  // Not `driven`, unlike decide: this command delivers the brief itself, and the
+  // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
+  // would strand the opposite way, since registration already moved the task past
+  // `queued` and nothing else ever re-sends a brief to its fresh pane.
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: false, escape: null,
+    reach: 'unfinished', escape: null,
   })
   if (!found.ok) return found.result
   const { run, task } = found.value
@@ -493,7 +522,7 @@ async function closeIntake(ctx: Ctx, input: {
 }): Promise<CmdResult> {
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
-    phases: REGISTRABLE, taskId: null, allowTerminal: false,
+    phases: REGISTRABLE, taskId: null, reach: 'unfinished',
   }
   const found = await resolveFor(ctx, query, null)
   if (!found.ok) return found.result
@@ -508,7 +537,7 @@ export const cmdDispatchDone = retryingOnStale(closeIntake)
 async function rewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
 }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
   // The phase is written onto the record unvalidated today, and every later row
@@ -597,7 +626,7 @@ async function release(ctx: Ctx, input: {
 }): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: input.runId !== null, escape: '--run <run-id> releases it anyway',
+    reach: 'finished-if-named', escape: '--run <run-id> releases it anyway',
   })
   if (!found.ok) return found.result
   const { run, task } = found.value
@@ -621,9 +650,11 @@ async function decide(ctx: Ctx, input: {
   // Alone among the four, this refuses a finished run even when named: opening a
   // decision on one strands the question, because neither `rewind` (it leaves
   // run.phase alone) nor `resume` (it needs a prior abort) can get a worker back.
+  // A parked run strands it too, until rewound: the supervisor announces nothing
+  // on one, so the orchestrator never hears the question.
   const found = await resolveTask(ctx, {
     taskId: input.task, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: false, escape: null,
+    reach: 'driven', escape: null,
   })
   if (!found.ok) return found.result
   const { run, task } = found.value
@@ -660,7 +691,7 @@ async function answer(ctx: Ctx, input: {
 }): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.task, repoKey: input.repoKey, runId: input.runId,
-    allowTerminal: input.runId !== null,
+    reach: 'finished-if-named',
     escape: '--run <run-id> records an answer on it anyway',
   })
   if (!found.ok) return found.result
@@ -709,7 +740,7 @@ export async function cmdDrain(ctx: Ctx): Promise<CmdResult> {
 }
 
 async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
   // Record where it was so resume can put it back. Worktrees and branches are untouched.
@@ -722,7 +753,7 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
 export const cmdAbort = retryingOnStale(abort)
 
 async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
-  const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+  const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
   const aborted = run.history.at(-1)?.why?.startsWith('aborted from')

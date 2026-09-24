@@ -1,6 +1,6 @@
 import { repoContext } from '../lib/repo'
 import {
-  activeRunForRepo, isUnlandedSave, retryOnStaleRun, saveRun, unlandedSaveMessage,
+  isUnlandedSave, resolveRun, retryOnStaleRun, saveRun, unlandedSaveMessage,
   writeOrchestrator,
 } from '../lib/ledger'
 import { sessionKey } from '../lib/session'
@@ -32,8 +32,19 @@ await writeOrchestrator(stateDir, session, repoRoot, {
 let run
 try {
   run = await retryOnStaleRun(async () => {
-    const active = await activeRunForRepo(stateDir, session, repoRoot)
-    if (!active) return null
+    const resolved = await resolveRun(stateDir, session, {
+      runId: null, repoKey: repoRoot, phases: null, taskId: null, reach: 'unfinished',
+    })
+    if (!resolved.ok && resolved.reason === 'ambiguous') {
+      // `hpipe start` refuses a second run per repo, so this is damage; rebinding
+      // whichever sorts first would silently hand this pane the wrong one.
+      console.error(`[pipeline] claimed ${paneId} for ${repoRoot}, but more than one run is ` +
+        `active for it: ${resolved.candidates.map((r) => r.run_id).join(', ')} — ` +
+        'none was rebound; abort the stray one and claim again')
+      process.exit(1)
+    }
+    if (!resolved.ok) return null
+    const active = resolved.run
     active.orchestrator_pane = paneId
     active.history.push({ at: Date.now(), from: 'claim', to: active.phase, why: `orchestrator rebound to ${paneId}` })
     await saveRun(stateDir, active)

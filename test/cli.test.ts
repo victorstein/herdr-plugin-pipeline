@@ -2,12 +2,19 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { activeRunForRepo, newRun, saveRun } from '../src/lib/ledger'
+import { newRun, resolveRun, saveRun } from '../src/lib/ledger'
 import { cmdRewind, cmdStart, cmdTask, listFlag } from '../src/cli'
 
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
+
+async function liveRun() {
+  const resolved = await resolveRun(dir, 'personal', {
+    runId: null, repoKey: 'k', phases: null, taskId: null, reach: 'unfinished',
+  })
+  return resolved.ok ? resolved.run : null
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'cli-'))
@@ -31,7 +38,7 @@ test('start opens a run and prints the intake prompt', async () => {
   })
   expect(out.ok).toBe(true)
   expect(out.text).toContain('intake')
-  expect((await activeRunForRepo(dir, 'personal', 'k'))?.title).toBe('chat meter')
+  expect((await liveRun())?.title).toBe('chat meter')
 })
 
 test('start refuses a second run for the same repo and names the blocker', async () => {
@@ -45,10 +52,48 @@ test('start refuses a second run for the same repo and names the blocker', async
   expect(second.text).toContain(JSON.parse(first.json ?? '{}').run_id ?? 'run')
 })
 
+test('start refuses beside a run whose phase is in no row, instead of throwing', async () => {
+  const broken = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  broken.phase = 'dnoe' as typeof broken.phase
+  await saveRun(dir, broken)
+
+  const result = await cmdStart(ctx(), {
+    title: 'b', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`hpipe abort ${broken.run_id}`)
+})
+
+test('a run excluded for being parked names the rewind that resumes it', async () => {
+  const parked = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  parked.phase = 'escalated'
+  parked.escalated_from = 'execute'
+  await saveRun(dir, parked)
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/core', issue: 1, surface: 'core', notes: '', dependsOn: [], files: [],
+    keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`rewind ${parked.run_id} execute\` resumes it`)
+})
+
+test('start is still refused by an escalated run for the same repo', async () => {
+  const parked = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  parked.phase = 'escalated'
+  await saveRun(dir, parked)
+
+  const result = await cmdStart(ctx(), {
+    title: 'b', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(parked.run_id)
+})
+
 test('task prints its id and withholds the prompt while gated', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
@@ -65,20 +110,20 @@ test('task prints its id and withholds the prompt while gated', async () => {
 test('a task dispatched at registration enters the design loop, not implement', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const started = await activeRunForRepo(dir, 'personal', 'k')
+  const started = await liveRun()
   started!.phase = 'dispatch'
   await saveRun(dir, started!)
 
   await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
 
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   expect(run?.tasks[0]?.phase).toBe('research')
 })
 
 test('task rejects a dependency cycle', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
@@ -91,7 +136,7 @@ test('task rejects a dependency cycle', async () => {
 test('task rejects a surface with no agent definition', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
@@ -109,13 +154,13 @@ test('task rejects a branch that starts with a dash and registers nothing', asyn
   const bad = await cmdTask(c, { branch: '-h', issue: 9, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('--branch cannot start with "-"')
-  expect((await activeRunForRepo(dir, 'personal', 'k'))!.tasks).toEqual([])
+  expect((await liveRun())!.tasks).toEqual([])
 })
 
 test('task rejects a dependency id that names no task', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
@@ -133,7 +178,7 @@ test('rewind clears the counters for the phase it rewinds to', async () => {
 
   const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'branch-review', taskId: null })
   expect(out.ok).toBe(true)
-  const after = await activeRunForRepo(dir, 'personal', 'k')
+  const after = await liveRun()
   expect(after?.phase).toBe('branch-review')
   expect(after?.passes).toEqual({})
 })
@@ -145,7 +190,7 @@ test('the run id carries the whole title, not a fragment of it', async () => {
   })
   expect(out.ok).toBe(true)
 
-  const run = await activeRunForRepo(dir, 'personal', 'k')
+  const run = await liveRun()
   expect(run?.run_id).toContain('add-a-titlecase-helper')
 })
 
@@ -169,7 +214,7 @@ test('listFlag keeps a value that looks like a flag, for cmdTask to reject', () 
 test('task rejects a --files entry containing whitespace and mints no task', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const started = await activeRunForRepo(dir, 'personal', 'k')
+  const started = await liveRun()
   started!.phase = 'dispatch'
   // Set so the assertion below can prove the rejection returned before
   // `run.intake_closed = false`. A fresh run already has it false.
@@ -189,7 +234,7 @@ test('task rejects a --files entry containing whitespace and mints no task', asy
 
   // There is no command that removes a task once minted, so the check has to run
   // before the task literal is pushed — not merely before the prompt is returned.
-  const after = await activeRunForRepo(dir, 'personal', 'k')
+  const after = await liveRun()
   expect(after?.tasks).toEqual([])
   expect(after?.intake_closed).toBe(true)
 })
@@ -197,7 +242,7 @@ test('task rejects a --files entry containing whitespace and mints no task', asy
 test('task rejects a --files entry that is a flag, not a path prefix', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const started = await activeRunForRepo(dir, 'personal', 'k')
+  const started = await liveRun()
   started!.phase = 'dispatch'
   await saveRun(dir, started!)
 
@@ -210,13 +255,13 @@ test('task rejects a --files entry that is a flag, not a path prefix', async () 
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('--surface')
   expect(bad.text).toContain('the value after --files is missing')
-  expect((await activeRunForRepo(dir, 'personal', 'k'))?.tasks).toEqual([])
+  expect((await liveRun())?.tasks).toEqual([])
 })
 
 test('task echoes the file set it recorded while gated', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const started = await activeRunForRepo(dir, 'personal', 'k')
+  const started = await liveRun()
   started!.phase = 'dispatch'
   await saveRun(dir, started!)
 
@@ -238,7 +283,7 @@ test('task echoes the file set it recorded while gated', async () => {
 test('task echoes files: none on the dispatched return when nothing was declared', async () => {
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
-  const started = await activeRunForRepo(dir, 'personal', 'k')
+  const started = await liveRun()
   started!.phase = 'dispatch'
   await saveRun(dir, started!)
 
