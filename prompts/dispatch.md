@@ -19,6 +19,12 @@ brief can sit unsubmitted in the input box, and nothing tells you. Measured on a
 zero only once herdr has seen the worker start working on it. On a non-zero exit, `herdr pane read`
 the pane before retrying — a retry after a stalled submission sends the brief twice.
 
+**To empty a worker's input box** — a brief that sat unsubmitted, a stray word — use
+`herdr agent send-keys <root_pane_id> ctrl+c` while the worker is idle. It clears the whole box,
+however many lines. `ctrl+u` clears only the line the cursor is on, `C-u` is not a key name herdr
+accepts, and `esc esc` on an empty box opens Claude's rewind menu. Never press `ctrl+c` while the
+worker is working: it interrupts the turn. Measured on a live run.
+
 **`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
 *focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
 start. Omitting it creates the worktree in whatever repo happens to be focused and launches the

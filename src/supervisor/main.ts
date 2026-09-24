@@ -13,8 +13,12 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
-  refreshBadges, shouldRetry, uncommittedPaths,
+  refreshBadges, uncommittedPaths,
 } from './deliver'
+import {
+  DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
+} from './courier'
+import { enqueue, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
@@ -110,7 +114,11 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  const attempts = new Map<string, number>()
+  const gate = new DeliveryGate({
+    sendsPerTick: config.DELIVERY_SENDS_PER_TICK,
+    backoffMaxMs: config.DELIVERY_BACKOFF_MAX_SECONDS * 1000,
+  })
+  const send = makeCourier(gate, herdr, config.PROMPT_CONFIRM_MS)
   const ambiguityLog = new Set<string>()
   let lastCiPollMs = 0
 
@@ -123,6 +131,8 @@ async function main(): Promise<void> {
         : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
       ).filter(isCurrentSchemaRun)
       const panes = await allOrchestratorPanes(stateDir, session)
+      gate.beginTick(new Set((await herdr.paneList()).map((p) => p.pane_id)))
+      for (const pane of readyPanes(events)) gate.wake(pane)
 
       const wakeOn = new Set(config.WAKE_ON)
       const applied = applyEvents(tickRuns, events, session, panes, wakeOn)
@@ -174,11 +184,18 @@ async function main(): Promise<void> {
 
       const pending: PendingPrompt[] = []
       const unsaved = new Set<Run>()
+      const footers = new Map<Run, string>()
+      // Every run on disk, not only the advancing ones: an `escalated` run releases
+      // its pane and is never advanced, yet the escalation it owes the
+      // orchestrator is the one prompt that must still arrive. An advancing run
+      // joins only once saved, so a tick that failed half way sends nothing from
+      // a copy the ledger never took.
+      const deliverFrom = new Set(runs.filter((run) => !advancing.includes(run)))
       for (const run of advancing) {
         const runPending: PendingPrompt[] = []
         const addPending = (
           paneId: string | null, text: string, eventLines: string[], subject: string,
-          phaseNote?: string, footer?: string,
+          phaseNote?: string, footer?: string, taskId?: string,
         ) => {
           if (text.length === 0 && eventLines.length === 0) return
           if (paneId === null) {
@@ -186,7 +203,7 @@ async function main(): Promise<void> {
             return
           }
           runPending.push({
-            paneId, run, text, events: eventLines, phaseNote, footer,
+            paneId, run, text, events: eventLines, phaseNote, footer, taskId,
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
@@ -226,7 +243,7 @@ async function main(): Promise<void> {
           const answerDeps: AnswerDeps = {
             pluginRoot,
             promptRetryMax: config.PROMPT_RETRY_MAX,
-            send: (paneId, text) => herdr.agentPrompt(paneId, text),
+            send,
             effects,
           }
           await deliverPendingAnswers(run, answerDeps)
@@ -250,19 +267,27 @@ async function main(): Promise<void> {
           // advances off the CI poll rather than a pane event. `deliveriesFor`
           // renders it once.
           const footer = parkedFooter(run, covered, tickNow, hpipe)
+          footers.set(run, footer)
 
           addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`,
             phaseNote, footer)
           for (const prompt of taskPrompts) {
             addPending(prompt.paneId, prompt.text, [], `task ${prompt.taskId}`, undefined,
-              prompt.paneId === run.orchestrator_pane ? footer : undefined)
+              prompt.paneId === run.orchestrator_pane ? footer : undefined, prompt.taskId)
           }
           addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`,
             undefined, footer)
-          // Queued only once saved: a prompt about a transition the ledger then
-          // refused would describe a state that no longer exists.
+          for (const stale of pruneOutbox(run)) {
+            console.error(`[pipeline] run ${run.run_id}: dropping an undelivered prompt for ` +
+              `${stale.task_id ?? 'the run'} — it has left the phase the prompt was about`)
+          }
+          // Written to the outbox in the same save as the transitions they describe,
+          // so a prompt about a transition the ledger then refused is refused with
+          // it, and one that is saved is sent until it lands.
+          const eventsOnly = queuePending(run, runPending, tickNow)
           if (await saveOrReapply(stateDir, run, effects) === 'saved') {
-            pending.push(...runPending)
+            pending.push(...eventsOnly)
+            deliverFrom.add(run)
           } else {
             unsaved.add(run)
             console.error(`[pipeline] run ${run.run_id}: this tick lost to a CLI write; ` +
@@ -280,18 +305,18 @@ async function main(): Promise<void> {
         }
       }
 
-      for (const delivery of deliveriesFor(pending)) {
-        const sent = await herdr.agentPrompt(delivery.paneId, delivery.text)
-        if (sent.ok) {
-          attempts.delete(delivery.paneId)
-          continue
-        }
-        const failures = (attempts.get(delivery.paneId) ?? 0) + 1
-        if (shouldRetry(sent.code, failures, config.PROMPT_RETRY_MAX)) {
-          attempts.set(delivery.paneId, failures)
-        } else {
-          console.error(`[pipeline] giving up on delivery to ${delivery.paneId}: ${sent.code}`)
-          attempts.delete(delivery.paneId)
+      for (const run of deliverFrom) pending.push(...outboxPending(run, footers.get(run)))
+      const settlements = await flushDeliveries(deliveriesFor(pending), send)
+      for (const [run, settled] of settlements) {
+        const settle = (target: Run) => settleOutbox(target, settled, Date.now())
+        settle(run)
+        try {
+          if (await saveOrReapply(stateDir, run, [settle]) === 'reapplied') unsaved.add(run)
+        } catch (error) {
+          if (!isUnlandedSave(error)) throw error
+          unsaved.add(run)
+          console.error(`[pipeline] run ${run.run_id}: delivery outcomes not saved ` +
+            `(${error.message}); what landed may be sent again next tick`)
         }
       }
 
@@ -314,7 +339,7 @@ async function main(): Promise<void> {
             awaiting: awaiting.clause,
             ladder: ladderFor(c, probeMax),
           })
-          return herdr.agentPrompt(c.paneId, text)
+          return send(c.paneId, text)
         },
         escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
           run_id: c.run.run_id,
@@ -327,21 +352,8 @@ async function main(): Promise<void> {
           resume_command: resumeCommand(hpipe, c.run, c.task, from),
           abandon: abandonParagraph(hpipe, c.run, c.task),
         }),
-        sendEscalation: async (c, text) => {
-          const pane = c.run.orchestrator_pane
-          if (pane === null) {
-            console.error(
-              `[pipeline] run ${c.run.run_id}: escalated but no orchestrator pane to tell`,
-            )
-            return
-          }
-          const sent = await herdr.agentPrompt(pane, text)
-          if (!sent.ok) {
-            console.error(
-              `[pipeline] run ${c.run.run_id}: escalation prompt to ${pane} failed (${sent.code})` +
-              ' — the transition is already recorded; `hpipe status` shows it',
-            )
-          }
+        queueEscalation: (c, text) => {
+          enqueue(c.run, { to: 'orchestrator', taskId: c.task?.task_id ?? null, text }, Date.now())
         },
       }
 

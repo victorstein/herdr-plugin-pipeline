@@ -402,8 +402,12 @@ export interface StallDeps {
    * `escalated`'s own row is `signal: 'manual'` and would describe nothing.
    */
   escalationText: (c: StallCandidate, from: string) => Promise<string>
-  /** Sends an already-rendered prompt. The transition is already persisted. */
-  sendEscalation: (c: StallCandidate, text: string) => Promise<void>
+  /**
+   * Queues an already-rendered prompt for the orchestrator on the record, after
+   * the transition, so the one save carries both and the prompt reaches a pane
+   * that is dead right now once it answers again.
+   */
+  queueEscalation: (c: StallCandidate, text: string) => void
   agentStatus: (paneId: string) => Promise<AgentStatus>
   /**
    * `effect` re-records an action already taken — a probe that was sent — should
@@ -491,10 +495,12 @@ async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutco
 /**
  * The transition lives here, not in the caller's callback, so both branches are
  * reachable from a test and the ordering is enforced by the code rather than by
- * a comment: the text describes the phase being LEFT, and the ledger write
- * precedes the send so a rejected prompt costs a prompt and never a transition.
- * This mirrors `deliverPendingAnswers` (`src/supervisor/tasks.ts:283`), which
- * calls `enterTaskPhase` in-module and injects only the send.
+ * a comment: the text describes the phase being LEFT, and it is queued, not sent,
+ * so the escalation's prompt is gated like every other send while its
+ * transition is not — a prompt the orchestrator cannot take yet is held, never
+ * the transition. This mirrors `deliverPendingAnswers`
+ * (`src/supervisor/tasks.ts:283`), which calls `enterTaskPhase` in-module and
+ * injects only the send.
  */
 async function escalate(c: StallCandidate, deps: StallDeps): Promise<void> {
   const from = c.task ? c.task.phase : c.run.phase
@@ -505,6 +511,6 @@ async function escalate(c: StallCandidate, deps: StallDeps): Promise<void> {
   if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
   else enterRunPhase(c.run, 'escalated', why)
 
+  deps.queueEscalation(c, text)
   await deps.persist(c.run)
-  await deps.sendEscalation(c, text)
 }

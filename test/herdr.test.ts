@@ -50,6 +50,14 @@ test('a confirmed prompt waits for the agent to start working, bounded by a time
   expect(log).toContain('agent prompt w1:p1 brief --wait --until working --until blocked --timeout 30000')
 })
 
+test('send-keys passes logical key names through to the agent', async () => {
+  const bin = await makeFakeBin(dir, { 'agent send-keys': { result: {} } })
+  const res = await new Herdr(bin).agentSendKeys('w1:p1', ['ctrl+c'])
+  expect(res.ok).toBe(true)
+  const log = await Bun.file(join(dir, 'calls.log')).text()
+  expect(log).toContain('agent send-keys w1:p1 ctrl+c')
+})
+
 test('a missing binary returns a failed result instead of throwing', async () => {
   const res = await new Herdr(join(dir, 'no-such-binary')).agentPrompt('w1:p1', 'hello')
   expect(res.ok).toBe(false)

@@ -373,7 +373,8 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
 export interface AnswerDeps {
   pluginRoot: string
   promptRetryMax: number
-  send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string }>
+  /** `held` means nothing was sent — the delivery gate is pausing that pane. */
+  send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string; held?: string }>
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
 }
@@ -427,7 +428,9 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
 
     const result = await deps.send(task.pane_id, text)
     if (!result.ok) {
-      task.delivery_attempts += 1
+      // A held send never reached herdr, so it must not spend the attempts that
+      // decide when this answer is abandoned.
+      if (result.held === undefined) task.delivery_attempts += 1
       continue
     }
 

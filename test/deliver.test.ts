@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  mergeAddedDocsArgs, promptForRunPhase, shouldRetry, taskSignalsFor, uncommittedPaths,
+  isRetryable, mergeAddedDocsArgs, promptForRunPhase, taskSignalsFor, uncommittedPaths,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
@@ -109,28 +109,34 @@ test('no prompt with content is ever dropped', () => {
   }
 })
 
-test('agent_blocked is retryable below the cap', () => {
-  expect(shouldRetry('agent_blocked', 1, 5)).toBe(true)
-})
-
-test('retries stop at the cap', () => {
-  expect(shouldRetry('agent_blocked', 5, 5)).toBe(false)
-})
-
 test('an unknown pane is retryable — it may be restoring', () => {
-  expect(shouldRetry('pane_not_found', 1, 5)).toBe(true)
+  expect(isRetryable('pane_not_found')).toBe(true)
 })
 
 test('herdr\'s transient codes count against the pane rather than giving up at once', () => {
   for (const code of [
-    'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
-    'server_unavailable', 'server_not_running',
-  ]) expect(shouldRetry(code, 1, 5), code).toBe(true)
+    'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
+    'agent_prompt_stalled', 'timeout', 'server_unavailable', 'server_not_running',
+    'spawn_failed',
+  ]) expect(isRetryable(code), code).toBe(true)
 })
 
 test('a permanent herdr code gives up at once', () => {
-  expect(shouldRetry('workspace_not_found', 1, 5)).toBe(false)
-  expect(shouldRetry('empty_agent_prompt', 1, 5)).toBe(false)
+  expect(isRetryable('workspace_not_found')).toBe(false)
+  expect(isRetryable('empty_agent_prompt')).toBe(false)
+})
+
+test('a delivery names the outbox entries it carries, from every run in it', () => {
+  const run = mkRun()
+  const other = mkRun()
+  other.orchestrator_pane = 'w1:p1'
+  const [delivery, ...rest] = deliveriesFor([
+    { paneId: 'w1:p1', run, text: 'a', isOrchestrator: true, events: [], outboxId: 'x1' },
+    { paneId: 'w1:p1', run, text: '', isOrchestrator: true, events: ['e1'] },
+    { paneId: 'w1:p1', run: other, text: 'b', isOrchestrator: true, events: [], outboxId: 'y1' },
+  ])
+  expect(rest).toHaveLength(0)
+  expect(delivery?.sources).toEqual([{ run, outboxId: 'x1' }, { run: other, outboxId: 'y1' }])
 })
 
 test('a blocked worker line inlines its pane tail', () => {

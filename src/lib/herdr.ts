@@ -102,6 +102,11 @@ export class Herdr {
     ])
   }
 
+  /** Logical key names — `ctrl+u`, not `C-u`, which herdr 0.9.0 rejects as `invalid_key`. */
+  async agentSendKeys(target: string, keys: string[]): Promise<CallResult<unknown>> {
+    return this.call(['agent', 'send-keys', target, ...keys])
+  }
+
   async paneRead(target: string, lines: number): Promise<string> {
     const res = await this.call<{ text: string }>(
       ['pane', 'read', target, '--source', 'visible', '--lines', String(lines)],

@@ -2,6 +2,7 @@ import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { runIsDriven } from './ledger'
+import { outboxWarnings } from './outbox'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import { overdueUnstartedWorker, startWorkerCommand } from './unstarted'
@@ -309,6 +310,7 @@ export function formatStatus(
       lines.push(...intakeWarning(run, hpipe))
       lines.push(...waitingOnYou(run, hpipe, now))
       lines.push(...taskWarnings(run, hpipe, now))
+      lines.push(...outboxWarnings(run, livePanes, now))
     }
   }
 

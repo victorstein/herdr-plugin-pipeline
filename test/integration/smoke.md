@@ -406,7 +406,8 @@ finding), or `hpipe status` reporting
 
 with N climbing. That means the send is failing; check the supervisor pane and whether the worker's
 pane is alive. After `PROMPT_RETRY_MAX` (5) attempts delivery stops being retried and a fresh
-`hpipe answer` is the only way to re-arm it.
+`hpipe answer` is the only way to re-arm it. A send held because the pane is gone or backing off
+(§4d) is not an attempt and does not move N.
 
 ### 4b. Escalated to the human
 
@@ -451,6 +452,39 @@ resumes an escalated task.
 
 If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
 `STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.
+
+### 4d. Delivery to a pane that cannot answer
+
+Every supervisor prompt is sent with `herdr agent prompt --wait --until working --until blocked` and
+counts as delivered only once herdr sees the agent take it up. A phase prompt, run prompt or
+escalation is written to the run's `outbox` in the ledger **before** it is sent and removed only
+when it lands; digest event lines are not kept. Sends are gated per pane: a pane missing from
+`herdr pane list` gets nothing, a pane that fails is retried at 5s, 10s, 20s… up to
+`DELIVERY_BACKOFF_MAX_SECONDS` (300), and no tick sends more than `DELIVERY_SENDS_PER_TICK` (8).
+
+1. **Dead orchestrator, workers keep moving.** With a task mid-`spec`, `/exit` the orchestrator's
+   Claude (leave the pane as a shell). Let the worker finish `spec`. **Pass:** the task still
+   advances to `spec-review` and its prompt lands in the worker pane; the supervisor pane logs
+   `delivery to <orchestrator pane> failed (agent_not_found)` **once**, not every tick; and
+   `hpipe status` shows `⚠ N prompts for the orchestrator undelivered for Xm (… last
+   agent_not_found)` once a digest is owed. Count sends in the supervisor log: no more than one
+   attempt per backoff interval.
+2. **Resume.** Restart Claude in that pane (`herdr agent start …`) or `claim` a new one. **Pass:**
+   within a tick of the agent reporting idle, the held prompts arrive as one digest, the log says
+   `delivery to <pane> recovered`, and the `hpipe status` line is gone.
+3. **Gone pane.** Close a worker's pane outright while its task waits on a prompt. **Pass:** the log
+   says `pane <id> is gone; holding …` once, `hpipe status` names it `(pane <id> is gone)`, the task's
+   stall ladder still climbs and escalates on time, and nothing is sent to the missing id.
+4. **Stuck input box.** In an idle worker pane, type text without submitting it, then trigger a
+   prompt to that worker (a rewind into its phase). **Record** what happens: herdr's `agent prompt`
+   does not clear the box, so the prompt is submitted with your text prepended — measured with
+   Claude Code 2.1 in an isolated herdr 0.9.0 session. The supervisor only clears the box (one
+   `ctrl+c`, idle agent only) after a send herdr reports as `agent_prompt_stalled`, and then re-sends
+   the whole prompt on a later tick. Whether a real stall reproduces on demand is still open.
+5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
+   for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
+   its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see
+   the limit — a finding.
 
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 

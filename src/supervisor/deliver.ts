@@ -24,7 +24,13 @@ export interface DigestInput {
   footer?: string
 }
 
-export interface Delivery { paneId: string; text: string; run: Run }
+export interface Delivery {
+  paneId: string
+  text: string
+  run: Run
+  /** The outbox entries this delivery carries, so its outcome can be written back to each. */
+  sources: Array<{ run: Run; outboxId: string }>
+}
 
 export function buildDigest(input: DigestInput): string {
   // Each non-empty tail part brings exactly one blank line with it, so the output
@@ -49,6 +55,10 @@ export interface PendingPrompt {
   phaseNote?: string
   /** The parked-task footer; set on every orchestrator pending, rendered once. */
   footer?: string
+  /** The task this prompt is about; absent for a run-level one. */
+  taskId?: string
+  /** Set on a prompt read back out of the outbox. */
+  outboxId?: string
 }
 
 /**
@@ -80,7 +90,9 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
           nextPrompt: body,
         })
       : body
-    out.push({ paneId, text, run: first.run })
+    const sources = group.flatMap((p) =>
+      (p.outboxId === undefined ? [] : [{ run: p.run, outboxId: p.outboxId }]))
+    out.push({ paneId, text, run: first.run, sources })
   }
   return out
 }
@@ -88,19 +100,20 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
 export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
 
-// Nothing re-sends a failed delivery; the next tick's transitions or the stall
-// ladder regenerate it. This set only decides whether a failure counts against
-// the pane or is logged as giving up at once, so it lists the herdr 0.9.0 codes
-// that are transient: an agent not detected or not ready yet, a busy PTY, a
-// server restarting.
-const RETRYABLE = new Set([
+// The herdr 0.9.0 codes that say the recipient cannot answer yet — an agent not
+// detected or not ready, a busy PTY, a prompt not taken up, a server restarting —
+// rather than that the text itself will never be accepted. A retryable failure
+// backs the pane off and keeps the prompt queued; any other code drops that
+// prompt, so it cannot hold up everything else addressed to the same pane.
+const RETRYABLE: ReadonlySet<string> = new Set([
   'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
+  'agent_prompt_stalled', 'timeout',
   'pane_not_found', 'not_found', 'server_unavailable', 'server_not_running', 'unparseable',
+  'spawn_failed',
 ])
 
-export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
-  if (attempts >= max) return false
-  return code !== undefined && RETRYABLE.has(code)
+export function isRetryable(code: string): boolean {
+  return RETRYABLE.has(code)
 }
 
 /**

@@ -248,6 +248,17 @@ test('a failed send leaves the task blocked and counts the attempt', async () =>
   expect(task.delivery_attempts).toBe(1)
 })
 
+test('a send the delivery gate held spends no attempt — #24', async () => {
+  const { run, task } = blockedOnDecision()
+
+  await deliverPendingAnswers(run, answerDeps({
+    send: async () => ({ ok: false, code: 'pane_gone', held: 'pane_gone' }),
+  }))
+
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.delivery_attempts).toBe(0)
+})
+
 test('an exhausted budget holds the task blocked rather than resuming it', async () => {
   const { run, task, decisionId } = blockedOnDecision()
   task.delivery_attempts = 5

@@ -6,9 +6,10 @@ import {
   applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
-import { listRuns, newRun, saveOrReapply, saveRun, StaleRunError } from '../src/lib/ledger'
+import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
+import { enqueue } from '../src/lib/outbox'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
@@ -460,7 +461,7 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
     now: () => NOW,
     probe: async (c) => { sent.push(`probe:${c.task?.task_id ?? 'run'}`); return { ok: true } },
     escalationText: async () => 'escalation text',
-    sendEscalation: async (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
+    queueEscalation: (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
     agentStatus: async () => 'idle',
     persist: async () => {},
   }
@@ -694,7 +695,7 @@ test('the escalation text is rendered BEFORE the transition overwrites the phase
   expect(seen).toEqual(['implement|implement'])
 })
 
-test('the ledger is persisted before the escalation is sent', async () => {
+test('the escalation prompt is queued after the transition, and one save carries both', async () => {
   const run = runAt('execute', LONG_AGO)
   const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
   run.tasks = [task]
@@ -705,9 +706,9 @@ test('the ledger is persisted before the escalation is sent', async () => {
   const order: string[] = []
   await applyStalls(taskStallCandidates([run], NOW, 45, 3), mkDeps({
     persist: async (r) => { order.push(`persist:${r.tasks[0]?.phase}`) },
-    sendEscalation: async () => { order.push('send') },
+    queueEscalation: (c) => { order.push(`queue:${c.task?.phase}`) },
   }))
-  expect(order).toEqual(['persist:escalated', 'send'])
+  expect(order).toEqual(['queue:escalated', 'persist:escalated'])
 })
 
 test('a sent probe whose save lost to a CLI write is still counted', async () => {
@@ -755,21 +756,33 @@ test('an undelivered-streak start whose save lost to a CLI write is still record
 })
 
 test('an escalation whose save lost to a CLI write is not sent, and the batch goes on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
   const stale = runAt('execute', LONG_AGO)
   const stuck = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
   stale.tasks = [stuck]
   stuck.stall = {
     at: LONG_AGO, run_at: stale.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
   }
+  await saveRun(dir, stale)
+  const [cliCopy] = await listRuns(dir, stale.session)
+  cliCopy!.intake_closed = true
+  await saveRun(dir, cliCopy!)
+
   const other = runAt('execute', LONG_AGO)
   other.run_id = 'other'
   other.tasks = [mkTask({ task_id: 't9', phase: 'implement', phase_entered_at: LONG_AGO })]
 
   const deps = mkDeps({
-    persist: async (r) => { if (r === stale) throw new StaleRunError(r.run_id) },
+    queueEscalation: (c, text) => { enqueue(c.run, { to: 'orchestrator', taskId: 't1', text }, NOW) },
+    persist: (r, effect) => (r === stale ? saveOrReapply(dir, r, effect ? [effect] : []) : Promise.resolve()),
   })
   await applyStalls(taskStallCandidates([stale, other], NOW, 45, 3), deps)
+
+  const [reloaded] = await listRuns(dir, stale.session)
+  expect(reloaded?.tasks[0]?.phase).toBe('implement')
+  expect(reloaded?.outbox).toBeUndefined()
   expect(deps.sent).toEqual(['probe:t9'])
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('every last-mile row is probed via the orchestrator — #19', () => {
@@ -787,7 +800,7 @@ test('no last-mile row escalates, however many probes go unanswered — #19', as
     const run = runWithTask({ phase })
     const task = run.tasks[0] as Task
     const deps = mkDeps({
-      sendEscalation: async () => { throw new Error(`${phase} must never escalate`) },
+      queueEscalation: () => { throw new Error(`${phase} must never escalate`) },
     })
     let now = NOW
     for (let i = 0; i < 20; i += 1) {
@@ -808,7 +821,7 @@ test('a 4h57m merge park produces six probes and no escalation — #19', async (
   const probesAtMinute: number[] = []
   const deps = mkDeps({
     probe: async () => { probesAtMinute.push(now / 60_000); return { ok: true } },
-    sendEscalation: async () => { throw new Error('merge must never escalate') },
+    queueEscalation: () => { throw new Error('merge must never escalate') },
   })
   for (; now <= (4 * 60 + 57) * 60_000; now += 60_000) {
     await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
