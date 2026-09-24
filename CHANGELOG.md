@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.0...v1.5.1) (2026-09-24)
+
+
+### Refactor
+
+* resolve every run through one resolver with an explicit reach ([#76](https://github.com/victorstein/herdr-plugin-pipeline/issues/76)) ([6ce6d05](https://github.com/victorstein/herdr-plugin-pipeline/commit/6ce6d05ed6fd6c9ed68ecc141c2d795b532e0f18)), closes [#49](https://github.com/victorstein/herdr-plugin-pipeline/issues/49)
+
 ## [1.5.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.2...v1.5.0) (2026-09-24)
 
 
