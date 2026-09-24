@@ -39,6 +39,35 @@ export interface TaskDeps {
   ambiguityLog: Set<string>
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
+  uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
+}
+
+const UNCOMMITTED_SAMPLE = 3
+
+/**
+ * An idle worker with uncommitted work is the most common real stopped state, and
+ * without this it reads exactly like one that is thinking. Measured on a live run.
+ *
+ * Only on a code row — the design rows' artifacts are judged by the artifact
+ * signal — and only once per idle spell: the worker has to go busy to change the
+ * tree, and going busy drops the record, so the next idle spell checks afresh.
+ */
+async function noteUncommittedWork(task: Task, actorIdle: boolean, deps: TaskDeps): Promise<void> {
+  const row = taskRow(task.phase)
+  if (row.actor !== 'worker' || row.holdsFiles !== true || task.checkout_path === null) return
+  if (!actorIdle) {
+    delete task.uncommitted_work
+    return
+  }
+  if (task.uncommitted_work?.at === task.phase_entered_at) return
+
+  // An unreadable checkout is recorded as an empty observation, not skipped:
+  // skipping would re-run git on every tick of the idle spell. It is retried on
+  // the next spell, and it never reports as work waiting on anyone.
+  const paths = (await deps.uncommittedPaths(task.checkout_path)) ?? []
+  task.uncommitted_work = {
+    at: task.phase_entered_at, count: paths.length, sample: paths.slice(0, UNCOMMITTED_SAMPLE),
+  }
 }
 
 /**
@@ -174,6 +203,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // while it is mid-turn, exactly as run phases are gated.
     if (row.actor === 'orchestrator' && !actorIdle) continue
 
+    await noteUncommittedWork(task, actorIdle, deps)
     const signals = await gatherSignals(run, task, deps, actorIdle)
     if (!signals) continue
 

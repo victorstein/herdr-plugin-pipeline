@@ -233,6 +233,19 @@ function nulSeparated(text: string): string[] {
   return text.split('\0').filter((path) => path.length > 0)
 }
 
+/**
+ * Porcelain paths the checkout has not committed, or null when git could not
+ * answer — an unreadable checkout must not read as a clean one.
+ */
+export async function uncommittedPaths(checkoutPath: string): Promise<string[] | null> {
+  const status = await git(checkoutPath, ['status', '--porcelain=v1', '--untracked-files=normal'])
+  if (status.code !== 0) return null
+  return status.text
+    .split('\n')
+    .filter((line) => line.length > 3)
+    .map((line) => line.slice(3))
+}
+
 export function taskSignalsFor(run: Run) {
   const adopted = run.tasks
     .map((t) => t.adopted_at)

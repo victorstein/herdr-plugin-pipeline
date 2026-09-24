@@ -15,7 +15,7 @@ import { enterTaskPhase } from './lib/machine'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
-import { renderPrompt } from './lib/render'
+import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail } from './lib/status'
@@ -597,6 +597,7 @@ export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
     runs,
     { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
     ctx.session,
+    hpipeCommand(ctx.pluginRoot),
     livePanes,
   ))
 }

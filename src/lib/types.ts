@@ -79,6 +79,20 @@ export interface StallState {
   holds: number
 }
 
+/**
+ * What `git status` showed in an idle worker's checkout during a code row. Keyed
+ * like `StallState`, so a phase re-entry retires it without anyone clearing it.
+ * `count: 0` records a clean or unreadable check, so an idle worker is inspected
+ * once per idle spell rather than once per tick.
+ */
+export interface UncommittedWork {
+  /** The task's `phase_entered_at` this record belongs to. */
+  at: number
+  count: number
+  /** The first few porcelain paths, for the operator; `count` is the real size. */
+  sample: string[]
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -123,6 +137,8 @@ export interface Task {
   stall?: StallState
   /** Optional: ledgers written before #23 lack it. */
   artifact_missing?: MissingArtifact
+  /** Optional: ledgers written before #14 lack it. */
+  uncommitted_work?: UncommittedWork
   notes: string
 }
 
