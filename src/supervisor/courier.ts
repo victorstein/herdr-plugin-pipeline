@@ -86,9 +86,17 @@ export function boxHoldsOnly(box: string, sent: string): boolean {
   const ours = squashSpace(sent)
   return box.split('\n').every((line) => {
     const rest = squashSpace(line.replace(PASTE_PLACEHOLDER, ' '))
-    return rest.length === 0 || ours.includes(rest)
+    return rest.length === 0 || (rest.length >= MIN_PIECE_CHARS && ours.includes(rest))
   })
 }
+
+/**
+ * A shorter line is not read as a piece of the send even when it is one: #18's
+ * stray `merge it` is a substring of the merge prompt, and a human's short draft
+ * matching by chance must be reported stuck, not cleared. The cost is that a very
+ * short tail fragment of our own is reported stuck too, which is the safe side.
+ */
+const MIN_PIECE_CHARS = 16
 
 /** Text the supervisor did not write is sitting in the pane's input box. */
 export const STUCK_INPUT = 'stuck_input'
@@ -164,7 +172,33 @@ export interface SendOutcome {
   held?: HoldReason
 }
 
-export type Send = (paneId: string, text: string) => Promise<SendOutcome>
+export type Send = (
+  paneId: string, text: string, options?: { overBudget?: boolean },
+) => Promise<SendOutcome>
+
+/**
+ * Consecutive ticks a stall probe may be deferred by the tick's budget before it
+ * is sent past it. A deferral records nothing on the ladder, so without a bound a
+ * supervisor whose budget is spent every tick would never probe or escalate —
+ * #32's silence again.
+ */
+export const PROBE_DEFERRALS_MAX = 5
+
+/**
+ * Wraps a probe send so a probe deferred PROBE_DEFERRALS_MAX ticks in a row is
+ * then sent regardless of the budget. Keyed by the record probed; any outcome
+ * other than a budget deferral resets its count.
+ */
+export function boundedProbeSend(send: Send, maxDeferrals = PROBE_DEFERRALS_MAX) {
+  const deferrals = new Map<string, number>()
+  return async (key: string, paneId: string, text: string): Promise<SendOutcome> => {
+    const overBudget = (deferrals.get(key) ?? 0) >= maxDeferrals
+    const outcome = await send(paneId, text, { overBudget })
+    if (outcome.held === 'budget') deferrals.set(key, (deferrals.get(key) ?? 0) + 1)
+    else deferrals.delete(key)
+    return outcome
+  }
+}
 
 /** The first retry waits past herdr's own 5s take-up window. */
 export const BACKOFF_BASE_MS = 5_000
@@ -174,9 +208,12 @@ export interface GateConfig {
   sendsPerTick: number
   backoffMaxMs: number
   /**
-   * Wall time after which a tick admits no more sends. A stalled confirmed send
-   * costs herdr's 5s take-up window, and eight of them in series would hold one
-   * tick for 40s, reading every later run against idle states that old.
+   * Wall time, counted from the tick's FIRST send, after which it admits no more.
+   * A stalled confirmed send costs herdr's 5s take-up window, and eight of them in
+   * series would hold one tick for 40s, reading every later run against idle
+   * states that old. Counted from the first send, not the tick's start: slow gh
+   * calls before any delivery would otherwise spend it every tick, and nothing
+   * would ever be delivered.
    */
   tickBudgetMs: number
 }
@@ -204,7 +241,7 @@ export class DeliveryGate {
   private readonly stuck = new Set<string>()
   private livePanes: ReadonlySet<string> = new Set()
   private sentThisTick = 0
-  private tickStartedAt = 0
+  private firstSendAt: number | null = null
   private budgetReported = false
 
   constructor(
@@ -221,7 +258,7 @@ export class DeliveryGate {
   beginTick(livePanes: ReadonlySet<string>): void {
     this.livePanes = livePanes
     this.sentThisTick = 0
-    this.tickStartedAt = this.now()
+    this.firstSendAt = null
     this.budgetReported = false
     for (const pane of this.reportedGone) {
       if (livePanes.has(pane)) {
@@ -240,8 +277,9 @@ export class DeliveryGate {
   /**
    * Admits one send to the pane, taking its slot from the tick's budget at once so
    * sends to several panes in flight together cannot overspend it — or says why not.
+   * `overBudget` skips only the tick's budget, never a gone, backing-off pane.
    */
-  admit(paneId: string): HoldReason | null {
+  admit(paneId: string, overBudget = false): HoldReason | null {
     if (this.livePanes.size > 0 && !this.livePanes.has(paneId)) {
       if (!this.reportedGone.has(paneId)) {
         this.reportedGone.add(paneId)
@@ -251,8 +289,9 @@ export class DeliveryGate {
     }
     const health = this.health.get(paneId)
     if (health && this.now() < health.nextAttemptAt) return 'backoff'
-    const outOfTime = this.now() - this.tickStartedAt >= this.config.tickBudgetMs
-    if (this.sentThisTick >= this.config.sendsPerTick || outOfTime) {
+    const outOfTime = this.firstSendAt !== null &&
+      this.now() - this.firstSendAt >= this.config.tickBudgetMs
+    if (!overBudget && (this.sentThisTick >= this.config.sendsPerTick || outOfTime)) {
       if (!this.budgetReported) {
         this.budgetReported = true
         this.log(outOfTime
@@ -262,6 +301,7 @@ export class DeliveryGate {
       return 'budget'
     }
     this.sentThisTick += 1
+    this.firstSendAt ??= this.now()
     return null
   }
 
@@ -320,7 +360,7 @@ export function makeCourier(
 ): Send {
   const clears = options.clears ?? new ClearGuard()
   const humanTypesIn = options.humanTypesIn ?? (() => false)
-  return async (paneId, text) => {
+  return async (paneId, text, sendOptions = {}) => {
     // Another send into a box holding someone else's text would be appended to it
     // and submitted with it, so a stuck pane gets nothing until the box is empty.
     if (gate.isStuck(paneId)) {
@@ -328,7 +368,7 @@ export function makeCourier(
       if (box !== null && box.length > 0) return { ok: false, code: STUCK_INPUT, held: STUCK_INPUT }
       gate.unstick(paneId)
     }
-    const held = gate.admit(paneId)
+    const held = gate.admit(paneId, sendOptions.overBudget === true)
     if (held !== null) return { ok: false, code: held, held }
     const result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
     gate.record(paneId, result)

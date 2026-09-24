@@ -4,9 +4,9 @@ import { newRun } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
-  BACKOFF_BASE_MS, boxHoldsOnly, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate, flushDeliveries,
+  BACKOFF_BASE_MS, boundedProbeSend, boxHoldsOnly, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate, flushDeliveries,
   inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
-  sendConfirmed, STUCK_INPUT,
+  PROBE_DEFERRALS_MAX, sendConfirmed, STUCK_INPUT,
 } from '../src/supervisor/courier'
 import { deliveriesFor } from '../src/supervisor/deliver'
 
@@ -16,7 +16,7 @@ const RULE = '─'.repeat(40)
 /** What `pane read --source visible` returned for an idle Claude, measured live. */
 const claudeScreen = (box: string) =>
   ['', '  ◐ medium · /effort', RULE, `❯ ${box}`, RULE, '  ⏵⏵ auto mode on'].join('\n')
-const STUCK = claudeScreen('merge it')
+const STUCK = claudeScreen('Please merge it once CI is green.')
 /** A send whose text STUCK's box holds a piece of. */
 const SENT = 'Your PR is green. Please merge it once CI is green.'
 
@@ -144,7 +144,7 @@ test('a press refused by a failed check does not consume the pane\'s interval', 
 })
 
 test('the input box is read from between the two rules that frame it', () => {
-  expect(inputBoxText(STUCK)).toBe('merge it')
+  expect(inputBoxText(STUCK)).toBe('Please merge it once CI is green.')
   expect(inputBoxText(claudeScreen(''))).toBe('')
   expect(inputBoxText([RULE, '❯ first stray', '  second stray', RULE].join('\n')))
     .toBe('first stray\n  second stray')
@@ -176,7 +176,7 @@ test('a worker box holding only this send — collapsed, wrapped or a tail fragm
   for (const box of [
     '[Pasted text #1 +40 lines]',
     'Your PR is green. Please\n  merge it once CI is green.',
-    '[Pasted text #1]e merge it once',
+    '[Pasted text #1]e merge it once CI is green.',
   ]) {
     const io = fakeIO({ prompt: stalled, screen: claudeScreen(box) })
     await sendConfirmed(io, 'w7:p1', SENT, 15000, new ClearGuard())
@@ -185,9 +185,10 @@ test('a worker box holding only this send — collapsed, wrapped or a tail fragm
 })
 
 test('boxHoldsOnly accepts only placeholders and pieces of the sent text', () => {
-  expect(boxHoldsOnly('merge it', SENT)).toBe(true)
+  expect(boxHoldsOnly('Please merge it once CI', SENT)).toBe(true)
+  expect(boxHoldsOnly('merge it', SENT)).toBe(false)
   expect(boxHoldsOnly('[Pasted text #3 +2 lines]', SENT)).toBe(true)
-  expect(boxHoldsOnly('merge it\nand also', SENT)).toBe(false)
+  expect(boxHoldsOnly('Please merge it once CI\nand also', SENT)).toBe(false)
   expect(boxHoldsOnly('ship it', SENT)).toBe(false)
 })
 
@@ -485,4 +486,53 @@ test('a tick that has used its time budget admits no more sends', () => {
   expect(gate.admit('w7:p1')).toBe('budget')
   gate.beginTick(new Set(['w1:p1', 'w7:p1']))
   expect(gate.admit('w7:p1')).toBeNull()
+})
+
+test('the tick\'s delivery time is counted from its first send, not from the tick\'s start', () => {
+  const clock = { now: 0 }
+  const gate = gateAt(clock, 8, 300_000, 20_000)
+  gate.beginTick(new Set(['w1:p1', 'w7:p1']))
+  clock.now = 21_000 // slow gh and advance work before any delivery
+  expect(gate.admit('w1:p1')).toBeNull()
+  clock.now = 40_000
+  expect(gate.admit('w7:p1')).toBeNull()
+  clock.now = 41_000
+  expect(gate.admit('w7:p1')).toBe('budget')
+})
+
+test('a probe the budget keeps deferring is sent past it after PROBE_DEFERRALS_MAX ticks — #32', async () => {
+  const gate = gateAt({ now: 0 }, 0)
+  const io = fakeIO()
+  const sendProbe = boundedProbeSend(makeCourier(gate, io, 15000))
+  const outcomes: Array<string | undefined> = []
+  for (let tick = 0; tick <= PROBE_DEFERRALS_MAX; tick++) {
+    gate.beginTick(new Set(['w7:p1']))
+    outcomes.push((await sendProbe('run:t1', 'w7:p1', 'probe')).held)
+  }
+  expect(outcomes).toEqual([...Array(PROBE_DEFERRALS_MAX).fill('budget'), undefined])
+  expect(io.calls.filter((c) => c.startsWith('prompt'))).toHaveLength(1)
+})
+
+test('forcing a deferred probe past the budget never forces it onto a gone or backing-off pane', async () => {
+  const gate = gateAt({ now: 0 }, 0)
+  gate.beginTick(new Set(['w1:p1']))
+  const sendProbe = boundedProbeSend(makeCourier(gate, fakeIO(), 15000), 0)
+  expect((await sendProbe('run:t1', 'w7:p1', 'probe')).held).toBe('pane_gone')
+})
+
+test('a text-level rejection drops only the entry that caused it', async () => {
+  const run = mkRun()
+  const poison = enqueue(run, { to: 'worker', taskId: 't1', text: 'POISON' }, 0)
+  const fine = enqueue(run, { to: 'worker', taskId: 't1', text: 'fine' }, 0)
+  const settled = await flushDeliveries(
+    deliveriesFor(outboxPending(run)),
+    async (_pane, text) => (text.includes('POISON')
+      ? { ok: false, code: 'invalid_request' }
+      : { ok: true }),
+    () => {},
+  )
+  expect(settled.get(run)).toEqual([
+    { id: poison.id, ok: false, code: 'invalid_request', permanent: true },
+    { id: fine.id, ok: true, code: undefined, permanent: false },
+  ])
 })

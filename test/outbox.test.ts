@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import {
-  enqueue, isCurrent, outboxWarnings, pruneOutbox, recipientPane, settleOutbox,
+  enqueue, isCurrent, outboxWarnings, pruneOutbox, recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
 import type { Run, Task } from '../src/lib/types'
 
@@ -128,6 +128,13 @@ test('a prompt not yet attempted to a live pane is in flight, not held', () => {
   const run = mkRun()
   enqueue(run, { to: 'worker', taskId: 't1', text: 'a' }, 0)
   expect(outboxWarnings(run, new Set(['w1:p1', 'w7:p1']), MINUTE)).toEqual([])
+})
+
+test('a prompt never attempted past the threshold is named, so a stalled supervisor is not silent', () => {
+  const run = mkRun()
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'a' }, 0)
+  const [line] = outboxWarnings(run, new Set(['w1:p1', 'w7:p1']), UNATTEMPTED_WARN_MS)
+  expect(line).toContain("1 prompt for t1's worker queued 2m and never attempted")
 })
 
 test('a finished run owes nothing, whatever is left in its outbox', () => {

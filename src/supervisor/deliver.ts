@@ -81,23 +81,33 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
 
   const out: Delivery[] = []
   for (const group of byRecipient.values()) {
-    const first = group[0] as PendingPrompt
-    const paneId = first.paneId
-    const body = group.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
-    const events = group.flatMap((p) => p.events)
-    const text = first.isOrchestrator
-      ? buildDigest({
-          run: first.run, eventLines: events,
-          phaseNote: group.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
-          footer: group.find((p) => p.footer)?.footer ?? '',
-          nextPrompt: body,
-        })
-      : body
-    const sources = group.flatMap((p) =>
-      (p.outboxId === undefined ? [] : [{ run: p.run, outboxId: p.outboxId }]))
-    out.push({ paneId, text, run: first.run, sources })
+    // Each outbox entry is its own send, so a text-level rejection drops only the
+    // entry that caused it and a failure is settled against only what it carried.
+    // The tick's event lines, footer and any unqueued text ride with the first.
+    const queued = group.filter((p) => p.outboxId !== undefined)
+    const unqueued = group.filter((p) => p.outboxId === undefined)
+    const units = queued.length === 0
+      ? [unqueued]
+      : queued.map((entry, i) => (i === 0 ? [...unqueued, entry] : [entry]))
+    units.forEach((unit, i) => out.push(deliveryOf(unit, group, i === 0)))
   }
   return out
+}
+
+function deliveryOf(unit: PendingPrompt[], group: PendingPrompt[], leads: boolean): Delivery {
+  const first = group[0] as PendingPrompt
+  const body = unit.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
+  const text = first.isOrchestrator
+    ? buildDigest({
+        run: first.run, eventLines: unit.flatMap((p) => p.events),
+        phaseNote: unit.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
+        footer: leads ? (group.find((p) => p.footer)?.footer ?? '') : '',
+        nextPrompt: body,
+      })
+    : body
+  const sources = unit.flatMap((p) =>
+    (p.outboxId === undefined ? [] : [{ run: p.run, outboxId: p.outboxId }]))
+  return { paneId: first.paneId, text, run: first.run, sources }
 }
 
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */

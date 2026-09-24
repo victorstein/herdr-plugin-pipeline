@@ -83,8 +83,16 @@ function recipientLabel(entry: OutboxEntry): string {
 }
 
 /**
- * One line per recipient still owed a prompt that has failed or has nowhere to go.
- * A prompt queued this tick and not yet attempted is in flight, not held.
+ * How long a prompt may sit never attempted before status names it. A supervisor
+ * that queues but never reaches delivery — every tick's budget gone to something
+ * else, or the supervisor wedged — otherwise leaves no trace but its own log.
+ */
+export const UNATTEMPTED_WARN_MS = 2 * 60_000
+
+/**
+ * One line per recipient still owed a prompt that has failed, has nowhere to go,
+ * or has waited UNATTEMPTED_WARN_MS without being tried. Anything younger and
+ * untried is in flight, not held.
  */
 export function outboxWarnings(
   run: Run, livePanes: ReadonlySet<string>, now: number = Date.now(),
@@ -95,7 +103,8 @@ export function outboxWarnings(
     if (!isCurrent(run, entry)) continue
     const pane = recipientPane(run, entry)
     const gone = pane === null || (livePanes.size > 0 && !livePanes.has(pane))
-    if (entry.attempts === 0 && !gone) continue
+    const inFlight = entry.attempts === 0 && now - entry.queued_at < UNATTEMPTED_WARN_MS
+    if (inFlight && !gone) continue
     const key = `${entry.to}:${entry.to === 'worker' ? entry.task_id : ''}`
     const group = groups.get(key) ?? { pane, entries: [] }
     group.entries.push(entry)
@@ -118,7 +127,13 @@ export function outboxWarnings(
       ? 'it has no pane'
       : livePanes.size > 0 && !livePanes.has(pane)
         ? `pane ${pane} is gone`
-        : `${attempts} failed attempt${attempts === 1 ? '' : 's'}, last ${latest.last_code ?? 'unknown'}`
+        : attempts === 0
+          ? null
+          : `${attempts} failed attempt${attempts === 1 ? '' : 's'}, last ${latest.last_code ?? 'unknown'}`
+    if (why === null) {
+      return `  ⚠ ${count} for ${recipientLabel(first)} queued ${ageMinutes(oldest, now)}m and ` +
+        'never attempted — the supervisor is not reaching delivery; check its pane'
+    }
     return `  ⚠ ${count} for ${recipientLabel(first)} undelivered for ` +
       `${ageMinutes(oldest, now)}m (${why}) — held, and sent as soon as it answers again`
   })

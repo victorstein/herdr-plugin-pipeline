@@ -16,7 +16,7 @@ import {
   refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
-  DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
+  boundedProbeSend, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
 } from './courier'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
@@ -149,6 +149,7 @@ async function main(): Promise<void> {
     humanTypesIn: (paneId) =>
       claimedPanes.has(paneId) || knownRuns.some((r) => r.orchestrator_pane === paneId),
   })
+  const sendProbe = boundedProbeSend(send)
   const ambiguityLog = new Set<string>()
   let lastCiPollMs = 0
 
@@ -382,7 +383,7 @@ async function main(): Promise<void> {
             awaiting: awaiting.clause,
             ladder: ladderFor(c, probeMax),
           })
-          const sent = await send(c.paneId, text)
+          const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
           return { ...sent, deferred: sent.held === 'budget' }
         },
         escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
