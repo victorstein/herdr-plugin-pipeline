@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  promptForRunPhase, shouldRetry, taskSignalsFor,
+  mergeAddedDocsArgs, promptForRunPhase, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
@@ -346,6 +346,29 @@ for (const landsAt of ['main', 'origin/main'] as const) {
     ])
   })
 }
+
+test('the merge scan diffs each merge against its first parent only, without git 2.31 flags', () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+  git(['merge', '-q', '--no-edit', siblingLands(worktree, SIBLING_DOC, 'sibling')], worktree)
+
+  const args = mergeAddedDocsArgs(['main'])
+  expect(args.some((arg) => arg.startsWith('--diff-merges'))).toBe(false)
+  const proc = Bun.spawnSync(['git', '-C', worktree, ...args], { stdout: 'pipe', stderr: 'pipe' })
+  expect(proc.exitCode).toBe(0)
+  expect(proc.stdout.toString().split('\0').filter((path) => path.length > 0)).toEqual([SIBLING_DOC])
+})
+
+test('adoptableArtifacts falls back to origin/main when local main is missing', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  git(['update-ref', 'refs/remotes/origin/main', 'refs/heads/main'], worktree)
+  git(['update-ref', '-d', 'refs/heads/main'], worktree)
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/mine.md',
+  ])
+})
 
 test('a moved doc is a rename even when the repo disables rename detection', async () => {
   const worktree = repoWithWorktree(

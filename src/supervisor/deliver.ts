@@ -172,6 +172,11 @@ async function git(checkoutPath: string, args: string[]): Promise<{ code: number
  * A doc a merge commit added relative to its first parent came from the other
  * side, so it is subtracted even when no mainline ref knows that side — a worker
  * merging a sibling's branch, or a fork whose remote is not `origin`.
+ *
+ * Two residuals, both failing closed to a repair. A branch with nothing of its
+ * own that fast-forwards onto a ref no mainline contains is indistinguishable from
+ * its own work. And a doc the worker commits inside a conflict-resolving merge
+ * (`git add -A` with its artifact uncommitted) is subtracted as foreign.
  */
 export async function adoptableArtifacts(
   checkoutPath: string | null, claimed: Set<string>,
@@ -181,12 +186,12 @@ export async function adoptableArtifacts(
   // branch-review artifact and every sibling's merged docs.
   if (checkoutPath === null) return []
 
-  const local = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ARTIFACT_BASE_REF])
-  if (local.code !== 0) return []
-  const remote = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ARTIFACT_REMOTE_BASE_REF])
-  const mainlines = remote.code === 0
-    ? [ARTIFACT_BASE_REF, ARTIFACT_REMOTE_BASE_REF]
-    : [ARTIFACT_BASE_REF]
+  const mainlines: string[] = []
+  for (const ref of [ARTIFACT_BASE_REF, ARTIFACT_REMOTE_BASE_REF]) {
+    const resolved = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ref])
+    if (resolved.code === 0) mainlines.push(ref)
+  }
+  if (mainlines.length === 0) return []
 
   const forkPoint = await git(checkoutPath, ['merge-base', 'HEAD', ...mainlines])
   if (forkPoint.code !== 0) return []
@@ -196,11 +201,7 @@ export async function adoptableArtifacts(
   ])
   if (diff.code !== 0) return []
 
-  const mergedIn = await git(checkoutPath, [
-    'log', '-z', '--format=', '--name-only', '--diff-filter=A',
-    '--first-parent', '--merges', '--diff-merges=first-parent',
-    'HEAD', '--not', ...mainlines, '--', 'docs/',
-  ])
+  const mergedIn = await git(checkoutPath, mergeAddedDocsArgs(mainlines))
   if (mergedIn.code !== 0) return []
   const addedByMerges = new Set(nulSeparated(mergedIn.text))
 
@@ -208,6 +209,16 @@ export async function adoptableArtifacts(
     .filter((path) => !path.startsWith(`${REVIEWS_DIR}/`))
     .filter((path) => !addedByMerges.has(path))
     .filter((path) => !claimed.has(path))
+}
+
+// `-m --first-parent`, not `--diff-merges=first-parent`: the latter needs git 2.31,
+// and on an older git the log exits non-zero and silently turns adoption off.
+export function mergeAddedDocsArgs(mainlines: string[]): string[] {
+  return [
+    'log', '-z', '--format=', '--name-only', '--diff-filter=A',
+    '--first-parent', '--merges', '-m',
+    'HEAD', '--not', ...mainlines, '--', 'docs/',
+  ]
 }
 
 function nulSeparated(text: string): string[] {
