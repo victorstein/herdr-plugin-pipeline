@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.3...v1.4.0) (2026-09-24)
+
+
+### Features
+
+* hand a brief over with hpipe dispatch --task, add hpipe show and --help ([#64](https://github.com/victorstein/herdr-plugin-pipeline/issues/64)) ([b4135c7](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4135c7f20040e4f16dc01edfd99507443ea9d67)), closes [#11](https://github.com/victorstein/herdr-plugin-pipeline/issues/11) [#17](https://github.com/victorstein/herdr-plugin-pipeline/issues/17)
+
 ## [1.3.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.2...v1.3.3) (2026-09-24)
 
 
