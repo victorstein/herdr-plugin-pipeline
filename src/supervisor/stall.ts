@@ -27,7 +27,7 @@ export interface StallCandidate {
   run: Run
   task: Task | null
   action: StallAction
-  /** Probes SENT so far — never deferrals. Drives the ladder sentence and the reason string. */
+  /** Probe rungs climbed so far, delivered or not — never deferrals. Drives the ladder sentence and the reason string. */
   probes: number
   escalatable: boolean
   /** Age in the current phase, for the prompt. */
@@ -120,6 +120,7 @@ export function stallStateFor(run: Run, record: Run | Task): StallState {
     run_at: run.phase_entered_at,
     last_probe_at: Math.max(record.phase_entered_at, run.phase_entered_at),
     probes: 0,
+    undelivered: 0,
     holds: 0,
   }
 }
@@ -132,14 +133,16 @@ export function stallStateFor(run: Run, record: Run | Task): StallState {
  * is the rung-per-tick burst this design exists to prevent.
  */
 export function bumpStall(
-  run: Run, record: Run | Task, kind: 'probes' | 'holds', now: number,
+  run: Run, record: Run | Task, kind: 'probes' | 'undelivered' | 'holds', now: number,
 ): void {
   const s = stallStateFor(run, record)
+  const isProbeRung = kind === 'probes' || kind === 'undelivered'
   record.stall = {
     at: record.phase_entered_at,
     run_at: run.phase_entered_at,
     last_probe_at: now,
-    probes: s.probes + (kind === 'probes' ? 1 : 0),
+    probes: s.probes + (isProbeRung ? 1 : 0),
+    undelivered: (s.undelivered ?? 0) + (kind === 'undelivered' ? 1 : 0),
     holds: s.holds + (kind === 'holds' ? 1 : 0),
   }
 }
@@ -307,6 +310,12 @@ export function ladderFor(c: { probes: number; escalatable: boolean }, probeMax:
 export interface StallDeps {
   probeMax: number
   now: () => number
+  /**
+   * `ok: false` means the probe did not reach the pane — a failed send, or one
+   * deliberately skipped because the pane cannot answer. Either climbs the
+   * ladder as an undelivered rung, so a filter that stops sending must still
+   * return here rather than drop the candidate.
+   */
   probe: (c: StallCandidate) => Promise<{ ok: boolean }>
   /**
    * Rendered BEFORE the transition, so it describes the phase being left —
@@ -332,11 +341,14 @@ export async function applyStalls(
   for (const c of candidates) {
     const record: Run | Task = c.task ?? c.run
 
+    // The rung is climbed whether or not the probe landed: the ladder exists to
+    // end silence, and a pane that cannot be reached is the case escalation
+    // matters most. Bumping still moves `last_probe_at`, so a failing send is
+    // retried once per threshold, not once per tick (#32).
     if (c.action === 'probe') {
-      if ((await deps.probe(c)).ok) {
-        bumpStall(c.run, record, 'probes', deps.now())
-        await deps.persist(c.run)
-      }
+      const { ok } = await deps.probe(c)
+      bumpStall(c.run, record, ok ? 'probes' : 'undelivered', deps.now())
+      await deps.persist(c.run)
       continue
     }
 
@@ -365,7 +377,9 @@ export async function applyStalls(
 async function escalate(c: StallCandidate, deps: StallDeps): Promise<void> {
   const from = c.task ? c.task.phase : c.run.phase
   const text = await deps.escalationText(c, from)
-  const why = `${c.probes} stall probes unanswered`
+  const undelivered = stallStateFor(c.run, c.task ?? c.run).undelivered ?? 0
+  const why = `${c.probes} stall probes unanswered` +
+    (undelivered > 0 ? `, ${undelivered} of them undelivered` : '')
 
   if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
   else enterRunPhase(c.run, 'escalated', why)

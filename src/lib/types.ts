@@ -51,9 +51,12 @@ export interface StallState {
   at: number
   /** The run's `phase_entered_at` this state belongs to. */
   run_at: number
-  /** When the last rung was climbed — a sent probe or a deferral. The due anchor. */
+  /** When the last rung was climbed — a probe, delivered or not, or a deferral. The due anchor. */
   last_probe_at: number
+  /** Probe rungs climbed, INCLUDING undelivered ones — an unreachable pane must still escalate. */
   probes: number
+  /** How many of `probes` never reached the pane. Optional: ledgers written before #32 lack it. */
+  undelivered?: number
   holds: number
 }
 

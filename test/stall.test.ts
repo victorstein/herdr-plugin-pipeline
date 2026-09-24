@@ -143,7 +143,7 @@ test('stall state reads as zero when absent, anchored at the later phase entry',
   const run = runAt('branch-review', 500)
   const task = mkTask({ phase_entered_at: 900 })
   expect(stallStateFor(run, task)).toEqual({
-    at: 900, run_at: 500, last_probe_at: 900, probes: 0, holds: 0,
+    at: 900, run_at: 500, last_probe_at: 900, probes: 0, undelivered: 0, holds: 0,
   })
 })
 
@@ -179,7 +179,7 @@ test('a bump rewrites both stamps, or the next read would reject it', () => {
   const task = mkTask({ phase_entered_at: 900 })
   bumpStall(run, task, 'probes', 5000)
   expect(task.stall).toEqual({
-    at: 900, run_at: 500, last_probe_at: 5000, probes: 1, holds: 0,
+    at: 900, run_at: 500, last_probe_at: 5000, probes: 1, undelivered: 0, holds: 0,
   })
   expect(stallStateFor(run, task).probes).toBe(1)
 })
@@ -191,7 +191,7 @@ test('bumps accumulate, and holds and probes count separately', () => {
   bumpStall(run, task, 'probes', 2000)
   bumpStall(run, task, 'holds', 3000)
   expect(stallStateFor(run, task)).toEqual({
-    at: 900, run_at: 500, last_probe_at: 3000, probes: 2, holds: 1,
+    at: 900, run_at: 500, last_probe_at: 3000, probes: 2, undelivered: 0, holds: 1,
   })
 })
 
@@ -466,7 +466,7 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
   return { ...base, ...over, sent }
 }
 
-test('an accepted probe bumps and persists; a rejected one does neither', async () => {
+test('an undelivered probe still climbs a rung, and is counted as undelivered — #32', async () => {
   const run = runAt('execute', LONG_AGO)
   const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
   run.tasks = [task]
@@ -474,13 +474,49 @@ test('an accepted probe bumps and persists; a rejected one does neither', async 
   let persisted = 0
   const bad = mkDeps({ probe: async () => ({ ok: false }), persist: async () => { persisted += 1 } })
   await applyStalls(taskStallCandidates([run], NOW, 45, 3), bad)
-  expect(stallStateFor(run, task).probes).toBe(0)
-  expect(persisted).toBe(0)
-
-  const good = mkDeps({ persist: async () => { persisted += 1 } })
-  await applyStalls(taskStallCandidates([run], NOW, 45, 3), good)
   expect(stallStateFor(run, task).probes).toBe(1)
+  expect(stallStateFor(run, task).undelivered).toBe(1)
+  expect(stallStateFor(run, task).last_probe_at).toBe(NOW)
   expect(persisted).toBe(1)
+
+  const later = NOW + 45 * 60_000
+  const good = mkDeps({ now: () => later, persist: async () => { persisted += 1 } })
+  await applyStalls(taskStallCandidates([run], later, 45, 3), good)
+  expect(stallStateFor(run, task).probes).toBe(2)
+  expect(stallStateFor(run, task).undelivered).toBe(1)
+  expect(persisted).toBe(2)
+})
+
+test('an unreachable pane escalates on the time-based cadence, not once per tick — #32', async () => {
+  // The issue's demonstration was 1000 ticks, 1000 sends, no escalation. Ticking
+  // every second must neither stall the ladder nor climb a rung per tick.
+  const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  const task = run.tasks[0] as Task
+  let now = 0
+  const attemptsAtMinute: number[] = []
+  const deps = mkDeps({
+    probe: async () => { attemptsAtMinute.push(now / 60_000); return { ok: false } },
+    agentStatus: async () => 'unknown',
+  })
+  for (; now <= 200 * 60_000 && task.phase === 'implement'; now += 1000) {
+    await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
+  }
+  expect(attemptsAtMinute).toEqual([45, 90, 135])
+  expect(task.phase).toBe('escalated')
+  expect(deps.sent).toEqual(['escalate:t1'])
+  expect(run.history.at(-1)?.why).toBe('3 stall probes unanswered, 3 of them undelivered')
+})
+
+test('a stall state written before #32 reads as zero undelivered', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = {
+    at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 2, holds: 0,
+  }
+  bumpStall(run, task, 'undelivered', NOW)
+  expect(stallStateFor(run, task).probes).toBe(3)
+  expect(stallStateFor(run, task).undelivered).toBe(1)
 })
 
 test('a bump survives the ledger round trip that every tick performs', async () => {
