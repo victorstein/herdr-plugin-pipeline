@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readJson, writeJson } from '../src/lib/store'
+import { LockTimeoutError, readJson, withFileLock, writeJson, writeJsonIf } from '../src/lib/store'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'store-')) })
@@ -42,4 +42,43 @@ test('concurrent writes from the same process both resolve and leave valid JSON'
   const result = await readJson<{ who: string }>(p)
   expect(result).not.toBeNull()
   expect(['a', 'b']).toContain(result!.who)
+})
+
+test('writeJsonIf writes only when the predicate accepts what is on disk', async () => {
+  const p = join(dir, 'a.json')
+  await writeJson(p, { rev: 1 })
+  const revIs = (n: number) => (current: unknown) => (current as { rev: number }).rev === n
+
+  expect(await writeJsonIf(p, { rev: 2 }, revIs(0))).toBe(false)
+  expect(await readJson<{ rev: number }>(p)).toEqual({ rev: 1 })
+  expect(await writeJsonIf(p, { rev: 2 }, revIs(1))).toBe(true)
+  expect(await readJson<{ rev: number }>(p)).toEqual({ rev: 2 })
+  expect(readdirSync(dir).filter((f) => f !== 'a.json')).toHaveLength(0)
+})
+
+test('a lock left behind by a dead holder is reclaimed once it is stale', async () => {
+  const p = join(dir, 'a.json')
+  writeFileSync(`${p}.lock`, '99999')
+  const past = new Date(Date.now() - 60_000)
+  utimesSync(`${p}.lock`, past, past)
+
+  expect(await withFileLock(p, () => 'got it', { staleMs: 1_000, waitMs: 500 })).toBe('got it')
+  expect(existsSync(`${p}.lock`)).toBe(false)
+})
+
+test('a fresh lock held by someone else times out instead of blocking forever', async () => {
+  const p = join(dir, 'a.json')
+  writeFileSync(`${p}.lock`, String(process.pid))
+
+  const started = Date.now()
+  await expect(withFileLock(p, () => 'never', { staleMs: 60_000, waitMs: 100 }))
+    .rejects.toBeInstanceOf(LockTimeoutError)
+  expect(Date.now() - started).toBeLessThan(1_000)
+  expect(existsSync(`${p}.lock`)).toBe(true)
+})
+
+test('the lock is released when the critical section throws', async () => {
+  const p = join(dir, 'a.json')
+  await expect(withFileLock(p, () => { throw new Error('boom') })).rejects.toThrow('boom')
+  expect(existsSync(`${p}.lock`)).toBe(false)
 })

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  activeRunForRepo, listRuns, newRun, readOrchestrator,
-  resolveRun, saveRun, writeOrchestrator,
+  activeRunForRepo, listRuns, loadRun, newRun, readOrchestrator,
+  resolveRun, retryOnStaleRun, saveRun, StaleRunError, writeOrchestrator,
 } from '../src/lib/ledger'
 
 let dir: string
@@ -204,4 +204,77 @@ test('resolveRun skips a run whose phase is in no row instead of throwing', asyn
 
   const named = await resolveRun(dir, 'personal', query({ runId: broken.run_id }))
   expect(!named.ok && named.reason).toBe('unreadable')
+})
+
+const fresh = () =>
+  newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+
+test('a run written before revisions existed loads and saves', async () => {
+  const run = fresh()
+  const legacy: Record<string, unknown> = { ...run }
+  delete legacy.revision
+  mkdirSync(join(dir, 'runs', 'personal'), { recursive: true })
+  writeFileSync(join(dir, 'runs', 'personal', `${run.run_id}.json`), JSON.stringify(legacy))
+
+  const loaded = (await loadRun(dir, 'personal', run.run_id))!
+  loaded.title = 'b'
+  await saveRun(dir, loaded)
+  expect((await loadRun(dir, 'personal', run.run_id))?.title).toBe('b')
+})
+
+test('saveRun refuses a copy whose base revision is stale', async () => {
+  const run = fresh()
+  await saveRun(dir, run)
+  const first = (await loadRun(dir, 'personal', run.run_id))!
+  const second = (await loadRun(dir, 'personal', run.run_id))!
+
+  first.phase = 'execute'
+  await saveRun(dir, first)
+  second.title = 'clobber'
+  await expect(saveRun(dir, second)).rejects.toBeInstanceOf(StaleRunError)
+
+  const onDisk = (await loadRun(dir, 'personal', run.run_id))!
+  expect(onDisk.phase).toBe('execute')
+  expect(onDisk.title).toBe('a')
+})
+
+test('a save advances the in-memory revision so the same holder can save again', async () => {
+  const run = fresh()
+  await saveRun(dir, run)
+  run.title = 'b'
+  await saveRun(dir, run)
+  expect((await loadRun(dir, 'personal', run.run_id))?.title).toBe('b')
+})
+
+test('retryOnStaleRun re-reads and reapplies a mutation that lost a race', async () => {
+  const run = fresh()
+  await saveRun(dir, run)
+
+  let attempts = 0
+  await retryOnStaleRun(async () => {
+    attempts++
+    const mine = (await loadRun(dir, 'personal', run.run_id))!
+    if (attempts === 1) {
+      const theirs = (await loadRun(dir, 'personal', run.run_id))!
+      theirs.intake_closed = true
+      await saveRun(dir, theirs)
+    }
+    mine.phase = 'execute'
+    await saveRun(dir, mine)
+  })
+
+  const onDisk = (await loadRun(dir, 'personal', run.run_id))!
+  expect(attempts).toBe(2)
+  expect(onDisk.phase).toBe('execute')
+  expect(onDisk.intake_closed).toBe(true)
+})
+
+test('retryOnStaleRun gives up loudly rather than looping forever', async () => {
+  let attempts = 0
+  const doomed = retryOnStaleRun(async () => {
+    attempts++
+    throw new StaleRunError('r1')
+  }, 3)
+  await expect(doomed).rejects.toBeInstanceOf(StaleRunError)
+  expect(attempts).toBe(3)
 })

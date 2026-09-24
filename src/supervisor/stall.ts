@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { isUnlandedSave } from '../lib/ledger'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
@@ -395,34 +396,49 @@ export interface StallDeps {
 export async function applyStalls(
   candidates: StallCandidate[], deps: StallDeps,
 ): Promise<void> {
+  // A run whose save lost to a CLI command is stale for the rest of the batch:
+  // every later persist of it would lose too, after its prompt had been sent.
+  const staleRuns = new Set<Run>()
   for (const c of candidates) {
-    const record: Run | Task = c.task ?? c.run
-
-    // An undeliverable probe must still climb eventually: the ladder exists to
-    // end silence, and a pane that cannot be reached is the case escalation
-    // matters most (#32). `noteUndelivered` decides when.
-    if (c.action === 'probe') {
-      if ((await deps.probe(c)).ok) {
-        bumpStall(c.run, record, 'probes', deps.now())
-        await deps.persist(c.run)
-      } else if (noteUndelivered(c.run, record, deps.now(), c.thresholdMs)) {
-        await deps.persist(c.run)
-      }
-      continue
+    if (staleRuns.has(c.run)) continue
+    try {
+      await applyStall(c, deps)
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+      staleRuns.add(c.run)
+      console.error(`[pipeline] run ${c.run.run_id}: stall bookkeeping not saved (${error.message}); ` +
+        're-read next tick')
     }
-
-    const { holds } = stallStateFor(c.run, record)
-    if (
-      holds < deps.probeMax && c.actorPaneId !== null &&
-      (await deps.agentStatus(c.actorPaneId)) === 'working'
-    ) {
-      bumpStall(c.run, record, 'holds', deps.now())
-      await deps.persist(c.run)
-      continue
-    }
-
-    await escalate(c, deps)
   }
+}
+
+async function applyStall(c: StallCandidate, deps: StallDeps): Promise<void> {
+  const record: Run | Task = c.task ?? c.run
+
+  // An undeliverable probe must still climb eventually: the ladder exists to
+  // end silence, and a pane that cannot be reached is the case escalation
+  // matters most (#32). `noteUndelivered` decides when.
+  if (c.action === 'probe') {
+    if ((await deps.probe(c)).ok) {
+      bumpStall(c.run, record, 'probes', deps.now())
+      await deps.persist(c.run)
+    } else if (noteUndelivered(c.run, record, deps.now(), c.thresholdMs)) {
+      await deps.persist(c.run)
+    }
+    return
+  }
+
+  const { holds } = stallStateFor(c.run, record)
+  if (
+    holds < deps.probeMax && c.actorPaneId !== null &&
+    (await deps.agentStatus(c.actorPaneId)) === 'working'
+  ) {
+    bumpStall(c.run, record, 'holds', deps.now())
+    await deps.persist(c.run)
+    return
+  }
+
+  await escalate(c, deps)
 }
 
 /**

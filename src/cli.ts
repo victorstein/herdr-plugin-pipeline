@@ -6,9 +6,10 @@ import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from 
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, runPhaseState, saveRun,
-  taskPhaseIsTerminal, writeOrchestrator,
+  activeRunForRepo, listRuns, newRun, resolveRun, retryOnStaleRun, runForWorkspace,
+  runPhaseState, saveRun, StaleRunError, taskPhaseIsTerminal, writeOrchestrator,
 } from './lib/ledger'
+import { LockTimeoutError } from './lib/store'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
@@ -27,6 +28,30 @@ export interface CmdResult { ok: boolean; text: string; json?: string }
 
 const ok = (text: string, json?: string): CmdResult => ({ ok: true, text, json })
 const fail = (text: string): CmdResult => ({ ok: false, text })
+
+/**
+ * A command that loses a save to the supervisor re-runs from its first read, so
+ * every guard is re-checked against what the supervisor just wrote. One that
+ * cannot land says so and exits non-zero: printing success for a recovery
+ * command the supervisor then discarded is how #51 stayed invisible.
+ */
+function retryingOnStale<A extends unknown[]>(
+  command: (...args: A) => Promise<CmdResult>,
+): (...args: A) => Promise<CmdResult> {
+  return async (...args) => {
+    try {
+      return await retryOnStaleRun(() => command(...args))
+    } catch (error) {
+      if (error instanceof StaleRunError) {
+        return fail(`run ${error.runId} kept changing under this command; nothing was written — run it again`)
+      }
+      if (error instanceof LockTimeoutError) {
+        return fail(`could not lock ${error.lockPath}; nothing was written — run it again`)
+      }
+      throw error
+    }
+  }
+}
 
 // No leading article: the call sites supply their own, so both "found no run in
 // intake, dispatch or execute" and "more than one live run" read as sentences.
@@ -166,7 +191,7 @@ export async function cmdStart(ctx: Ctx, input: {
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
 
-export async function cmdTask(ctx: Ctx, input: {
+async function registerTask(ctx: Ctx, input: {
   branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
   repoKey: string | null; runId: string | null
@@ -250,6 +275,15 @@ export async function cmdTask(ctx: Ctx, input: {
   // execute completes only once intake is closed and every task is terminal, so a
   // task registered mid-run must reopen the gate or the run could complete underneath it.
   run.intake_closed = false
+
+  // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
+  // `queued` would make the next tick deliver the same prompt a second time. One
+  // save for registration and dispatch together: a stale second save would make
+  // the retry register the task twice.
+  const gate = gateStatus(task, run.tasks)
+  if (gate.state === 'ready') {
+    enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
+  }
   await saveRun(ctx.stateDir, run)
 
   // The recorded set, printed back. A malformed --files is otherwise invisible:
@@ -263,19 +297,14 @@ export async function cmdTask(ctx: Ctx, input: {
   // supervisor's tick. Measured on the live ledger.
   const bootLine = bootstrapLine(repoBootstrap(run.repo_root))
 
-  const gate = gateStatus(task, run.tasks)
   if (gate.state !== 'ready') {
     return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\nqueued: waiting on ${gate.on.join(', ')}`)
   }
 
-  // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
-  // `queued` would make the next tick deliver the same prompt a second time.
-  enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
-  await saveRun(ctx.stateDir, run)
-
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\n\n${prompt}`)
 }
+export const cmdTask = retryingOnStale(registerTask)
 
 /**
  * Read-only. Without it the only way to see a worker brief is to register a
@@ -363,7 +392,7 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`)
 }
 
-export async function cmdDispatchDone(ctx: Ctx, input: {
+async function closeIntake(ctx: Ctx, input: {
   runId: string | null; repoKey: string | null
 }): Promise<CmdResult> {
   const query: RunQuery = {
@@ -378,8 +407,9 @@ export async function cmdDispatchDone(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(`intake closed for ${run.run_id}`)
 }
+export const cmdDispatchDone = retryingOnStale(closeIntake)
 
-export async function cmdRewind(ctx: Ctx, input: {
+async function rewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
 }): Promise<CmdResult> {
   const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
@@ -464,8 +494,9 @@ export async function cmdRewind(ctx: Ctx, input: {
     (reserved === null ? '' : `; next verdict → ${reserved}`),
   )
 }
+export const cmdRewind = retryingOnStale(rewind)
 
-export async function cmdRelease(ctx: Ctx, input: {
+async function release(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
@@ -485,8 +516,9 @@ export async function cmdRelease(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(`released ${input.taskId}; files reservation cleared`)
 }
+export const cmdRelease = retryingOnStale(release)
 
-export async function cmdDecide(ctx: Ctx, input: {
+async function decide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
@@ -524,8 +556,9 @@ export async function cmdDecide(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(`opened decision ${decision.id} on ${input.task}; task blocked-on-decision`)
 }
+export const cmdDecide = retryingOnStale(decide)
 
-export async function cmdAnswer(ctx: Ctx, input: {
+async function answer(ctx: Ctx, input: {
   task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
@@ -559,6 +592,7 @@ export async function cmdAnswer(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(`recorded answer to ${decision.id} on ${input.task}; pending delivery`)
 }
+export const cmdAnswer = retryingOnStale(answer)
 
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
@@ -577,7 +611,7 @@ export async function cmdDrain(ctx: Ctx): Promise<CmdResult> {
   return ok(events.length === 0 ? 'queue empty' : JSON.stringify(events, null, 2))
 }
 
-export async function cmdAbort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
+async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -588,8 +622,9 @@ export async function cmdAbort(ctx: Ctx, input: { runId: string }): Promise<CmdR
   await saveRun(ctx.stateDir, run)
   return ok(`aborted ${run.run_id}; worktrees and branches left alone. Undo: hpipe resume ${run.run_id}`)
 }
+export const cmdAbort = retryingOnStale(abort)
 
-export async function cmdResume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
+async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -606,8 +641,9 @@ export async function cmdResume(ctx: Ctx, input: { runId: string }): Promise<Cmd
   await saveRun(ctx.stateDir, run)
   return ok(`resumed ${run.run_id} at ${back}`)
 }
+export const cmdResume = retryingOnStale(resume)
 
-export async function cmdForget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {
+async function forget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {
   const run = await runForWorkspace(ctx.stateDir, ctx.session, input.workspaceId)
   const task = run?.tasks.find((t) => t.workspace_id === input.workspaceId)
   if (!run || !task) return fail(`no task is bound to ${input.workspaceId}`)
@@ -617,6 +653,7 @@ export async function cmdForget(ctx: Ctx, input: { workspaceId: string }): Promi
   await saveRun(ctx.stateDir, run)
   return ok(`unbound ${input.workspaceId} from ${task.task_id}`)
 }
+export const cmdForget = retryingOnStale(forget)
 
 // ——— argv dispatcher ———
 

@@ -6,7 +6,7 @@ import {
   applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
-import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
@@ -707,6 +707,24 @@ test('the ledger is persisted before the escalation is sent', async () => {
     sendEscalation: async () => { order.push('send') },
   }))
   expect(order).toEqual(['persist:escalated', 'send'])
+})
+
+test('an escalation whose save lost to a CLI write is not sent, and the batch goes on', async () => {
+  const stale = runAt('execute', LONG_AGO)
+  const stuck = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  stale.tasks = [stuck]
+  stuck.stall = {
+    at: LONG_AGO, run_at: stale.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+  const other = runAt('execute', LONG_AGO)
+  other.run_id = 'other'
+  other.tasks = [mkTask({ task_id: 't9', phase: 'implement', phase_entered_at: LONG_AGO })]
+
+  const deps = mkDeps({
+    persist: async (r) => { if (r === stale) throw new StaleRunError(r.run_id) },
+  })
+  await applyStalls(taskStallCandidates([stale, other], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual(['probe:t9'])
 })
 
 test('every last-mile row is probed via the orchestrator — #19', () => {

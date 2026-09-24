@@ -942,3 +942,33 @@ test('dispatch --task needs a pane', async () => {
   expect(result.text).toContain('--pane')
   expect(sent).toEqual([])
 })
+
+test('a supervisor save of a copy loaded before a rewind cannot undo the rewind', async () => {
+  // The interleaving that returned a run from `execute` to `intake` on
+  // 2026-09-19: the supervisor loads, a human rewinds, the supervisor saves.
+  const run = await seed()
+  const supervisorCopy = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!
+
+  const rewound = await cmdRewind(ctx(), { runId: run.run_id, phase: 'execute', taskId: null })
+  expect(rewound.ok).toBe(true)
+
+  supervisorCopy.history.push({ at: Date.now(), from: 'intake', to: 'intake', why: 'tick' })
+  await expect(saveRun(dir, supervisorCopy)).rejects.toThrow()
+
+  const onDisk = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(onDisk?.phase).toBe('execute')
+})
+
+test('concurrent commands on one run each land instead of the last one winning', async () => {
+  const ids = ['t1', 't2', 't3', 't4', 't5']
+  const run = runWithTasks(ids.map((task_id) => ({ task_id, phase: 'failed', files: [`src/${task_id}`] })))
+  await saveRun(dir, run)
+
+  const results = await Promise.all(
+    ids.map((taskId) => cmdRelease(ctx(), { taskId, repoKey: null, runId: run.run_id })),
+  )
+  expect(results.every((r) => r.ok)).toBe(true)
+
+  const onDisk = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
+  expect(onDisk?.tasks.map((t) => t.files)).toEqual([[], [], [], [], []])
+})

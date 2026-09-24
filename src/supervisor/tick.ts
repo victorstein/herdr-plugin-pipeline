@@ -1,5 +1,6 @@
 import { abandonDecisions } from '../lib/decisions'
 import { filesOverlap, isInFlight } from '../lib/gating'
+import { isUnlandedSave } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { adoptionOutcome, currentMissingArtifact } from '../lib/status'
@@ -234,6 +235,55 @@ export function applyEvents(
   }
 
   return { changed, wake }
+}
+
+export interface EventSaveDeps {
+  save: (run: Run) => Promise<void>
+  reload: (run: Run) => Promise<Run | null>
+  /** The same drained batch, applied to one freshly read run. */
+  reapply: (run: Run) => ApplyResult
+  warn: (message: string) => void
+}
+
+/**
+ * Saves every run after an event batch. A run a CLI command rewrote since this
+ * tick read it is re-read and the batch applied again: drain() is destructive, so
+ * dropping the save would lose a pane exit or a worktree adoption for good, and
+ * saving the tick's copy would silently undo the command (#51). A run that still
+ * cannot be saved sits out the rest of the tick, so nothing downstream acts on —
+ * or sends prompts about — state the ledger never recorded.
+ */
+export async function saveEventedRuns(
+  runs: Run[], wake: WakeLine[], deps: EventSaveDeps,
+): Promise<{ runs: Run[]; wake: WakeLine[] }> {
+  const saved: Run[] = []
+  let lines = wake
+
+  for (const run of runs) {
+    try {
+      await deps.save(run)
+      saved.push(run)
+      continue
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+    }
+
+    lines = lines.filter((line) => line.run !== run)
+    try {
+      const fresh = await deps.reload(run)
+      if (fresh === null) continue
+      const replay = deps.reapply(fresh)
+      if (replay.changed) await deps.save(fresh)
+      saved.push(fresh)
+      lines = [...lines, ...replay.wake]
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+      deps.warn(`[pipeline] run ${run.run_id}: events not saved (${error.message}); ` +
+        'skipping it this tick')
+    }
+  }
+
+  return { runs: saved, wake: lines }
 }
 
 /**
