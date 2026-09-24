@@ -636,12 +636,6 @@ async function rewind(ctx: Ctx, input: {
     run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
-    // applyEvents binds a worktree only when workspace_id is null, so adopted_at is
-    // write-once — without clearing it here, rewinding to `dispatch` could never
-    // re-fire that row's edge and the rewind would be a one-way door.
-    if (input.phase === 'dispatch') {
-      for (const t of run.tasks) if (t.workspace_id !== null) t.adopted_at = null
-    }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (runRow(run.phase).signal === 'verdict') {
       reserved = reserveVerdict(run, null, run.phase)

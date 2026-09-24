@@ -247,15 +247,24 @@ export async function uncommittedPaths(checkoutPath: string): Promise<string[] |
     .map((line) => line.slice(3))
 }
 
+/**
+ * A task is owed a worktree once it has left `queued` — at registration or when
+ * its dependencies land — until it is bound or has stopped. A queued dependent is
+ * not owed one yet: holding `dispatch` for it would stall-probe the orchestrator
+ * for the whole life of its dependency.
+ */
+function awaitsWorktree(task: Task): boolean {
+  if (task.phase === 'queued' || task.workspace_id !== null) return false
+  return !taskRow(task.phase).terminal && task.phase !== 'escalated'
+}
+
 export function taskSignalsFor(run: Run) {
-  const adopted = run.tasks
-    .map((t) => t.adopted_at)
-    .filter((at): at is number => at !== null)
   return {
     newestRegisteredAt: run.tasks.length > 0
       ? Math.max(...run.tasks.map((t) => t.registered_at))
       : null,
-    newestAdoptedAt: adopted.length > 0 ? Math.max(...adopted) : null,
+    dispatchComplete: run.tasks.some((t) => t.phase !== 'queued') &&
+      !run.tasks.some(awaitsWorktree),
     tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => FINISHED.has(t.phase)),
     anyTaskDone: run.tasks.some((t) => t.phase === 'done'),
   }
