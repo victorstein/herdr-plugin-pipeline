@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import type { Task } from '../src/lib/types'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
@@ -159,13 +160,8 @@ test('the worker brief carries the bootstrap note', async () => {
   expect(text).toContain('{{bootstrap_note}}')
 })
 
-test('a rendered worker brief leaves no placeholder behind', async () => {
-  // render() throws on an unresolved {{token}} at DELIVERY time, in front of an
-  // agent — modelled on 'a rendered probe leaves no placeholder behind' above.
-  const { renderWorkerPrompt } = await import('../src/lib/worker-prompt')
-  const { newRun } = await import('../src/lib/ledger')
-  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
-  run.tasks = [{
+function briefTask(overrides: Partial<Task>): Task {
+  return {
     task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core', depends_on: [], files: [],
     keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown',
     phase: 'research', phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
@@ -173,32 +169,32 @@ test('a rendered worker brief leaves no placeholder behind', async () => {
     artifacts: { research: 'a.md', spec: 'b.md', plan: 'c.md', verdicts: {} },
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: 'n',
-  }]
-  const text = await renderWorkerPrompt(ROOT, run, run.tasks[0]!)
+    ...overrides,
+  }
+}
+
+async function renderBriefFor(tasks: Task[], index: number): Promise<string> {
+  const { renderWorkerPrompt } = await import('../src/lib/worker-prompt')
+  const { newRun } = await import('../src/lib/ledger')
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.tasks = tasks
+  return renderWorkerPrompt(ROOT, run, run.tasks[index]!)
+}
+
+test('a rendered worker brief leaves no placeholder behind', async () => {
+  // render() throws on an unresolved {{token}} at DELIVERY time, in front of an
+  // agent — modelled on 'a rendered probe leaves no placeholder behind' above.
+  const text = await renderBriefFor([briefTask({})], 0)
   expect(text).not.toContain('{{')
 })
 
 test('a task depending on a core-surface sibling gets no repo-specific build command', async () => {
-  // A dependent is dispatched only once its dependency is `done`, so the repo's
-  // own bootstrap already runs against a checkout that contains it. A plugin-side
-  // build line can only be one repo's convention shipped to every other repo.
-  const { renderWorkerPrompt } = await import('../src/lib/worker-prompt')
-  const { newRun } = await import('../src/lib/ledger')
-  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
-  const base = {
-    branch: 'feat/x', issue: 1, depends_on: [] as string[], files: [],
-    keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown' as const,
-    phase: 'research' as const, phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
-    pr: null, ci: null, checkout_path: null, registered_at: 0, adopted_at: null,
-    artifacts: { research: 'a.md', spec: 'b.md', plan: 'c.md', verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
-    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: 'n',
-  }
-  run.tasks = [
-    { ...base, task_id: 't1', surface: 'core' },
-    { ...base, task_id: 't2', surface: 'web', depends_on: ['t1'] },
-  ]
-  const text = await renderWorkerPrompt(ROOT, run, run.tasks[1]!)
+  // A plugin-side build line can only be one repo's convention shipped to every
+  // other repo; the build belongs in that repo's own bootstrap.
+  const text = await renderBriefFor([
+    briefTask({ task_id: 't1', surface: 'core' }),
+    briefTask({ task_id: 't2', surface: 'web', depends_on: ['t1'] }),
+  ], 1)
   expect(text).not.toContain('pnpm')
   expect(text).not.toContain('turbo')
   expect(text).not.toContain('@repo/core')
@@ -209,10 +205,12 @@ test('the worker brief has no plugin-side build note', async () => {
   expect(text).not.toContain('{{dist_note}}')
 })
 
-test('the README tells a repo its bootstrap is where a dependency\'s build step belongs', async () => {
-  const readme = await Bun.file(join(ROOT, 'README.md')).text()
-  expect(readme).toContain('--depends-on')
-  expect(readme).toContain('after its dependencies have merged')
+test('the merge prompt asks for a bootstrap re-run where the rebase happens', async () => {
+  // The orchestrator is the one told to rebase, so the re-run cue lives here and
+  // not in the worker's brief.
+  const text = await Bun.file(join(ROOT, 'prompts', 'merge.md')).text()
+  expect(text).toContain('rebase')
+  expect(text).toContain('.claude/pipeline-bootstrap')
 })
 
 test('the dispatch prompt names all three header lines, not two', async () => {

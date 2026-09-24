@@ -57,6 +57,5 @@ export function briefNote(b: Bootstrap): string {
     : ''
   return `> This repo declares a worktree bootstrap at \`./${BOOTSTRAP_REL}\`, which should have been run\n` +
     '> in this checkout before you started. If a build, test or typecheck fails on a missing\n' +
-    '> dependency, run it yourself rather than installing anything by hand. Run it again after\n' +
-    `> any rebase onto the base branch: a sibling that landed may have changed what it builds.${caveat}`
+    `> dependency, run it yourself rather than installing anything by hand.${caveat}`
 }

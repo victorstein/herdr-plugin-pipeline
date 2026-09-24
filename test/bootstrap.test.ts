@@ -85,10 +85,3 @@ test('the worker note offers a recovery, it does not assert the bootstrap ran', 
 test('a non-executable declaration tells the worker how to fix it', () => {
   expect(briefNote({ kind: 'not-executable' })).toContain(`chmod +x ${BOOTSTRAP_REL}`)
 })
-
-test('the worker note asks for a re-run after a rebase, whatever the task depends on', () => {
-  // A sibling that lands mid-task can change what the bootstrap builds, and the
-  // plugin cannot know which surfaces those are, so the cue is the rebase itself.
-  expect(briefNote({ kind: 'ready' })).toContain('rebase')
-  expect(briefNote({ kind: 'not-executable' })).toContain('rebase')
-})
