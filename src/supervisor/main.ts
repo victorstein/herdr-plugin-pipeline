@@ -107,6 +107,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown)
 
   const attempts = new Map<string, number>()
+  const ambiguityLog = new Set<string>()
   let lastCiPollMs = 0
 
   for (;;) {
@@ -199,6 +200,7 @@ async function main(): Promise<void> {
             },
             removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
+            ambiguityLog,
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to

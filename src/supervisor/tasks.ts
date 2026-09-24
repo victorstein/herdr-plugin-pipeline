@@ -32,12 +32,10 @@ export interface TaskDeps {
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
   /**
-   * Phase entries whose ambiguous candidate set has already been reported. Ideally
-   * owned by main()'s loop the way `probed` and `attempts` are, but main.ts belongs
-   * to issue #15's file set, so this defaults to a module-level set and stays
-   * optional. Tests pass their own to avoid inheriting another test's keys.
+   * Phase entries whose ambiguous candidate set has already been reported. Owned
+   * by main()'s loop so cross-tick dedup has one owner, not a module-level twin.
    */
-  ambiguityLog?: Set<string>
+  ambiguityLog: Set<string>
 }
 
 /**
@@ -191,12 +189,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 
 // Reported once per phase entry rather than once per 1s tick for the 45 minutes
 // before the first stall probe. `run_id` is in the key because task ids are
-// per-run: two live runs both hold a `t1`. The key was originally spelled out
-// here to avoid sharing a helper with stall.ts while #15 rewrote it; #15 has
-// landed and deleted the helper this once mirrored, so the duplication is now
-// simply local.
-const defaultAmbiguityLog = new Set<string>()
-
+// per-run: two live runs both hold a `t1`.
 function logAmbiguous(run: Run, task: Task, candidates: string[], seen: Set<string>): void {
   const key = `${run.run_id}:${task.task_id}:${task.phase}:${task.phase_entered_at}`
   if (seen.has(key)) return
@@ -263,7 +256,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       const adopted = candidates.length === 1 ? candidates[0] : undefined
       if (adopted === undefined) {
         if (candidates.length > 1) {
-          logAmbiguous(run, task, candidates, deps.ambiguityLog ?? defaultAmbiguityLog)
+          logAmbiguous(run, task, candidates, deps.ambiguityLog)
         }
         return base
       }
