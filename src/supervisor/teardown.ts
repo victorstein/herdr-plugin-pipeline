@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import type { RunEffect } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { TASK_ROWS } from '../lib/phases'
 import type { Run, Task, TaskPhase } from '../lib/types'
@@ -14,8 +16,26 @@ export const SETTLED: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'escalated',
 ])
 
+/** `gone`: herdr no longer knows the workspace, so there is nothing left for it to remove. */
+export type WorktreeRemoval = 'removed' | 'gone' | 'failed'
+
+/** herdr 0.9.0 answers `worktree remove` on an unknown workspace with this code. */
+const WORKSPACE_NOT_FOUND = 'workspace_not_found'
+
+export function worktreeRemovalFrom(result: { ok: boolean; code?: string }): WorktreeRemoval {
+  if (result.ok) return 'removed'
+  return result.code === WORKSPACE_NOT_FOUND ? 'gone' : 'failed'
+}
+
+export function markTornDown(run: Run, taskId: string, workspaceId: string): void {
+  const task = run.tasks.find((t) => t.task_id === taskId)
+  if (task?.phase !== 'teardown' || task.workspace_id !== workspaceId) return
+  enterTaskPhase(run, task, 'done', 'worktree removed')
+}
+
 export async function runTeardown(
-  runs: Run[], removeWorktree: (workspaceId: string) => Promise<boolean>,
+  runs: Run[], removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>,
+  effects: RunEffect[] = [],
 ): Promise<Task[]> {
   const completed: Task[] = []
 
@@ -30,9 +50,21 @@ export async function runTeardown(
         continue
       }
 
-      const removed = await removeWorktree(task.workspace_id)
-      enterTaskPhase(run, task, removed ? 'done' : 'orphaned',
-        removed ? 'worktree removed' : 'worktree removal failed')
+      const workspaceId = task.workspace_id
+      const removal = await removeWorktree(workspaceId)
+      if (removal === 'removed') {
+        markTornDown(run, task.task_id, workspaceId)
+        effects.push((fresh) => markTornDown(fresh, task.task_id, workspaceId))
+      } else if (removal === 'gone' && (task.checkout_path === null || !existsSync(task.checkout_path))) {
+        // A second teardown of a worktree already removed — after a save that lost
+        // to a CLI command, or a supervisor crash before its save. `orphaned` is
+        // terminal-bad and would fail every dependent into `blocked-on-failure`.
+        enterTaskPhase(run, task, 'done', 'worktree already removed')
+      } else {
+        enterTaskPhase(run, task, 'orphaned', removal === 'gone'
+          ? `workspace gone but checkout left at ${task.checkout_path}`
+          : 'worktree removal failed')
+      }
       completed.push(task)
     }
   }

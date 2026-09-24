@@ -75,6 +75,13 @@ export async function saveRun(stateDir: string, run: Run): Promise<void> {
 export const isUnlandedSave = (error: unknown): error is StaleRunError | LockTimeoutError =>
   error instanceof StaleRunError || error instanceof LockTimeoutError
 
+/** What a command prints when its write never landed, so it is never mistaken for success. */
+export function unlandedSaveMessage(error: StaleRunError | LockTimeoutError): string {
+  return error instanceof StaleRunError
+    ? `run ${error.runId} kept changing under this command; nothing was written — run it again`
+    : `could not lock ${error.lockPath}; nothing was written — run it again`
+}
+
 export async function loadRun(
   stateDir: string, session: SessionKey, runId: string,
 ): Promise<Run | null> {
@@ -97,6 +104,41 @@ export async function retryOnStaleRun<T>(
     } catch (error) {
       if (!(error instanceof StaleRunError) || tries >= maxAttempts) throw error
     }
+  }
+}
+
+/**
+ * Records one thing already done outside the ledger — a worktree removed, a
+ * prompt sent — so it can be written onto a freshly read run. Each checks its own
+ * precondition against that run and does nothing if a CLI command moved the
+ * record on meanwhile.
+ */
+export type RunEffect = (run: Run) => void
+
+export type SaveOutcome = 'saved' | 'reapplied'
+
+/**
+ * Saves `run`, or — when a CLI command landed first — re-reads it and saves the
+ * fresh copy with only `effects` applied. Everything else the caller computed on
+ * its stale copy is dropped, which is the point: the command wins. What cannot be
+ * dropped is an action already taken outside the ledger, because the next pass
+ * would take it again. Throws when there is nothing worth salvaging.
+ */
+export async function saveOrReapply(
+  stateDir: string, run: Run, effects: readonly RunEffect[],
+): Promise<SaveOutcome> {
+  try {
+    await saveRun(stateDir, run)
+    return 'saved'
+  } catch (error) {
+    if (!isUnlandedSave(error) || effects.length === 0) throw error
+    return retryOnStaleRun(async () => {
+      const fresh = await loadRun(stateDir, run.session, run.run_id)
+      if (fresh === null) throw error
+      for (const apply of effects) apply(fresh)
+      await saveRun(stateDir, fresh)
+      return 'reapplied' as const
+    })
   }
 }
 

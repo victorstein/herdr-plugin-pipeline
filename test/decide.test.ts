@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmdAnswer, cmdDecide } from '../src/cli'
+import { cmdAnswer, cmdDecide, cmdRewind } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
-import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { listRuns, loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { type AnswerDeps, announceDecisions, deliverPendingAnswers } from '../src/supervisor/tasks'
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { verdictFor } from '../src/lib/verdict-path'
@@ -499,4 +499,64 @@ test('answering a decision raised on a review row does not move the verdict path
   })
   expect(verdictFor(task, 'spec-review')).toBe(handed)
   expect(artifactPathFor(run, task)).toBe(handed)
+})
+
+// ——— sends whose save lost to a CLI write ———
+
+/** Saves `run`, lands an unrelated CLI write on it, and returns the tick's now-stale copy. */
+async function staleTickCopy(run: Run): Promise<Run> {
+  await saveRun(dir, run)
+  const tickCopy = (await loadRun(dir, run.session, run.run_id))!
+  const cliCopy = (await loadRun(dir, run.session, run.run_id))!
+  cliCopy.intake_closed = true
+  await saveRun(dir, cliCopy)
+  return tickCopy
+}
+
+test('a delivered answer whose save lost is recorded, so the next tick does not send it again', async () => {
+  const tickCopy = await staleTickCopy(blockedOnDecision().run)
+  let sends = 0
+  const effects: RunEffect[] = []
+  const deps = answerDeps({ send: async () => { sends += 1; return { ok: true } }, effects })
+
+  await deliverPendingAnswers(tickCopy, deps)
+  expect(await saveOrReapply(dir, tickCopy, effects)).toBe('reapplied')
+
+  const nextTick = (await loadRun(dir, tickCopy.session, tickCopy.run_id))!
+  expect(nextTick.intake_closed).toBe(true)
+  expect(nextTick.tasks[0]?.phase).toBe('plan')
+  expect(nextTick.tasks[0]?.pending_answer).toBeNull()
+  await deliverPendingAnswers(nextTick, answerDeps({ send: async () => { sends += 1; return { ok: true } } }))
+  expect(sends).toBe(1)
+})
+
+test('an answer rewound away by the CLI is not resurrected by the re-apply', async () => {
+  const { run } = blockedOnDecision()
+  await saveRun(dir, run)
+  const tickCopy = (await loadRun(dir, run.session, run.run_id))!
+  const effects: RunEffect[] = []
+  await deliverPendingAnswers(tickCopy, answerDeps({ effects }))
+
+  const rewound = await cmdRewind({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' },
+    { runId: run.run_id, phase: 'spec', taskId: 't1' })
+  expect(rewound.ok).toBe(true)
+  await saveOrReapply(dir, tickCopy, effects)
+
+  const onDisk = (await loadRun(dir, run.session, run.run_id))!
+  expect(onDisk.tasks[0]?.phase).toBe('spec')
+})
+
+test('an announced decision whose save lost is recorded, so it is announced once', async () => {
+  const tickCopy = await staleTickCopy(blockedWithOpenDecision())
+  let sends = 0
+  const effects: RunEffect[] = []
+  const deps = answerDeps({ send: async () => { sends += 1; return { ok: true } }, effects })
+
+  await announceDecisions(tickCopy, deps)
+  expect(await saveOrReapply(dir, tickCopy, effects)).toBe('reapplied')
+
+  const nextTick = (await loadRun(dir, tickCopy.session, tickCopy.run_id))!
+  expect(nextTick.intake_closed).toBe(true)
+  await announceDecisions(nextTick, answerDeps({ send: async () => { sends += 1; return { ok: true } } }))
+  expect(sends).toBe(1)
 })

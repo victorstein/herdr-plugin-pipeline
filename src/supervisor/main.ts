@@ -4,7 +4,9 @@ import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
 import { drain } from '../lib/queue'
-import { allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, saveRun } from '../lib/ledger'
+import {
+  allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, type RunEffect, saveOrReapply, saveRun,
+} from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
@@ -19,6 +21,7 @@ import {
 } from './stall'
 import { applyEvents, describeWake, parkedFooter, pickOneAdvance, saveEventedRuns } from './tick'
 import { ciTransitions } from './ci'
+import { worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import type { AgentStatus, Run } from '../lib/types'
@@ -186,6 +189,7 @@ async function main(): Promise<void> {
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
+        const effects: RunEffect[] = []
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
@@ -208,9 +212,10 @@ async function main(): Promise<void> {
               if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
               return parseVerdict(absolute)
             },
-            removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+            removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
             ambiguityLog,
+            effects,
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to
@@ -220,6 +225,7 @@ async function main(): Promise<void> {
             pluginRoot,
             promptRetryMax: config.PROMPT_RETRY_MAX,
             send: (paneId, text) => herdr.agentPrompt(paneId, text),
+            effects,
           }
           await deliverPendingAnswers(run, answerDeps)
           await announceDecisions(run, answerDeps)
@@ -251,10 +257,16 @@ async function main(): Promise<void> {
           }
           addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`,
             undefined, footer)
-          await saveRun(stateDir, run)
           // Queued only once saved: a prompt about a transition the ledger then
           // refused would describe a state that no longer exists.
-          pending.push(...runPending)
+          if (await saveOrReapply(stateDir, run, effects) === 'saved') {
+            pending.push(...runPending)
+          } else {
+            unsaved.add(run)
+            console.error(`[pipeline] run ${run.run_id}: this tick lost to a CLI write; ` +
+              `${effects.length} action(s) already taken were recorded on the fresh copy, ` +
+              'the rest is re-evaluated next tick')
+          }
         } catch (error) {
           if (isUnlandedSave(error)) {
             unsaved.add(run)
@@ -288,7 +300,7 @@ async function main(): Promise<void> {
         probeMax,
         now: () => Date.now(),
         agentStatus: (paneId) => herdr.agentStatus(paneId),
-        persist: (run) => saveRun(stateDir, run),
+        persist: (run, effect) => saveOrReapply(stateDir, run, effect ? [effect] : []),
         probe: async (c) => {
           const awaiting = stallAwaiting(c.run, c.task, hpipe)
           const text = await renderPrompt(pluginRoot, 'stall-probe', {

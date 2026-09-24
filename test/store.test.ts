@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LockTimeoutError, readJson, withFileLock, writeJson, writeJsonIf } from '../src/lib/store'
@@ -75,6 +77,15 @@ test('a fresh lock held by someone else times out instead of blocking forever', 
     .rejects.toBeInstanceOf(LockTimeoutError)
   expect(Date.now() - started).toBeLessThan(1_000)
   expect(existsSync(`${p}.lock`)).toBe(true)
+})
+
+test('a holder whose lock was reclaimed leaves the new holder\'s lock alone on release', async () => {
+  const p = join(dir, 'a.json')
+  await withFileLock(p, () => {
+    writeFileSync(`${p}.lock`, 'someone-else')
+  })
+  expect(readFileSync(`${p}.lock`, 'utf8')).toBe('someone-else')
+  expect(readdirSync(dir).filter((f) => f.endsWith('.aside'))).toHaveLength(0)
 })
 
 test('the lock is released when the critical section throws', async () => {

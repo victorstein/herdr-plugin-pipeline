@@ -6,10 +6,10 @@ import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from 
 import { detectCycle, gateStatus } from './lib/gating'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  activeRunForRepo, listRuns, newRun, resolveRun, retryOnStaleRun, runForWorkspace,
-  runPhaseState, saveRun, StaleRunError, taskPhaseIsTerminal, writeOrchestrator,
+  activeRunForRepo, isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun,
+  runForWorkspace, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
+  writeOrchestrator,
 } from './lib/ledger'
-import { LockTimeoutError } from './lib/store'
 import type { RunQuery, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
@@ -42,12 +42,7 @@ function retryingOnStale<A extends unknown[]>(
     try {
       return await retryOnStaleRun(() => command(...args))
     } catch (error) {
-      if (error instanceof StaleRunError) {
-        return fail(`run ${error.runId} kept changing under this command; nothing was written — run it again`)
-      }
-      if (error instanceof LockTimeoutError) {
-        return fail(`could not lock ${error.lockPath}; nothing was written — run it again`)
-      }
+      if (isUnlandedSave(error)) return fail(unlandedSaveMessage(error))
       throw error
     }
   }

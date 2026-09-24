@@ -1,5 +1,5 @@
 import {
-  closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync,
+  closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -49,15 +49,51 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | null)?.code
 }
 
-function tryAcquire(lockPath: string): boolean {
+function tryAcquire(lockPath: string, token: string): boolean {
   try {
     const fd = openSync(lockPath, 'wx')
-    writeSync(fd, String(process.pid))
+    writeSync(fd, token)
     closeSync(fd)
     return true
   } catch (error) {
     if (errorCode(error) === 'EEXIST') return false
     throw error
+  }
+}
+
+function readToken(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Removes the lock only if it still carries `token`. Checking the path and then
+ * unlinking it could delete a lock someone took in between, so the lock is moved
+ * aside first — one atomic step — and the token is checked on the copy nobody
+ * else can reach. A lock that turns out to be someone else's is linked back,
+ * which fails rather than overwrites if the path was taken meanwhile. That last
+ * case needs three processes and a dead holder at once; its worst outcome is one
+ * write outside the lock, which is what every write was before this lock existed.
+ */
+function removeLockIf(lockPath: string, token: string): void {
+  const aside = `${lockPath}.${randomUUID()}.aside`
+  try {
+    renameSync(lockPath, aside)
+  } catch {
+    return
+  }
+  try {
+    if (readToken(aside) === token) return
+    try {
+      linkSync(aside, lockPath)
+    } catch {
+      // EEXIST: a new holder already has the path, and theirs stands.
+    }
+  } finally {
+    rmSync(aside, { force: true })
   }
 }
 
@@ -69,15 +105,8 @@ function reclaimIfStale(lockPath: string, staleMs: number): void {
     return
   }
   if (Date.now() - seen.mtimeMs < staleMs) return
-  // Two waiters can both judge the same lock stale; the inode check keeps the
-  // slower one from unlinking the lock the faster one has just taken. It narrows
-  // that race rather than closing it — at worst one write goes unguarded, which
-  // is what every write was before this lock existed.
-  try {
-    if (statSync(lockPath).ino === seen.ino) unlinkSync(lockPath)
-  } catch {
-    // Already gone: someone else reclaimed or released it.
-  }
+  const staleToken = readToken(lockPath)
+  if (staleToken !== null) removeLockIf(lockPath, staleToken)
 }
 
 /**
@@ -90,8 +119,9 @@ export async function withFileLock<T>(
   const lockPath = `${path}.lock`
   mkdirSync(dirname(path), { recursive: true })
   const deadline = Date.now() + timing.waitMs
+  const token = `${process.pid}.${randomUUID()}`
 
-  while (!tryAcquire(lockPath)) {
+  while (!tryAcquire(lockPath, token)) {
     if (Date.now() >= deadline) throw new LockTimeoutError(lockPath)
     reclaimIfStale(lockPath, timing.staleMs)
     await Bun.sleep(LOCK_POLL_MS)
@@ -100,11 +130,8 @@ export async function withFileLock<T>(
   try {
     return await critical()
   } finally {
-    try {
-      unlinkSync(lockPath)
-    } catch {
-      // Reclaimed as stale while we held it; nothing of ours left to remove.
-    }
+    // Reclaimed as stale while we held it, the path may now be someone else's.
+    removeLockIf(lockPath, token)
   }
 }
 

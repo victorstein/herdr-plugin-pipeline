@@ -6,7 +6,7 @@ import {
   applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
-import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { listRuns, newRun, saveOrReapply, saveRun, StaleRunError } from '../src/lib/ledger'
 import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
@@ -707,6 +707,27 @@ test('the ledger is persisted before the escalation is sent', async () => {
     sendEscalation: async () => { order.push('send') },
   }))
   expect(order).toEqual(['persist:escalated', 'send'])
+})
+
+test('a sent probe whose save lost to a CLI write is still counted', async () => {
+  // Otherwise the next tick probes again at once instead of waiting a rung.
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
+  const run = runAt('execute', LONG_AGO)
+  run.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+  await saveRun(dir, run)
+  const [tickCopy] = await listRuns(dir, run.session)
+  const [cliCopy] = await listRuns(dir, run.session)
+  cliCopy!.intake_closed = true
+  await saveRun(dir, cliCopy!)
+
+  const deps = mkDeps({ persist: (r, effect) => saveOrReapply(dir, r, effect ? [effect] : []) })
+  await applyStalls(taskStallCandidates([tickCopy!], NOW, 45, 3), deps)
+
+  const [reloaded] = await listRuns(dir, run.session)
+  expect(deps.sent).toEqual(['probe:t1'])
+  expect(reloaded?.intake_closed).toBe(true)
+  expect(stallStateFor(reloaded!, reloaded!.tasks[0]!).probes).toBe(1)
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('an escalation whose save lost to a CLI write is not sent, and the batch goes on', async () => {
