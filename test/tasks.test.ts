@@ -480,6 +480,24 @@ test('a working worker clears a missing-artifact record instead of reporting it'
   expect(run.tasks[0]?.artifact_missing).toBeUndefined()
 })
 
+test('the missing-artifact record clears once the artifact appears', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const artifacts = designArtifacts()
+
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts,
+  })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeDefined()
+
+  mkdirSync(join(worktree, dirname(artifacts.research as string)), { recursive: true })
+  writeFileSync(join(worktree, artifacts.research as string), 'the note\n')
+  await advanceTasks(run, deps())
+
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.artifact_missing).toBeUndefined()
+})
+
 test('a present-but-stale artifact is not reported as missing', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
   const artifacts = designArtifacts()

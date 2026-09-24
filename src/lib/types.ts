@@ -42,11 +42,6 @@ export interface Decision {
 }
 
 /**
- * Stall-ladder state for ONE phase entry of ONE record. Absent, or stamped with
- * an `at`/`run_at` that no longer match, reads as zero — so any code that
- * re-stamps `phase_entered_at` re-arms the ladder without knowing it exists.
- */
-/**
  * An idle worker's artifact row with nothing at the recorded path and no single
  * file the adoption scan could take instead. Keyed like `StallState`, so a phase
  * re-entry retires it without anyone clearing it.
@@ -59,6 +54,11 @@ export interface MissingArtifact {
   candidates: string[]
 }
 
+/**
+ * Stall-ladder state for ONE phase entry of ONE record. Absent, or stamped with
+ * an `at`/`run_at` that no longer match, reads as zero — so any code that
+ * re-stamps `phase_entered_at` re-arms the ladder without knowing it exists.
+ */
 export interface StallState {
   /** The record's `phase_entered_at` this state belongs to. */
   at: number

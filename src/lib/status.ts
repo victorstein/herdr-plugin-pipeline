@@ -1,7 +1,7 @@
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { taskRow } from './phases'
+import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task } from './types'
 
 export interface StatusSupervisor {
@@ -13,7 +13,13 @@ function ageMinutes(sinceMs: number): number {
   return Math.max(0, Math.floor((Date.now() - sinceMs) / 60000))
 }
 
-export function currentMissingArtifact(task: Task): MissingArtifact | null {
+/**
+ * Only the supervisor's own evaluation clears the record, and it never reaches a
+ * run parked in a pane-releasing phase (`cmdAbort` leaves tasks intact in `done`)
+ * or a worker with no pane — so for those the record is left behind, not live.
+ */
+export function currentMissingArtifact(run: Run, task: Task): MissingArtifact | null {
+  if (runRow(run.phase).releasesPane === true || task.pane_id === null) return null
   const missing = task.artifact_missing
   return missing !== undefined && missing.at === task.phase_entered_at ? missing : null
 }
@@ -37,10 +43,10 @@ function taskWarnings(run: Run): string[] {
       )
     }
 
-    const missing = currentMissingArtifact(task)
+    const missing = currentMissingArtifact(run, task)
     if (missing) {
       lines.push(
-        `  ⚠ ${task.task_id} idle in ${task.phase} ${ageMinutes(task.phase_entered_at)}m ` +
+        `  ⚠ ${task.task_id} idle, ${ageMinutes(task.phase_entered_at)}m in ${task.phase}, ` +
         `with nothing at ${missing.path} — ${adoptionOutcome(missing)}`,
       )
     }

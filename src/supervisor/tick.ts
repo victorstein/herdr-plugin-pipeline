@@ -42,7 +42,7 @@ export function actionFor(run: Run, task: Task, hpipe: string): string {
   if (row.actor === 'worker') {
     // An idle worker with no artifact otherwise reads exactly like a busy one, and
     // the orchestrator waits on it until the stall ladder's first rung.
-    const missing = currentMissingArtifact(task)
+    const missing = currentMissingArtifact(run, task)
     return missing
       ? `worker's move, but nothing is at ${missing.path} (${adoptionOutcome(missing)})`
       : "worker's move"

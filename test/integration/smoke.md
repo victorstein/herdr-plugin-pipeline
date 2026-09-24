@@ -200,7 +200,7 @@ watch -n 2 'hpipe status'
   not read as a plain `worker's move`: its line reads `worker's move, but nothing is at <path>`
   followed by what the adoption scan found — `its branch added no document to adopt` or
   `N candidates, too many to adopt: …` — and `hpipe status` carries a matching
-  `⚠ <task> idle in <phase> <age>m with nothing at <path>` line. To provoke it, answer a worker's
+  `⚠ <task> idle, <age>m in <phase>, with nothing at <path>` line. To provoke it, answer a worker's
   research prompt without writing the note. A line that says `worker's move` alone for that pane
   is a **finding**; so is the `⚠` line surviving once the worker is busy again.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at

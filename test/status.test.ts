@@ -193,7 +193,7 @@ test('an idle worker with no artifact is called out with its phase, age and path
     artifact_missing: { at: entered, path: '/wt/docs/research/r.md', candidates: [] },
   })]
   const out = formatStatus([run], { state: 'live' }, 'personal')
-  expect(out).toContain('⚠ t1 idle in research 12m with nothing at /wt/docs/research/r.md')
+  expect(out).toContain('⚠ t1 idle, 12m in research, with nothing at /wt/docs/research/r.md')
   expect(out).toContain('its branch added no document to adopt')
 })
 
@@ -211,6 +211,25 @@ test('a missing-artifact record from an earlier phase entry is not reported', ()
   const run = mkRun()
   run.tasks = [mkTask({
     phase: 'spec', phase_entered_at: 99,
+    artifact_missing: { at: 0, path: '/wt/r.md', candidates: [] },
+  })]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('with nothing at')
+})
+
+test('an aborted run does not report a missing artifact its supervisor stopped clearing', () => {
+  const run = mkRun()
+  run.phase = 'done'
+  run.tasks = [mkTask({
+    phase: 'research', phase_entered_at: 0,
+    artifact_missing: { at: 0, path: '/wt/r.md', candidates: [] },
+  })]
+  expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('with nothing at')
+})
+
+test('a paneless worker does not report a missing artifact the supervisor never re-evaluates', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({
+    phase: 'research', phase_entered_at: 0, pane_id: null,
     artifact_missing: { at: 0, path: '/wt/r.md', candidates: [] },
   })]
   expect(formatStatus([run], { state: 'live' }, 'personal')).not.toContain('with nothing at')
