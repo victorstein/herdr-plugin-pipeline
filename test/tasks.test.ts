@@ -42,6 +42,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   verdictFor: async () => null,
   removeWorktree: async () => true,
   ciDetail: async () => '',
+  ambiguityLog: new Set<string>(),
   ...over,
 })
 
@@ -446,32 +447,29 @@ test('with no checkout the scan never falls back to the main checkout', async ()
   expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
 })
 
-test('the supervisor default dedup set is what production actually uses', async () => {
+test('one shared dedup set still reports the same task id in two live runs', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
   commitIn(worktree, 'docs/superpowers/notes/one.md', 'first\n')
   commitIn(worktree, 'docs/superpowers/notes/two.md', 'second\n')
 
-  // No `ambiguityLog` in deps, exactly as src/supervisor/main.ts builds them, so
-  // this is the only test that exercises the module-level default. Keyed on a
-  // task_id and phase_entered_at no other test uses, because that set is
-  // process-lifetime and shared across this file.
-  const run = mkRun([mkTask({
-    task_id: 'tdefault', phase: 'research', phase_entered_at: 7,
-    checkout_path: worktree, artifacts: designArtifacts(),
+  const twin = () => mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktree, artifacts: designArtifacts(),
   })])
+  const [first, second] = [twin(), twin()]
+  const ambiguityLog = new Set<string>()
 
   const seen: string[] = []
   const original = console.error
   console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
   try {
-    await advanceTasks(run, deps())
-    await advanceTasks(run, deps())
+    await advanceTasks(first, deps({ ambiguityLog }))
+    await advanceTasks(second, deps({ ambiguityLog }))
   } finally {
     console.error = original
   }
 
-  expect(run.tasks[0]?.phase).toBe('research')
-  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(1)
+  expect(first.run_id).not.toBe(second.run_id)
+  expect(seen.filter((line) => line.includes('ambiguous'))).toHaveLength(2)
 })
 
 test('a review row reserves its verdict path before the prompt names it', async () => {
