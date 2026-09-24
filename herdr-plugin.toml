@@ -1,6 +1,6 @@
 id = "stein.pipeline"
 name = "Pipeline"
-version = "1.4.1"
+version = "1.4.2"
 min_herdr_version = "0.9.0"
 description = "Drives the superpowers pipeline across herdr worktrees"
 platforms = ["macos", "linux"]

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.1...v1.4.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* show phase age and what is waiting on you in hpipe status ([#69](https://github.com/victorstein/herdr-plugin-pipeline/issues/69)) ([d5950d3](https://github.com/victorstein/herdr-plugin-pipeline/commit/d5950d3ecc9ca34dd00450374fef29bcc2c0bf5c))
+
 ## [1.4.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.0...v1.4.1) (2026-09-24)
 
 
