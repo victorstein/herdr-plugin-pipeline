@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.2...v1.3.3) (2026-09-24)
+
+
+### Bug Fixes
+
+* keep docs merged in from main out of artifact adoption ([#66](https://github.com/victorstein/herdr-plugin-pipeline/issues/66)) ([e1690c0](https://github.com/victorstein/herdr-plugin-pipeline/commit/e1690c09406fc4384c29a955f918e16b84b2e382))
+* widen a task's file lock from its plan before implementation ([#65](https://github.com/victorstein/herdr-plugin-pipeline/issues/65)) ([2642a5b](https://github.com/victorstein/herdr-plugin-pipeline/commit/2642a5b638b98bbe01acc61a70800010a254958e))
+
 ## [1.3.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.1...v1.3.2) (2026-09-24)
 
 
