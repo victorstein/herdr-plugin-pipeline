@@ -304,29 +304,28 @@ export function stallAwaiting(
     // `gatherSignals` returns early on a null PR (tasks.ts:278), so `merged` is
     // never true and machine.ts:165-171 never fires.
     if (task.pr === null) return missingPr(task, 'so no merge is ever seen.')
-    // The second sentence is not padding: this row cannot distinguish "not yet
-    // merged" from "merged too early to be seen" (machine.ts:167), so a clause
-    // asserting the first would be false in the second.
+    // Not "the PR is unmerged": this row is evaluated only while the orchestrator
+    // is idle, so a merged PR can sit here as long as the orchestrator stays busy.
     return {
       short: `PR #${task.pr} to be merged`,
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
         "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
-        "merged, this phase cannot see it: only a merge that postdates this phase's entry " +
-        'counts, so say so rather than waiting.',
+        'merged, end your turn: this phase is read only while you are idle.',
     }
   }
   if (row.signal === 'closed' && task) {
     // Not "the issue is still open": `closedByMerge` needs `merged_at_ms`, which
-    // only the merge edge writes (machine.ts:168). A task rewound into `close`
-    // from before `merge` has none, so a closed issue never satisfies
-    // machine.ts:178-181 and this row parks with the work already done.
+    // only the merge row writes. A task rewound into `close` from before `merge`
+    // has none, so a closed issue never satisfies it and this row parks with the
+    // work already done; a rewind into `merge` records the merge and passes through.
     return {
       short: `issue #${task.issue} to close`,
       clause: `This phase is waiting for issue #${task.issue} to close. Check it with ` +
         `\`gh issue view ${task.issue} --json closed,state\`; if the PR body used a phrase ` +
         'GitHub does not treat as a closing keyword, close it by hand. If it is already ' +
         'closed, this phase cannot see it: it only counts a close it can tie to this ' +
-        "task's recorded merge, so say so rather than waiting.",
+        `task's recorded merge, which \`${hpipe} rewind ${run.run_id} merge --task ` +
+        `${task.task_id}\` records.`,
     }
   }
   if (row.signal === 'files') {

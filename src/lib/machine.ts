@@ -37,7 +37,7 @@ export interface RunSignals {
   verdict: VerdictResult | null
   maxPasses: number
   newestRegisteredAt: number | null
-  newestAdoptedAt: number | null
+  dispatchComplete: boolean
   tasksAllTerminal: boolean
   anyTaskDone: boolean
 }
@@ -58,11 +58,14 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
       return enterRunPhase(run, 'dispatch', 'a task was registered')
     }
 
+    // A level, not an edge. As "a worktree adopted after this phase began" it
+    // missed adoptions that came first — the orchestrator dispatches from the
+    // brief `hpipe task` prints, before intake's idle gate lets the run in here —
+    // and the run sat in `dispatch` for good. Measured on a live run. A rewind
+    // into this row now leaves again as soon as nothing is owed a worktree.
     case 'dispatch': {
-      // Edge, not level: `hpipe rewind <run> dispatch` clears `adopted_at` on
-      // bound tasks so this can re-fire. Without that this row is a one-way door.
-      if (s.newestAdoptedAt === null || s.newestAdoptedAt <= run.phase_entered_at) return null
-      return enterRunPhase(run, 'execute', 'a worktree was adopted')
+      if (!s.dispatchComplete) return null
+      return enterRunPhase(run, 'execute', 'every dispatched task has a worktree')
     }
 
     case 'execute': {
@@ -163,8 +166,10 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     }
 
     case 'merge': {
-      if (!s.merged) return null
-      if (s.mergedAtMs === undefined || s.mergedAtMs <= task.phase_entered_at) return null
+      // A level for the same reason as the run's `dispatch` row: a PR merged
+      // before the task entered `merge` (merging is the human's move and races
+      // the CI poll), or a rewind into `merge` after it, stranded the task here.
+      if (!s.merged || s.mergedAtMs === undefined) return null
       task.merged_at_ms = s.mergedAtMs
       task.issue_closed_at_entry = s.issueClosed
       return enterTaskPhase(run, task, 'close', 'PR merged')

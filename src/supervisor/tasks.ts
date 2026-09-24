@@ -339,7 +339,15 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'merge': {
       if (task.pr === null) return base
       const view = await deps.prView(task.pr)
-      return { ...base, merged: view?.merged ?? false, mergedAtMs: view?.mergedAtMs ?? undefined }
+      if (!view?.merged) return base
+      // `issue_closed_at_entry` is recorded from this read. Without it the flag was
+      // always false, and an issue closed before its merge — by hand, or by an
+      // earlier PR — stranded the task in `close`.
+      const issue = await deps.issueView(task.issue)
+      return {
+        ...base, merged: true, mergedAtMs: view.mergedAtMs ?? undefined,
+        issueClosed: issue?.closed ?? false,
+      }
     }
     case 'close': {
       const view = await deps.issueView(task.issue)

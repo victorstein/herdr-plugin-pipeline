@@ -6,7 +6,9 @@ import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask, recordWorkerPane,
 } from '../src/cli'
-import { artifactPathFor } from '../src/supervisor/deliver'
+import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
+import { advanceRun } from '../src/lib/machine'
+import { advanceTasks } from '../src/supervisor/tasks'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
@@ -405,6 +407,78 @@ test('rewind clears the whole counter map rather than spending a pass', async ()
   expect(saved?.tasks[0]?.passes).toEqual({})
 })
 
+const MERGED_PR_STATE: Partial<Task> = {
+  pr: 5, ci: 'pass', head_sha_at_entry: 'aaa', merged_at_ms: 9_000, issue_closed_at_entry: true,
+}
+
+test('rewind to implement or earlier forgets the PR, so a merged one cannot finish the task', async () => {
+  // `merge` is a level: a sticky pr pointing at an already-merged PR would carry
+  // the reworked task straight through merge on the old PR's mergedAt.
+  for (const phase of ['implement', 'blocked-on-files', 'plan', 'research'] as const) {
+    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    await saveRun(dir, run)
+
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+    expect(task?.pr, phase).toBeNull()
+    expect(task?.ci, phase).toBeNull()
+    expect(task?.merged_at_ms, phase).toBeNull()
+    expect(task?.issue_closed_at_entry, phase).toBe(false)
+  }
+})
+
+test('a task resumed into implement with its PR still open waits for a new push', async () => {
+  // The #46 resume path: a review sent it back at head H, it escalated from
+  // implement, and the human resumed it. The rejected head must not count as work.
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'escalated', escalated_from: 'implement',
+    workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: '/r/.worktrees/b',
+    pr: 5, head_sha_at_entry: 'H',
+  }])
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+
+  let head = 'H'
+  const deps = {
+    pluginRoot: join(import.meta.dir, '..'),
+    liveIdle: async () => true,
+    maxPasses: 2,
+    fileSettleMs: 0,
+    prForBranch: async () => 5,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: head }),
+    issueView: async () => null,
+    verdictFor: async () => null,
+    removeWorktree: async () => 'removed' as const,
+    ciDetail: async () => '',
+    ambiguityLog: new Set<string>(),
+    uncommittedPaths: async () => [],
+  }
+  await advanceTasks(saved, deps)
+  expect(saved.tasks[0]?.phase).toBe('implement')
+
+  head = 'I'
+  await advanceTasks(saved, deps)
+  expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
+})
+
+test('rewind onto a phase that works the current PR keeps it', async () => {
+  for (const phase of ['pr-review-intent', 'ci', 'merge', 'close'] as const) {
+    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    await saveRun(dir, run)
+
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+    expect(task?.pr, phase).toBe(5)
+    expect(task?.merged_at_ms, phase).toBe(9_000)
+  }
+})
+
 test('rewind clears a pending answer and records the discard', async () => {
   const run = runWithTasks([
     { task_id: 't1', phase: 'blocked-on-decision', pending_answer: 'd1' },
@@ -419,17 +493,41 @@ test('rewind clears a pending answer and records the discard', async () => {
   expect(saved?.history.some((h) => h.why.includes('d1') && h.why.includes('discard'))).toBe(true)
 })
 
-test('rewind to dispatch clears adopted_at on bound tasks so the row can re-fire', async () => {
+test('rewind to dispatch keeps each binding, and the run leaves dispatch on the next evaluation', async () => {
   const run = runWithTasks([
     { task_id: 't1', phase: 'implement', workspace_id: 'w7', adopted_at: 1000 },
   ])
+  run.phase = 'execute'
   await saveRun(dir, run)
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'dispatch', taskId: null })
   expect(result.ok).toBe(true)
 
-  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
-  expect(saved?.tasks[0]?.adopted_at).toBeNull()
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+  expect(saved.phase).toBe('dispatch')
+  expect(saved.tasks[0]?.workspace_id).toBe('w7')
+  expect(advanceRun(saved, {
+    actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
+    ...taskSignalsFor(saved),
+  })?.phase).toBe('execute')
+})
+
+test('a run rewound to intake is carried out by the next registration, then through dispatch', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement', workspace_id: 'w7' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'intake', taskId: null })).ok).toBe(true)
+
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+  const base = { actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2 }
+  expect(advanceRun(saved, { ...base, ...taskSignalsFor(saved) })).toBeNull()
+
+  saved.tasks.push(mkTask({
+    task_id: 't2', phase: 'research', workspace_id: 'w8', registered_at: saved.phase_entered_at + 1,
+  }))
+  expect(advanceRun(saved, { ...base, ...taskSignalsFor(saved) })?.phase).toBe('dispatch')
+  expect(advanceRun(saved, { ...base, ...taskSignalsFor(saved) })?.phase).toBe('execute')
 })
 
 test('dispatch --done finds the active run when no id is given', async () => {

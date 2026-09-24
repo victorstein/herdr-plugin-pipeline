@@ -140,7 +140,7 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 
 | | |
 |---|---|
-| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters, any undelivered answer, and (rewinding to `dispatch`) worktree adoption. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
+| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters and any undelivered answer. Rewinding a task to `implement` or earlier also forgets its recorded PR and CI state, which `implement` rediscovers from the branch's open PR. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
 | Two live runs in one session | `task`, `brief`, `show`, `dispatch`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is escalated | `hpipe rewind <run> <phase> --task <id>` resumes it; `hpipe rewind <run> failed --task <id>` abandons it. The run stays in `execute`, and the task's dependents stay queued, until you do one |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
@@ -168,9 +168,13 @@ Two rules in the current design exist because breaking them shipped real bugs, t
 - **Retry counters are monotone.** Every row that can send a record back to a producer carries a
   counter keyed by itself, and nothing resets it on forward progress. Two earlier drafts reset on a
   forward transition and each time deleted a bound — once the review loop, once the CI retry budget.
-- **A phase advances on an edge, not a level.** Predicates compare against `phase_entered_at`, or
-  against the event that should have caused them. A level predicate re-fires forever and makes
-  `hpipe rewind` a no-op on the row it was offered as the escape for.
+- **A phase advances on an edge, not a level** — with two named exceptions. Predicates compare
+  against `phase_entered_at`, or against the event that should have caused them. A level predicate
+  re-fires forever and makes `hpipe rewind` a no-op on the row it was offered as the escape for.
+  The exceptions are the run's `dispatch` (every dispatched task has a worktree) and a task's
+  `merge` (its PR is merged): there the awaited state *is* the row's goal, a rewind into either
+  sends no prompt and has nothing to re-trigger, and as edges both deadlocked on a state reached
+  before the row was entered (#22).
 
 `test/integration/smoke.md` is the live runbook, and its findings section records a full run: two
 issues, two workers, two merged PRs, run `done`. That run found five bugs no unit test reached — the

@@ -65,14 +65,44 @@ test('a task escalates alone at MAX_PASSES', () => {
   expect(run.phase).not.toBe('escalated')
 })
 
-test('merge requires mergedAt to postdate phase entry, not merely MERGED', () => {
+test('merge advances on a PR merged before the task entered merge', () => {
+  // Merging is the human's move and nothing serialises it against the CI poll,
+  // so a PR can land while the task is still in `ci`.
   const { run, task } = fixture('merge')
-  const stale = advanceTask(run, task, {
+  const mergedAtMs = task.phase_entered_at - 1_000
+  const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs: task.phase_entered_at - 1_000,
+    prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs,
     issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
-  expect(stale).toBeNull()
+  expect(next?.phase).toBe('close')
+  expect(task.merged_at_ms).toBe(mergedAtMs)
+})
+
+test('merge waits while the PR is unmerged', () => {
+  const { run, task } = fixture('merge')
+  expect(advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false,
+    issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+  })).toBeNull()
+})
+
+test('a rewind into merge after the merge reaches teardown through close', () => {
+  const { run, task } = fixture('close')
+  const mergedAtMs = Date.now() - 60_000
+  const closedAtMs = mergedAtMs + 2_000
+  task.merged_at_ms = null
+  task.phase = 'merge'
+  task.phase_entered_at = Date.now()
+
+  const s = {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs,
+    issueClosed: true, closedAtMs, ciBucket: null, filesClear: false, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, s)?.phase).toBe('close')
+  expect(advanceTask(run, task, s)?.phase).toBe('teardown')
 })
 
 test('merge advances when mergedAt postdates phase entry', () => {

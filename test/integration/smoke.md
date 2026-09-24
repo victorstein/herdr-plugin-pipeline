@@ -183,6 +183,14 @@ binding comes from two separate events — `worktree.created` (matched on `branc
 but the pane did not, the agent was started somewhere the plugin did not see. `hpipe forget
 <workspace_id>` unbinds so you can retry.
 
+Once **both** tasks are bound, the run reads `[execute]` within a tick or two — even when the
+orchestrator dispatched them straight after registering them, before the run itself had entered
+`dispatch`. That ordering is the normal one, and it is what #22 deadlocked on.
+
+**Failure looks like (dispatch → execute):** the run sitting in `[dispatch]` with both tasks bound
+and advancing past `research`. That is the #22 deadlock back; the ledger will show both tasks'
+`adopted_at` older than the run's `phase_entered_at`.
+
 **The unstarted-worker check (#12).** For one extra task, run `worktree create` and stop — no
 `agent start`. `herdr agent get <root_pane_id>` answers `agent_not_found`, and `pane list` shows the
 pane with no `agent` field. For the first five minutes nothing flags it (the bootstrap grace). After
@@ -608,7 +616,7 @@ from the orchestrator pane.
 
 | Symptom | Recovery |
 | --- | --- |
-| A phase advanced early, or on the wrong file | `hpipe rewind <run_id> <phase> [--task <task_id>]` — resets the phase, clears review-pass counters and `delivery_attempts`, discards an undelivered answer (recorded in history), and clears `escalated_from`. Rewinding a *run* to `dispatch` also clears `adopted_at` on bound tasks so worktree binding can re-fire. Rewinding *onto* a review phase also reserves a fresh verdict path and prints it; write the next review there. |
+| A phase advanced early, or on the wrong file | `hpipe rewind <run_id> <phase> [--task <task_id>]` — resets the phase, clears review-pass counters and `delivery_attempts`, discards an undelivered answer (recorded in history), and clears `escalated_from`. Rewinding a *run* to `dispatch` leaves every worktree bound; the run returns to `execute` on the next tick unless a dispatched task still has no worktree. Rewinding a *task* to `implement` or earlier forgets its recorded PR and CI state, so `hpipe status` shows neither until `implement` rediscovers the open PR. Rewinding *onto* a review phase also reserves a fresh verdict path and prints it; write the next review there. |
 | A task is stuck in `blocked-on-files` behind a holder that will never finish | Get the holder terminal first (`hpipe rewind … --task <holder>` to a phase it can finish, or let it fail), then `hpipe release --task <holder>`. `release` refuses while the holder is in flight, and only accepts a terminal or `escalated` task. |
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which clears every pass counter on that record and, for a review phase, prints the fresh verdict path it reserved. |

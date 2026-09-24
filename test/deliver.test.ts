@@ -144,7 +144,7 @@ test('a blocked worker line inlines its pane tail', () => {
   expect(text).toContain('Do you want to proceed?')
 })
 
-import { advanceRun, isAgentReady } from '../src/lib/machine'
+import { advanceRun, enterRunPhase, isAgentReady } from '../src/lib/machine'
 
 test('an agent that finished its turn is ready, whether idle or done', () => {
   // herdr reports `done` for "idle and not yet seen". An orchestrator driven by
@@ -261,16 +261,80 @@ test('a task still in flight leaves the run in execute', () => {
   })).toBeNull()
 })
 
-test('the registration and adoption signals are the newest of each, or null', () => {
+test('a run with no tasks has registered nothing and dispatched nothing', () => {
+  expect(taskSignalsFor(mkRun()).newestRegisteredAt).toBeNull()
+  expect(taskSignalsFor(mkRun()).dispatchComplete).toBe(false)
+})
+
+test('dispatch is complete once every dispatched task is bound', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't1', phase: 'research' }), mkTask({ task_id: 't2', phase: 'spec' })]
+  expect(taskSignalsFor(run).dispatchComplete).toBe(true)
+})
+
+test('a dispatched task with no worktree yet keeps dispatch open', () => {
   const run = mkRun()
   run.tasks = [
-    mkTask({ task_id: 't1', registered_at: 1_000, adopted_at: null }),
-    mkTask({ task_id: 't2', registered_at: 3_000, adopted_at: 2_000 }),
+    mkTask({ task_id: 't1', phase: 'research' }),
+    mkTask({ task_id: 't2', phase: 'research', workspace_id: null, pane_id: null, adopted_at: null }),
   ]
-  expect(taskSignalsFor(run).newestRegisteredAt).toBe(3_000)
-  expect(taskSignalsFor(run).newestAdoptedAt).toBe(2_000)
-  expect(taskSignalsFor(mkRun()).newestRegisteredAt).toBeNull()
-  expect(taskSignalsFor(mkRun()).newestAdoptedAt).toBeNull()
+  expect(taskSignalsFor(run).dispatchComplete).toBe(false)
+})
+
+test('a task queued behind a dependency is not owed a worktree yet', () => {
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'queued', depends_on: ['t1'], workspace_id: null, adopted_at: null }),
+  ]
+  expect(taskSignalsFor(run).dispatchComplete).toBe(true)
+})
+
+test('a batch whose every task is still queued has dispatched nothing', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't1', phase: 'queued', depends_on: ['t9'], workspace_id: null })]
+  expect(taskSignalsFor(run).dispatchComplete).toBe(false)
+})
+
+test('a task that stopped before it was bound is owed no worktree', () => {
+  for (const phase of ['failed', 'blocked-on-failure', 'escalated'] as const) {
+    const run = mkRun()
+    run.tasks = [
+      mkTask({ task_id: 't1', phase: 'research' }),
+      mkTask({ task_id: 't2', phase, workspace_id: null, pane_id: null, adopted_at: null }),
+    ]
+    expect(taskSignalsFor(run).dispatchComplete).toBe(true)
+  }
+})
+
+test('tasks adopted before the run entered dispatch still carry it to execute', () => {
+  // The qc13 ledger: both worktrees adopted at 21:52, the run entered dispatch at 21:54.
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'spec-review', registered_at: 1_000, adopted_at: 2_000 }),
+    mkTask({ task_id: 't2', phase: 'spec-review', registered_at: 1_100, adopted_at: 2_100 }),
+  ]
+  enterRunPhase(run, 'dispatch', 'a task was registered')
+  expect(run.phase_entered_at).toBeGreaterThan(2_100)
+
+  const advanced = advanceRun(run, {
+    actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
+    ...taskSignalsFor(run),
+  })
+  expect(advanced?.phase).toBe('execute')
+})
+
+test('a run rewound to dispatch with every task bound returns to execute', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't1', phase: 'implement' })]
+  run.phase = 'dispatch'
+  run.phase_entered_at = Date.now()
+
+  const advanced = advanceRun(run, {
+    actorIdle: true, artifactFresh: false, verdict: null, maxPasses: 2,
+    ...taskSignalsFor(run),
+  })
+  expect(advanced?.phase).toBe('execute')
 })
 
 test('the digest keeps evaluateRun\'s transition note, not just the current phase', () => {

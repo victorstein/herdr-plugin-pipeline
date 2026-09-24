@@ -905,10 +905,10 @@ test('a merge row names the PR and does not assert it is unmerged — #19', () =
   expect(a.clause).toContain('PR #42')
   expect(a.clause).toContain('feat/x')
   expect(a.clause).toContain('nothing merges automatically')
-  // machine.ts:167 is an edge: a PR merged before phase entry is never seen, so
-  // a clause asserting "not yet merged" would be false in that deadlock.
-  expect(a.clause).toContain('already merged, this phase cannot see it')
-  expect(a.clause).toContain('postdates')
+  // The row reads only while the orchestrator is idle, so a merged PR can still
+  // be sitting here; the clause must not assert it is unmerged.
+  expect(a.clause).toContain('If it is already merged, end your turn')
+  expect(a.clause).not.toContain('cannot see it')
 })
 
 
@@ -921,6 +921,7 @@ test('a close row names the issue and does not assert it is still open — #19',
   // A task rewound into `close` from before `merge` has no `merged_at_ms`, so
   // machine.ts:178-181 can never fire however closed the issue is.
   expect(a.clause).toContain('already closed, this phase cannot see it')
+  expect(a.clause).toContain(`hp rewind ${run.run_id} merge --task t1`)
   expect(a.clause).not.toContain('never clear')
   expect(a.clause).not.toContain('whatever clears')
 })

@@ -230,6 +230,39 @@ test('a merged PR advances to close, and a closed issue to teardown', async () =
   expect(run.tasks[0]?.phase).toBe('teardown')
 })
 
+test('an issue closed before the merge still lets close advance', async () => {
+  const mergedAtMs = 10_000
+  const view = {
+    prView: async () => ({ merged: true, mergedAtMs, headSha: 'x' }),
+    issueView: async () => ({ closed: true, closedAtMs: mergedAtMs - 30_000 }),
+  }
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+
+  await advanceTasks(run, deps(view))
+  expect(run.tasks[0]?.phase).toBe('close')
+  expect(run.tasks[0]?.issue_closed_at_entry).toBe(true)
+
+  await advanceTasks(run, deps(view))
+  expect(run.tasks[0]?.phase).toBe('teardown')
+})
+
+test('a rewind into merge rescues a close whose merge was never recorded', async () => {
+  const mergedAtMs = 10_000
+  const view = {
+    prView: async () => ({ merged: true, mergedAtMs, headSha: 'x' }),
+    issueView: async () => ({ closed: true, closedAtMs: mergedAtMs + 2_000 }),
+  }
+  const run = mkRun([mkTask({ phase: 'close', pr: 42, merged_at_ms: null })])
+  await advanceTasks(run, deps(view))
+  expect(run.tasks[0]?.phase).toBe('close')
+
+  Object.assign(run.tasks[0]!, { phase: 'merge', phase_entered_at: Date.now() })
+  await advanceTasks(run, deps(view))
+  expect(run.tasks[0]?.phase).toBe('close')
+  await advanceTasks(run, deps(view))
+  expect(run.tasks[0]?.phase).toBe('teardown')
+})
+
 test('teardown removes the worktree and completes the task', async () => {
   const run = mkRun([mkTask({ phase: 'teardown' })])
   const removed: string[] = []
