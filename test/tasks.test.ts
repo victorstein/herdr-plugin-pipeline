@@ -67,6 +67,60 @@ test('advanceTasks releases a blocked-on-files task once its sibling settles', a
   expect(run.tasks[1]?.phase).toBe('implement')
 })
 
+function checkoutWithPlan(planText: string): { checkout_path: string; artifacts: Task['artifacts'] } {
+  const checkout = tempDir('hpipe-plan-files-')
+  const plan = 'docs/superpowers/plans/plan.md'
+  mkdirSync(join(checkout, dirname(plan)), { recursive: true })
+  writeFileSync(join(checkout, plan), planText)
+  return { checkout_path: checkout, artifacts: { research: null, spec: null, plan, verdicts: {} } }
+}
+
+test('a file the plan discovered keeps the task off a sibling that holds it', async () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'implement', files: ['src/deliver.ts'] }),
+    mkTask({
+      task_id: 't2', phase: 'blocked-on-files', files: ['src/cli.ts'],
+      ...checkoutWithPlan('# Plan\n\nFILES: src/cli.ts, src/deliver.ts\n'),
+    }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('blocked-on-files')
+  expect(run.tasks[1]?.files).toEqual(['src/cli.ts', 'src/deliver.ts'])
+})
+
+test('a plan path written under the worker\'s checkout is locked repo-relative', async () => {
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: [] })
+  Object.assign(waiter, checkoutWithPlan(''))
+  writeFileSync(
+    join(waiter.checkout_path as string, waiter.artifacts.plan as string),
+    `FILES: ${waiter.checkout_path}/src/deliver.ts\n`,
+  )
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'implement', files: ['src/'] }), waiter])
+  await advanceTasks(run, deps())
+  expect(waiter.files).toEqual(['src/deliver.ts'])
+  expect(waiter.phase).toBe('blocked-on-files')
+})
+
+test('two tasks whose plans each discover the other\'s files run one after the other', async () => {
+  const run = mkRun([
+    mkTask({
+      task_id: 't1', phase: 'blocked-on-files', files: ['a/'],
+      ...checkoutWithPlan('FILES: a/, b/\n'),
+    }),
+    mkTask({
+      task_id: 't2', phase: 'blocked-on-files', files: ['b/'],
+      ...checkoutWithPlan('FILES: b/, a/\n'),
+    }),
+  ])
+  await advanceTasks(run, deps())
+  expect(run.tasks.map((t) => t.phase)).toEqual(['implement', 'blocked-on-files'])
+
+  const first = run.tasks[0] as Task
+  first.phase = 'done'
+  await advanceTasks(run, deps())
+  expect(run.tasks[1]?.phase).toBe('implement')
+})
+
 test('a worker row reads the worker pane live, not the cached agent_status', async () => {
   const run = mkRun([mkTask({ phase: 'spec', pane_id: 'w7:p1', agent_status: 'idle' })])
   const reads: string[] = []

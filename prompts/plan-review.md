@@ -24,7 +24,10 @@ Check specifically: does every spec requirement map to a step? Do types, functio
 signatures stay consistent from step to step? Are there placeholders, vague steps, or steps that say
 what to do without showing how? Does every step start with a failing test, and does every step leave
 the tree working and committable? Could an implementer with no other context execute this plan
-literally and arrive at the spec?
+literally and arrive at the spec? Does every file a step touches appear on a `FILES:` line at column
+0 outside any code block, as a repo-relative path or a directory prefix ending in `/` (not a glob)?
+Those lines are the file lock the pipeline enforces before implementation;
+a touched file missing from them is a BLOCKER.
 
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**, each as claim →
 problem → evidence → concrete fix, most severe first.
