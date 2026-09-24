@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.1...v1.5.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* surface a worktree no agent was ever started in ([#78](https://github.com/victorstein/herdr-plugin-pipeline/issues/78)) ([e5baec0](https://github.com/victorstein/herdr-plugin-pipeline/commit/e5baec0a79cc5ae9d76c30390794b860d9bd581c))
+
 ## [1.5.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.0...v1.5.1) (2026-09-24)
 
 
