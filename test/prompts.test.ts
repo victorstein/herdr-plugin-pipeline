@@ -119,7 +119,7 @@ test('the plugin manifest version matches version.txt', async () => {
 test('the stall escalation prompt carries its own variables, not escalate.md\'s', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'stall-escalate.md')).text()
   for (const key of ['{{run_id}}', '{{phase}}', '{{minutes}}', '{{probes}}',
-                     '{{awaiting_short}}', '{{task_flag}}']) {
+                     '{{awaiting_short}}', '{{task_flag}}', '{{undelivered}}']) {
     expect(text, `stall-escalate.md must render ${key}`).toContain(key)
   }
   expect(text).not.toContain('review passes')

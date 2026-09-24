@@ -27,8 +27,15 @@ export interface StallCandidate {
   run: Run
   task: Task | null
   action: StallAction
-  /** Probes SENT so far — never deferrals. Drives the ladder sentence and the reason string. */
+  /**
+   * Probe rungs climbed so far, delivered or not — never deferrals. Drives the
+   * ladder sentence and the reason string.
+   */
   probes: number
+  /** How many of `probes` never reached the pane. */
+  undelivered: number
+  /** This record's threshold, which also bounds how long a failing send is retried per rung. */
+  thresholdMs: number
   escalatable: boolean
   /** Age in the current phase, for the prompt. */
   minutes: number
@@ -56,9 +63,10 @@ function candidateFor(
   if (!paneId) return null
 
   const state = stallStateFor(run, record)
+  const thresholdMs = thresholdMinutes * MS_PER_MINUTE
   // The anchor is the last rung climbed, NOT the phase entry: anchoring on age
   // makes every rung due at once for a record first seen past its threshold.
-  if (now - state.last_probe_at < thresholdMinutes * MS_PER_MINUTE) return null
+  if (now - state.last_probe_at < thresholdMs) return null
 
   const escalatable = ESCALATING_SIGNALS.has(row.signal)
   return {
@@ -66,6 +74,8 @@ function candidateFor(
     task,
     action: escalatable && state.probes >= probeMax ? 'escalate' : 'probe',
     probes: state.probes,
+    undelivered: state.undelivered ?? 0,
+    thresholdMs,
     escalatable,
     minutes: Math.floor((now - record.phase_entered_at) / MS_PER_MINUTE),
     paneId,
@@ -120,6 +130,7 @@ export function stallStateFor(run: Run, record: Run | Task): StallState {
     run_at: run.phase_entered_at,
     last_probe_at: Math.max(record.phase_entered_at, run.phase_entered_at),
     probes: 0,
+    undelivered: 0,
     holds: 0,
   }
 }
@@ -140,8 +151,38 @@ export function bumpStall(
     run_at: run.phase_entered_at,
     last_probe_at: now,
     probes: s.probes + (kind === 'probes' ? 1 : 0),
+    undelivered: s.undelivered ?? 0,
     holds: s.holds + (kind === 'holds' ? 1 : 0),
   }
+}
+
+/**
+ * Records a probe that did not reach the pane, and reports whether the ledger
+ * changed. A failure does NOT climb a rung on its own — the anchor stays put, so
+ * the probe is retried next tick and a one-tick blip costs nothing. Only a
+ * streak that has lasted a whole threshold climbs, and the rung is dated to when
+ * the streak began: that keeps an unreachable pane on the same rung cadence as a
+ * silent one, where dating it to `now` would stretch every rung to two
+ * thresholds.
+ */
+export function noteUndelivered(
+  run: Run, record: Run | Task, now: number, thresholdMs: number,
+): boolean {
+  const s = stallStateFor(run, record)
+  const since = s.undeliverable_since
+  if (since === undefined) {
+    record.stall = { ...s, undeliverable_since: now }
+    return true
+  }
+  if (now - since < thresholdMs) return false
+  record.stall = {
+    ...s,
+    last_probe_at: since,
+    probes: s.probes + 1,
+    undelivered: (s.undelivered ?? 0) + 1,
+    undeliverable_since: now,
+  }
+  return true
 }
 
 export interface Awaiting {
@@ -295,18 +336,43 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
  * "probe N of M" is false for every row escalation excludes: those keep being
  * probed past the cap and are never escalated.
  */
-export function ladderFor(c: { probes: number; escalatable: boolean }, probeMax: number): string {
+export function ladderFor(
+  c: { probes: number; undelivered: number; escalatable: boolean }, probeMax: number,
+): string {
   if (!c.escalatable) {
     return 'This is a standing nudge — this phase is not escalated automatically, and clears ' +
       'when whatever it is waiting for arrives.'
   }
-  return `This is probe ${c.probes + 1} of ${probeMax}. After ${probeMax} unanswered probes ` +
-    'this phase is escalated to the human and stops moving on its own.'
+  // Numbered by rung, not by delivered probe: undelivered rungs count toward the
+  // cap, so a delivered-only count would promise the agent probes it will not get.
+  const missed = c.undelivered === 0
+    ? ''
+    : ` ${c.undelivered === 1 ? 'One earlier probe' : `${c.undelivered} earlier probes`} ` +
+      'could not be delivered to this pane and still counted.'
+  return `This is probe ${c.probes + 1} of ${probeMax}.${missed} After ${probeMax} unanswered ` +
+    'probes this phase is escalated to the human and stops moving on its own.'
+}
+
+/**
+ * For the escalation prompt, which otherwise asks the orchestrator what the
+ * worker was doing — the wrong first question when the pane never got a probe.
+ */
+export function undeliveredNote(undelivered: number): string {
+  if (undelivered === 0) return ''
+  return `\n\n${undelivered} of them never reached the pane, so it may be unreachable — ` +
+    'check that the pane and its agent are still alive before asking what it was doing.'
 }
 
 export interface StallDeps {
   probeMax: number
   now: () => number
+  /**
+   * `ok: false` means the probe did not reach the pane — a failed send, or one
+   * deliberately skipped because the pane cannot answer. Either is retried and,
+   * once undeliverable for a whole threshold, climbs as an undelivered rung, so a
+   * filter that stops sending must still return here rather than drop the
+   * candidate.
+   */
   probe: (c: StallCandidate) => Promise<{ ok: boolean }>
   /**
    * Rendered BEFORE the transition, so it describes the phase being left —
@@ -332,9 +398,14 @@ export async function applyStalls(
   for (const c of candidates) {
     const record: Run | Task = c.task ?? c.run
 
+    // An undeliverable probe must still climb eventually: the ladder exists to
+    // end silence, and a pane that cannot be reached is the case escalation
+    // matters most (#32). `noteUndelivered` decides when.
     if (c.action === 'probe') {
       if ((await deps.probe(c)).ok) {
         bumpStall(c.run, record, 'probes', deps.now())
+        await deps.persist(c.run)
+      } else if (noteUndelivered(c.run, record, deps.now(), c.thresholdMs)) {
         await deps.persist(c.run)
       }
       continue
@@ -365,7 +436,8 @@ export async function applyStalls(
 async function escalate(c: StallCandidate, deps: StallDeps): Promise<void> {
   const from = c.task ? c.task.phase : c.run.phase
   const text = await deps.escalationText(c, from)
-  const why = `${c.probes} stall probes unanswered`
+  const why = `${c.probes} stall probes unanswered` +
+    (c.undelivered > 0 ? `, ${c.undelivered} of them undelivered` : '')
 
   if (c.task) enterTaskPhase(c.run, c.task, 'escalated', why)
   else enterRunPhase(c.run, 'escalated', why)
