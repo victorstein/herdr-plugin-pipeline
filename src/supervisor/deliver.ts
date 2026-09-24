@@ -311,9 +311,23 @@ export async function evaluateRun(
 
 const UNLANDED_MEANING: Partial<Record<TaskPhase, string>> = {
   'failed': 'its work never merged',
-  'blocked-on-failure': 'it never started, because a dependency failed',
   'orphaned': 'it merged, but its worktree was not removed; its code is on the base branch',
   'escalated': 'it is waiting on a human and its work has not merged',
+}
+
+/**
+ * Gating before #46 cascaded the dependents of an escalated task too, and that
+ * phase is terminal, so a run on disk can hold one whose dependency was later
+ * resumed and landed. Name the dependency's real outcome rather than "failed".
+ */
+function neverStarted(run: Run, task: Task): string {
+  const unlanded = task.depends_on.filter((id) => {
+    const dep = run.tasks.find((t) => t.task_id === id)
+    return dep === undefined || dep.phase !== 'done'
+  })
+  return unlanded.length > 0
+    ? `it never started, because ${unlanded.join(', ')} did not land`
+    : 'it never started: it was blocked on a dependency that has since landed, and was never re-queued'
 }
 
 /**
@@ -326,7 +340,7 @@ export function taskOutcomesFor(run: Run): string {
   if (unlanded.length === 0) return `Every task in **${run.title}** is merged and torn down.`
   const lines = unlanded.map((t) =>
     `- \`${t.task_id}\` (#${t.issue}, \`${t.branch}\`) stopped at \`${t.phase}\`` +
-    ` — ${UNLANDED_MEANING[t.phase] ?? 'it did not finish'}`)
+    ` — ${t.phase === 'blocked-on-failure' ? neverStarted(run, t) : UNLANDED_MEANING[t.phase] ?? 'it did not finish'}`)
   return [
     `Not every task in **${run.title}** landed. Every task is merged and torn down except:`,
     '',
@@ -361,6 +375,7 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
         run_id: run.run_id, phase: from,
         pass: String(counterFor(run, from)),
         resume_command: resumeCommand(hpipeCommand(pluginRoot), run),
+        abandon: '',
       })
     }
     default: return ''

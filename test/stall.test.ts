@@ -840,6 +840,21 @@ test('an escalated task is not told it awaits a decision it never asked — #19'
   expect(a.clause).not.toContain('{{')
 })
 
+test('an escalated task\'s standing nudge names the abandon as well as the resume', () => {
+  const run = runWithTask({ phase: 'escalated', escalated_from: 'implement' })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.clause).toContain(`\`hp rewind ${run.run_id} implement --task t1\` resumes it`)
+  expect(a.clause).toContain(`\`hp rewind ${run.run_id} failed --task t1\` abandons it`)
+})
+
+test('a run-level escalation offers no task abandon', () => {
+  const run = runWithTask({ phase: 'implement' })
+  run.phase = 'escalated'
+  run.escalated_from = 'branch-review'
+  const a = stallAwaiting(run, null, 'hp')
+  expect(a.clause).not.toContain('failed')
+})
+
 test('blocked-on-decision still names the open decision after the reorder — #19', () => {
   const run = runWithTask({ phase: 'blocked-on-decision' })
   expect(stallAwaiting(run, run.tasks[0] as Task, 'hp').short)

@@ -273,6 +273,7 @@ test('an escalated task yields the escalation prompt naming its task flag', asyn
   }))
   expect(run.tasks[0]?.phase).toBe('escalated')
   expect(prompts.map((p) => p.text).join('\n')).toContain('--task t1')
+  expect(prompts.map((p) => p.text).join('\n')).toMatch(/rewind \S+ failed --task t1/)
 })
 
 test('a worker-owned phase addresses its prompt to the worker pane, not the orchestrator', async () => {

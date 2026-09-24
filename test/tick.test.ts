@@ -211,6 +211,50 @@ test('an escalated run does not starve a later run sharing its pane', () => {
   expect(picked[0]?.phase).toBe('intake')
 })
 
+test('a run held in execute only by escalated tasks does not starve a run sharing its pane', () => {
+  const held = mkRun([
+    mkTask({ task_id: 't1', phase: 'done' }),
+    mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'implement' }),
+  ])
+  held.phase = 'execute'
+  held.intake_closed = true
+  held.orchestrator_pane = 'w1:p1'
+
+  const active = mkRun([])
+  active.phase = 'intake'
+  active.orchestrator_pane = 'w1:p1'
+
+  expect(pickOneAdvance([held, active])).toEqual([active])
+})
+
+test('a held run is picked again once its escalated task is rewound', () => {
+  const held = mkRun([mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' })])
+  held.phase = 'execute'
+  held.intake_closed = true
+  held.orchestrator_pane = 'w1:p1'
+  expect(pickOneAdvance([held])).toHaveLength(0)
+
+  ;(held.tasks[0] as Task).phase = 'implement'
+  expect(pickOneAdvance([held])).toEqual([held])
+})
+
+test('an escalated task beside live work, or before intake closes, keeps its run picked', () => {
+  const live = mkRun([
+    mkTask({ task_id: 't1', phase: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'implement' }),
+  ])
+  live.phase = 'execute'
+  live.intake_closed = true
+  live.orchestrator_pane = 'w1:p1'
+  expect(pickOneAdvance([live])).toEqual([live])
+
+  const open = mkRun([mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' })])
+  open.phase = 'execute'
+  open.intake_closed = false
+  open.orchestrator_pane = 'w2:p1'
+  expect(pickOneAdvance([open])).toEqual([open])
+})
+
 test('settle windows for distinct panes run concurrently, not serially', async () => {
   const settleMs = 200
   const status = async () => 'idle' as const
@@ -275,9 +319,9 @@ test('actionFor answers whose move it is, by rung', () => {
     expect(at(phase)).toBe('dead end, needs a human')
   }
   expect(at('escalated', { escalated_from: 'implement' }))
-    .toBe('needs a human: `hp rewind r1 implement --task t1`')
+    .toBe('needs a human: `hp rewind r1 implement --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
   expect(at('escalated', { escalated_from: null }))
-    .toBe('needs a human: `hp rewind r1 <phase> --task t1`')
+    .toBe('needs a human: `hp rewind r1 <phase> --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
   for (const phase of ['merge', 'close', 'blocked-on-decision'] as TaskPhase[]) {
     expect(at(phase)).toBe('YOUR move')
   }
@@ -507,7 +551,7 @@ test('the footer names orchestrator-owned and escalated tasks that produced no l
   expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
     'also waiting on you:\n' +
     '- t1 fix/a (#30) [merge 41m] — YOUR move\n' +
-    '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2`',
+    '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2` resumes it, `hp rewind r1 failed --task t2` abandons it — the run holds in execute until one is run',
   )
 })
 

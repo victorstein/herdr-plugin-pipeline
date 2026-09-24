@@ -567,3 +567,27 @@ test('branch-review names each task that did not land instead of claiming all me
   expect(text).toContain('`t3` (#20, `fix/20-y`) stopped at `orphaned`')
   expect(text).not.toContain('`t1`')
 })
+
+test('branch-review blames a dependency that did not land for a blocked-on-failure task', async () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'failed' }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-failure', depends_on: ['t1'] }),
+  ]
+  const text = await promptForRunPhase(run, {} as Config)
+  expect(text).toContain('it never started, because t1 did not land')
+})
+
+test('branch-review does not claim a dependency failed when it has since landed', async () => {
+  // A dependent cascaded by the pre-#46 gating while its dependency was only escalated.
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'done' }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-failure', depends_on: ['t1'] }),
+  ]
+  const text = await promptForRunPhase(run, {} as Config)
+  expect(text).not.toContain('dependency failed')
+  expect(text).toContain('a dependency that has since landed, and was never re-queued')
+})

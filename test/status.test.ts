@@ -108,6 +108,31 @@ test('status flags a run whose intake was never closed', () => {
   expect(text).toContain(`${HP} dispatch --done`)
 })
 
+test('an unclosed intake with an escalated task does not promise that closing it advances the run', () => {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.intake_closed = false
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'done' }),
+    mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'implement' }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).toContain(`${HP} dispatch --done`)
+  expect(text).not.toContain('to let this run advance')
+  expect(text).toContain('still waits on t2 (escalated)')
+})
+
+test('the escalated line says the run holds only while the run is in execute', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'escalated', escalated_from: 'implement' })]
+  run.phase = 'execute'
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain('the run holds in execute')
+  run.phase = 'branch-review'
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).toContain('abandons it')
+  expect(text).not.toContain('the run holds in execute')
+})
+
 test('a healthy run produces none of the four new warning lines', () => {
   const run = mkRun()
   run.phase = 'execute'
@@ -167,8 +192,8 @@ test('an escalated task is called out as needing a human', () => {
 test('an escalated task names the rewind that abandons it, since the run waits on it', () => {
   const run = mkRun()
   run.tasks = [mkTask({ phase: 'escalated', escalated_from: 'implement' })]
-  const out = formatStatus([run], { state: 'live' }, 'personal')
-  expect(out).toContain(`\`hpipe rewind ${run.run_id} failed --task t1\` abandons it`)
+  const out = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(out).toContain(`\`${HP} rewind ${run.run_id} failed --task t1\` abandons it`)
 })
 
 test('a healthy task gets no escalation warning', () => {

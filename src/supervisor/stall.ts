@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
-import { ageMinutes, resumeCommand } from '../lib/status'
+import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { overdueUnstartedWorker, startWorkerCommand } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
@@ -238,7 +238,8 @@ export function stallAwaiting(
       short: 'a human to act on the escalation',
       clause: 'This phase is escalated and waits on the human, not on you. If they have not been ' +
         'told, tell them now; once they have decided, ' +
-        `\`${resumeCommand(hpipe, run, task)}\` resumes it.`,
+        `\`${resumeCommand(hpipe, run, task)}\` resumes it` +
+        (task ? `, \`${abandonCommand(hpipe, run, task)}\` abandons it.` : '.'),
     }
   }
 
