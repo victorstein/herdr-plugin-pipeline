@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.5](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.4...v1.5.5) (2026-09-24)
+
+
+### Bug Fixes
+
+* confirm supervisor sends, re-send what fails, and hold sends to a pane that cannot answer ([#80](https://github.com/victorstein/herdr-plugin-pipeline/issues/80)) ([2e0e576](https://github.com/victorstein/herdr-plugin-pipeline/commit/2e0e57689b462f109a8286ddf177b1db5b1cf8c2))
+
 ## [1.5.4](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.3...v1.5.4) (2026-09-24)
 
 
