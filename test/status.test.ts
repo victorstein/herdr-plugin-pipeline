@@ -164,6 +164,13 @@ test('an escalated task is called out as needing a human', () => {
   expect(out).not.toMatch(/(^|[^/])hpipe /m)
 })
 
+test('an escalated task names the rewind that abandons it, since the run waits on it', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'escalated', escalated_from: 'implement' })]
+  const out = formatStatus([run], { state: 'live' }, 'personal')
+  expect(out).toContain(`\`hpipe rewind ${run.run_id} failed --task t1\` abandons it`)
+})
+
 test('a healthy task gets no escalation warning', () => {
   const run = mkRun()
   run.tasks = [mkTask({ phase: 'implement' })]

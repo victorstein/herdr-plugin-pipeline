@@ -58,7 +58,7 @@ export const RUN_ROWS: readonly PhaseRow<RunPhase>[] = [
     stallWhen: (run) => !run.intake_closed && run.tasks.length > 0 &&
       run.tasks.every((t) => TERMINAL_OR_SETTLED.has(t.phase)) },
   // Unlike the other review rows, this one loops back onto itself: by the time
-  // it runs every task is merged and torn down, so there is no producer phase
+  // it runs every task has finished, so there is no producer phase
   // to return to. The orchestrator patches the branch directly, and the counter
   // still bounds the loop.
   { phase: 'branch-review', actor: 'orchestrator', signal: 'verdict',

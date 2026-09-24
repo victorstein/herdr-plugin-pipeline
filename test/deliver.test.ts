@@ -184,19 +184,70 @@ test('a recorded entry with no verdict_seq is ignored and the pre-#26 path appli
     .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
-test('an escalated task is settled, so a run holding one still leaves execute', () => {
-  const run = mkRun()
-  run.phase = 'execute'
-  run.intake_closed = true
-  run.tasks = [
-    mkTask({ task_id: 't1', phase: 'escalated' }),
-    mkTask({ task_id: 't2', phase: 'done' }),
-  ]
-  const advanced = advanceRun(run, {
+function executeAdvance(run: Run) {
+  return advanceRun(run, {
     actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
     ...taskSignalsFor(run),
   })
-  expect(advanced?.phase).toBe('branch-review')
+}
+
+function closedExecuteRun(tasks: Task[]): Run {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.intake_closed = true
+  run.tasks = tasks
+  return run
+}
+
+test('an escalated task holds the run in execute rather than starting the final review', () => {
+  const run = closedExecuteRun([
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'done' }),
+  ])
+  expect(executeAdvance(run)).toBeNull()
+  expect(run.phase).toBe('execute')
+})
+
+test('a run whose every task is escalated waits in execute instead of escalating itself', () => {
+  const run = closedExecuteRun([
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'spec-review' }),
+  ])
+  expect(executeAdvance(run)).toBeNull()
+})
+
+test('rewinding the escalated task and finishing it lets the run leave execute', () => {
+  const run = closedExecuteRun([
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'done' }),
+  ])
+  expect(executeAdvance(run)).toBeNull()
+
+  const t1 = run.tasks[0] as Task
+  t1.phase = 'implement'
+  t1.escalated_from = null
+  expect(executeAdvance(run)).toBeNull()
+
+  t1.phase = 'done'
+  expect(executeAdvance(run)?.phase).toBe('branch-review')
+})
+
+test('a terminal task that did not land still lets the run reach branch review', () => {
+  for (const phase of ['failed', 'orphaned', 'blocked-on-failure'] as const) {
+    const run = closedExecuteRun([
+      mkTask({ task_id: 't1', phase }),
+      mkTask({ task_id: 't2', phase: 'done' }),
+    ])
+    expect(executeAdvance(run)?.phase).toBe('branch-review')
+  }
+})
+
+test('a run whose every task ended without reaching done escalates', () => {
+  const run = closedExecuteRun([
+    mkTask({ task_id: 't1', phase: 'failed' }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-failure' }),
+  ])
+  expect(executeAdvance(run)?.phase).toBe('escalated')
 })
 
 test('a task still in flight leaves the run in execute', () => {
@@ -488,4 +539,31 @@ test('a run phase that is not a review reserves nothing', async () => {
 
   expect(run.verdict_seq).toBeUndefined()
   expect(run.artifacts.verdicts).toEqual({})
+})
+
+test('branch-review says every task landed only when every task is done', async () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'done' }), mkTask({ task_id: 't2', phase: 'done' })]
+
+  const text = await promptForRunPhase(run, {} as Config)
+
+  expect(text).toContain('Every task in **a** is merged and torn down.')
+})
+
+test('branch-review names each task that did not land instead of claiming all merged', async () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'done', issue: 18 }),
+    mkTask({ task_id: 't2', phase: 'failed', issue: 19, branch: 'fix/19-x' }),
+    mkTask({ task_id: 't3', phase: 'orphaned', issue: 20, branch: 'fix/20-y' }),
+  ]
+
+  const text = await promptForRunPhase(run, {} as Config)
+
+  expect(text).not.toContain('Every task in')
+  expect(text).toContain('`t2` (#19, `fix/19-x`) stopped at `failed`')
+  expect(text).toContain('`t3` (#20, `fix/20-y`) stopped at `orphaned`')
+  expect(text).not.toContain('`t1`')
 })

@@ -3,8 +3,14 @@ import type { Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
 const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
+/**
+ * `escalated` is absent on purpose: one rewind resumes it, but a dependent
+ * cascaded into `blocked-on-failure` is terminal and would stay there after its
+ * dependency finished. The dependent waits instead; a human who abandons the
+ * escalated task rewinds it to `failed`, and the cascade happens then.
+ */
 const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
-  'failed', 'orphaned', 'blocked-on-failure', 'escalated',
+  'failed', 'orphaned', 'blocked-on-failure',
 ])
 
 export type GateState =

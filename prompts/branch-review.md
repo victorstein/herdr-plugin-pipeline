@@ -1,7 +1,8 @@
 # Final whole-branch review — run {{run_id}}, pass {{pass}}
 
-Every task in **{{title}}** is merged and torn down. Dispatch a fresh subagent to review the **whole**
-body of work, not task by task.
+{{task_outcomes}}
+
+Dispatch a fresh subagent to review the **whole** body of work, not task by task.
 
 There is no run-level spec to review against: each task carried its own, on its own branch. Start
 from the merged PRs — `gh pr list --state merged --search "<this run's issues>"` — and read each

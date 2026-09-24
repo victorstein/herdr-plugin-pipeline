@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { runTeardown, SETTLED, worktreeRemovalFrom } from '../src/supervisor/teardown'
+import { FINISHED, runTeardown, worktreeRemovalFrom } from '../src/supervisor/teardown'
 import { newRun, type RunEffect } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -68,8 +68,8 @@ test('a removal already done records nothing to re-apply, a fresh one does', asy
   expect(effects).toHaveLength(1)
 })
 
-test('SETTLED counts escalated, which is not terminal but has stopped moving', () => {
-  expect(SETTLED.has('escalated')).toBe(true)
-  expect(SETTLED.has('done')).toBe(true)
-  expect(SETTLED.has('implement')).toBe(false)
+test('FINISHED excludes escalated, which has stopped but a rewind resumes', () => {
+  expect(FINISHED.has('escalated')).toBe(false)
+  expect(FINISHED.has('done')).toBe(true)
+  expect(FINISHED.has('implement')).toBe(false)
 })

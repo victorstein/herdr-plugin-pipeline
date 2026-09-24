@@ -47,6 +47,14 @@ test('an orphaned dependency also blocks permanently', () => {
   expect(gateStatus(waiting, [orphaned, waiting]).state).toBe('blocked-on-failure')
 })
 
+test('an escalated dependency is waited on, not treated as a failure', () => {
+  // A human resumes an escalated task with one rewind. Cascading its dependent
+  // into the terminal blocked-on-failure would strand that dependent there.
+  const stuck = task({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' })
+  const waiting = task({ task_id: 't2', depends_on: ['t1'] })
+  expect(gateStatus(waiting, [stuck, waiting])).toEqual({ state: 'waiting', on: ['t1'] })
+})
+
 test('a finished task does not hold its files', () => {
   const done = task({ task_id: 't1', phase: 'done', files: ['packages/core/'] })
   const waiting = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/x.ts'] })
