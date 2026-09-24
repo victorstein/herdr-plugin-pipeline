@@ -12,7 +12,7 @@ This is one of the only two reasons to interrupt them, so make it worth the inte
 
 When they have answered, resume with:
 
-    {{hpipe}} rewind {{run_id}} {{phase}}{{task_flag}}
+    {{resume_command}}
 
 which clears every pass counter on that record, not only `{{phase}}`'s, and — when `{{phase}}` is a
 review row — reserves a fresh verdict path and prints it. Write the next review there, not to the

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
-import { writeOrchestrator } from '../src/lib/ledger'
-import { resolveOrchestrator } from '../src/lib/orchestrator'
+import { listRuns, newRun, saveRun, writeOrchestrator } from '../src/lib/ledger'
+import { claimRunForRepo, resolveOrchestrator } from '../src/lib/orchestrator'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'orch-')) })
@@ -68,4 +68,47 @@ test('discards a claimed pane that no longer exists', async () => {
     'workspace list': { result: { workspaces: [] } },
   })
   expect(await resolveOrchestrator(dir, new Herdr(bin), 'personal', 'k')).toBeNull()
+})
+
+// ——— claimRunForRepo ———
+
+async function seedRun(title: string, phase = 'execute'): Promise<string> {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: '/repo', repoRoot: '/repo', title })
+  run.phase = phase as typeof run.phase
+  await saveRun(dir, run)
+  return run.run_id
+}
+
+const panes = async () =>
+  Object.fromEntries((await listRuns(dir, 'personal')).map((r) => [r.run_id, r.orchestrator_pane]))
+
+test('claim binds the pane to the one run for the repo', async () => {
+  const id = await seedRun('a')
+  const outcome = await claimRunForRepo(dir, 'personal', '/repo', 'w1:p1', 'hpipe')
+  expect(outcome).toEqual({ ok: true, message: `w1:p1 now drives ${id}` })
+  expect((await panes())[id]).toBe('w1:p1')
+})
+
+test('claim with no run for the repo binds nothing and succeeds', async () => {
+  const outcome = await claimRunForRepo(dir, 'personal', '/repo', 'w1:p1', 'hpipe')
+  expect(outcome.ok).toBe(true)
+  expect(outcome.message).toContain('no active run yet')
+})
+
+test('claim refuses to guess between two live runs for the repo', async () => {
+  const a = await seedRun('aaa')
+  const b = await seedRun('bbb')
+  const outcome = await claimRunForRepo(dir, 'personal', '/repo', 'w1:p1', 'hpipe')
+  expect(outcome.ok).toBe(false)
+  expect(outcome.message).toContain(a)
+  expect(outcome.message).toContain(b)
+  expect(await panes()).toEqual({ [a]: null, [b]: null })
+})
+
+test('claim reads a run in no phase row as occupying the repo, as start does', async () => {
+  const broken = await seedRun('broken', 'dnoe')
+  const outcome = await claimRunForRepo(dir, 'personal', '/repo', 'w1:p1', 'hpipe')
+  expect(outcome.ok).toBe(false)
+  expect(outcome.message).toContain(`hpipe rewind ${broken} <phase>`)
+  expect((await panes())[broken]).toBeNull()
 })

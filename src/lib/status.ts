@@ -78,9 +78,11 @@ interface Move {
  * channel that tells an operator how to resume renders it here, so status, the
  * digest, the stall ladder and a refused CLI command cannot drift apart.
  */
-export function resumeCommand(hpipe: string, run: Run, task: Task | null = null): string {
-  const from = (task ? task.escalated_from : run.escalated_from) ?? '<phase>'
-  return `${hpipe} rewind ${run.run_id} ${from}${task ? ` --task ${task.task_id}` : ''}`
+export function resumeCommand(
+  hpipe: string, run: Run, task: Task | null = null,
+  from: string | null = task ? task.escalated_from : run.escalated_from,
+): string {
+  return `${hpipe} rewind ${run.run_id} ${from ?? '<phase>'}${task ? ` --task ${task.task_id}` : ''}`
 }
 
 function moveFor(run: Run, task: Task, hpipe: string): Move {

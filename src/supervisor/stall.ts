@@ -104,9 +104,8 @@ export function taskStallCandidates(
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
-    // A run in a pane-releasing phase is not being driven — `pickOneAdvance`
-    // skips it for the same reason (`src/supervisor/tick.ts:109`), and
-    // `cmdAbort` parks a run in `done` with its tasks intact.
+    // `pickOneAdvance` skips an undriven run too, and `cmdAbort` parks a run in
+    // `done` with its tasks intact.
     if (!runIsDriven(run)) continue
     for (const task of run.tasks) {
       const row = taskRow(task.phase)

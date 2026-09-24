@@ -1,8 +1,8 @@
+import { join } from 'node:path'
 import { repoContext } from '../lib/repo'
-import {
-  isUnlandedSave, resolveRun, retryOnStaleRun, saveRun, unlandedSaveMessage,
-  writeOrchestrator,
-} from '../lib/ledger'
+import { writeOrchestrator } from '../lib/ledger'
+import { claimRunForRepo } from '../lib/orchestrator'
+import { hpipeCommand } from '../lib/render'
 import { sessionKey } from '../lib/session'
 
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
@@ -29,34 +29,10 @@ await writeOrchestrator(stateDir, session, repoRoot, {
   claimed_at: Date.now(),
 })
 
-let run
-try {
-  run = await retryOnStaleRun(async () => {
-    const resolved = await resolveRun(stateDir, session, {
-      runId: null, repoKey: repoRoot, phases: null, taskId: null, reach: 'unfinished',
-    })
-    if (!resolved.ok && resolved.reason === 'ambiguous') {
-      // `hpipe start` refuses a second run per repo, so this is damage; rebinding
-      // whichever sorts first would silently hand this pane the wrong one.
-      console.error(`[pipeline] claimed ${paneId} for ${repoRoot}, but more than one run is ` +
-        `active for it: ${resolved.candidates.map((r) => r.run_id).join(', ')} — ` +
-        'none was rebound; abort the stray one and claim again')
-      process.exit(1)
-    }
-    if (!resolved.ok) return null
-    const active = resolved.run
-    active.orchestrator_pane = paneId
-    active.history.push({ at: Date.now(), from: 'claim', to: active.phase, why: `orchestrator rebound to ${paneId}` })
-    await saveRun(stateDir, active)
-    return active
-  })
-} catch (error) {
-  if (!isUnlandedSave(error)) throw error
-  console.error(`[pipeline] ${unlandedSaveMessage(error)}`)
+const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? join(import.meta.dir, '..', '..')
+const outcome = await claimRunForRepo(stateDir, session, repoRoot, paneId, hpipeCommand(pluginRoot))
+if (!outcome.ok) {
+  console.error(`[pipeline] ${outcome.message}`)
   process.exit(1)
 }
-if (run) {
-  console.log(`[pipeline] ${paneId} now drives ${run.run_id}`)
-} else {
-  console.log(`[pipeline] claimed ${paneId} for ${repoRoot}; no active run yet`)
-}
+console.log(`[pipeline] ${outcome.message}`)

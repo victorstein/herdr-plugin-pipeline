@@ -7,8 +7,8 @@ import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForWorkspace,
-  runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
+  isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForRepo,
+  runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
   writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
@@ -166,31 +166,15 @@ async function resolveTask(ctx: Ctx, input: {
   return { ok: true, value: { run: found.value, task } }
 }
 
-/**
- * Any unfinished run blocks a start, and so does one in no phase row: the old
- * first-match lookup threw on it, and silently starting beside it would leave
- * two runs claiming one repo.
- */
-async function existingRunForRepo(ctx: Ctx, repoKey: string): Promise<Run | null> {
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, {
-    runId: null, repoKey, phases: null, taskId: null, reach: 'unfinished',
-  })
-  if (resolved.ok) return resolved.run
-  if (resolved.reason === 'ambiguous') return resolved.candidates[0] ?? null
-  if (resolved.reason === 'none') {
-    return resolved.excluded.find((r) => runPhaseState(r) === 'unreadable') ?? null
-  }
-  return null
-}
-
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
 }): Promise<CmdResult> {
-  const existing = await existingRunForRepo(ctx, input.repoKey)
-  if (existing) {
-    return fail(`a run is already active for this repo: ${existing.run_id} (phase ${existing.phase}). ` +
-      `Finish it, or run: hpipe abort ${existing.run_id}`)
+  const existing = await runForRepo(ctx.stateDir, ctx.session, input.repoKey)
+  if (existing.kind !== 'free') {
+    const blocker = existing.kind === 'ambiguous' ? existing.runs[0] as Run : existing.run
+    return fail(`a run is already active for this repo: ${blocker.run_id} (phase ${blocker.phase}). ` +
+      `Finish it, or run: ${hpipeCommand(ctx.pluginRoot)} abort ${blocker.run_id}`)
   }
 
   const run = newRun({

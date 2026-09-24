@@ -321,3 +321,29 @@ export async function resolveRun(
   if (matched.length > 1) return { ok: false, reason: 'ambiguous', candidates: matched }
   return { ok: false, reason: 'none', excluded: withTask }
 }
+
+export type RepoRun =
+  | { kind: 'free' }
+  | { kind: 'one'; run: Run }
+  | { kind: 'ambiguous'; runs: Run[] }
+  | { kind: 'unreadable'; run: Run }
+
+/**
+ * "The run for this repo", read the same way by `hpipe start` and the claim
+ * action. A run in no phase row still occupies the repo: the old first-match
+ * lookup threw on it, and reading it as absent would let `start` open a second
+ * run beside it while `claim` reported there was none.
+ */
+export async function runForRepo(
+  stateDir: string, session: SessionKey, repoKey: string,
+): Promise<RepoRun> {
+  const resolved = await resolveRun(stateDir, session, {
+    runId: null, repoKey, phases: null, taskId: null, reach: 'unfinished',
+  })
+  if (resolved.ok) return { kind: 'one', run: resolved.run }
+  if (resolved.reason === 'ambiguous') return { kind: 'ambiguous', runs: resolved.candidates }
+  const unreadable = resolved.reason === 'none'
+    ? resolved.excluded.find((r) => runPhaseState(r) === 'unreadable')
+    : undefined
+  return unreadable ? { kind: 'unreadable', run: unreadable } : { kind: 'free' }
+}

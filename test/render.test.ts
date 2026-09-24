@@ -38,8 +38,8 @@ test('hpipe on PATH is used only when it resolves into this plugin', () => {
 
 test('renderPrompt supplies hpipe without the caller passing it', async () => {
   const out = await renderPrompt(join(import.meta.dir, '..'), 'escalate', {
-    run_id: 'r1', phase: 'spec', pass: '1', task_flag: '',
+    run_id: 'r1', phase: 'spec', pass: '1', resume_command: 'hpipe rewind r1 spec',
   })
   expect(out).not.toContain('{{hpipe}}')
-  expect(out).toMatch(/(hpipe|src\/cli\.ts) rewind/)
+  expect(out).toContain('hpipe rewind r1 spec')
 })

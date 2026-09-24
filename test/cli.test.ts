@@ -61,7 +61,7 @@ test('start refuses beside a run whose phase is in no row, instead of throwing',
     title: 'b', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
   })
   expect(result.ok).toBe(false)
-  expect(result.text).toContain(`hpipe abort ${broken.run_id}`)
+  expect(result.text).toContain(` abort ${broken.run_id}`)
 })
 
 test('a run excluded for being parked names the rewind that resumes it', async () => {
