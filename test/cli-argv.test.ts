@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { makeFakeBin } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts')
@@ -175,4 +176,160 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
     cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
   })
   expect(byId.exitCode).toBe(0)
+})
+
+const SUBCOMMANDS = [
+  'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
+  'decide', 'answer', 'resume', 'abort', 'forget',
+]
+
+test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
+  // `hpipe start --help` used to start a real run titled "--help", and
+  // `hpipe resume --help` looked up a run with that id.
+  const f = fixture()
+  const outside = tempDir('hpipe-argv-help-')
+
+  for (const command of SUBCOMMANDS) {
+    for (const helpFlag of ['--help', '-h']) {
+      const proc = Bun.spawnSync(['bun', 'run', CLI, command, helpFlag], {
+        cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
+      })
+      const out = proc.stdout.toString() + proc.stderr.toString()
+      expect(proc.exitCode, `${command} ${helpFlag}`).toBe(0)
+      expect(out, `${command} ${helpFlag}`).toContain(`usage: hpipe ${command}`)
+      expect(out).not.toContain('no such run')
+      expect(out).not.toContain('not inside a git repository')
+    }
+  }
+  expect(existsSync(join(f.stateDir, 'runs'))).toBe(false)
+})
+
+test('start --help inside a repo starts no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', '--help'], f)
+  expect(r.code).toBe(0)
+  expect(existsSync(join(f.stateDir, 'runs'))).toBe(false)
+})
+
+test('the top-level usage names every subcommand, brief and show included', () => {
+  const f = fixture()
+  const help = hpipe(['--help'], f)
+  expect(help.code).toBe(0)
+  for (const command of SUBCOMMANDS) expect(help.out).toContain(`hpipe ${command}`)
+
+  const unknown = hpipe(['frobnicate'], f)
+  expect(unknown.code).toBe(1)
+  expect(unknown.out).toContain('brief')
+  expect(unknown.out).toContain('show')
+})
+
+test('bare hpipe prints the usage to stderr and fails; --help prints it to stdout and succeeds', () => {
+  const f = fixture()
+  const bare = Bun.spawnSync(['bun', 'run', CLI], { cwd: f.repo, env: f.env, stdout: 'pipe', stderr: 'pipe' })
+  expect(bare.exitCode).toBe(1)
+  expect(bare.stdout.toString()).toBe('')
+  expect(bare.stderr.toString()).toContain('usage: hpipe')
+
+  const help = Bun.spawnSync(['bun', 'run', CLI, '--help'], { cwd: f.repo, env: f.env, stdout: 'pipe', stderr: 'pipe' })
+  expect(help.exitCode).toBe(0)
+  expect(help.stdout.toString()).toContain('usage: hpipe')
+})
+
+test('a command named after an Object.prototype key is unknown, not a crash', () => {
+  const r = hpipe(['constructor', '--help'], fixture())
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('usage: hpipe <')
+  expect(r.out).not.toContain('TypeError')
+})
+
+test('a help flag in a free-text value slot is that value, not a help request', () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+
+  const r = hpipe(['decide', '--task', 't1', '--question', '-h', '--recommend', 'r'], f)
+  expect(r.out).not.toContain('usage:')
+  expect(r.out).toContain('opened decision')
+})
+
+function registeredTasks(f: Fixture): unknown[] {
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  return (JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8')) as {
+    tasks: unknown[]
+  }).tasks
+}
+
+test('a help flag in an identifier slot is a help request and registers nothing', () => {
+  // Round 2 of #64: `task --branch -h` registered a real task on branch `-h`.
+  const f = started()
+  for (const helpFlag of ['-h', '--help']) {
+    const r = hpipe(['task', '--branch', helpFlag, '--issue', '1', '--surface', 'core'], f)
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('usage: hpipe task')
+  }
+  expect(registeredTasks(f)).toEqual([])
+})
+
+test('an identifier flag whose value looks like a flag is a usage error', () => {
+  const f = started()
+  for (const args of [
+    ['task', '--branch', '-x', '--issue', '1', '--surface', 'core'],
+    ['task', '--branch', '--issue', '1', '--surface', 'core'],
+  ]) {
+    const r = hpipe(args, f)
+    expect(r.code, args.join(' ')).toBe(1)
+    expect(r.out).toContain('--branch needs a value')
+  }
+  expect(registeredTasks(f)).toEqual([])
+})
+
+async function withFakeHerdr(f: Fixture, responses: Record<string, unknown>): Promise<string> {
+  const binDir = tempDir('hpipe-argv-herdr-')
+  f.env.HERDR_BIN_PATH = await makeFakeBin(binDir, responses)
+  return join(binDir, 'calls.log')
+}
+
+test('dispatch --task submits the brief through herdr agent prompt and waits for it', async () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  const log = await withFakeHerdr(f, { 'agent prompt': { result: {} } })
+
+  const r = hpipe(['dispatch', '--task', 't1', '--pane', 'w1-2'], f)
+
+  expect(r.code).toBe(0)
+  expect(r.out).toContain('brief for t1 delivered to w1-2')
+  const calls = await Bun.file(log).text()
+  expect(calls).toStartWith('agent prompt w1-2 # smoke/one — issue #1')
+  expect(calls).toContain('--wait --until working --until blocked --timeout')
+})
+
+test('dispatch --task carries herdr\'s own error code through a real failure envelope', async () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  await withFakeHerdr(f, {
+    'agent prompt': { error: { code: 'agent_not_found', message: 'agent target w9-9 not found' } },
+  })
+
+  const r = hpipe(['dispatch', '--task', 't1', '--pane', 'w9-9'], f)
+
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('agent_not_found')
+  expect(r.out).not.toContain('unparseable')
+})
+
+test('dispatch needs exactly one of --task and --done', async () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  const log = await withFakeHerdr(f, { 'agent prompt': { result: {} } })
+
+  for (const args of [['dispatch'], ['dispatch', '--done', '--task', 't1', '--pane', 'w1-2']]) {
+    const r = hpipe(args, f)
+    expect(r.code, args.join(' ')).toBe(1)
+    expect(r.out).toContain('usage: hpipe dispatch')
+  }
+  expect(existsSync(log)).toBe(false)
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  const run = JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8')) as {
+    intake_closed: boolean
+  }
+  expect(run.intake_closed).toBe(false)
 })

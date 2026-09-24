@@ -15,7 +15,9 @@ test('parses a result envelope', async () => {
   expect(panes[0]?.pane_id).toBe('w1:p1')
 })
 
-test('surfaces an error envelope as ok:false with the code', async () => {
+test('surfaces an error envelope from stderr as ok:false with the code', async () => {
+  // The fake writes errors the way herdr 0.9.0 does: stderr, exit 1, empty
+  // stdout. Reading stdout alone reported every one of them as `unparseable`.
   const bin = await makeFakeBin(dir, {
     'agent prompt': { error: { code: 'agent_blocked', message: 'blocked' } },
   })
@@ -27,7 +29,7 @@ test('surfaces an error envelope as ok:false with the code', async () => {
 test('treats a zero exit with an error body as failure', async () => {
   const bin = await makeFakeBin(dir, {
     'plugin pane open': { error: { code: 'no_active_workspace', message: 'none' } },
-  })
+  }, { 'plugin pane open': 0 })
   const res = await new Herdr(bin).pluginPaneOpen('stein.pipeline', 'supervisor', 'w1')
   expect(res.ok).toBe(false)
   expect(res.code).toBe('no_active_workspace')
@@ -38,6 +40,14 @@ test('records the argv it was called with', async () => {
   await new Herdr(bin).agentStatus('w1:p1')
   const log = await Bun.file(join(dir, 'calls.log')).text()
   expect(log).toContain('agent get w1:p1')
+})
+
+test('a confirmed prompt waits for the agent to start working, bounded by a timeout', async () => {
+  const bin = await makeFakeBin(dir, { 'agent prompt': { result: {} } })
+  const res = await new Herdr(bin).agentPromptConfirmed('w1:p1', 'brief', 30000)
+  expect(res.ok).toBe(true)
+  const log = await Bun.file(join(dir, 'calls.log')).text()
+  expect(log).toContain('agent prompt w1:p1 brief --wait --until working --until blocked --timeout 30000')
 })
 
 test('a missing binary returns a failed result instead of throwing', async () => {
@@ -62,8 +72,8 @@ test('fake-bin requires a token boundary after the matched prefix', async () => 
   const bin = await makeFakeBin(dir, {
     'agent get w1:p1': { result: { agent: { agent_status: 'idle' } } },
   })
-  const proc = Bun.spawn([bin, 'agent', 'get', 'w1:p10'], { stdout: 'pipe' })
-  const text = await new Response(proc.stdout).text()
+  const proc = Bun.spawn([bin, 'agent', 'get', 'w1:p10'], { stdout: 'pipe', stderr: 'pipe' })
+  const text = await new Response(proc.stderr).text()
   await proc.exited
   const parsed = JSON.parse(text) as { error?: { code: string } }
   expect(parsed.error?.code).toBe('unstubbed')

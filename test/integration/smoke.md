@@ -138,15 +138,22 @@ definition at …-dev.md` (wrong `--surface`).
 The orchestrator now creates a worktree per task and adopts its root pane:
 
 ```bash
-herdr worktree create --branch smoke/one --base main
+herdr worktree create --cwd <repo> --branch smoke/one --base main
 # capture .result.root_pane.pane_id
-herdr agent start smoke-one --kind claude --pane <root_pane_id> -- \
-  --dangerously-skip-permissions "<the brief hpipe task printed>"
+herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
+hpipe dispatch --task t1 --pane <root_pane_id>
 ```
 
 **Observe:** `pane list --workspace <ws>` shows exactly ONE pane for that workspace before and
-after `agent start` — it adopts the existing root pane and creates no orphan. Within a tick or two
-`hpipe status` shows the task bound: its `agent_status` stops being `unknown`.
+after `agent start` — it adopts the existing root pane and creates no orphan. `hpipe dispatch --task`
+exits 0 with `brief for t1 delivered`, and the worker pane shows the brief submitted and the agent
+working on it — not text sitting in the input box. `hpipe show --task t1` prints the recorded task.
+Within a tick or two `hpipe status` shows the task bound: its `agent_status` stops being `unknown`.
+
+**Failure looks like (handoff):** `dispatch --task` exits 1 naming a herdr code. `agent_prompt_stalled`
+means herdr saw no working state within 5s of submitting — `herdr pane read` the pane to tell a
+brief left unsubmitted from one that never arrived. Passing the brief on the `agent start` line instead
+fails every task with `invalid_agent_argument`; that is the defect this step replaced (#11).
 
 **Failure looks like:** the task still shows `unknown` and `hpipe status` never names a pane. The
 binding comes from two separate events — `worktree.created` (matched on `branch`, sets

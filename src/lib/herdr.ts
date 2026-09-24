@@ -25,6 +25,15 @@ interface Envelope<T> {
   error?: { code: string; message: string }
 }
 
+function parseEnvelope<T>(text: string): Envelope<T> | null {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return typeof parsed === 'object' && parsed !== null ? parsed as Envelope<T> : null
+  } catch {
+    return null
+  }
+}
+
 export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
@@ -32,20 +41,24 @@ export class Herdr {
     // Bun.spawn throws synchronously on a missing binary. Callers rely on these
     // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
     // CallResult rather than crash the supervisor loop.
-    let text: string
+    let stdout: string
+    let stderr: string
     try {
       const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
-      text = await new Response(proc.stdout).text()
+      ;[stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+      ])
       await proc.exited
     } catch (error) {
       return { ok: false, code: 'spawn_failed', message: String(error) }
     }
 
-    let parsed: Envelope<T>
-    try {
-      parsed = JSON.parse(text) as Envelope<T>
-    } catch {
-      return { ok: false, code: 'unparseable', message: text.slice(0, 200) }
+    // herdr 0.9.0 writes a failure's envelope to stderr, exits 1 and leaves
+    // stdout empty; reading stdout alone turned every error code into
+    // `unparseable`. Measured on a live run.
+    const parsed = parseEnvelope<T>(stdout) ?? parseEnvelope<T>(stderr)
+    if (parsed === null) {
+      return { ok: false, code: 'unparseable', message: (stdout || stderr).slice(0, 200) }
     }
 
     // herdr reports some failures in the body while exiting 0.
@@ -72,6 +85,21 @@ export class Herdr {
 
   async agentPrompt(target: string, text: string): Promise<CallResult<unknown>> {
     return this.call(['agent', 'prompt', target, text])
+  }
+
+  /**
+   * Succeeds only once herdr has seen the agent take the prompt up. Without
+   * `--wait` a success reports the submission, not its effect — and the brief
+   * lost on the berean-os run sat unsubmitted in the input box with nothing
+   * anywhere saying so.
+   */
+  async agentPromptConfirmed(
+    target: string, text: string, timeoutMs: number,
+  ): Promise<CallResult<unknown>> {
+    return this.call([
+      'agent', 'prompt', target, text,
+      '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(timeoutMs),
+    ])
   }
 
   async paneRead(target: string, lines: number): Promise<string> {

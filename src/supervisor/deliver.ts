@@ -87,7 +87,15 @@ export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
 export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
 
-const RETRYABLE = new Set(['agent_blocked', 'pane_not_found', 'not_found', 'unparseable'])
+// Nothing re-sends a failed delivery; the next tick's transitions or the stall
+// ladder regenerate it. This set only decides whether a failure counts against
+// the pane or is logged as giving up at once, so it lists the herdr 0.9.0 codes
+// that are transient: an agent not detected or not ready yet, a busy PTY, a
+// server restarting.
+const RETRYABLE = new Set([
+  'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
+  'pane_not_found', 'not_found', 'server_unavailable', 'server_not_running', 'unparseable',
+])
 
 export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
   if (attempts >= max) return false

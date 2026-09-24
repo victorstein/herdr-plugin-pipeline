@@ -121,6 +121,18 @@ test('an unknown pane is retryable — it may be restoring', () => {
   expect(shouldRetry('pane_not_found', 1, 5)).toBe(true)
 })
 
+test('herdr\'s transient codes count against the pane rather than giving up at once', () => {
+  for (const code of [
+    'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
+    'server_unavailable', 'server_not_running',
+  ]) expect(shouldRetry(code, 1, 5), code).toBe(true)
+})
+
+test('a permanent herdr code gives up at once', () => {
+  expect(shouldRetry('workspace_not_found', 1, 5)).toBe(false)
+  expect(shouldRetry('empty_agent_prompt', 1, 5)).toBe(false)
+})
+
 test('a blocked worker line inlines its pane tail', () => {
   const run = mkRun()
   run.tasks.push(mkTask({ agent_status: 'blocked' }))

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
-import { Herdr } from './lib/herdr'
+import { Herdr, type CallResult } from './lib/herdr'
 import {
   activeRunForRepo, listRuns, newRun, resolveRun, runForWorkspace, runPhaseState, saveRun,
   taskPhaseIsTerminal, writeOrchestrator,
@@ -17,7 +17,7 @@ import { drain } from './lib/queue'
 import { renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
-import { formatStatus } from './lib/status'
+import { formatStatus, formatTaskDetail } from './lib/status'
 import { reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
@@ -186,6 +186,7 @@ export async function cmdTask(ctx: Ctx, input: {
     return fail(`--issue must be a positive issue number, got: ${input.issue || '(missing)'}`)
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
+  if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
@@ -291,6 +292,75 @@ export async function cmdBrief(ctx: Ctx, input: {
   if (!found.ok) return found.result
 
   return ok(await renderWorkerPrompt(ctx.pluginRoot, found.value.run, found.value.task))
+}
+
+/** Read-only, and reaches a finished run under --run, like `brief`. */
+export async function cmdShow(ctx: Ctx, input: {
+  taskId: string; repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: input.runId !== null, escape: '--run <run-id> shows it anyway',
+  })
+  if (!found.ok) return found.result
+  return ok(formatTaskDetail(found.value.run, found.value.task))
+}
+
+export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unknown>>
+
+/**
+ * The handoff `agent start "<brief>"` could not make: herdr refuses to encode a
+ * brief's fences and backticks as a shell argument, which fails every task. The
+ * brief goes over `agent prompt` instead, the same channel the supervisor uses
+ * for every later phase. Measured on a live run.
+ */
+export async function cmdDispatchTask(ctx: Ctx, input: {
+  taskId: string; paneId: string; repoKey: string | null; runId: string | null
+}, send: SendBrief): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    allowTerminal: false, escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  if (input.paneId.trim().length === 0) {
+    return fail('--pane is required: the root pane `worktree create` returned')
+  }
+
+  // A queued task's files or dependencies are still held; starting its worker
+  // now is exactly the parallel edit `--files` and `--depends-on` exist to stop.
+  if (task.phase === 'queued') {
+    const gate = gateStatus(task, run.tasks)
+    const waitingOn = gate.state === 'ready' ? '' : `: waiting on ${gate.on.join(', ')}`
+    return fail(`task ${task.task_id} is still queued${waitingOn} — you will be told when it is ready`)
+  }
+  if (taskPhaseIsTerminal(task.phase)) {
+    return fail(`task ${task.task_id} is finished (phase: ${task.phase}) — there is no worker to brief`)
+  }
+  // Past the gate's first phase a worker already holds the brief. Re-sending it
+  // would restart that worker's instructions mid-phase, and `--until working`
+  // matches at once on a busy agent, so the confirmation would prove nothing.
+  const briefedPhase = taskRow('queued').onClear as TaskPhase
+  if (task.phase !== briefedPhase) {
+    return fail(`task ${task.task_id} is already in ${task.phase}, past ${briefedPhase} — ` +
+      `its worker has the brief; \`hpipe brief --task ${task.task_id}\` prints it to reread`)
+  }
+
+  const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
+  const sent = await send(input.paneId, brief)
+  if (!sent.ok) {
+    const reason = `brief for ${task.task_id} not confirmed in ${input.paneId}: ` +
+      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
+    // Only these two come back after herdr accepted the text; every other code
+    // is a rejection before anything reached the pane.
+    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
+    return fail(mayHaveLanded
+      ? `${reason}\n  → herdr pane read ${input.paneId} before retrying: the brief was ` +
+        'submitted and may already be in the pane, and a retry would send it twice'
+      : `${reason}\n  → nothing was sent; fix the cause and run it again`)
+  }
+  return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`)
 }
 
 export async function cmdDispatchDone(ctx: Ctx, input: {
@@ -572,12 +642,93 @@ export function listFlag(argv: string[], name: string): string[] {
   return entries
 }
 
+const USAGE: Record<string, string[]> = {
+  start: ['hpipe start <title>'],
+  task: ['hpipe task --branch <branch> --issue <n> --surface <surface> ' +
+    '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
+  brief: ['hpipe brief --task <id> [--run <run-id>]'],
+  show: ['hpipe show --task <id> [--run <run-id>]'],
+  dispatch: [
+    'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
+    'hpipe dispatch --done [--run <run-id>]',
+  ],
+  status: ['hpipe status'],
+  drain: ['hpipe drain'],
+  rewind: ['hpipe rewind <run-id> <phase> [--task <id>]'],
+  release: ['hpipe release --task <id> [--run <run-id>]'],
+  decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
+  answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
+  resume: ['hpipe resume <run-id>'],
+  abort: ['hpipe abort <run-id>'],
+  forget: ['hpipe forget <workspace-id>'],
+}
+
+const commandUsage = (forms: string[]): string => `usage: ${forms.join('\n       ')}`
+
+const fullUsage = (): string =>
+  `usage: hpipe <${Object.keys(USAGE).join('|')}> …\n\n` +
+  Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
+
+const HELP_FLAGS = new Set(['--help', '-h'])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
+// Prose can legitimately be `-h`. An identifier never can: taking one as a value
+// registered a task on branch `-h`.
+const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes'])
+// cmdTask names this one's argv accident more precisely than a usage line can.
+const SELF_VALIDATING_FLAGS = new Set(['--files'])
+
+const wantsHelp = (args: string[]): boolean => args.some((arg, i) => {
+  if (!HELP_FLAGS.has(arg)) return false
+  const previous = args[i - 1]
+  return previous === undefined || !FREE_TEXT_FLAGS.has(previous)
+})
+
+/** The first identifier flag whose value is missing or looks like a flag. */
+function identifierWithoutValue(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const name = args[i] as string
+    if (!name.startsWith('--') || VALUELESS_FLAGS.has(name)) continue
+    if (FREE_TEXT_FLAGS.has(name) || SELF_VALIDATING_FLAGS.has(name)) { i++; continue }
+    const value = args[i + 1]
+    if (value === undefined || value.startsWith('-')) return name
+    i++
+  }
+  return null
+}
+
+const DISPATCH_CONFIRM_TIMEOUT_MS = 30_000
+
 async function dispatch(argv: string[]): Promise<number> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
     ?? join(process.env.HOME ?? '', '.local/state/herdr/plugins/stein.pipeline')
   const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? join(import.meta.dir, '..')
   const ctx: Ctx = { stateDir, pluginRoot, session: sessionKey() }
   const [command, ...rest] = argv
+
+  if (command === 'help' || (command !== undefined && HELP_FLAGS.has(command))) {
+    console.log(fullUsage())
+    return 0
+  }
+  const usage = command !== undefined && Object.hasOwn(USAGE, command) ? USAGE[command] : undefined
+  if (command === undefined || usage === undefined) {
+    console.error(fullUsage())
+    return 1
+  }
+  // Before the repo lookup and every write: `start --help` used to open a run
+  // titled "--help", and `resume --help` looked for a run with that id.
+  if (wantsHelp(rest)) {
+    console.log(commandUsage(usage))
+    return 0
+  }
+  if (command === 'dispatch' && rest.includes('--done') === (flag(rest, 'task') !== null)) {
+    console.error(commandUsage(usage))
+    return 1
+  }
+  const valueless = command === 'start' ? null : identifierWithoutValue(rest)
+  if (valueless !== null) {
+    console.error(`hpipe: ${valueless} needs a value\n${commandUsage(usage)}`)
+    return 1
+  }
 
   // Every command that resolves a run needs the caller's repo to filter by, so
   // this is a deny-list, not an allow-list: a new command is assumed to resolve.
@@ -630,14 +781,27 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
-    case 'dispatch':
-      if (!rest.includes('--done')) {
-        console.error('usage: hpipe dispatch --done [--run <run-id>]')
-        return 1
-      }
-      out = await cmdDispatchDone(ctx, {
-        runId: flag(rest, 'run'), repoKey: repo?.repoKey ?? null,
+    case 'show':
+      out = await cmdShow(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
       })
+      break
+
+    case 'dispatch':
+      if (rest.includes('--done')) {
+        out = await cmdDispatchDone(ctx, {
+          runId: flag(rest, 'run'), repoKey: repo?.repoKey ?? null,
+        })
+        break
+      }
+      out = await cmdDispatchTask(ctx, {
+        taskId: flag(rest, 'task')!,
+        paneId: flag(rest, 'pane') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      }, (paneId, text) => new Herdr().agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS))
       break
 
     case 'rewind':
@@ -682,7 +846,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:
-      console.error('usage: hpipe <start|task|dispatch|status|drain|rewind|release|decide|answer|resume|abort|forget> …')
+      console.error(fullUsage())
       return 1
   }
 

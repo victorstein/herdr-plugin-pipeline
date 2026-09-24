@@ -104,10 +104,25 @@ body is the brief** — and register each with:
                [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>] \
                [--run <run-id>]
 
-When the batch is complete it closes intake with `hpipe dispatch --done`. Everything after that is
-injected: each worker gets its brief at dispatch and its next instruction as each phase completes.
+When a task is ready the orchestrator creates its worktree, starts a bare agent in the root pane, and
+hands it the brief with:
 
-`hpipe status` shows the fleet, every open decision, and anything waiting on you.
+    hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]
+
+which submits the rendered brief over `herdr agent prompt` and exits non-zero unless herdr sees the
+worker start on it. The brief cannot ride on `herdr agent start` itself: herdr refuses to pass an
+argument containing its fences and backticks. When the batch is complete the orchestrator closes
+intake with `hpipe dispatch --done`. Everything after that is injected: each worker gets its next
+instruction as each phase completes.
+
+`hpipe status` shows the fleet, every open decision, and anything waiting on you. For one task:
+
+| | |
+|---|---|
+| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, issue, surface, files, dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
+| `hpipe brief --task <id> [--run <run-id>]` | The worker brief, rendered bare. Read-only — registering a task is the only other place it is printed |
+
+Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
 ## Answering a decision
 
@@ -122,7 +137,7 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 | | |
 |---|---|
 | Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters, any undelivered answer, and (rewinding to `dispatch`) worktree adoption. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
-| Two live runs in one session | `task`, `brief`, `dispatch --done`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
+| Two live runs in one session | `task`, `brief`, `show`, `dispatch`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |

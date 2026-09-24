@@ -3,12 +3,21 @@
 Tasks are registered. Your job now is to give each ready task a worktree and an agent, and to keep
 two agents off the same files.
 
-**When you are told a task is ready**, create its worktree and start the worker on it:
+**When you are told a task is ready**, create its worktree, start the worker on it bare, then hand
+it the brief:
 
     herdr worktree create --cwd {{repo_root}} --branch <branch> --base main
-    # capture .result.root_pane.pane_id from that response
-    herdr agent start <name> --kind claude --pane <root_pane_id> -- \
-      --dangerously-skip-permissions "<the worker brief you were given>"
+    # capture .result.root_pane.pane_id and .result.worktree.path from that response
+    herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
+    {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
+
+**Never put the brief on the `agent start` line.** herdr refuses to encode an argument holding fences
+or backticks for the target shell (`invalid_agent_argument`), and every brief has both, so it fails
+for every task. Do not rebuild the handoff out of `pane send-text` and `send-keys` either: a pasted
+brief can sit unsubmitted in the input box, and nothing tells you. Measured on a live run.
+`{{hpipe}} dispatch --task` renders the brief itself, submits it over `herdr agent prompt`, and exits
+zero only once herdr has seen the worker start working on it. On a non-zero exit, `herdr pane read`
+the pane before retrying — a retry after a stalled submission sends the brief twice.
 
 **`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
 *focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
@@ -16,21 +25,19 @@ start. Omitting it creates the worktree in whatever repo happens to be focused a
 worker there, reading `gh issue view` against a different repo's issues. Measured on a live run.
 
 `agent start` adopts the **existing** root pane — it does not create one, and there is no orphan pane
-to close. Do not pass `--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its
-0.9.0 signature. That prohibition is about `agent start` only — `worktree create` has `--cwd` and
-needs it.
+to close. It returns once the agent is ready for input, which is when the handoff can go. Do not pass
+`--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its 0.9.0 signature. That
+prohibition is about `agent start` only — `worktree create` has `--cwd` and needs it.
 
-Hand the worker the brief exactly as you were given it. It is rendered for that task and carries the
-issue number, the surface, the artifact paths the supervisor watches and the task id the worker needs
-for `{{hpipe}} decide`. Do not summarise it, do not add task text of your own: the issue body is the
-brief, and anything you say here instead of in the issue is lost. When the brief came from
-`{{hpipe}} task`, the three header lines above it — `task_id:`, `files:` and `bootstrap:` — are for
-you and not for the worker: confirm the `files:` line matches what you declared, run what
-`bootstrap:` names in the new checkout before `agent start`, then hand over everything from the
-blank line onward. `{{hpipe}}
-brief --task <id>` prints the brief bare, with no header lines and no `files:` echo, so hand that
-one over whole — its first blank line falls after the `# <branch> — issue #<n>` heading, and
-stripping to it would drop the heading.
+The brief is rendered for that task and carries the issue number, the surface, the artifact paths the
+supervisor watches and the task id the worker needs for `{{hpipe}} decide`. Do not summarise it or
+send the worker task text of your own: the issue body is the brief, and anything you say here instead
+of in the issue is lost. The copy you were shown is for you to read; `dispatch --task` sends its
+own. When it came from `{{hpipe}} task`, the three header lines above it — `task_id:`, `files:` and
+`bootstrap:` — are yours: confirm the `files:` line matches what you declared, and run what
+`bootstrap:` names in the new checkout before `agent start`. `{{hpipe}} brief --task <id>` prints
+the bare brief again if you need to reread it, and `{{hpipe}} show --task <id>` prints what the run
+recorded for the task — its phase, files, dependencies, artifact paths, PR and CI.
 
 **Still registering?** New tasks go in with an issue first, then:
 
