@@ -1,7 +1,7 @@
 import { abandonDecisions } from '../lib/decisions'
-import { isUnlandedSave } from '../lib/ledger'
+import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
-import { runRow, taskRow } from '../lib/phases'
+import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
@@ -234,7 +234,7 @@ export function pickOneAdvance(runs: Run[]): Run[] {
   const seen = new Set<string>()
   const picked: Run[] = []
   for (const run of runs) {
-    if (runRow(run.phase).releasesPane === true) continue
+    if (!runIsDriven(run)) continue
     const pane = run.orchestrator_pane
     if (!pane || seen.has(pane)) continue
     seen.add(pane)

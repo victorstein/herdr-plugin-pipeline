@@ -1,7 +1,8 @@
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { runRow, taskRow } from './phases'
+import { runIsDriven } from './ledger'
+import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 
 export interface StatusSupervisor {
@@ -39,7 +40,7 @@ function fileHolders(run: Run, task: Task): Task[] {
  * live.
  */
 function isCurrentObservation(run: Run, task: Task, at: number): boolean {
-  if (runRow(run.phase).releasesPane === true || task.pane_id === null) return false
+  if (!runIsDriven(run) || task.pane_id === null) return false
   return at === task.phase_entered_at
 }
 
@@ -72,6 +73,18 @@ interface Move {
   clause: string
 }
 
+/**
+ * The one way back from an escalation, for a run or for one of its tasks. Every
+ * channel that tells an operator how to resume renders it here, so status, the
+ * digest, the stall ladder and a refused CLI command cannot drift apart.
+ */
+export function resumeCommand(
+  hpipe: string, run: Run, task: Task | null = null,
+  from: string | null = task ? task.escalated_from : run.escalated_from,
+): string {
+  return `${hpipe} rewind ${run.run_id} ${from ?? '<phase>'}${task ? ` --task ${task.task_id}` : ''}`
+}
+
 function moveFor(run: Run, task: Task, hpipe: string): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
@@ -79,10 +92,7 @@ function moveFor(run: Run, task: Task, hpipe: string): Move {
 
   if (task.phase === 'done') return notYours('nothing for you — this task is finished')
   if (row.terminal === true) return yours('dead end, needs a human')
-  if (task.phase === 'escalated') {
-    const from = task.escalated_from ?? '<phase>'
-    return yours(`needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``)
-  }
+  if (task.phase === 'escalated') return yours(`needs a human: \`${resumeCommand(hpipe, run, task)}\``)
   if (row.actor === 'orchestrator') return yours('YOUR move')
   if (row.actor === 'worker') {
     // An idle worker that has stopped short otherwise reads exactly like a busy
@@ -242,7 +252,7 @@ export function formatStatus(
       lines.push(
         `  ⚠ run escalated from ${run.escalated_from ?? 'unknown'} ` +
         `${ageMinutes(run.phase_entered_at, now)}m ago — needs a human; ` +
-        `\`${hpipe} rewind ${run.run_id} ${run.escalated_from ?? '<phase>'}\` resumes it`,
+        `\`${resumeCommand(hpipe, run)}\` resumes it`,
       )
     }
 

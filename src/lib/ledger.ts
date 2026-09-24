@@ -166,13 +166,6 @@ export async function listRuns(stateDir: string, session: SessionKey): Promise<R
   return runs
 }
 
-export async function activeRunForRepo(
-  stateDir: string, session: SessionKey, repoKey: string,
-): Promise<Run | null> {
-  const runs = await listRuns(stateDir, session)
-  return runs.find((r) => r.repo_key === repoKey && !runRow(r.phase).terminal) ?? null
-}
-
 export async function runForWorkspace(
   stateDir: string, session: SessionKey, workspaceId: string,
 ): Promise<Run | null> {
@@ -223,23 +216,31 @@ export interface RunQuery {
   repoKey: string | null
   phases: readonly RunPhase[] | null
   taskId: string | null
-  /** The caller opts into a finished run by naming it; never inferred. */
-  allowTerminal: boolean
+  reach: RunReach
 }
+
+/**
+ * Which runs a command may act on, picked at every call site so none reaches for
+ * `terminal` or `releasesPane` on its own. `driven` is for a command whose effect
+ * only the supervisor carries forward: on a parked run it would strand. A finished
+ * run is only ever reached by naming it, never inferred.
+ */
+export type RunReach = 'driven' | 'unfinished' | 'finished-if-named'
 
 export type RunResolution =
   | { ok: true; run: Run }
   | { ok: false; reason: 'no-such-run' }
   | { ok: false; reason: 'terminal'; run: Run }
+  | { ok: false; reason: 'parked'; run: Run }
   | { ok: false; reason: 'wrong-phase'; run: Run }
   | { ok: false; reason: 'unreadable'; run: Run }
   | { ok: false; reason: 'none'; excluded: Run[] }
   | { ok: false; reason: 'ambiguous'; candidates: Run[] }
 
 /**
- * Both phase questions below are throw-safe, and both live here rather than in
- * `phases.ts` beside `runRow`/`taskRow` — one address, so the next caller
- * reading a phase off disk finds them instead of writing a fourth spelling.
+ * Every phase question below is throw-safe, and all of them live here rather
+ * than in `phases.ts` beside `runRow`/`taskRow` — one address, so the next
+ * caller reading a phase off disk finds them instead of writing another spelling.
  *
  * `runRow` throws on a phase with no row and nothing validates what is on disk,
  * so every caller of resolveRun would otherwise inherit a stack trace from one
@@ -252,6 +253,34 @@ export function runPhaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
     return 'unreadable'
   }
 }
+
+/**
+ * "Is the supervisor acting on this run?" — a different question from
+ * `runPhaseState`'s "is it finished?". `releasesPane` covers `escalated` as well
+ * as `done`, so a run parked in `escalated` is unfinished yet nothing announces
+ * its decisions or probes its tasks until a human rewinds it.
+ */
+export function runIsDriven(run: Run): boolean {
+  try {
+    return runRow(run.phase).releasesPane !== true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * By id alone, in any phase — finished, parked, or in no row at all. Only the
+ * escape commands use it: `rewind` is how a finished or unreadable run is left,
+ * so resolveRun's legality filters would lock that door from the outside.
+ */
+export async function runById(
+  stateDir: string, session: SessionKey, runId: string,
+): Promise<Run | null> {
+  return (await listRuns(stateDir, session)).find((r) => r.run_id === runId) ?? null
+}
+
+const withinReach = (run: Run, reach: RunReach): boolean =>
+  runPhaseState(run) === 'live' && (reach !== 'driven' || runIsDriven(run))
 
 export const taskPhaseIsTerminal = (phase: string): boolean =>
   TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
@@ -266,8 +295,11 @@ export async function resolveRun(
     if (!named) return { ok: false, reason: 'no-such-run' }
     const state = runPhaseState(named)
     if (state === 'unreadable') return { ok: false, reason: 'unreadable', run: named }
-    if (state === 'terminal' && !query.allowTerminal) {
+    if (state === 'terminal' && query.reach !== 'finished-if-named') {
       return { ok: false, reason: 'terminal', run: named }
+    }
+    if (query.reach === 'driven' && !runIsDriven(named)) {
+      return { ok: false, reason: 'parked', run: named }
     }
     if (query.phases !== null && !query.phases.includes(named.phase)) {
       return { ok: false, reason: 'wrong-phase', run: named }
@@ -280,7 +312,7 @@ export async function resolveRun(
     (r) => query.taskId === null || r.tasks.some((t) => t.task_id === query.taskId),
   )
   const matched = withTask.filter(
-    (r) => runPhaseState(r) === 'live' &&
+    (r) => withinReach(r, query.reach) &&
       (query.phases === null || query.phases.includes(r.phase)),
   )
 
@@ -288,4 +320,30 @@ export async function resolveRun(
   if (matched.length === 1 && only) return { ok: true, run: only }
   if (matched.length > 1) return { ok: false, reason: 'ambiguous', candidates: matched }
   return { ok: false, reason: 'none', excluded: withTask }
+}
+
+export type RepoRun =
+  | { kind: 'free' }
+  | { kind: 'one'; run: Run }
+  | { kind: 'ambiguous'; runs: Run[] }
+  | { kind: 'unreadable'; run: Run }
+
+/**
+ * "The run for this repo", read the same way by `hpipe start` and the claim
+ * action. A run in no phase row still occupies the repo: the old first-match
+ * lookup threw on it, and reading it as absent would let `start` open a second
+ * run beside it while `claim` reported there was none.
+ */
+export async function runForRepo(
+  stateDir: string, session: SessionKey, repoKey: string,
+): Promise<RepoRun> {
+  const resolved = await resolveRun(stateDir, session, {
+    runId: null, repoKey, phases: null, taskId: null, reach: 'unfinished',
+  })
+  if (resolved.ok) return { kind: 'one', run: resolved.run }
+  if (resolved.reason === 'ambiguous') return { kind: 'ambiguous', runs: resolved.candidates }
+  const unreadable = resolved.reason === 'none'
+    ? resolved.excluded.find((r) => runPhaseState(r) === 'unreadable')
+    : undefined
+  return unreadable ? { kind: 'unreadable', run: unreadable } : { kind: 'free' }
 }

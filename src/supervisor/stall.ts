@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
-import { isUnlandedSave, type RunEffect, type SaveOutcome } from '../lib/ledger'
-import { ageMinutes } from '../lib/status'
+import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
+import { ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
@@ -104,10 +104,9 @@ export function taskStallCandidates(
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
-    // A run in a pane-releasing phase is not being driven — `pickOneAdvance`
-    // skips it for the same reason (`src/supervisor/tick.ts:109`), and
-    // `cmdAbort` parks a run in `done` with its tasks intact.
-    if (runRow(run.phase).releasesPane === true) continue
+    // `pickOneAdvance` skips an undriven run too, and `cmdAbort` parks a run in
+    // `done` with its tasks intact.
+    if (!runIsDriven(run)) continue
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
@@ -223,13 +222,11 @@ export function stallAwaiting(run: Run, task: Task | null, hpipe: string): Await
   // which would otherwise tell an escalated task it is waiting for an answer to a
   // decision it never asked.
   if (row.actor === 'human') {
-    const from = (task ? task.escalated_from : run.escalated_from) ?? '<phase>'
-    const flag = task ? ` --task ${task.task_id}` : ''
     return {
       short: 'a human to act on the escalation',
       clause: 'This phase is escalated and waits on the human, not on you. If they have not been ' +
         'told, tell them now; once they have decided, ' +
-        `\`${hpipe} rewind ${run.run_id} ${from}${flag}\` resumes it.`,
+        `\`${resumeCommand(hpipe, run, task)}\` resumes it.`,
     }
   }
 

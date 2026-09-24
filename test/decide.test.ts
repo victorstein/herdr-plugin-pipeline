@@ -405,6 +405,45 @@ test('decide refuses a task in a finished run and writes nothing', async () => {
   expect(saved?.tasks[0]?.decisions).toHaveLength(0)
 })
 
+test('decide refuses a task in an escalated run, names the rewind, and writes nothing', async () => {
+  // Issue #49: `escalated` is not terminal, so the resolver let this through —
+  // but the supervisor drives nothing on a parked run, so the question stranded.
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'escalated'
+  run.escalated_from = 'execute'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'plan' })]
+  await saveRun(dir, run)
+
+  for (const runId of [null, run.run_id]) {
+    const result = await cmdDecide(ctx(), {
+      task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.text).toContain(`rewind ${run.run_id} execute`)
+  }
+
+  const saved = await savedRun(run.run_id)
+  expect(saved?.tasks[0]?.phase).toBe('plan')
+  expect(saved?.tasks[0]?.decisions).toHaveLength(0)
+})
+
+test('answer still records onto a task in an escalated run', async () => {
+  // Unlike decide, an answer waits in pending_answer and is delivered once the
+  // run is rewound, so nothing strands.
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
+  const decided = (await savedRun(run.run_id))!
+  decided.phase = 'escalated'
+  decided.escalated_from = 'execute'
+  await saveRun(dir, decided)
+
+  const result = await cmdAnswer(ctx(), {
+    task: 't1', decision: openDecisionFor(decided.tasks[0]!)!.id, answer: 'do X', by: 'human',
+    repoKey: 'k', runId: null,
+  })
+  expect(result.ok).toBe(true)
+})
+
 test('decide refuses a finished task even inside a live run', async () => {
   const run = await runWithTask({ task_id: 't1', phase: 'done' })
   const result = await cmdDecide(ctx(), {

@@ -1,5 +1,7 @@
 import type { Herdr } from './herdr'
-import { readOrchestrator } from './ledger'
+import {
+  isUnlandedSave, readOrchestrator, retryOnStaleRun, runForRepo, saveRun, unlandedSaveMessage,
+} from './ledger'
 import type { Run, SessionKey } from './types'
 
 export async function resolveOrchestrator(
@@ -58,4 +60,51 @@ export async function rebindOrchestrator(
     why: `orchestrator rebound after ${previous} went away`,
   })
   return true
+}
+
+export interface ClaimOutcome { ok: boolean; message: string }
+
+/**
+ * Binds `paneId` to the repo's run, if there is exactly one. With two, or with
+ * one in no phase row, it rebinds nothing: `hpipe start` refuses a second run per
+ * repo, so either is damage, and picking whichever sorts first would silently
+ * hand this pane the wrong run.
+ */
+export async function claimRunForRepo(
+  stateDir: string, session: SessionKey, repoRoot: string, paneId: string, hpipe: string,
+): Promise<ClaimOutcome> {
+  const claimed = `claimed ${paneId} for ${repoRoot}`
+  try {
+    return await retryOnStaleRun(async (): Promise<ClaimOutcome> => {
+      const found = await runForRepo(stateDir, session, repoRoot)
+      switch (found.kind) {
+        case 'free':
+          return { ok: true, message: `${claimed}; no active run yet` }
+        case 'ambiguous':
+          return {
+            ok: false,
+            message: `${claimed}, but more than one run is active for it: ` +
+              `${found.runs.map((r) => r.run_id).join(', ')} — none was rebound; ` +
+              `\`${hpipe} abort <run-id>\` the stray one and claim again`,
+          }
+        case 'unreadable':
+          return {
+            ok: false,
+            message: `${claimed}, but ${found.run.run_id} is in ${found.run.phase}, which is in ` +
+              `no phase row — it was not rebound; \`${hpipe} rewind ${found.run.run_id} <phase>\` ` +
+              'and claim again',
+          }
+        case 'one': {
+          const run = found.run
+          run.orchestrator_pane = paneId
+          run.history.push({ at: Date.now(), from: 'claim', to: run.phase, why: `orchestrator rebound to ${paneId}` })
+          await saveRun(stateDir, run)
+          return { ok: true, message: `${paneId} now drives ${run.run_id}` }
+        }
+      }
+    })
+  } catch (error) {
+    if (!isUnlandedSave(error)) throw error
+    return { ok: false, message: unlandedSaveMessage(error) }
+  }
 }

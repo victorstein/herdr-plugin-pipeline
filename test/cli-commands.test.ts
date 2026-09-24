@@ -9,7 +9,7 @@ import {
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
-import { activeRunForRepo, listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
 let dir: string

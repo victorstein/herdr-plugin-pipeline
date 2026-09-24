@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  activeRunForRepo, listRuns, loadRun, newRun, readOrchestrator,
-  resolveRun, retryOnStaleRun, saveRun, StaleRunError, writeOrchestrator,
+  listRuns, loadRun, newRun, readOrchestrator,
+  resolveRun, retryOnStaleRun, runById, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
 } from '../src/lib/ledger'
 
 let dir: string
@@ -28,19 +28,6 @@ test('listRuns only returns runs for the requested session', async () => {
   const runs = await listRuns(dir, 'personal')
   expect(runs).toHaveLength(1)
   expect(runs[0]?.title).toBe('a')
-})
-
-test('activeRunForRepo ignores a finished run', async () => {
-  const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
-  done.phase = 'done'
-  await saveRun(dir, done)
-  expect(await activeRunForRepo(dir, 'personal', 'k')).toBeNull()
-})
-
-test('activeRunForRepo finds a live run', async () => {
-  const live = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
-  await saveRun(dir, live)
-  expect((await activeRunForRepo(dir, 'personal', 'k'))?.run_id).toBe(live.run_id)
 })
 
 test('orchestrators are keyed by session and repo', async () => {
@@ -100,7 +87,7 @@ async function seedRun(over: {
 }
 
 const query = (over: Partial<Parameters<typeof resolveRun>[2]> = {}) => ({
-  runId: null, repoKey: null, phases: null, taskId: null, allowTerminal: false, ...over,
+  runId: null, repoKey: null, phases: null, taskId: null, reach: 'unfinished' as const, ...over,
 })
 
 test('resolveRun skips a finished run that sorts first', async () => {
@@ -180,7 +167,7 @@ test('resolveRun by id refuses a finished run unless the caller allows it', asyn
   const refused = await resolveRun(dir, 'personal', query({ runId: done }))
   expect(!refused.ok && refused.reason).toBe('terminal')
 
-  const allowed = await resolveRun(dir, 'personal', query({ runId: done, allowTerminal: true }))
+  const allowed = await resolveRun(dir, 'personal', query({ runId: done, reach: 'finished-if-named' }))
   expect(allowed.ok && allowed.run.run_id).toBe(done)
 })
 
@@ -277,4 +264,46 @@ test('retryOnStaleRun gives up loudly rather than looping forever', async () => 
   }, 3)
   await expect(doomed).rejects.toBeInstanceOf(StaleRunError)
   expect(attempts).toBe(3)
+})
+
+test('a run parked in escalated is unfinished but not driven', () => {
+  // The two predicates #49 names: `terminal` covers done alone, `releasesPane`
+  // covers done and escalated. Neither may stand in for the other.
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'escalated'
+  expect(runIsDriven(run)).toBe(false)
+  run.phase = 'execute'
+  expect(runIsDriven(run)).toBe(true)
+  run.phase = 'dnoe' as typeof run.phase
+  expect(runIsDriven(run)).toBe(false)
+})
+
+test('resolveRun reaching driven runs refuses an escalated one, named or inferred', async () => {
+  const parked = await seedRun({ phase: 'escalated' })
+
+  const named = await resolveRun(dir, 'personal', query({ runId: parked, reach: 'driven' }))
+  expect(!named.ok && named.reason).toBe('parked')
+
+  const inferred = await resolveRun(dir, 'personal', query({ repoKey: 'repo-a', reach: 'driven' }))
+  expect(!inferred.ok && inferred.reason).toBe('none')
+  expect(!inferred.ok && inferred.reason === 'none' && inferred.excluded.map((r) => r.run_id))
+    .toEqual([parked])
+
+  const unfinished = await resolveRun(dir, 'personal', query({ runId: parked }))
+  expect(unfinished.ok && unfinished.run.run_id).toBe(parked)
+})
+
+test('resolveRun reaching driven runs still reports a finished one as terminal', async () => {
+  const done = await seedRun({ phase: 'done' })
+  const result = await resolveRun(dir, 'personal', query({ runId: done, reach: 'driven' }))
+  expect(!result.ok && result.reason).toBe('terminal')
+})
+
+test('runById reaches a run in any phase, including one in no row', async () => {
+  const done = await seedRun({ phase: 'done', title: 'done' })
+  const broken = await seedRun({ phase: 'dnoe', title: 'broken' })
+
+  expect((await runById(dir, 'personal', done))?.run_id).toBe(done)
+  expect((await runById(dir, 'personal', broken))?.run_id).toBe(broken)
+  expect(await runById(dir, 'personal', 'nope')).toBeNull()
 })

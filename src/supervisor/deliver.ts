@@ -4,7 +4,8 @@ import type { Herdr } from '../lib/herdr'
 import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
-import { renderPrompt } from '../lib/render'
+import { hpipeCommand, renderPrompt } from '../lib/render'
+import { resumeCommand } from '../lib/status'
 import {
   artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
   verdictPrefix,
@@ -328,7 +329,8 @@ export async function promptForRunPhase(run: Run, _config: Config): Promise<stri
       const from = run.escalated_from ?? run.phase
       return renderPrompt(pluginRoot, 'escalate', {
         run_id: run.run_id, phase: from,
-        pass: String(counterFor(run, from)), task_flag: '',
+        pass: String(counterFor(run, from)),
+        resume_command: resumeCommand(hpipeCommand(pluginRoot), run),
       })
     }
     default: return ''
