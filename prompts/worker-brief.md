@@ -11,8 +11,6 @@ Read `{{agent_file}}` before your first edit — it is the scoped guide for surf
 the repo's root `CLAUDE.md` outranks it where they conflict. Work only on this surface, only in this
 worktree, only on `{{branch}}`.
 
-{{dist_note}}
-
 {{bootstrap_note}}
 
 Batch context the public issue does not carry: {{notes}}

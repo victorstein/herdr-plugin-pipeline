@@ -83,6 +83,13 @@ brief names it as the recovery if a build fails on a missing dependency. It runs
 root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
 the file; every dispatch then reports `bootstrap: none`.
 
+It is also where a dependency's build step belongs. A task registered with `--depends-on` is only
+dispatched after its dependencies have merged, so its bootstrap already runs against a checkout that
+contains them: if your apps consume a sibling package's built `dist` rather than its source, build it
+here (`pnpm install && pnpm turbo build --filter=@repo/core`, say). The worker's brief also asks it to
+re-run the bootstrap after any rebase onto the base branch, which covers a sibling that lands
+mid-task. The plugin itself never names a build command.
+
 ## Use
 
 From the orchestrator's pane:
