@@ -196,6 +196,172 @@ test('registering a task reopens intake', async () => {
   expect(saved?.intake_closed).toBe(false)
 })
 
+const unfiledTask = {
+  branch: 'feat/tile-label', issue: 0, surface: 'core', notes: '',
+  dependsOn: [] as string[], files: [] as string[], keepWorktree: false,
+  repoKey: 'k', runId: null,
+}
+
+async function seedInRepoWithBrief(): Promise<string> {
+  await saveRun(dir, newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' }))
+  const bodyFile = join(repoDir, 'brief.md')
+  writeFileSync(bodyFile, 'Relabel the settings tile.\n')
+  return bodyFile
+}
+
+const registered = async (): Promise<Task[]> => (await listRuns(dir, 'personal'))[0]!.tasks
+
+const issue318 = { number: 318, url: 'https://github.com/o/r/issues/318' }
+
+/** Lands a write between the command's read and its save, as the supervisor would. */
+async function supervisorWrites(change: (run: Run) => void): Promise<void> {
+  const run = (await listRuns(dir, 'personal'))[0]!
+  change(run)
+  await saveRun(dir, run)
+}
+
+test('--title files the issue in the run\'s repo and registers the task under its number', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  const filed: string[][] = []
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 'Relabel the tile', bodyFile },
+    async (repoRoot, title, path) => { filed.push([repoRoot, title, path]); return issue318 })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('issue: #318 (filed)')
+  expect(filed).toEqual([[repoDir, 'Relabel the tile', bodyFile]])
+  const task = (await registered())[0]!
+  expect(task.issue).toBe(318)
+  expect(task.artifacts.spec).toContain('issue-318')
+})
+
+test('--issue and --title together are rejected before anything is filed', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, issue: 4, title: 't', bodyFile },
+    async () => { filed++; return issue318 })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--issue')
+  expect(result.text).toContain('--title')
+  expect(filed).toBe(0)
+})
+
+test('--title without a --body-file that is a file is rejected, because the body is the brief', async () => {
+  await seedInRepoWithBrief()
+  let filed = 0
+  const fileIssue = async () => { filed++; return issue318 }
+
+  const missing = await cmdTask(ctx(), { ...unfiledTask, title: 't' }, fileIssue)
+  const absent = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'nope.md') }, fileIssue)
+  const directory = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: repoDir }, fileIssue)
+
+  expect(missing.ok).toBe(false)
+  expect(missing.text).toContain('--body-file')
+  expect(absent.ok).toBe(false)
+  expect(absent.text).toContain('nope.md')
+  expect(directory.ok).toBe(false)
+  expect(directory.text).toContain('is not a file')
+  expect(filed).toBe(0)
+  expect(await registered()).toEqual([])
+})
+
+test('a --title that swallowed the next flag files nothing', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: '--body-file', bodyFile },
+    async () => { filed++; return issue318 })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('the value after --title is missing')
+  expect(filed).toBe(0)
+})
+
+test('a registration that fails validation files no orphan issue', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+  const fileIssue = async () => { filed++; return issue318 }
+
+  const badSurface = await cmdTask(ctx(), { ...unfiledTask, surface: 'kore', title: 't', bodyFile }, fileIssue)
+  const badDepends = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t9'], title: 't', bodyFile }, fileIssue)
+  const cyclic = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t1'], title: 't', bodyFile }, fileIssue)
+
+  expect([badSurface.ok, badDepends.ok, cyclic.ok]).toEqual([false, false, false])
+  expect(cyclic.text).toContain('cycle')
+  expect(filed).toBe(0)
+})
+
+test('a registration that loses its save is retried without filing the issue again', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, async () => {
+    filed++
+    await supervisorWrites((run) => { run.intake_closed = true })
+    return issue318
+  })
+
+  expect(result.ok).toBe(true)
+  expect(filed).toBe(1)
+  expect((await registered()).map((t) => t.issue)).toEqual([318])
+})
+
+test('a registration that fails after filing names the issue so it can be registered with --issue', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, async () => {
+    filed++
+    await supervisorWrites((run) => { run.phase = 'done' })
+    return issue318
+  })
+
+  expect(result.ok).toBe(false)
+  expect(filed).toBe(1)
+  expect(result.text).toContain('issue #318 was filed (https://github.com/o/r/issues/318) but no task was registered')
+  expect(result.text).toContain('--issue 318')
+  expect(await registered()).toEqual([])
+})
+
+test('a failure after the registration landed says so, and does not invite a second registration', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  const noPrompts = mkdtempSync(join(tmpdir(), 'clicmd-noprompts-'))
+
+  const result = await cmdTask({ ...ctx(), pluginRoot: noPrompts }, { ...unfiledTask, title: 't', bodyFile },
+    async () => issue318)
+  rmSync(noPrompts, { recursive: true, force: true })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('task t1 is registered with issue #318')
+  expect(result.text).toContain('hpipe brief --task t1')
+  expect(result.text).not.toContain('--issue 318')
+  expect((await registered()).map((t) => t.issue)).toEqual([318])
+})
+
+test('a failed gh issue create registers nothing and passes gh\'s error through', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
+    async () => ({ error: 'HTTP 410: Issues are disabled for this repo' }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('gh issue create failed')
+  expect(result.text).toContain('HTTP 410: Issues are disabled for this repo')
+  expect(await registered()).toEqual([])
+})
+
+test('with neither --issue nor --title the error names both ways in', async () => {
+  await seedInRepoWithBrief()
+
+  const result = await cmdTask(ctx(), unfiledTask, async () => issue318)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--issue must be a positive issue number')
+  expect(result.text).toContain('--title')
+})
+
 test('dispatch --done closes intake', async () => {
   const run = await seed()
   expect(run.intake_closed).toBe(false)

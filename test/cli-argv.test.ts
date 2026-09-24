@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
@@ -279,6 +279,38 @@ test('an identifier flag whose value looks like a flag is a usage error', () => 
     expect(r.code, args.join(' ')).toBe(1)
     expect(r.out).toContain('--branch needs a value')
   }
+  expect(registeredTasks(f)).toEqual([])
+})
+
+test('task --title --body-file files the issue through gh and registers it', async () => {
+  const f = started()
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue create': 'https://github.com/o/r/issues/77\n' })
+  writeFileSync(join(f.repo, 'brief.md'), 'Relabel the settings tile.\n')
+
+  const r = hpipe(['task', '--branch', 'feat/tile', '--title', '-relabel the tile',
+    '--body-file', 'brief.md', '--surface', 'core'], f)
+
+  expect(r.code).toBe(0)
+  expect(r.out).toContain('issue: #77 (filed)')
+  expect(r.out).toContain('# feat/tile — issue #77')
+  expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain(
+    `issue create --title -relabel the tile --body-file ${join(realpathSync(f.repo), 'brief.md')}`,
+  )
+  expect(registeredTasks(f)).toMatchObject([{ issue: 77 }])
+})
+
+test('task --title with its value missing does not file an issue named after the next flag', async () => {
+  const f = started()
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue create': 'https://github.com/o/r/issues/78\n' })
+  writeFileSync(join(f.repo, 'brief.md'), 'Relabel the settings tile.\n')
+
+  const r = hpipe(['task', '--branch', 'feat/t', '--title', '--body-file', 'brief.md', '--surface', 'core'], f)
+
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('the value after --title is missing')
+  expect(existsSync(join(binDir, 'calls.log'))).toBe(false)
   expect(registeredTasks(f)).toEqual([])
 })
 

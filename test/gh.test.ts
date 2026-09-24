@@ -58,3 +58,19 @@ test('prForBranch returns the first PR number or null', async () => {
   const bin = await makeFakeBin(dir, { 'pr list': [{ number: 412 }] })
   expect(await new Gh(bin, dir).prForBranch('feat/x')).toBe(412)
 })
+
+test('issueCreate files with the given title and body file and returns the new number', async () => {
+  const bin = await makeFakeBin(dir, { 'issue create': 'https://github.com/o/r/issues/318\n' })
+  expect(await new Gh(bin, dir).issueCreate('Relabel the tile', '/tmp/body.md'))
+    .toEqual({ number: 318, url: 'https://github.com/o/r/issues/318' })
+  expect(await Bun.file(join(dir, 'calls.log')).text())
+    .toBe('issue create --title Relabel the tile --body-file /tmp/body.md\n')
+})
+
+test('issueCreate passes gh\'s stderr through on failure, and fails on output with no issue URL', async () => {
+  const failing = await makeFakeBin(dir, { 'issue create': { error: { message: 'auth' } } })
+  expect(await new Gh(failing, dir).issueCreate('t', '/b'))
+    .toEqual({ error: JSON.stringify({ error: { message: 'auth' } }) })
+  const urlless = await makeFakeBin(dir, { 'issue create': 'Creating issue in o/r\n' })
+  expect(await new Gh(urlless, dir).issueCreate('t', '/b')).toMatchObject({ error: expect.any(String) })
+})

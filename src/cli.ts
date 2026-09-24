@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
+import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
   activeRunForRepo, isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun,
@@ -186,11 +187,27 @@ export async function cmdStart(ctx: Ctx, input: {
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
 
-async function registerTask(ctx: Ctx, input: {
+type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<FiledIssue | GhFailure>
+
+/** What one `hpipe task` call carries across the stale-run retries of its registration. */
+interface RegistrationAttempt {
+  fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
+  landed: (taskId: string) => void
+}
+
+const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
+  new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
+
+interface TaskInput {
   branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
   repoKey: string | null; runId: string | null
-}): Promise<CmdResult> {
+  title?: string; bodyFile?: string
+}
+
+async function registerTask(
+  ctx: Ctx, input: TaskInput, attempt: RegistrationAttempt,
+): Promise<CmdResult> {
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
     phases: REGISTRABLE, taskId: null, allowTerminal: false,
@@ -199,11 +216,36 @@ async function registerTask(ctx: Ctx, input: {
   if (!found.ok) return found.result
   const run = found.value
 
+  // Work with no issue behind it used to fall outside the pipeline and be
+  // hand-rolled, which is where the mistakes were. Filing one here, rather than
+  // letting a task run issue-less, keeps the issue body as the one brief and
+  // `Closes #N` as the close phase's signal. Measured on a live run.
+  const filing = input.title !== undefined
+
   // The argv parser defaults a missing --issue to 0 and a missing --branch to
   // "". Without these checks a mistyped command mints a ghost task into a live
   // run, and there is no command that removes one. Measured on a live run.
-  if (!Number.isInteger(input.issue) || input.issue <= 0) {
-    return fail(`--issue must be a positive issue number, got: ${input.issue || '(missing)'}`)
+  if (filing && input.issue !== 0) {
+    return fail('--issue registers an existing issue and --title files a new one — pass one, not both')
+  }
+  if (!filing && (!Number.isInteger(input.issue) || input.issue <= 0)) {
+    return fail(
+      `--issue must be a positive issue number, got: ${input.issue || '(missing)'}\n` +
+      '  → no issue yet? --title <title> --body-file <path> files one and registers it',
+    )
+  }
+  if (filing) {
+    if (input.title!.trim().length === 0) return fail('--title cannot be empty')
+    // --title is free text, so the argv layer lets a missing value swallow the
+    // next flag — and the issue it files would be public under that flag's name.
+    if (input.title!.startsWith('--')) {
+      return fail(`--title got a flag where the title belongs: "${input.title}" — the value after --title is missing`)
+    }
+    if (input.bodyFile === undefined) return fail('--title needs --body-file: the issue body is the worker\'s brief')
+    const bodyPath = resolve(input.bodyFile)
+    if (!existsSync(bodyPath) || !statSync(bodyPath).isFile()) return fail(`--body-file is not a file: ${bodyPath}`)
+  } else if (input.bodyFile !== undefined) {
+    return fail('--body-file only goes with --title; an existing issue already has its body')
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
   if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
@@ -233,12 +275,33 @@ async function registerTask(ctx: Ctx, input: {
     }
   }
 
+  const taskId = `t${run.tasks.length + 1}`
+
+  // detectCycle skips ids it does not recognise, so a typo would otherwise pass
+  // validation here and then wait in `queued` forever with no diagnostic. The
+  // new task's own id counts as known — depending on yourself is a cycle, not
+  // a typo, and must fall through to the cycle check below to be reported as one.
+  const known = new Set([...run.tasks.map((t) => t.task_id), taskId])
+  const unknown = input.dependsOn.filter((id) => !known.has(id))
+  if (unknown.length > 0) return fail(`--depends-on names no such task: ${unknown.join(', ')}`)
+
+  const cycle = detectCycle([...run.tasks, { task_id: taskId, depends_on: input.dependsOn }])
+  if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
+
+  // Last, after every check: an issue filed for a registration that then fails
+  // is public, and nothing in the pipeline would ever close it.
+  const filed = filing ? await attempt.fileIssueOnce(run.repo_root) : null
+  if (filed !== null && 'error' in filed) {
+    return fail(`gh issue create failed in ${run.repo_root}; nothing was filed or registered:\n  ${filed.error}`)
+  }
+  const issue = filed?.number ?? input.issue
+
   const date = new Date().toISOString().slice(0, 10)
-  const stem = `${date}-issue-${input.issue}`
+  const stem = `${date}-issue-${issue}`
 
   const task: Task = {
-    task_id: `t${run.tasks.length + 1}`,
-    branch: input.branch, issue: input.issue, surface: input.surface,
+    task_id: taskId,
+    branch: input.branch, issue, surface: input.surface,
     depends_on: input.dependsOn, files: input.files,
     keep_worktree: input.keepWorktree,
     workspace_id: null, pane_id: null, agent_status: 'unknown',
@@ -255,17 +318,6 @@ async function registerTask(ctx: Ctx, input: {
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
   }
 
-  // detectCycle skips ids it does not recognise, so a typo would otherwise pass
-  // validation here and then wait in `queued` forever with no diagnostic. The
-  // new task's own id counts as known — depending on yourself is a cycle, not
-  // a typo, and must fall through to the cycle check below to be reported as one.
-  const known = new Set([...run.tasks.map((t) => t.task_id), task.task_id])
-  const unknown = input.dependsOn.filter((id) => !known.has(id))
-  if (unknown.length > 0) return fail(`--depends-on names no such task: ${unknown.join(', ')}`)
-
-  const cycle = detectCycle([...run.tasks, task])
-  if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
-
   run.tasks.push(task)
   // execute completes only once intake is closed and every task is terminal, so a
   // task registered mid-run must reopen the gate or the run could complete underneath it.
@@ -280,6 +332,7 @@ async function registerTask(ctx: Ctx, input: {
     enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
   }
   await saveRun(ctx.stateDir, run)
+  attempt.landed(task.task_id)
 
   // The recorded set, printed back. A malformed --files is otherwise invisible:
   // the only other place task.files reaches a human is the blocked-on-files
@@ -292,14 +345,62 @@ async function registerTask(ctx: Ctx, input: {
   // supervisor's tick. Measured on the live ledger.
   const bootLine = bootstrapLine(repoBootstrap(run.repo_root))
 
-  if (gate.state !== 'ready') {
-    return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\nqueued: waiting on ${gate.on.join(', ')}`)
-  }
+  const header = [`task_id: ${task.task_id}`, ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine]
+    .join('\n')
+
+  if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
 
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`task_id: ${task.task_id}\n${filesLine}\n${bootLine}\n\n${prompt}`)
+  return ok(`${header}\n\n${prompt}`)
 }
-export const cmdTask = retryingOnStale(registerTask)
+
+export async function cmdTask(
+  ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
+): Promise<CmdResult> {
+  // The retry re-runs registerTask from a fresh read, so the gh call is memoized
+  // out here: a second attempt reuses the issue the first one filed, never files another.
+  const outcome: { filing: Promise<FiledIssue | GhFailure> | null; registeredAs: string | null } = {
+    filing: null, registeredAs: null,
+  }
+  const attempt: RegistrationAttempt = {
+    fileIssueOnce: (repoRoot) =>
+      (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
+    landed: (taskId) => { outcome.registeredAs = taskId },
+  }
+  const filedIssue = async (): Promise<FiledIssue | null> => {
+    const filed = outcome.filing === null ? null : await outcome.filing
+    return filed === null || 'error' in filed ? null : filed
+  }
+
+  let reason: string
+  try {
+    const result = await retryOnStaleRun(() => registerTask(ctx, input, attempt))
+    if (result.ok) return result
+    reason = result.text
+  } catch (error) {
+    const filed = await filedIssue()
+    if (filed === null) {
+      if (isUnlandedSave(error)) return fail(unlandedSaveMessage(error))
+      throw error
+    }
+    // Not unlandedSaveMessage: its "run it again" would file a second issue.
+    reason = error instanceof Error ? error.message : String(error)
+  }
+
+  const filed = await filedIssue()
+  if (filed === null) return fail(reason)
+  if (outcome.registeredAs !== null) {
+    return fail(
+      `task ${outcome.registeredAs} is registered with issue #${filed.number} (${filed.url}), but: ${reason}\n` +
+      `  → hpipe brief --task ${outcome.registeredAs} prints its brief; do not register it again`,
+    )
+  }
+  return fail(
+    `${reason}\nissue #${filed.number} was filed (${filed.url}) but no task was registered\n` +
+    `  → register it with --issue ${filed.number} in place of --title and --body-file; ` +
+    're-running with --title files a second issue',
+  )
+}
 
 /**
  * Read-only. Without it the only way to see a worker brief is to register a
@@ -677,7 +778,7 @@ export function listFlag(argv: string[], name: string): string[] {
 
 const USAGE: Record<string, string[]> = {
   start: ['hpipe start <title>'],
-  task: ['hpipe task --branch <branch> --issue <n> --surface <surface> ' +
+  task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
     '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
@@ -706,7 +807,7 @@ const HELP_FLAGS = new Set(['--help', '-h'])
 const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
-const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes'])
+const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title'])
 // cmdTask names this one's argv accident more precisely than a usage line can.
 const SELF_VALIDATING_FLAGS = new Set(['--files'])
 
@@ -803,6 +904,8 @@ async function dispatch(argv: string[]): Promise<number> {
         keepWorktree: rest.includes('--keep-worktree'),
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
+        title: flag(rest, 'title') ?? undefined,
+        bodyFile: flag(rest, 'body-file') ?? undefined,
       })
       break
 
