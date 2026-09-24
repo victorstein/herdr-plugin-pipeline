@@ -6,7 +6,9 @@ import {
   promptForRunPhase, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
-import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
+import {
+  cleanupFixtures, commitIn, git, repoWithWorktree, siblingLands, tempDir,
+} from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -314,6 +316,36 @@ test('adoptableArtifacts excludes paths already recorded on the task', async () 
     'docs/superpowers/notes/the-spec.md',
   ])
 })
+
+const SIBLING_DOC = 'docs/superpowers/specs/sibling-design.md'
+
+for (const landsAt of ['main', 'origin/main', 'sibling'] as const) {
+  test(`a sibling doc merged in from ${landsAt} is not a candidate`, async () => {
+    const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+    commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+    git(['merge', '-q', '--no-edit', siblingLands(worktree, SIBLING_DOC, landsAt)], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+      'docs/superpowers/notes/mine.md',
+    ])
+  })
+}
+
+// With nothing of its own yet, the branch fast-forwards and gets no merge commit to
+// subtract, which is the one-candidate window the issue called unrecoverable.
+for (const landsAt of ['main', 'origin/main'] as const) {
+  test(`a sibling doc fast-forwarded in from ${landsAt} is not a candidate`, async () => {
+    const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+    git(['merge', '-q', '--ff-only', siblingLands(worktree, SIBLING_DOC, landsAt)], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+
+    commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+      'docs/superpowers/notes/mine.md',
+    ])
+  })
+}
 
 test('a moved doc is a rename even when the repo disables rename detection', async () => {
   const worktree = repoWithWorktree(
