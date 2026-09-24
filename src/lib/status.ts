@@ -1,8 +1,8 @@
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { taskRow } from './phases'
-import type { Run, SessionKey } from './types'
+import { runRow, taskRow } from './phases'
+import type { MissingArtifact, Run, SessionKey, Task } from './types'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -11,6 +11,23 @@ export interface StatusSupervisor {
 
 function ageMinutes(sinceMs: number): number {
   return Math.max(0, Math.floor((Date.now() - sinceMs) / 60000))
+}
+
+/**
+ * Only the supervisor's own evaluation clears the record, and it never reaches a
+ * run parked in a pane-releasing phase (`cmdAbort` leaves tasks intact in `done`)
+ * or a worker with no pane — so for those the record is left behind, not live.
+ */
+export function currentMissingArtifact(run: Run, task: Task): MissingArtifact | null {
+  if (runRow(run.phase).releasesPane === true || task.pane_id === null) return null
+  const missing = task.artifact_missing
+  return missing !== undefined && missing.at === task.phase_entered_at ? missing : null
+}
+
+export function adoptionOutcome(missing: MissingArtifact): string {
+  return missing.candidates.length === 0
+    ? 'its branch added no document to adopt'
+    : `${missing.candidates.length} candidates, too many to adopt: ${missing.candidates.join(', ')}`
 }
 
 /** Task-level warnings that only make sense once a run is on the current schema. */
@@ -23,6 +40,14 @@ function taskWarnings(run: Run): string[] {
         `  ⚠ ${task.task_id} escalated from ${task.escalated_from ?? 'unknown'} ` +
         `${ageMinutes(task.phase_entered_at)}m ago — needs a human; ` +
         `\`hpipe rewind ${run.run_id} ${task.escalated_from ?? '<phase>'} --task ${task.task_id}\` resumes it`,
+      )
+    }
+
+    const missing = currentMissingArtifact(run, task)
+    if (missing) {
+      lines.push(
+        `  ⚠ ${task.task_id} idle, ${ageMinutes(task.phase_entered_at)}m in ${task.phase}, ` +
+        `with nothing at ${missing.path} — ${adoptionOutcome(missing)}`,
       )
     }
 

@@ -422,6 +422,22 @@ test('a digest line carries the task, the phase, the age and the action', () => 
     .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move")
 })
 
+test('a digest line names the missing artifact of an idle worker', () => {
+  const now = 1_000_000
+  const entered = now - 720_000
+  const line = wakeLine({
+    phaseAtEvent: 'research',
+    task: mkTask({
+      phase: 'research', phase_entered_at: entered,
+      artifact_missing: { at: entered, path: '/wt/r.md', candidates: ['a.md', 'b.md'] },
+    }),
+  })
+  expect(describeWake(line, now, 'hp')).toBe(
+    "t1 feat/x (#1) [research 12m] agent:idle — worker's move, but nothing is at /wt/r.md " +
+    '(2 candidates, too many to adopt: a.md, b.md)',
+  )
+})
+
 test('a phase that moved this tick renders as a transition and drops the age', () => {
   // Every in-tick mutator re-stamps phase_entered_at, so the age would read 0m in
   // every arrow line. The arrow is the signal that the phase actually completed.
