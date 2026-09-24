@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.1...v1.3.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* drop the hardcoded pnpm/turbo build note from the worker brief ([#60](https://github.com/victorstein/herdr-plugin-pipeline/issues/60)) ([bf1aa7c](https://github.com/victorstein/herdr-plugin-pipeline/commit/bf1aa7c511684aececd9e6f247c37cb0019244e9)), closes [#56](https://github.com/victorstein/herdr-plugin-pipeline/issues/56)
+
+
+### Refactor
+
+* make TaskDeps.ambiguityLog required and own it in main() ([#63](https://github.com/victorstein/herdr-plugin-pipeline/issues/63)) ([1c8daaa](https://github.com/victorstein/herdr-plugin-pipeline/commit/1c8daaaf1d3f700b58ded26b3b6742d1b8461c4e)), closes [#33](https://github.com/victorstein/herdr-plugin-pipeline/issues/33)
+
 ## [1.3.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.0...v1.3.1) (2026-09-20)
 
 
