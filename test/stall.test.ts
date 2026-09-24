@@ -490,14 +490,14 @@ test('a probe that fails once and lands next tick costs no rung — #32', async 
 })
 
 /** Ticks once a second until escalation; reports when it happened and what it cost. */
-async function escalateAgainst(delivered: boolean) {
+async function escalateAgainst(deliveredAt: (now: number) => boolean) {
   const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
   const task = run.tasks[0] as Task
   let now = 0
   let attempts = 0
   let persisted = 0
   const deps = mkDeps({
-    probe: async () => { attempts += 1; return { ok: delivered } },
+    probe: async () => { attempts += 1; return { ok: deliveredAt(now) } },
     agentStatus: async () => 'unknown',
     persist: async () => { persisted += 1 },
   })
@@ -509,8 +509,8 @@ async function escalateAgainst(delivered: boolean) {
 
 test('an unreachable pane escalates at the same minute as a silent one — #32', async () => {
   // The issue's demonstration was 1000 ticks, 1000 sends, no escalation.
-  const silent = await escalateAgainst(true)
-  const unreachable = await escalateAgainst(false)
+  const silent = await escalateAgainst(() => true)
+  const unreachable = await escalateAgainst(() => false)
   expect(silent.minute).toBe(180)
   expect(unreachable.minute).toBe(silent.minute)
   expect(unreachable.task.phase).toBe('escalated')
@@ -519,8 +519,16 @@ test('an unreachable pane escalates at the same minute as a silent one — #32',
     .toBe('3 stall probes unanswered, 3 of them undelivered')
 })
 
+test('a pane that goes unreachable after a delivered probe escalates on the silent cadence — #32', async () => {
+  const firstRungDelivered = (now: number) => now < 46 * 60_000
+  const { task, run, minute } = await escalateAgainst(firstRungDelivered)
+  expect(minute).toBe(180)
+  expect(task.phase).toBe('escalated')
+  expect(run.history.at(-1)?.why).toBe('3 stall probes unanswered, 2 of them undelivered')
+})
+
 test('an unreachable pane is retried once a tick but written to the ledger once a rung — #32', async () => {
-  const { attempts, persisted } = await escalateAgainst(false)
+  const { attempts, persisted } = await escalateAgainst(() => false)
   const ticksFromFirstDueToLastRungInclusive = (180 - 45) * 60 + 1
   expect(attempts).toBe(ticksFromFirstDueToLastRungInclusive)
   // The streak start, three climbs, and the escalation itself.

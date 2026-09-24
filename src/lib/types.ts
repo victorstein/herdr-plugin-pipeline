@@ -51,7 +51,11 @@ export interface StallState {
   at: number
   /** The run's `phase_entered_at` this state belongs to. */
   run_at: number
-  /** When the last rung was climbed — a probe, delivered or not, or a deferral. The due anchor. */
+  /**
+   * When the last rung was climbed — a delivered probe, a deferral, or an
+   * undelivered rung, which is back-dated to the start of its failure streak.
+   * The due anchor.
+   */
   last_probe_at: number
   /** Probe rungs climbed, INCLUDING undelivered ones — an unreachable pane must still escalate. */
   probes: number
