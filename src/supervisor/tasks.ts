@@ -143,13 +143,6 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // `done` in the same call, skipping that phase's own settle.
   await runTeardown([run], deps.removeWorktree)
 
-  // Every waiter at once, before any is released: `releasableFromFiles` compares
-  // waiters with each other, so widening only the one being evaluated would let
-  // two mutual discoverers each see the other's intake-time list and both go.
-  for (const task of run.tasks) {
-    if (task.phase === 'blocked-on-files') await widenFromPlan(run, task)
-  }
-
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
       const gate = gateStatus(task, run.tasks)
@@ -202,16 +195,21 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
  * when `plan` clears: a CLEAR plan-review fixes MAJORs inline and may add files
  * to the plan after that. Widening only ever happens while a task holds no
  * files, so no task waits on a lock while holding one — which is what keeps two
- * mutual discoverers from deadlocking.
+ * mutual discoverers from deadlocking. Only the task being released needs to be
+ * widened first: overlap is symmetric, so its widened set meets any sibling's
+ * files whether or not that sibling has been widened yet.
  */
 async function widenFromPlan(run: Run, task: Task): Promise<void> {
   const planPath = taskArtifactPath(run, task, 'plan')
   if (planPath === '' || !existsSync(planPath)) return
-  const added = widenFiles(task.files, planDeclaredFiles(await Bun.file(planPath).text()))
+  const roots = [task.checkout_path, run.repo_root].filter((r): r is string => r !== null)
+  const declared = planDeclaredFiles(await Bun.file(planPath).text(), roots)
+  const added = widenFiles(task.files, declared)
   if (added.length === 0) return
   task.files = [...task.files, ...added]
   console.error(
-    `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ${added.join(', ')}`,
+    `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ` +
+    added.map((path) => (path === '' ? '(whole repo)' : path)).join(', '),
   )
 }
 
@@ -322,6 +320,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     // and a snapshot taken before that would release an overlapping sibling onto
     // files now in flight.
     case 'blocked-on-files':
+      await widenFromPlan(run, task)
       return {
         ...base,
         filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),

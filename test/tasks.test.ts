@@ -87,6 +87,19 @@ test('a file the plan discovered keeps the task off a sibling that holds it', as
   expect(run.tasks[1]?.files).toEqual(['src/cli.ts', 'src/deliver.ts'])
 })
 
+test('a plan path written under the worker\'s checkout is locked repo-relative', async () => {
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: [] })
+  Object.assign(waiter, checkoutWithPlan(''))
+  writeFileSync(
+    join(waiter.checkout_path as string, waiter.artifacts.plan as string),
+    `FILES: ${waiter.checkout_path}/src/deliver.ts\n`,
+  )
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'implement', files: ['src/'] }), waiter])
+  await advanceTasks(run, deps())
+  expect(waiter.files).toEqual(['src/deliver.ts'])
+  expect(waiter.phase).toBe('blocked-on-files')
+})
+
 test('two tasks whose plans each discover the other\'s files run one after the other', async () => {
   const run = mkRun([
     mkTask({

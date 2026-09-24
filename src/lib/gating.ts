@@ -24,22 +24,55 @@ export function filesOverlap(a: string[], b: string[]): boolean {
 // (predicates.ts): the plan prompt documents the line as an indented example, and
 // a plan's code steps may quote one. A quoted copy must not claim files.
 const FILES_LINE = /^FILES:(.*)$/
-const FENCE = /^\s*(```|~~~)/
+const FENCE_OPEN = /^\s{0,3}(`{3,}|~{3,})/
+const GLOB_CHAR = /[*?[{]/
 
-export function planDeclaredFiles(planText: string): string[] {
+/**
+ * `roots` are the absolute directories a plan may have written paths under (the
+ * checkout, the repo root); a path under one is made repo-relative.
+ */
+export function planDeclaredFiles(planText: string, roots: string[] = []): string[] {
   const declared: string[] = []
-  let fenced = false
+  let openFence: string | null = null
   for (const line of planText.split('\n').map((l) => l.replace(/\r$/, ''))) {
-    if (FENCE.test(line)) { fenced = !fenced; continue }
-    if (fenced) continue
+    const fence = FENCE_OPEN.exec(line)?.[1]
+    if (openFence === null && fence !== undefined) { openFence = fence; continue }
+    if (openFence !== null) {
+      if (isFenceClose(line, openFence)) openFence = null
+      continue
+    }
     const match = FILES_LINE.exec(line)
     if (!match) continue
     for (const entry of (match[1] ?? '').split(',')) {
-      const path = entry.trim().replace(/^`|`$/g, '').replace(/^\.\//, '')
-      if (path.length > 0) declared.push(path)
+      const path = normaliseDeclared(entry, roots)
+      if (path !== null) declared.push(path)
     }
   }
   return declared
+}
+
+function isFenceClose(line: string, openFence: string): boolean {
+  const marker = openFence[0] as string
+  const close = new RegExp(`^\\s{0,3}(\\${marker}{${openFence.length},})\\s*$`)
+  return close.test(line)
+}
+
+/**
+ * `filesOverlap` is a plain prefix test, so an entry kept verbatim as a glob or an
+ * absolute path would overlap nothing and lock nothing. Both are narrowed to the
+ * prefix they imply instead, which can only lock more, never less: a glob with no
+ * literal directory before it becomes the empty prefix, which locks everything.
+ */
+function normaliseDeclared(entry: string, roots: string[]): string | null {
+  let path = entry.trim().replace(/^`|`$/g, '')
+  if (path.length === 0) return null
+  for (const root of roots) {
+    const base = root.endsWith('/') ? root : `${root}/`
+    if (path.startsWith(base)) { path = path.slice(base.length); break }
+  }
+  path = path.replace(/^\/+/, '').replace(/^(\.\/)+/, '')
+  const glob = path.search(GLOB_CHAR)
+  return glob === -1 ? path : path.slice(0, glob)
 }
 
 /**

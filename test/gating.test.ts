@@ -130,14 +130,46 @@ test('an indented or fenced FILES line is documentation, not a declaration', () 
   expect(planDeclaredFiles(plan)).toEqual(['real.ts'])
 })
 
+test('a fence closes only on its own marker, at least as long as the opener', () => {
+  const plan = [
+    '````md',
+    '~~~',
+    'FILES: hidden/by-tilde.ts',
+    '```',
+    'FILES: hidden/by-short-backticks.ts',
+    '````',
+    'FILES: real.ts',
+  ].join('\n')
+  expect(planDeclaredFiles(plan)).toEqual(['real.ts'])
+})
+
+test('globs and absolute paths narrow to the prefix they imply, never to nothing', () => {
+  const plan = [
+    'FILES: src/**/*.ts, test/foo*.test.ts',
+    'FILES: /wt/checkout/src/lib/gating.ts, /repo/docs/, /prompts/plan.md',
+    'FILES: **/*.md',
+  ].join('\n')
+  expect(planDeclaredFiles(plan, ['/wt/checkout', '/repo/'])).toEqual([
+    'src/', 'test/foo', 'src/lib/gating.ts', 'docs/', 'prompts/plan.md', '',
+  ])
+  expect(filesOverlap(['src/'], ['src/lib/x.ts'])).toBe(true)
+  expect(filesOverlap([''], ['anything.ts'])).toBe(true)
+})
+
 test('widening adds only what the held prefixes do not already cover', () => {
   expect(widenFiles(['a/', 'b.ts'], ['a/x.ts', 'b.ts', 'c.ts', 'c.ts'])).toEqual(['c.ts'])
   expect(widenFiles(['a/'], [])).toEqual([])
 })
 
 test('two waiters that each discover the other\'s files are serialised, not deadlocked', () => {
-  const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/', 'b/'] })
-  const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['b/', 'a/'] })
+  const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/'] })
+  const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['b/'] })
+  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1', 't2'])
+
+  a.files.push(...widenFiles(a.files, planDeclaredFiles('FILES: a/, b/x.ts\n')))
+  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+
+  b.files.push(...widenFiles(b.files, planDeclaredFiles('FILES: b/, a/y.ts\n')))
   expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
 
   a.phase = 'implement'

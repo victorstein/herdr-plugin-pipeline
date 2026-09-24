@@ -15,7 +15,9 @@ Assume the implementer has no context for this codebase beyond `{{spec_path}}` a
 that implementer, several phases from now, with your reasoning gone.
 
 Declare every file any step creates, edits or deletes — tests and docs included — on `FILES:` lines
-at the start of a line, outside any code block, comma-separated, repo-relative, one line or several:
+at the start of a line, outside any code block, comma-separated, one line or several. Each entry is a
+repo-relative file path or a directory prefix ending in `/` — no globs, no absolute paths. A glob is
+cut at its first wildcard, so `**/*.ts` locks the whole repository:
 
     FILES: src/lib/gating.ts, test/gating.test.ts
     FILES: docs/runbook.md
