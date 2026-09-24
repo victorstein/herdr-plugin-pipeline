@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  actionFor, ageMinutes, applyEvents, describeWake, type EventSaveDeps, parkedFooter,
-  pickOneAdvance, saveEventedRuns,
-  type WakeLine,
+  applyEvents, describeWake, type EventSaveDeps, parkedFooter, pickOneAdvance,
+  saveEventedRuns, type WakeLine,
 } from '../src/supervisor/tick'
+import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
@@ -295,7 +295,7 @@ test('actionFor answers whose move it is, by rung', () => {
 
 test('actionFor renders the CLI it is given, never a literal hpipe', () => {
   // A plugin installed from GitHub has no `hpipe` on PATH (src/lib/render.ts:19-22),
-  // so a hardcoded name would be uninvokable. status.ts:25 has that latent defect.
+  // so a hardcoded name would be uninvokable.
   const run = mkRun([])
   const text = actionFor(run, mkTask({ phase: 'escalated', escalated_from: 'plan' }),
     'bun run /p/src/cli.ts')
@@ -318,7 +318,7 @@ test('a blocked-on-files task held by a dead task names the release command', ()
 
 test('a blocked-on-files task held by a live task is still the supervisor\'s', () => {
   // `hpipe release` refuses an in-flight holder, so offering it against a healthy
-  // one sends the orchestrator at a command that will bounce (src/lib/status.ts:51-54).
+  // one sends the orchestrator at a command that will bounce.
   const run = mkRun([])
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const holder = mkTask({ task_id: 't2', phase: 'implement', files: ['src/a.ts'] })
@@ -434,7 +434,7 @@ test('a digest line names the missing artifact of an idle worker', () => {
     }),
   })
   expect(describeWake(line, now, 'hp')).toBe(
-    "t1 feat/x (#1) [research 12m] agent:idle — worker's move, but nothing is at /wt/r.md " +
+    't1 feat/x (#1) [research 12m] agent:idle — YOUR move: worker idle with nothing at /wt/r.md ' +
     '(2 candidates, too many to adopt: a.md, b.md)',
   )
 })
@@ -531,8 +531,6 @@ test('the footer is empty for a run with no tasks', () => {
 })
 
 test('the footer renders the CLI it is given, and covered beats the escalated exception', () => {
-  // The hpipe parameter is only live because `escalated` is in the predicate —
-  // every other covered row renders `YOUR move`, which carries no command.
   const now = 1_000_000
   const run = mkRun([])
   run.run_id = 'r1'
@@ -544,10 +542,10 @@ test('the footer renders the CLI it is given, and covered beats the escalated ex
 })
 
 test('the footer lists every non-terminal row a person has to act on', () => {
-  // Keyed on `actor`, deliberately NOT on parkedFooter's own predicate — which
-  // spells the human case as `phase === 'escalated'`. The two agree only because
-  // `escalated` is the single actor:'human' row today; a second one would diverge
-  // and this goes red, which is the whole point of a table-driven guard.
+  // Keyed on `actor`, deliberately NOT on the shared `waitsOnYou` predicate the
+  // footer uses — which spells the human case as `phase === 'escalated'`. A second
+  // actor:'human' row would diverge and this goes red, which is the whole point of
+  // a table-driven guard.
   const now = 1_000_000
   const run = mkRun([])
   for (const row of TASK_ROWS) {
@@ -619,4 +617,23 @@ test('a run that cannot be saved even after a re-read sits out the rest of the t
   expect(result.runs).toHaveLength(0)
   expect(result.wake).toHaveLength(0)
   expect(warnings).toHaveLength(1)
+})
+
+test('the footer agrees with hpipe status on the rows no actor column can see', () => {
+  // A files block behind a dead holder and an idle worker sitting on uncommitted
+  // work both wait on a person, though neither row's actor says so.
+  const now = 1_000_000
+  const run = mkRun([])
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: now }),
+    mkTask({ task_id: 't3', phase: 'implement', phase_entered_at: now,
+             uncommitted_work: { at: now, count: 1, sample: ['src/b.ts'] } }),
+  ]
+  expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
+    'also waiting on you:\n' +
+    '- t2 feat/x (#1) [blocked-on-files 0m] — YOUR move: `hp release --task t1`\n' +
+    '- t3 feat/x (#1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
+    '(src/b.ts) — have it commit and push',
+  )
 })

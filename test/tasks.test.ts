@@ -43,6 +43,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   removeWorktree: async () => 'removed' as const,
   ciDetail: async () => '',
   ambiguityLog: new Set<string>(),
+  uncommittedPaths: async () => [],
   ...over,
 })
 
@@ -669,6 +670,64 @@ test('the dispatch prompt names the repo bootstrap above the blank line', async 
   const head = text.split('\n\n')[0]!
   expect(head).toContain('bootstrap: .claude/pipeline-bootstrap')
   expect(text.split('\n\n').slice(1).join('\n\n')).toStartWith('# feat/x — issue #1')
+})
+
+const dirtyTree = (paths: string[] | null) => {
+  const calls: string[] = []
+  return {
+    calls,
+    uncommittedPaths: async (checkout: string) => { calls.push(checkout); return paths },
+  }
+}
+
+test('an idle worker in a code row records its uncommitted work against the phase entry', async () => {
+  const git = dirtyTree(['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'])
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+  expect(git.calls).toEqual(['/r/.worktrees/feat-x'])
+  expect(run.tasks[0]?.uncommitted_work).toEqual({
+    at: 5, count: 4, sample: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+  })
+})
+
+test('an idle spell is inspected once, not on every tick', async () => {
+  for (const paths of [['src/a.ts'], []]) {
+    const git = dirtyTree(paths)
+    const run = mkRun([mkTask({ phase: 'pr-review-quality', phase_entered_at: 5 })])
+    await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+    await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+    expect(git.calls, `after ${paths.length} dirty paths`).toHaveLength(1)
+  }
+})
+
+test('a busy worker drops the record, so its next idle spell is inspected afresh', async () => {
+  const git = dirtyTree(['src/a.ts'])
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5,
+                              uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } })])
+  await advanceTasks(run, deps({ liveIdle: async () => false, uncommittedPaths: git.uncommittedPaths }))
+  expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
+  expect(git.calls).toHaveLength(0)
+})
+
+test('design rows record nothing', async () => {
+  const designGit = dirtyTree(['docs/x.md'])
+  const design = mkRun([mkTask({ phase: 'spec', phase_entered_at: 5 })])
+  await advanceTasks(design, deps({ uncommittedPaths: designGit.uncommittedPaths }))
+  expect(designGit.calls).toHaveLength(0)
+  expect(design.tasks[0]?.uncommitted_work).toBeUndefined()
+})
+
+test('an unreadable checkout reports nothing and is retried only on the next idle spell', async () => {
+  const brokenGit = dirtyTree(null)
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({ uncommittedPaths: brokenGit.uncommittedPaths }))
+  await advanceTasks(run, deps({ uncommittedPaths: brokenGit.uncommittedPaths }))
+  expect(brokenGit.calls).toHaveLength(1)
+  expect(run.tasks[0]?.uncommitted_work?.count).toBe(0)
+
+  await advanceTasks(run, deps({ liveIdle: async () => false, uncommittedPaths: brokenGit.uncommittedPaths }))
+  await advanceTasks(run, deps({ uncommittedPaths: brokenGit.uncommittedPaths }))
+  expect(brokenGit.calls).toHaveLength(2)
 })
 
 test('a repo declaring no bootstrap still says so in the dispatch prompt', async () => {

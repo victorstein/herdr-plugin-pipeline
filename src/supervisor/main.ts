@@ -12,7 +12,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
-  refreshBadges, shouldRetry,
+  refreshBadges, shouldRetry, uncommittedPaths,
 } from './deliver'
 import { isAgentReady } from '../lib/machine'
 import {
@@ -216,6 +216,7 @@ async function main(): Promise<void> {
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
             ambiguityLog,
             effects,
+            uncommittedPaths,
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to

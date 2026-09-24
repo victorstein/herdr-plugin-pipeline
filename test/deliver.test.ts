@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  mergeAddedDocsArgs, promptForRunPhase, shouldRetry, taskSignalsFor,
+  mergeAddedDocsArgs, promptForRunPhase, shouldRetry, taskSignalsFor, uncommittedPaths,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
@@ -286,6 +286,19 @@ test('adoptableArtifacts returns docs this branch added, not what the worktree c
   expect(await adoptableArtifacts(worktree, new Set())).toEqual([
     'docs/superpowers/notes/misfiled.md',
   ])
+})
+
+test('uncommittedPaths names modified and untracked files, and nothing on a clean tree', async () => {
+  const worktree = repoWithWorktree(['src/a.ts'])
+  expect(await uncommittedPaths(worktree)).toEqual([])
+
+  writeFileSync(join(worktree, 'src/a.ts'), 'changed\n')
+  writeFileSync(join(worktree, 'new.ts'), 'new\n')
+  expect((await uncommittedPaths(worktree))?.sort()).toEqual(['new.ts', 'src/a.ts'])
+})
+
+test('uncommittedPaths is null, not clean, outside a git repo', async () => {
+  expect(await uncommittedPaths(tempDir('hpipe-nogit-'))).toBeNull()
 })
 
 test('adoptableArtifacts yields nothing without a checkout', async () => {

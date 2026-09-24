@@ -204,16 +204,25 @@ watch -n 2 'hpipe status'
   been exercised by unit tests. Watch for one digest where a phase advances and record whether the
   box reads `[research → spec]` rather than `[spec 0m]`.
 - **An idle worker in `research`, `spec` or `plan` with nothing at its artifact path** (#23) must
-  not read as a plain `worker's move`: its line reads `worker's move, but nothing is at <path>`
-  followed by what the adoption scan found — `its branch added no document to adopt` or
-  `N candidates, too many to adopt: …` — and `hpipe status` carries a matching
-  `⚠ <task> idle, <age>m in <phase>, with nothing at <path>` line. To provoke it, answer a worker's
-  research prompt without writing the note. A line that says `worker's move` alone for that pane
-  is a **finding**; so is the `⚠` line surviving once the worker is busy again.
+  not read as a plain `worker's move`: its line reads `YOUR move: worker idle with nothing at
+  <path>` followed by what the adoption scan found — `its branch added no document to adopt` or
+  `N candidates, too many to adopt: …` — and `hpipe status` lists the same clause under
+  `waiting on you:`. To provoke it, answer a worker's research prompt without writing the note. A
+  line that says `worker's move` alone for that pane is a **finding**; so is the entry surviving
+  once the worker is busy again.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
   all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
-  is already sending a digest the footer is what reports it. Expect it to name the same tasks
-  `hpipe status` flags.
+  is already sending a digest the footer is what reports it. Every task it names should also appear,
+  with the same clause, under `hpipe status`'s `waiting on you:` section (status also lists dead
+  ends, which the footer leaves out) — both use one predicate and render `actionFor`, so a
+  different recovery command between the two is a finding. Every `hpipe status` task line should
+  read `[<phase> Nm]`, and the minutes should match the digest's box for the same task.
+- **Leave one worker idle with an uncommitted edit** in `implement` (or either PR review): within a
+  tick of it going idle, `hpipe status` should list it under `waiting on you:` as `YOUR move:
+  worker idle with N uncommitted path(s) (…) — have it commit and push`, and the entry should
+  vanish the moment the worker goes busy. The supervisor runs one `git status` per idle spell, not
+  per tick; a git process per second in `ps` while it sits idle is a finding. So is a checkout
+  whose bootstrap leaves untracked, un-ignored files, which would flag every idle worker.
 - **Independently of any digest, a task parked in `ci`, `merge`, `close`, `teardown` or `escalated`
   is probed in the orchestrator's pane every `TASK_STALL_MINUTES`** (#19). In a genuinely quiet
   window that probe is the only thing that speaks. Confirm one arrives; that its clause names what
@@ -249,8 +258,12 @@ makes **one pass in `task_id` order and releases at most one task per overlappin
 2. The loser stays in `blocked-on-files` and `hpipe status` prints, every time you run it:
 
    ```
-     ⚠ t2 blocked on files held by t1 (implement) — `hpipe release --task t1` is the only way out
+     ⚠ t2 blocked on files held by t1 (implement) — waiting for it to finish
    ```
+
+   Only a holder that has stopped moving (`failed`, `escalated`, …) reads `— it has stopped
+   moving, so only a release clears it` instead, and then `t2` also appears under `waiting on
+   you:` carrying the rendered `<hpipe> release --task t1` — once, not on both lines.
 
    The holder phase in that line should track `t1` as it moves: `implement`, `pr-review-intent`,
    `pr-review-quality`, `ci`, `merge`, `close`, `teardown` all hold files.
@@ -559,7 +572,7 @@ from the orchestrator pane.
 | A task is stuck in `blocked-on-files` behind a holder that will never finish | Get the holder terminal first (`hpipe rewind … --task <holder>` to a phase it can finish, or let it fail), then `hpipe release --task <holder>`. `release` refuses while the holder is in flight, and only accepts a terminal or `escalated` task. |
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which clears every pass counter on that record and, for a review phase, prints the fresh verdict path it reserved. |
-| A phase was escalated by the stall ladder | `hpipe status` shows `⚠ … escalated from <phase> … needs a human`. Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. |
+| A phase was escalated by the stall ladder | `hpipe status` lists the task under `waiting on you:` as `tN <branch> (#n) [escalated Nm] — needs a human: <rewind command>` (a run shows `⚠ run escalated from <phase> … needs a human`). Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. |
 | The whole run is wrong and you want out | `hpipe abort <run_id>` — leaves worktrees and branches alone, releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was. |
 | The orchestrator pane died or changed id | `hpipe status` flags it (`⚠ orchestrator pane … is gone`). Run the plugin's `claim` action from the pane that should drive the run. |
 | The supervisor died | `hpipe status` reports `supervisor: none\|stale`. Reopen with `herdr plugin action invoke stein.pipeline.supervisor`. Nothing advances until it is back; no state is lost. |

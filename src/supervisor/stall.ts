@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, type RunEffect, type SaveOutcome } from '../lib/ledger'
+import { ageMinutes } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
@@ -78,7 +79,7 @@ function candidateFor(
     undelivered: state.undelivered ?? 0,
     thresholdMs,
     escalatable,
-    minutes: Math.floor((now - record.phase_entered_at) / MS_PER_MINUTE),
+    minutes: ageMinutes(record.phase_entered_at, now),
     paneId,
     actorPaneId: actorPaneFor(run, row, task),
   }

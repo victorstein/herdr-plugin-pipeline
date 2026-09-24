@@ -1,67 +1,9 @@
 import { abandonDecisions } from '../lib/decisions'
-import { filesOverlap, isInFlight } from '../lib/gating'
 import { isUnlandedSave } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
-import { adoptionOutcome, currentMissingArtifact } from '../lib/status'
+import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
-
-const MS_PER_MINUTE = 60_000
-
-/**
- * Clamped, matching `src/lib/status.ts:12-14`. A third private copy, written
- * because both other homes were outside the declaring task's file set at the
- * time — not because the duplication is wanted.
- *
- * It is worse than ordinary triplication: `status.ts:25` hardcodes a literal
- * `hpipe`, which a GitHub-installed plugin cannot invoke, while everything here
- * renders `hpipeCommand`. So `hpipe status` and the digest now hand an operator
- * different recovery commands for the same escalated task, one of them wrong.
- * Collapsing these belongs to #14, which needs this arithmetic and an `actionFor`
- * equivalent in `src/lib/` — where `src/supervisor/` cannot be imported from,
- * since the layering is one-way.
- */
-export function ageMinutes(sinceMs: number, now: number): number {
-  return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
-}
-
-/**
- * Whose move it is, keyed on the phase row rather than the phase name so a row
- * added to TASK_ROWS gets a correct clause with no edit here. Shared by the
- * digest line and the parked-task footer so the two cannot drift.
- */
-export function actionFor(run: Run, task: Task, hpipe: string): string {
-  const row = taskRow(task.phase)
-
-  if (task.phase === 'done') return 'nothing for you — this task is finished'
-  if (row.terminal === true) return 'dead end, needs a human'
-  if (task.phase === 'escalated') {
-    const from = task.escalated_from ?? '<phase>'
-    return `needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``
-  }
-  if (row.actor === 'orchestrator') return 'YOUR move'
-  if (row.actor === 'worker') {
-    // An idle worker with no artifact otherwise reads exactly like a busy one, and
-    // the orchestrator waits on it until the stall ladder's first rung.
-    const missing = currentMissingArtifact(run, task)
-    return missing
-      ? `worker's move, but nothing is at ${missing.path} (${adoptionOutcome(missing)})`
-      : "worker's move"
-  }
-  if (task.phase === 'blocked-on-files') {
-    // Mirrors `src/lib/status.ts:51-60`: only a holder that has stopped moving is
-    // releasable, and this row has no escalation path of its own — `files` is not
-    // in stall.ts's ESCALATING_SIGNALS, so the ladder probes it to the cap and
-    // then goes quiet forever.
-    const stuck = run.tasks.find(
-      (t) => t.task_id !== task.task_id &&
-        isInFlight(t) && filesOverlap(task.files, t.files) &&
-        (taskRow(t.phase).terminal === true || t.phase === 'escalated'),
-    )
-    if (stuck) return `YOUR move: \`${hpipe} release --task ${stuck.task_id}\``
-  }
-  return 'nothing for you — the supervisor is driving'
-}
 
 export interface WakeLine {
   run: Run
@@ -130,13 +72,9 @@ export function parkedFooter(
 ): string {
   const parked = run.tasks
     .filter((task) => !covered.has(task.task_id))
-    .filter((task) => {
-      const row = taskRow(task.phase)
-      if (row.terminal === true) return false
-      // `escalated` is spelled out rather than matched as `actor: 'human'` so a
-      // future human-owned row has to opt in here instead of inheriting this.
-      return row.actor === 'orchestrator' || task.phase === 'escalated'
-    })
+    // Dead ends are left to `hpipe status`: they never move again, so the footer
+    // would repeat them on every digest for the rest of the run.
+    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
   if (parked.length === 0) return ''

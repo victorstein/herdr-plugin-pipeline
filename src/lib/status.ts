@@ -2,59 +2,158 @@ import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { runRow, taskRow } from './phases'
-import type { MissingArtifact, Run, SessionKey, Task } from './types'
+import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
   pid?: number
 }
 
-function ageMinutes(sinceMs: number): number {
-  return Math.max(0, Math.floor((Date.now() - sinceMs) / 60000))
+const MS_PER_MINUTE = 60_000
+
+/** Clamped: a future stamp from clock skew must not print "-1m" at an operator. */
+export function ageMinutes(sinceMs: number, now: number): number {
+  return Math.max(0, Math.floor((now - sinceMs) / MS_PER_MINUTE))
 }
 
 /**
- * Only the supervisor's own evaluation clears the record, and it never reaches a
- * run parked in a pane-releasing phase (`cmdAbort` leaves tasks intact in `done`)
- * or a worker with no pane — so for those the record is left behind, not live.
+ * A holder that will never tear itself down. `hpipe release` refuses an
+ * in-flight holder, so offering it against a healthy one sends the human at a
+ * command that will bounce; only one of these is releasable.
  */
-export function currentMissingArtifact(run: Run, task: Task): MissingArtifact | null {
-  if (runRow(run.phase).releasesPane === true || task.pane_id === null) return null
-  const missing = task.artifact_missing
-  return missing !== undefined && missing.at === task.phase_entered_at ? missing : null
+function hasStoppedMoving(task: Task): boolean {
+  return taskRow(task.phase).terminal === true || task.phase === 'escalated'
 }
 
-export function adoptionOutcome(missing: MissingArtifact): string {
+function fileHolders(run: Run, task: Task): Task[] {
+  return run.tasks.filter(
+    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
+  )
+}
+
+/**
+ * Whether a supervisor-written observation of an idle worker still describes it.
+ * Only the supervisor's own evaluation clears such a record, and it never reaches
+ * a run parked in a pane-releasing phase (`cmdAbort` leaves tasks intact in
+ * `done`) or a worker with no pane — so for those the record is left behind, not
+ * live.
+ */
+function isCurrentObservation(run: Run, task: Task, at: number): boolean {
+  if (runRow(run.phase).releasesPane === true || task.pane_id === null) return false
+  return at === task.phase_entered_at
+}
+
+function currentMissingArtifact(run: Run, task: Task): MissingArtifact | null {
+  const missing = task.artifact_missing
+  return missing !== undefined && isCurrentObservation(run, task, missing.at) ? missing : null
+}
+
+function adoptionOutcome(missing: MissingArtifact): string {
   return missing.candidates.length === 0
     ? 'its branch added no document to adopt'
     : `${missing.candidates.length} candidates, too many to adopt: ${missing.candidates.join(', ')}`
 }
 
-/** Task-level warnings that only make sense once a run is on the current schema. */
-function taskWarnings(run: Run): string[] {
+function currentUncommittedWork(run: Run, task: Task): UncommittedWork | null {
+  const work = task.uncommitted_work
+  return work !== undefined && work.count > 0 && isCurrentObservation(run, task, work.at)
+    ? work
+    : null
+}
+
+function describeUncommitted(work: UncommittedWork): string {
+  const more = work.count > work.sample.length ? ', …' : ''
+  const noun = work.count === 1 ? 'path' : 'paths'
+  return `worker idle with ${work.count} uncommitted ${noun} (${work.sample.join(', ')}${more})`
+}
+
+interface Move {
+  waitsOnYou: boolean
+  clause: string
+}
+
+function moveFor(run: Run, task: Task, hpipe: string): Move {
+  const row = taskRow(task.phase)
+  const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
+  const notYours = (clause: string): Move => ({ waitsOnYou: false, clause })
+
+  if (task.phase === 'done') return notYours('nothing for you — this task is finished')
+  if (row.terminal === true) return yours('dead end, needs a human')
+  if (task.phase === 'escalated') {
+    const from = task.escalated_from ?? '<phase>'
+    return yours(`needs a human: \`${hpipe} rewind ${run.run_id} ${from} --task ${task.task_id}\``)
+  }
+  if (row.actor === 'orchestrator') return yours('YOUR move')
+  if (row.actor === 'worker') {
+    // An idle worker that has stopped short otherwise reads exactly like a busy
+    // one, and the orchestrator waits on it until the stall ladder's first rung.
+    const missing = currentMissingArtifact(run, task)
+    if (missing) {
+      return yours(`YOUR move: worker idle with nothing at ${missing.path} (${adoptionOutcome(missing)})`)
+    }
+    const work = currentUncommittedWork(run, task)
+    if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
+    return notYours("worker's move")
+  }
+  if (task.phase === 'blocked-on-files') {
+    // This row has no escalation path of its own — `files` is not in stall.ts's
+    // ESCALATING_SIGNALS, so the ladder probes it to the cap and then goes quiet
+    // forever. A stuck holder is therefore only ever cleared by a human.
+    const stuck = fileHolders(run, task).filter(hasStoppedMoving)
+    if (stuck.length > 0) {
+      return yours(`YOUR move: ${stuck.map((t) => `\`${hpipe} release --task ${t.task_id}\``).join(', ')}`)
+    }
+  }
+  return notYours('nothing for you — the supervisor is driving')
+}
+
+/**
+ * The digest footer's predicate. It passes no CLI because only the clause needs
+ * one, and the footer renders its clause through `actionFor` separately.
+ */
+export function waitsOnYou(run: Run, task: Task): boolean {
+  return moveFor(run, task, '').waitsOnYou
+}
+
+/**
+ * Whose move it is, keyed on the phase row rather than the phase name so a row
+ * added to TASK_ROWS gets a correct clause with no edit here. Shared by the
+ * digest, its parked-task footer and `hpipe status`, so the three cannot hand an
+ * operator different recovery commands for the same task.
+ */
+export function actionFor(run: Run, task: Task, hpipe: string): string {
+  return moveFor(run, task, hpipe).clause
+}
+
+/**
+ * Named explicitly rather than left to be spotted in the task list: a task parked
+ * in `merge` for five hours rendered as one more ordinary line on the berean-os
+ * run of 2026-09-16. Measured on a live run.
+ */
+function waitingOnYou(run: Run, hpipe: string, now: number): string[] {
+  const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
+  const lines = byId.flatMap((task) => {
+    const move = moveFor(run, task, hpipe)
+    if (!move.waitsOnYou) return []
+    const age = ageMinutes(task.phase_entered_at, now)
+    return [`    ${task.task_id} ${task.branch} (#${task.issue}) [${task.phase} ${age}m] — ${move.clause}`]
+  })
+  return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
+}
+
+/**
+ * Detail the "waiting on you" clause has no room for: the question itself, who
+ * holds the files, a stalled answer. Only meaningful once a run is on the
+ * current schema.
+ */
+function taskWarnings(run: Run, hpipe: string, now: number): string[] {
   const lines: string[] = []
 
   for (const task of run.tasks) {
-    if (task.phase === 'escalated') {
-      lines.push(
-        `  ⚠ ${task.task_id} escalated from ${task.escalated_from ?? 'unknown'} ` +
-        `${ageMinutes(task.phase_entered_at)}m ago — needs a human; ` +
-        `\`hpipe rewind ${run.run_id} ${task.escalated_from ?? '<phase>'} --task ${task.task_id}\` resumes it`,
-      )
-    }
-
-    const missing = currentMissingArtifact(run, task)
-    if (missing) {
-      lines.push(
-        `  ⚠ ${task.task_id} idle, ${ageMinutes(task.phase_entered_at)}m in ${task.phase}, ` +
-        `with nothing at ${missing.path} — ${adoptionOutcome(missing)}`,
-      )
-    }
-
     const open = openDecisionFor(task)
     if (open) {
       lines.push(
-        `  ⚠ ${task.task_id} blocked on an open decision (${ageMinutes(open.asked_at)}m): ${open.question}`,
+        `  ⚠ ${task.task_id} blocked on an open decision (${ageMinutes(open.asked_at, now)}m): ${open.question}`,
       )
     }
 
@@ -63,25 +162,17 @@ function taskWarnings(run: Run): string[] {
       if (decision) {
         lines.push(
           `  ⚠ ${task.task_id} decision ${decision.id} answered but undelivered ` +
-          `(${task.delivery_attempts} delivery attempts) — a fresh \`hpipe answer\` re-arms delivery`,
+          `(${task.delivery_attempts} delivery attempts) — a fresh \`${hpipe} answer\` re-arms delivery`,
         )
       }
     }
 
     if (task.phase === 'blocked-on-files') {
-      const holders = run.tasks.filter(
-        (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
-      )
-      for (const holder of holders) {
-        // `hpipe release` refuses an in-flight holder, so offering it against a
-        // healthy one sends the human at a command that will bounce. It is the
-        // escape only when the holder has stopped moving and nothing will tear
-        // it down.
-        const stuck = taskRow(holder.phase).terminal || holder.phase === 'escalated'
+      for (const holder of fileHolders(run, task)) {
         lines.push(
           `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
-          (stuck
-            ? `\`hpipe release --task ${holder.task_id}\` is the only way out`
+          (hasStoppedMoving(holder)
+            ? 'it has stopped moving, so only a release clears it'
             : 'waiting for it to finish'),
         )
       }
@@ -91,21 +182,24 @@ function taskWarnings(run: Run): string[] {
   return lines
 }
 
-function intakeWarning(run: Run): string[] {
+function intakeWarning(run: Run, hpipe: string): string[] {
   if (run.phase !== 'execute' || run.intake_closed || run.tasks.length === 0) return []
-  const allTerminal = run.tasks.every(
-    (t) => taskRow(t.phase).terminal === true || t.phase === 'escalated',
-  )
-  if (!allTerminal) return []
+  if (!run.tasks.every(hasStoppedMoving)) return []
   return [
     '  ⚠ every task is settled but intake was never closed — ' +
-    'run `hpipe dispatch --done` to let this run advance',
+    `run \`${hpipe} dispatch --done\` to let this run advance`,
   ]
 }
 
+/**
+ * `hpipe` is the rendered invocation from `hpipeCommand`, never a literal: a
+ * plugin installed from GitHub has no `hpipe` on PATH, and the digest already
+ * renders it, so a literal here would hand the operator a different — and
+ * uninvokable — recovery command for the same task.
+ */
 export function formatStatus(
-  runs: Run[], supervisor: StatusSupervisor, session: SessionKey,
-  livePanes: ReadonlySet<string> = new Set(),
+  runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
+  livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
 ): string {
   const lines: string[] = []
   lines.push(`session: ${session}`)
@@ -137,7 +231,7 @@ export function formatStatus(
     if (run.schema_version !== 2) {
       lines.push(
         `  ⚠ run ${run.run_id} was started by an earlier plugin version and cannot be ` +
-        `advanced — hpipe abort ${run.run_id} to release the repo.`,
+        `advanced — ${hpipe} abort ${run.run_id} to release the repo.`,
       )
     }
 
@@ -147,8 +241,8 @@ export function formatStatus(
     if (run.phase === 'escalated') {
       lines.push(
         `  ⚠ run escalated from ${run.escalated_from ?? 'unknown'} ` +
-        `${ageMinutes(run.phase_entered_at)}m ago — needs a human; ` +
-        `\`hpipe rewind ${run.run_id} ${run.escalated_from ?? '<phase>'}\` resumes it`,
+        `${ageMinutes(run.phase_entered_at, now)}m ago — needs a human; ` +
+        `\`${hpipe} rewind ${run.run_id} ${run.escalated_from ?? '<phase>'}\` resumes it`,
       )
     }
 
@@ -157,7 +251,7 @@ export function formatStatus(
         `  ${task.task_id}`,
         task.branch,
         `#${task.issue}`,
-        `[${task.phase}]`,
+        `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
         task.agent_status,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
@@ -166,8 +260,9 @@ export function formatStatus(
     }
 
     if (run.schema_version === 2) {
-      lines.push(...intakeWarning(run))
-      lines.push(...taskWarnings(run))
+      lines.push(...intakeWarning(run, hpipe))
+      lines.push(...waitingOnYou(run, hpipe, now))
+      lines.push(...taskWarnings(run, hpipe, now))
     }
   }
 
@@ -180,7 +275,7 @@ const orNone = (value: string | number | null | undefined): string =>
 const listOrNone = (values: readonly string[]): string =>
   values.length > 0 ? values.join(', ') : 'none'
 
-export function formatTaskDetail(run: Run, task: Task): string {
+export function formatTaskDetail(run: Run, task: Task, now: number = Date.now()): string {
   const verdicts = Object.entries(task.artifacts.verdicts)
   const open = openDecisionFor(task)
   return [
@@ -191,7 +286,7 @@ export function formatTaskDetail(run: Run, task: Task): string {
     `surface:    ${task.surface}`,
     `files:      ${listOrNone(task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,
-    `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at)}m)`,
+    `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
     `agent:      ${task.agent_status}`,
     `workspace:  ${orNone(task.workspace_id)}`,
     `pane:       ${orNone(task.pane_id)}`,
