@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.4](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.3...v1.5.4) (2026-09-24)
+
+
+### Bug Fixes
+
+* leave dispatch once every dispatched task has a worktree ([#70](https://github.com/victorstein/herdr-plugin-pipeline/issues/70)) ([5eb4928](https://github.com/victorstein/herdr-plugin-pipeline/commit/5eb49286bd7d198ed30393284492f88fe45bacdd))
+
 ## [1.5.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.2...v1.5.3) (2026-09-24)
 
 
