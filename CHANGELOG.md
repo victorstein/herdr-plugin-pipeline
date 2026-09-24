@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.4.0...v1.4.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* stop the supervisor silently discarding cli recovery commands ([#67](https://github.com/victorstein/herdr-plugin-pipeline/issues/67)) ([06c3cf3](https://github.com/victorstein/herdr-plugin-pipeline/commit/06c3cf3d222bc856fbdf9a9bb10bb27c30c7c6be)), closes [#51](https://github.com/victorstein/herdr-plugin-pipeline/issues/51)
+
 ## [1.4.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.3.3...v1.4.0) (2026-09-24)
 
 
