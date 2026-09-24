@@ -3,6 +3,7 @@ import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
+import { bindWorkerPane } from '../lib/unstarted'
 import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
 
 export interface WakeLine {
@@ -53,7 +54,7 @@ export function describeWake(line: WakeLine, now: number, hpipe: string): string
 
   const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
   const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
-    `${line.event} — ${actionFor(run, task, hpipe)}`
+    `${line.event} — ${actionFor(run, task, hpipe, now)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
@@ -74,20 +75,30 @@ export function parkedFooter(
     .filter((task) => !covered.has(task.task_id))
     // Dead ends are left to `hpipe status`: they never move again, so the footer
     // would repeat them on every digest for the rest of the run.
-    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task))
+    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
   if (parked.length === 0) return ''
 
   const lines = parked.map((task) =>
     `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
-    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe)}`)
+    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now)}`)
   return ['also waiting on you:', ...lines].join('\n')
 }
 
 export interface ApplyResult {
   changed: boolean
   wake: WakeLine[]
+}
+
+/**
+ * A pane with no agent left in it is not the worker's pane. Kept, it would make a
+ * task rewound out of `failed` look bound, so the unstarted-worker check skipped
+ * it and every probe went to a pane that cannot answer.
+ */
+function releaseWorkerPane(task: Task): void {
+  if (task.pane_id !== null) task.last_pane_id = task.pane_id
+  task.pane_id = null
 }
 
 function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; task: Task } | null {
@@ -138,11 +149,12 @@ export function applyEvents(
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)
         enterTaskPhase(run, task, 'failed', 'agent released')
+        releaseWorkerPane(task)
         wake.push({
           run, task, phaseAtEvent, event: 'agent released',
         })
       } else if (event.pane_id) {
-        task.pane_id = event.pane_id
+        bindWorkerPane(run, task, event.pane_id, Date.now())
       }
       changed = true
       continue
@@ -151,6 +163,7 @@ export function applyEvents(
     if (event.kind === 'pane.exited') {
       if (task.phase === 'blocked-on-decision') abandonDecisions(task)
       enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
+      releaseWorkerPane(task)
       wake.push({
         run, task, phaseAtEvent,
         event: `pane exited${task.pr ? '' : ', no PR'}`,

@@ -7,6 +7,7 @@ import {
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveOrReapply, saveRun, StaleRunError } from '../src/lib/ledger'
+import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
@@ -245,7 +246,7 @@ test('an artifact that exists but is stale is not described as absent', () => {
   const task = mkTask({ phase: 'research', checkout_path: dir })
   task.artifacts.research = 'docs/superpowers/research/r.md'
   run.tasks = [task]
-  const a = stallAwaiting(run, task, 'hp')
+  const a = stallAwaiting(run, task, 'hp', NOW)
   expect(a.clause).not.toContain('Nothing has appeared at')
   expect(a.clause).toContain("Nothing newer than this phase's start")
   rmSync(dir, { recursive: true, force: true })
@@ -937,4 +938,69 @@ test('the escalation text describes the phase being left, not escalated — #19'
   }
   expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])
   expect(task.phase).toBe('escalated')
+})
+
+test('a worktree with no agent in it is probed on the orchestrator cadence — #12', () => {
+  // The fault is the orchestrator's, and so is the probe: waiting out the 45-minute
+  // worker threshold on a pane nobody started is the berean-os `w23:p1` case.
+  const entered = NOW - 20 * 60_000
+  const unstarted = runWithTask({
+    phase: 'research', pane_id: null, phase_entered_at: entered, adopted_at: entered,
+  })
+  const out = taskStallCandidates([unstarted], NOW, 45, 3, 15)
+  expect(out.map((c) => c.paneId)).toEqual([ORCHESTRATOR_PANE])
+  expect(out[0]?.thresholdMs).toBe(15 * 60_000)
+
+  const started = runWithTask({ phase: 'research', pane_id: 'w7:p1', phase_entered_at: entered })
+  expect(taskStallCandidates([started], NOW, 45, 3, 15)).toHaveLength(0)
+})
+
+test('a worktree still inside the bootstrap grace keeps the worker threshold — #12', () => {
+  const unstarted = runWithTask({
+    phase: 'research', pane_id: null, phase_entered_at: NOW - 20 * 60_000, adopted_at: NOW - 60_000,
+  })
+  expect(taskStallCandidates([unstarted], NOW, 45, 3, 15)).toHaveLength(0)
+})
+
+test('an unstarted worker is told it has no agent, not that its artifact is missing — #12', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({
+    phase: 'research', pane_id: null, workspace_id: 'w23', checkout_path: '/wt', adopted_at: LONG_AGO,
+  })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).not.toContain('Nothing has appeared at')
+  expect(a.clause).toContain('No agent has been detected')
+  expect(a.clause).toContain('herdr pane list --workspace w23')
+  expect(a.clause).toContain('`hp dispatch --task t1 --pane <pane>`')
+  expect(a.short).toContain('agent')
+})
+
+test('a worktree still inside the bootstrap grace is not told it has no agent — #12', () => {
+  // A task that entered research at registration can come due on the worker
+  // threshold a minute after its worktree was made, while the bootstrap runs.
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({
+    phase: 'research', pane_id: null, workspace_id: 'w23', checkout_path: '/wt', adopted_at: NOW - 60_000,
+  })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  expect(stallAwaiting(run, task, 'hp', NOW).clause).not.toContain('No agent has been detected')
+})
+
+test('orchestrator probes about an empty worktree do not count toward the worker\'s escalation — #12', () => {
+  const entered = NOW - 50 * 60_000
+  const run = runWithTask({
+    phase: 'research', pane_id: null, phase_entered_at: entered, adopted_at: entered,
+  })
+  const task = run.tasks[0]!
+  task.stall = { at: entered, run_at: run.phase_entered_at, last_probe_at: NOW - 5 * 60_000,
+                 probes: 3, undelivered: 0, holds: 0 }
+
+  bindWorkerPane(run, task, 'w7:p1', NOW)
+
+  expect(taskStallCandidates([run], NOW + 44 * 60_000, 45, 3, 15)).toHaveLength(0)
+  const due = taskStallCandidates([run], NOW + 45 * 60_000, 45, 3, 15)
+  expect(due.map((c) => [c.action, c.probes, c.paneId])).toEqual([['probe', 0, 'w7:p1']])
 })

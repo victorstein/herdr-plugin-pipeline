@@ -103,6 +103,11 @@ export interface Task {
   keep_worktree: boolean
   workspace_id: string | null
   pane_id: string | null
+  /**
+   * The pane a dead worker last ran in, kept for `herdr pane read` once
+   * `pane_id` is cleared. Optional: ledgers written before #12 lack it.
+   */
+  last_pane_id?: string
   agent_status: AgentStatus
   phase: TaskPhase
   phase_entered_at: number

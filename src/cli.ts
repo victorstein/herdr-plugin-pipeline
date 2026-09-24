@@ -20,6 +20,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { bindWorkerPane } from './lib/unstarted'
 import { reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
@@ -450,7 +451,7 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
  */
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
-}, send: SendBrief): Promise<CmdResult> {
+}, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
   // would strand the opposite way, since registration already moved the task past
@@ -485,6 +486,18 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
       `its worker has the brief; \`hpipe brief --task ${task.task_id}\` prints it to reread`)
   }
 
+  // Checked before the send, because a brief sent to the wrong pane cannot be
+  // recalled, and a pane recorded on the wrong task routes that pane's events —
+  // exit, release, idle — to whichever of the two `findTask` meets first.
+  if (input.paneId === run.orchestrator_pane) {
+    return fail(`${input.paneId} is this run's orchestrator pane — pass the worker's root pane`)
+  }
+  const holder = run.tasks.find((t) => t.task_id !== task.task_id && t.pane_id === input.paneId)
+  if (holder) {
+    return fail(`${input.paneId} is already ${holder.task_id}'s worker pane — pass ${task.task_id}'s ` +
+      'root pane, from `herdr pane list --workspace <its workspace>`')
+  }
+
   const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sent = await send(input.paneId, brief)
   if (!sent.ok) {
@@ -498,7 +511,45 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
         'submitted and may already be in the pane, and a retry would send it twice'
       : `${reason}\n  → nothing was sent; fix the cause and run it again`)
   }
-  return ok(`brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`)
+
+  const delivered = `brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`
+  const unrecorded = await recordPane(ctx, {
+    runId: run.run_id, taskId: task.task_id, paneId: input.paneId, briefedPhase,
+  })
+  if (unrecorded === null) return ok(delivered)
+  // Still `ok`, and never "run it again": the brief has landed, and a re-run is
+  // let through by the briefed-phase guard and would hand the worker a second one.
+  return ok(`${delivered}\n  ⚠ but its pane was not recorded (${unrecorded}). Do not run ` +
+    '`dispatch --task` again — that would brief the worker twice. The pane binds on its own ' +
+    'once herdr reports the agent.')
+}
+
+/**
+ * Written only after herdr confirmed the handoff, and re-read rather than reusing
+ * the copy the send began with: the supervisor saves the run many times during
+ * a confirmation wait. Recording the pane here, as well as on
+ * `pane.agent_detected`, is what keeps a lost hook event from leaving a briefed
+ * worker looking as though no agent was ever started for it. Returns why the
+ * pane was not recorded, or null.
+ */
+export async function recordWorkerPane(ctx: Ctx, input: {
+  runId: string; taskId: string; paneId: string; briefedPhase: TaskPhase
+}, save: (stateDir: string, run: Run) => Promise<void> = saveRun): Promise<string | null> {
+  try {
+    return await retryOnStaleRun(async () => {
+      const run = (await listRuns(ctx.stateDir, ctx.session)).find((r) => r.run_id === input.runId)
+      const task = run?.tasks.find((t) => t.task_id === input.taskId)
+      if (!run || !task) return `${input.taskId} is gone from the ledger`
+      // A pane that exited during the confirmation wait has already failed the
+      // task and been unbound; binding it again would make a rewind read as bound.
+      if (task.phase !== input.briefedPhase) return null
+      if (bindWorkerPane(run, task, input.paneId, Date.now())) await save(ctx.stateDir, run)
+      return null
+    })
+  } catch (error) {
+    if (isUnlandedSave(error)) return 'the ledger kept changing under the save'
+    throw error
+  }
 }
 
 async function closeIntake(ctx: Ctx, input: {

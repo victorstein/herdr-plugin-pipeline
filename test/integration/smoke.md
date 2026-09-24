@@ -178,9 +178,28 @@ fails every task with `invalid_agent_argument`; that is the defect this step rep
 
 **Failure looks like:** the task still shows `unknown` and `hpipe status` never names a pane. The
 binding comes from two separate events — `worktree.created` (matched on `branch`, sets
-`workspace_id`/`checkout_path`) and `pane.agent_detected` (sets `pane_id`). If the worktree bound
+`workspace_id`/`checkout_path`) and `pane.agent_detected` (sets `pane_id`); a confirmed `dispatch
+--task` also sets `pane_id`, so a lost detection event cannot unbind a briefed worker. If the worktree bound
 but the pane did not, the agent was started somewhere the plugin did not see. `hpipe forget
 <workspace_id>` unbinds so you can retry.
+
+**The unstarted-worker check (#12).** For one extra task, run `worktree create` and stop — no
+`agent start`. `herdr agent get <root_pane_id>` answers `agent_not_found`, and `pane list` shows the
+pane with no `agent` field. For the first five minutes nothing flags it (the bootstrap grace). After
+that, `hpipe status` lists the task under `waiting on you:` and the next digest's `also waiting on
+you:` footer lists it too, both as `YOUR move: no agent detected in its worktree`, telling you to
+check `herdr pane list --workspace <ws>` before `agent start` + `dispatch --task`. `STALL_MINUTES`
+(15) after phase entry the **orchestrator** is probed with that same advice rather than "nothing has
+appeared at <path>". Then start the agent and dispatch: all three go quiet within a tick of
+`pane.agent_detected` or the confirmed `dispatch --task`, and the stall ladder **re-arms**:
+`hpipe show --task <id>` lists the pane, and the worker's first probe comes a full
+`TASK_STALL_MINUTES` (45) after the bind, as probe 1 — the orchestrator's probes do not count toward
+its escalation. If the task is still flagged once its agent is working, the pane never bound, which
+is the failure above, not this one.
+
+Kill that worker's pane (`herdr pane close`): the task goes to `failed` and `hpipe show` reports
+`pane: none (last: <pane>)`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
+not as bound to the dead pane.
 
 ---
 
