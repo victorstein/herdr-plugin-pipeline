@@ -15,7 +15,7 @@ import {
 import { isAgentReady } from '../lib/machine'
 import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
-  taskStallCandidates,
+  taskStallCandidates, undeliveredNote,
 } from './stall'
 import { applyEvents, describeWake, parkedFooter, pickOneAdvance } from './tick'
 import { ciTransitions } from './ci'
@@ -286,6 +286,7 @@ async function main(): Promise<void> {
           phase: from,
           minutes: String(c.minutes),
           probes: String(c.probes),
+          undelivered: undeliveredNote(c.undelivered),
           awaiting_short: stallAwaiting(c.run, c.task, hpipe).short,
           task_flag: c.task ? ` --task ${c.task.task_id}` : '',
         }),

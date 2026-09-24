@@ -1,7 +1,7 @@
 # Escalated — run {{run_id}}, phase `{{phase}}`
 
 This phase went {{probes}} stall probes without producing {{awaiting_short}}, and has been open
-{{minutes}} minutes. The pipeline has stopped it on purpose.
+{{minutes}} minutes. The pipeline has stopped it on purpose.{{undelivered}}
 
 Summarise for the human, in a few lines:
 

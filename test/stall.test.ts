@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
-  type StallDeps, taskStallCandidates,
+  type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import { rollUpBucket } from '../src/lib/gh'
@@ -317,14 +317,14 @@ test('an unrecognised signal falls back to naming the phase', () => {
 })
 
 test('an escalating row is told its position and the bound', () => {
-  expect(ladderFor({ probes: 1, escalatable: true }, 3)).toBe(
+  expect(ladderFor({ probes: 1, undelivered: 0, escalatable: true }, 3)).toBe(
     'This is probe 2 of 3. After 3 unanswered probes this phase is escalated to the human ' +
     'and stops moving on its own.')
 })
 
 test('an excluded row is never promised a bound it does not have', () => {
-  expect(ladderFor({ probes: 8, escalatable: false }, 3)).not.toContain('of 3')
-  expect(ladderFor({ probes: 8, escalatable: false }, 3)).toContain('standing nudge')
+  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).not.toContain('of 3')
+  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).toContain('standing nudge')
 })
 
 test('a run with no orchestrator pane produces no candidate at all', () => {
@@ -466,57 +466,92 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
   return { ...base, ...over, sent }
 }
 
-test('an undelivered probe still climbs a rung, and is counted as undelivered — #32', async () => {
-  const run = runAt('execute', LONG_AGO)
-  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
-  run.tasks = [task]
-
+test('a probe that fails once and lands next tick costs no rung — #32', async () => {
+  const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  const task = run.tasks[0] as Task
+  const due = 45 * 60_000
   let persisted = 0
-  const bad = mkDeps({ probe: async () => ({ ok: false }), persist: async () => { persisted += 1 } })
-  await applyStalls(taskStallCandidates([run], NOW, 45, 3), bad)
-  expect(stallStateFor(run, task).probes).toBe(1)
-  expect(stallStateFor(run, task).undelivered).toBe(1)
-  expect(stallStateFor(run, task).last_probe_at).toBe(NOW)
+  const persist = async () => { persisted += 1 }
+
+  await applyStalls(taskStallCandidates([run], due, 45, 3),
+    mkDeps({ now: () => due, persist, probe: async () => ({ ok: false }) }))
+  expect(stallStateFor(run, task).probes).toBe(0)
+  expect(stallStateFor(run, task).undeliverable_since).toBe(due)
   expect(persisted).toBe(1)
 
-  const later = NOW + 45 * 60_000
-  const good = mkDeps({ now: () => later, persist: async () => { persisted += 1 } })
-  await applyStalls(taskStallCandidates([run], later, 45, 3), good)
-  expect(stallStateFor(run, task).probes).toBe(2)
-  expect(stallStateFor(run, task).undelivered).toBe(1)
-  expect(persisted).toBe(2)
+  const nextTick = due + 1000
+  const retried = mkDeps({ now: () => nextTick, persist })
+  await applyStalls(taskStallCandidates([run], nextTick, 45, 3), retried)
+  expect(retried.sent).toEqual(['probe:t1'])
+  expect(stallStateFor(run, task).probes).toBe(1)
+  expect(stallStateFor(run, task).undelivered).toBe(0)
+  expect(stallStateFor(run, task).undeliverable_since).toBeUndefined()
+  expect(stallStateFor(run, task).last_probe_at).toBe(nextTick)
 })
 
-test('an unreachable pane escalates on the time-based cadence, not once per tick — #32', async () => {
-  // The issue's demonstration was 1000 ticks, 1000 sends, no escalation. Ticking
-  // every second must neither stall the ladder nor climb a rung per tick.
+/** Ticks once a second until escalation; reports when it happened and what it cost. */
+async function escalateAgainst(delivered: boolean) {
   const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
   const task = run.tasks[0] as Task
   let now = 0
-  const attemptsAtMinute: number[] = []
+  let attempts = 0
+  let persisted = 0
   const deps = mkDeps({
-    probe: async () => { attemptsAtMinute.push(now / 60_000); return { ok: false } },
+    probe: async () => { attempts += 1; return { ok: delivered } },
     agentStatus: async () => 'unknown',
+    persist: async () => { persisted += 1 },
   })
-  for (; now <= 200 * 60_000 && task.phase === 'implement'; now += 1000) {
+  for (; now <= 300 * 60_000 && task.phase === 'implement'; now += 1000) {
     await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
   }
-  expect(attemptsAtMinute).toEqual([45, 90, 135])
-  expect(task.phase).toBe('escalated')
-  expect(deps.sent).toEqual(['escalate:t1'])
-  expect(run.history.at(-1)?.why).toBe('3 stall probes unanswered, 3 of them undelivered')
+  return { run, task, attempts, persisted, minute: Math.floor(now / 60_000), sent: deps.sent }
+}
+
+test('an unreachable pane escalates at the same minute as a silent one — #32', async () => {
+  // The issue's demonstration was 1000 ticks, 1000 sends, no escalation.
+  const silent = await escalateAgainst(true)
+  const unreachable = await escalateAgainst(false)
+  expect(silent.minute).toBe(180)
+  expect(unreachable.minute).toBe(silent.minute)
+  expect(unreachable.task.phase).toBe('escalated')
+  expect(unreachable.sent).toEqual(['escalate:t1'])
+  expect(unreachable.run.history.at(-1)?.why)
+    .toBe('3 stall probes unanswered, 3 of them undelivered')
 })
 
-test('a stall state written before #32 reads as zero undelivered', () => {
+test('an unreachable pane is retried once a tick but written to the ledger once a rung — #32', async () => {
+  const { attempts, persisted } = await escalateAgainst(false)
+  const ticksFromFirstDueToLastRungInclusive = (180 - 45) * 60 + 1
+  expect(attempts).toBe(ticksFromFirstDueToLastRungInclusive)
+  // The streak start, three climbs, and the escalation itself.
+  expect(persisted).toBe(5)
+})
+
+test('a stall state written before #32 reads as zero undelivered', async () => {
   const run = runAt('execute', LONG_AGO)
   const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
   run.tasks = [task]
   task.stall = {
     at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 2, holds: 0,
   }
-  bumpStall(run, task, 'undelivered', NOW)
+  const failing = { probe: async () => ({ ok: false }) }
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), mkDeps(failing))
+  const later = NOW + 45 * 60_000
+  await applyStalls(taskStallCandidates([run], later, 45, 3), mkDeps({ ...failing, now: () => later }))
   expect(stallStateFor(run, task).probes).toBe(3)
   expect(stallStateFor(run, task).undelivered).toBe(1)
+})
+
+test('the ladder sentence owns up to rungs that never reached the pane — #32', () => {
+  expect(ladderFor({ probes: 2, undelivered: 2, escalatable: true }, 3))
+    .toContain('2 earlier probes could not be delivered')
+  expect(ladderFor({ probes: 2, undelivered: 0, escalatable: true }, 3))
+    .not.toContain('could not be delivered')
+})
+
+test('the escalation note names an unreachable pane only when a probe went undelivered — #32', () => {
+  expect(undeliveredNote(0)).toBe('')
+  expect(undeliveredNote(3)).toContain('3 of them never reached')
 })
 
 test('a bump survives the ledger round trip that every tick performs', async () => {

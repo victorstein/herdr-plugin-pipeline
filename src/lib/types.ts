@@ -57,6 +57,8 @@ export interface StallState {
   probes: number
   /** How many of `probes` never reached the pane. Optional: ledgers written before #32 lack it. */
   undelivered?: number
+  /** Start of the current run of failed sends; cleared by a delivered probe. */
+  undeliverable_since?: number
   holds: number
 }
 
