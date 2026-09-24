@@ -1,5 +1,8 @@
 import { repoContext } from '../lib/repo'
-import { activeRunForRepo, saveRun, writeOrchestrator } from '../lib/ledger'
+import {
+  activeRunForRepo, isUnlandedSave, retryOnStaleRun, saveRun, unlandedSaveMessage,
+  writeOrchestrator,
+} from '../lib/ledger'
 import { sessionKey } from '../lib/session'
 
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
@@ -26,11 +29,22 @@ await writeOrchestrator(stateDir, session, repoRoot, {
   claimed_at: Date.now(),
 })
 
-const run = await activeRunForRepo(stateDir, session, repoRoot)
+let run
+try {
+  run = await retryOnStaleRun(async () => {
+    const active = await activeRunForRepo(stateDir, session, repoRoot)
+    if (!active) return null
+    active.orchestrator_pane = paneId
+    active.history.push({ at: Date.now(), from: 'claim', to: active.phase, why: `orchestrator rebound to ${paneId}` })
+    await saveRun(stateDir, active)
+    return active
+  })
+} catch (error) {
+  if (!isUnlandedSave(error)) throw error
+  console.error(`[pipeline] ${unlandedSaveMessage(error)}`)
+  process.exit(1)
+}
 if (run) {
-  run.orchestrator_pane = paneId
-  run.history.push({ at: Date.now(), from: 'claim', to: run.phase, why: `orchestrator rebound to ${paneId}` })
-  await saveRun(stateDir, run)
   console.log(`[pipeline] ${paneId} now drives ${run.run_id}`)
 } else {
   console.log(`[pipeline] claimed ${paneId} for ${repoRoot}; no active run yet`)

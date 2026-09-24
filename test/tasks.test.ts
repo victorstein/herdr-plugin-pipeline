@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
-import { newRun } from '../src/lib/ledger'
+import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor } from '../src/lib/machine'
 import type { Run, Task } from '../src/lib/types'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
@@ -40,7 +40,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   prView: async () => null,
   issueView: async () => null,
   verdictFor: async () => null,
-  removeWorktree: async () => true,
+  removeWorktree: async () => 'removed' as const,
   ciDetail: async () => '',
   ambiguityLog: new Set<string>(),
   ...over,
@@ -218,7 +218,7 @@ test('teardown removes the worktree and completes the task', async () => {
   const run = mkRun([mkTask({ phase: 'teardown' })])
   const removed: string[] = []
   await advanceTasks(run, deps({
-    removeWorktree: async (ws: string) => { removed.push(ws); return true },
+    removeWorktree: async (ws: string) => { removed.push(ws); return 'removed' as const },
   }))
   expect(removed).toEqual(['w7'])
   expect(run.tasks[0]?.phase).toBe('done')
@@ -675,4 +675,52 @@ test('a repo declaring no bootstrap still says so in the dispatch prompt', async
   const run = mkRun([mkTask({})])   // mkRun uses repoRoot '/r', which does not exist
   const prompts = await advanceTasks(run, deps())
   expect(prompts[0]!.text).toContain('bootstrap: none')
+})
+
+test('a teardown whose save lost to a CLI write stays done and its dependent still dispatches', async () => {
+  // The #67 review's reproduction: without the re-apply, tick 2 finds the
+  // workspace gone, orphans t1, and fails t2 terminally into blocked-on-failure.
+  const stateDir = tempDir('tasks-ledger-')
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'teardown', workspace_id: 'w7' }),
+    mkTask({ task_id: 't2', phase: 'queued', depends_on: ['t1'], workspace_id: null, pane_id: null }),
+  ])
+  await saveRun(stateDir, run)
+  const tickCopy = (await loadRun(stateDir, run.session, run.run_id))!
+
+  const effects: RunEffect[] = []
+  const removed: string[] = []
+  await advanceTasks(tickCopy, deps({
+    removeWorktree: async (ws) => { removed.push(ws); return 'removed' as const },
+    effects,
+  }))
+
+  const cliCopy = (await loadRun(stateDir, run.session, run.run_id))!
+  cliCopy.tasks[1]!.notes = 'edited by a CLI command'
+  await saveRun(stateDir, cliCopy)
+
+  expect(await saveOrReapply(stateDir, tickCopy, effects)).toBe('reapplied')
+
+  const nextTick = (await loadRun(stateDir, run.session, run.run_id))!
+  expect(nextTick.tasks[0]?.phase).toBe('done')
+  expect(nextTick.tasks[1]?.notes).toBe('edited by a CLI command')
+  await advanceTasks(nextTick, deps({
+    removeWorktree: async (ws) => { removed.push(ws); return 'gone' as const },
+  }))
+  expect(removed).toEqual(['w7'])
+  expect(nextTick.tasks.map((t) => t.phase)).toEqual(['done', 'research'])
+})
+
+test('a second teardown of a workspace herdr no longer knows completes the task', async () => {
+  // Also the supervisor-crash-between-removal-and-save case.
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'teardown', checkout_path: '/nonexistent/wt' })])
+  await advanceTasks(run, deps({ removeWorktree: async () => 'gone' as const }))
+  expect(run.tasks[0]?.phase).toBe('done')
+})
+
+test('a vanished workspace whose checkout is still on disk is orphaned, not done', async () => {
+  const checkout = tempDir('tasks-checkout-')
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'teardown', checkout_path: checkout })])
+  await advanceTasks(run, deps({ removeWorktree: async () => 'gone' as const }))
+  expect(run.tasks[0]?.phase).toBe('orphaned')
 })

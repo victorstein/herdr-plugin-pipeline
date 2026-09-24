@@ -4,7 +4,9 @@ import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
 import { drain } from '../lib/queue'
-import { allOrchestratorPanes, listRuns, saveRun } from '../lib/ledger'
+import {
+  allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, type RunEffect, saveOrReapply, saveRun,
+} from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { sessionKey } from '../lib/session'
@@ -17,8 +19,9 @@ import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates, undeliveredNote,
 } from './stall'
-import { applyEvents, describeWake, parkedFooter, pickOneAdvance } from './tick'
+import { applyEvents, describeWake, parkedFooter, pickOneAdvance, saveEventedRuns } from './tick'
 import { ciTransitions } from './ci'
+import { worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import type { AgentStatus, Run } from '../lib/types'
@@ -114,13 +117,27 @@ async function main(): Promise<void> {
     try {
       const events = await drain(queueDir)
       const allRuns = await listRuns(stateDir, session)
-      const runs = (config.REPOS_ALLOW.length === 0
+      const tickRuns = (config.REPOS_ALLOW.length === 0
         ? allRuns
         : allRuns.filter((r) => config.REPOS_ALLOW.includes(r.repo_key))
       ).filter(isCurrentSchemaRun)
       const panes = await allOrchestratorPanes(stateDir, session)
 
-      const { changed, wake } = applyEvents(runs, events, session, panes, new Set(config.WAKE_ON))
+      const wakeOn = new Set(config.WAKE_ON)
+      const applied = applyEvents(tickRuns, events, session, panes, wakeOn)
+
+      // Saving before delivery keeps the ledger authoritative: a crash here loses
+      // that tick's prompt, not the state transition, and the orchestrator can
+      // recover with `hpipe status`. Events themselves are at-most-once —
+      // drain() unlinks as it reads.
+      const { runs, wake } = applied.changed
+        ? await saveEventedRuns(tickRuns, applied.wake, {
+          save: (run) => saveRun(stateDir, run),
+          reload: (run) => loadRun(stateDir, session, run.run_id),
+          reapply: (run) => applyEvents([run], events, session, panes, wakeOn),
+          warn: (message) => console.error(message),
+        })
+        : { runs: tickRuns, wake: applied.wake }
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -133,12 +150,6 @@ async function main(): Promise<void> {
           }
         }
       }
-
-      // Saving before delivery keeps the ledger authoritative: a crash here loses
-      // that tick's prompt, not the state transition, and the orchestrator can
-      // recover with `hpipe status`. Events themselves are at-most-once —
-      // drain() unlinks as it reads.
-      if (changed) for (const run of runs) await saveRun(stateDir, run)
 
       if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
         lastCiPollMs = Date.now()
@@ -161,7 +172,9 @@ async function main(): Promise<void> {
       const hpipe = hpipeCommand(pluginRoot)
 
       const pending: PendingPrompt[] = []
+      const unsaved = new Set<Run>()
       for (const run of advancing) {
+        const runPending: PendingPrompt[] = []
         const addPending = (
           paneId: string | null, text: string, eventLines: string[], subject: string,
           phaseNote?: string, footer?: string,
@@ -171,11 +184,12 @@ async function main(): Promise<void> {
             console.error(`[pipeline] run ${run.run_id}: dropping prompt for ${subject} — no pane`)
             return
           }
-          pending.push({
+          runPending.push({
             paneId, run, text, events: eventLines, phaseNote, footer,
             isOrchestrator: paneId === run.orchestrator_pane,
           })
         }
+        const effects: RunEffect[] = []
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
@@ -198,9 +212,10 @@ async function main(): Promise<void> {
               if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
               return parseVerdict(absolute)
             },
-            removeWorktree: async (ws) => (await herdr.worktreeRemove(ws)).ok,
+            removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
             ambiguityLog,
+            effects,
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to
@@ -210,6 +225,7 @@ async function main(): Promise<void> {
             pluginRoot,
             promptRetryMax: config.PROMPT_RETRY_MAX,
             send: (paneId, text) => herdr.agentPrompt(paneId, text),
+            effects,
           }
           await deliverPendingAnswers(run, answerDeps)
           await announceDecisions(run, answerDeps)
@@ -241,8 +257,23 @@ async function main(): Promise<void> {
           }
           addPending(run.orchestrator_pane, enteredRunPhase, [], `run phase ${run.phase}`,
             undefined, footer)
-          await saveRun(stateDir, run)
+          // Queued only once saved: a prompt about a transition the ledger then
+          // refused would describe a state that no longer exists.
+          if (await saveOrReapply(stateDir, run, effects) === 'saved') {
+            pending.push(...runPending)
+          } else {
+            unsaved.add(run)
+            console.error(`[pipeline] run ${run.run_id}: this tick lost to a CLI write; ` +
+              `${effects.length} action(s) already taken were recorded on the fresh copy, ` +
+              'the rest is re-evaluated next tick')
+          }
         } catch (error) {
+          if (isUnlandedSave(error)) {
+            unsaved.add(run)
+            console.error(`[pipeline] run ${run.run_id}: this tick not saved (${error.message}); ` +
+              'its prompts are dropped and it is re-read next tick')
+            continue
+          }
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
         }
       }
@@ -269,7 +300,7 @@ async function main(): Promise<void> {
         probeMax,
         now: () => Date.now(),
         agentStatus: (paneId) => herdr.agentStatus(paneId),
-        persist: (run) => saveRun(stateDir, run),
+        persist: (run, effect) => saveOrReapply(stateDir, run, effect ? [effect] : []),
         probe: async (c) => {
           const awaiting = stallAwaiting(c.run, c.task, hpipe)
           const text = await renderPrompt(pluginRoot, 'stall-probe', {
@@ -310,11 +341,12 @@ async function main(): Promise<void> {
         },
       }
 
+      const savedRuns = runs.filter((run) => !unsaved.has(run))
       await applyStalls(
-        stallCandidates(runs, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
+        stallCandidates(savedRuns, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
       )
       await applyStalls(
-        taskStallCandidates(runs, Date.now(), config.TASK_STALL_MINUTES, probeMax), stallDeps,
+        taskStallCandidates(savedRuns, Date.now(), config.TASK_STALL_MINUTES, probeMax), stallDeps,
       )
     } catch (error) {
       console.error('[pipeline] tick error:', error)

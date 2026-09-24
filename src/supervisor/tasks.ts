@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { openDecisionFor } from '../lib/decisions'
 import { gateStatus, planDeclaredFiles, releasableFromFiles, widenFiles } from '../lib/gating'
+import type { RunEffect } from '../lib/ledger'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
@@ -12,7 +13,7 @@ import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
-import { runTeardown } from './teardown'
+import { runTeardown, type WorktreeRemoval } from './teardown'
 
 export interface TaskDeps {
   pluginRoot: string
@@ -28,7 +29,7 @@ export interface TaskDeps {
   prView: (pr: number) => Promise<PrView | null>
   issueView: (issue: number) => Promise<IssueView | null>
   verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
-  removeWorktree: (workspaceId: string) => Promise<boolean>
+  removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
   /**
@@ -36,6 +37,8 @@ export interface TaskDeps {
    * by main()'s loop so cross-tick dedup has one owner, not a module-level twin.
    */
   ambiguityLog: Set<string>
+  /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
+  effects?: RunEffect[]
 }
 
 /**
@@ -139,7 +142,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // queued task is dispatched); calling this after the loop instead would
   // let a task that reaches `teardown` THIS tick fall straight through to
   // `done` in the same call, skipping that phase's own settle.
-  await runTeardown([run], deps.removeWorktree)
+  await runTeardown([run], deps.removeWorktree, deps.effects)
 
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
@@ -331,6 +334,30 @@ export interface AnswerDeps {
   pluginRoot: string
   promptRetryMax: number
   send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string }>
+  /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
+  effects?: RunEffect[]
+}
+
+export function markAnswerDelivered(
+  run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase,
+): void {
+  const task = run.tasks.find((t) => t.task_id === taskId)
+  if (task?.phase !== 'blocked-on-decision' || task.pending_answer !== decisionId) return
+  task.pending_answer = null
+  task.delivery_attempts = 0
+  // No prompt is rendered here, deliberately: `answer.md` has already been sent,
+  // and rendering the row's own prompt would reserve a second verdict path and
+  // move the file the agent was told to write. A resume is not a new review.
+  enterTaskPhase(run, task, resumeTo, `decision ${decisionId} answered`)
+  task.decision_from = null
+}
+
+export function markDecisionAnnounced(
+  run: Run, taskId: string, decisionId: string, at: number,
+): void {
+  const decision = run.tasks.find((t) => t.task_id === taskId)
+    ?.decisions.find((d) => d.id === decisionId)
+  if (decision && decision.prompted_at === null) decision.prompted_at = at
 }
 
 /**
@@ -364,13 +391,10 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       continue
     }
 
-    task.pending_answer = null
-    task.delivery_attempts = 0
-    // No prompt is rendered here, deliberately: `answer.md` has already been sent,
-    // and rendering the row's own prompt would reserve a second verdict path and
-    // move the file the agent was told to write. A resume is not a new review.
-    enterTaskPhase(run, task, resumeTo, `decision ${decision.id} answered`)
-    task.decision_from = null
+    const taskId = task.task_id
+    const decisionId = decision.id
+    markAnswerDelivered(run, taskId, decisionId, resumeTo)
+    deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo))
   }
 }
 
@@ -394,6 +418,11 @@ export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<voi
     })
 
     const result = await deps.send(run.orchestrator_pane, text)
-    if (result.ok) decision.prompted_at = Date.now()
+    if (!result.ok) continue
+    const taskId = task.task_id
+    const decisionId = decision.id
+    const at = Date.now()
+    markDecisionAnnounced(run, taskId, decisionId, at)
+    deps.effects?.push((fresh) => markDecisionAnnounced(fresh, taskId, decisionId, at))
   }
 }

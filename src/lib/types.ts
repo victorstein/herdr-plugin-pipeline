@@ -145,6 +145,11 @@ export interface Run {
   tasks: Task[]
   history: HistoryEntry[]
   schema_version: number
+  /**
+   * Bumped by every save and checked against disk before it. Absent on runs
+   * written before it existed, which read as 0 — so no schema bump.
+   */
+  revision?: number
   intake_closed: boolean
   passes: Partial<Record<RunPhase, number>>
   /** Per-phase review count; see the note on `Task.verdict_seq`. */

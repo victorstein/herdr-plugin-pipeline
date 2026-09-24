@@ -1,10 +1,12 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { TASK_ROWS, runRow } from './phases'
-import { readJson, writeJson } from './store'
+import { LockTimeoutError, readJson, writeJson, writeJsonIf } from './store'
 import type { Orchestrator, Run, RunPhase, SessionKey } from './types'
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
+const runPath = (stateDir: string, session: SessionKey, runId: string) =>
+  join(runsDir(stateDir, session), `${runId}.json`)
 
 export function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
@@ -36,13 +38,116 @@ export function newRun(input: {
     tasks: [],
     history: [],
     schema_version: 2,
+    revision: 0,
     intake_closed: false,
     passes: {},
   }
 }
 
+export class StaleRunError extends Error {
+  constructor(readonly runId: string) {
+    super(`run ${runId} changed on disk since it was read`)
+    this.name = 'StaleRunError'
+  }
+}
+
+/**
+ * Refuses to overwrite a run someone else saved after this copy was read, and
+ * throws rather than returning a flag so a caller that forgets to handle it
+ * fails loudly instead of clobbering. The CLI and the supervisor both
+ * read-modify-write the whole file, and before this check a CLI rewind landing
+ * inside a supervisor tick was silently undone by that tick's save.
+ * Measured on a live run.
+ */
 export async function saveRun(stateDir: string, run: Run): Promise<void> {
-  await writeJson(join(runsDir(stateDir, run.session), `${run.run_id}.json`), run)
+  const base = run.revision ?? 0
+  const next: Run = { ...run, revision: base + 1 }
+  const written = await writeJsonIf(
+    runPath(stateDir, run.session, run.run_id),
+    next,
+    (current) => current === null || ((current as Partial<Run>).revision ?? 0) === base,
+  )
+  if (!written) throw new StaleRunError(run.run_id)
+  run.revision = next.revision
+}
+
+/** A save that left the file untouched, so the caller can drop its copy and read again. */
+export const isUnlandedSave = (error: unknown): error is StaleRunError | LockTimeoutError =>
+  error instanceof StaleRunError || error instanceof LockTimeoutError
+
+/** What a command prints when its write never landed, so it is never mistaken for success. */
+export function unlandedSaveMessage(error: StaleRunError | LockTimeoutError): string {
+  return error instanceof StaleRunError
+    ? `run ${error.runId} kept changing under this command; nothing was written — run it again`
+    : `could not lock ${error.lockPath}; nothing was written — run it again`
+}
+
+export async function loadRun(
+  stateDir: string, session: SessionKey, runId: string,
+): Promise<Run | null> {
+  return readJson<Run>(runPath(stateDir, session, runId))
+}
+
+const STALE_RETRY_MAX = 5
+
+/**
+ * Runs a whole load-validate-mutate-save attempt again when its save lost a
+ * race, so the retry re-reads fresh state and re-checks every precondition
+ * against it rather than replaying a stale decision.
+ */
+export async function retryOnStaleRun<T>(
+  attempt: () => Promise<T>, maxAttempts = STALE_RETRY_MAX,
+): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await attempt()
+    } catch (error) {
+      if (!(error instanceof StaleRunError) || tries >= maxAttempts) throw error
+    }
+  }
+}
+
+/**
+ * Records one thing already done outside the ledger — a worktree removed, a
+ * prompt sent — so it can be written onto a freshly read run. Each checks its own
+ * precondition against that run and does nothing if a CLI command moved the
+ * record on meanwhile.
+ */
+export type RunEffect = (run: Run) => void
+
+export type SaveOutcome = 'saved' | 'reapplied'
+
+/**
+ * Saves `run`, or — when a CLI command landed first — re-reads it and saves the
+ * fresh copy with only `effects` applied. Everything else the caller computed on
+ * its stale copy is dropped, which is the point: the command wins. What cannot be
+ * dropped is an action already taken outside the ledger, because the next pass
+ * would take it again. Throws when there is nothing worth salvaging.
+ */
+export async function saveOrReapply(
+  stateDir: string, run: Run, effects: readonly RunEffect[],
+): Promise<SaveOutcome> {
+  try {
+    await saveRun(stateDir, run)
+    return 'saved'
+  } catch (error) {
+    if (!isUnlandedSave(error) || effects.length === 0) throw error
+    const reapply = () => retryOnStaleRun(async () => {
+      const fresh = await loadRun(stateDir, run.session, run.run_id)
+      if (fresh === null) throw error
+      for (const apply of effects) apply(fresh)
+      await saveRun(stateDir, fresh)
+      return 'reapplied' as const
+    })
+    // One more bounded wait: giving up here drops actions already taken, which the
+    // next tick would repeat as a duplicate prompt.
+    try {
+      return await reapply()
+    } catch (reapplyError) {
+      if (!(reapplyError instanceof LockTimeoutError)) throw reapplyError
+      return reapply()
+    }
+  }
 }
 
 export async function listRuns(stateDir: string, session: SessionKey): Promise<Run[]> {

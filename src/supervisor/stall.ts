@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { isUnlandedSave, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
@@ -382,7 +383,11 @@ export interface StallDeps {
   /** Sends an already-rendered prompt. The transition is already persisted. */
   sendEscalation: (c: StallCandidate, text: string) => Promise<void>
   agentStatus: (paneId: string) => Promise<AgentStatus>
-  persist: (run: Run) => Promise<void>
+  /**
+   * `effect` re-records an action already taken — a probe that was sent — should
+   * the save lose to a CLI write; see `saveOrReapply`.
+   */
+  persist: (run: Run, effect?: RunEffect) => Promise<SaveOutcome | void>
 }
 
 /**
@@ -395,34 +400,70 @@ export interface StallDeps {
 export async function applyStalls(
   candidates: StallCandidate[], deps: StallDeps,
 ): Promise<void> {
+  // A run whose save lost to a CLI command is stale for the rest of the batch:
+  // its later candidates were computed from state the command replaced.
+  const staleRuns = new Set<Run>()
   for (const c of candidates) {
-    const record: Run | Task = c.task ?? c.run
-
-    // An undeliverable probe must still climb eventually: the ladder exists to
-    // end silence, and a pane that cannot be reached is the case escalation
-    // matters most (#32). `noteUndelivered` decides when.
-    if (c.action === 'probe') {
-      if ((await deps.probe(c)).ok) {
-        bumpStall(c.run, record, 'probes', deps.now())
-        await deps.persist(c.run)
-      } else if (noteUndelivered(c.run, record, deps.now(), c.thresholdMs)) {
-        await deps.persist(c.run)
-      }
-      continue
+    if (staleRuns.has(c.run)) continue
+    try {
+      if (await applyStall(c, deps) === 'reapplied') staleRuns.add(c.run)
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+      staleRuns.add(c.run)
+      console.error(`[pipeline] run ${c.run.run_id}: stall bookkeeping not saved (${error.message}); ` +
+        're-read next tick')
     }
-
-    const { holds } = stallStateFor(c.run, record)
-    if (
-      holds < deps.probeMax && c.actorPaneId !== null &&
-      (await deps.agentStatus(c.actorPaneId)) === 'working'
-    ) {
-      bumpStall(c.run, record, 'holds', deps.now())
-      await deps.persist(c.run)
-      continue
-    }
-
-    await escalate(c, deps)
   }
+}
+
+/**
+ * A probe's ladder bookkeeping, applicable both to the tick's copy and — should
+ * that save lose to a CLI write — to a freshly read run, where it applies only if
+ * neither the record nor the run has changed phase since the candidate was built.
+ * Both outcomes are replayed: a delivered probe must not be sent again at once,
+ * and an undelivered streak that restarted on every lost save would postpone the
+ * escalation #61 exists for. Returns whether there was anything to save.
+ */
+function stallEffectFor(
+  c: StallCandidate, mutate: (run: Run, record: Run | Task) => boolean | void,
+): (run: Run) => boolean {
+  const taskId = c.task?.task_id
+  const recordEnteredAt = (c.task ?? c.run).phase_entered_at
+  const runEnteredAt = c.run.phase_entered_at
+  return (run) => {
+    const record = taskId === undefined ? run : run.tasks.find((t) => t.task_id === taskId)
+    if (!record || record.phase_entered_at !== recordEnteredAt) return false
+    if (run.phase_entered_at !== runEnteredAt) return false
+    return mutate(run, record) !== false
+  }
+}
+
+async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutcome | void> {
+  const record: Run | Task = c.task ?? c.run
+
+  // An undeliverable probe must still climb eventually: the ladder exists to
+  // end silence, and a pane that cannot be reached is the case escalation
+  // matters most (#32). `noteUndelivered` decides when.
+  if (c.action === 'probe') {
+    const now = deps.now()
+    const delivered = (await deps.probe(c)).ok
+    const bookkeeping = stallEffectFor(c, delivered
+      ? (run, record) => { bumpStall(run, record, 'probes', now) }
+      : (run, record) => noteUndelivered(run, record, now, c.thresholdMs))
+    if (!bookkeeping(c.run)) return
+    return deps.persist(c.run, (fresh) => { bookkeeping(fresh) })
+  }
+
+  const { holds } = stallStateFor(c.run, record)
+  if (
+    holds < deps.probeMax && c.actorPaneId !== null &&
+    (await deps.agentStatus(c.actorPaneId)) === 'working'
+  ) {
+    bumpStall(c.run, record, 'holds', deps.now())
+    return deps.persist(c.run)
+  }
+
+  await escalate(c, deps)
 }
 
 /**

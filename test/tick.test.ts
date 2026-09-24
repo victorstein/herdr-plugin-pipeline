@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  actionFor, ageMinutes, applyEvents, describeWake, parkedFooter, pickOneAdvance,
+  actionFor, ageMinutes, applyEvents, describeWake, type EventSaveDeps, parkedFooter,
+  pickOneAdvance, saveEventedRuns,
   type WakeLine,
 } from '../src/supervisor/tick'
 import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
-import { newRun, saveRun } from '../src/lib/ledger'
+import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
@@ -556,4 +557,66 @@ test('the footer lists every non-terminal row a person has to act on', () => {
     const listed = parkedFooter(run, new Set(), now, 'hp').length > 0
     expect(listed, `${row.phase}: expected listed=${expected}`).toBe(expected)
   }
+})
+
+const exitEvents: QueuedEvent[] = [
+  { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7' },
+]
+
+const eventSaveDeps = (warnings: string[] = []): EventSaveDeps => ({
+  save: (r) => saveRun(dir, r),
+  reload: (r) => loadRun(dir, r.session, r.run_id),
+  reapply: (r) => applyEvents([r], exitEvents, 'personal', new Set()),
+  warn: (m) => { warnings.push(m) },
+})
+
+test('an event batch is re-applied onto a run a CLI command rewrote mid-tick', async () => {
+  const run = mkRun([mkTask({})])
+  await saveRun(dir, run)
+  const tickCopy = (await loadRun(dir, 'personal', run.run_id))!
+  const applied = applyEvents([tickCopy], exitEvents, 'personal', new Set())
+
+  const cliCopy = (await loadRun(dir, 'personal', run.run_id))!
+  cliCopy.intake_closed = true
+  await saveRun(dir, cliCopy)
+
+  const result = await saveEventedRuns([tickCopy], applied.wake, eventSaveDeps())
+
+  const onDisk = (await loadRun(dir, 'personal', run.run_id))!
+  expect(onDisk.intake_closed).toBe(true)
+  expect(onDisk.tasks[0]?.phase).toBe('failed')
+  expect(result.runs).toHaveLength(1)
+  expect(result.runs[0]).not.toBe(tickCopy)
+  expect(result.wake).toHaveLength(1)
+  expect(result.wake[0]?.run).toBe(result.runs[0]!)
+})
+
+test('an uncontended event batch saves the copy the tick already holds', async () => {
+  const run = mkRun([mkTask({})])
+  await saveRun(dir, run)
+  const tickCopy = (await loadRun(dir, 'personal', run.run_id))!
+  const applied = applyEvents([tickCopy], exitEvents, 'personal', new Set())
+
+  const result = await saveEventedRuns([tickCopy], applied.wake, eventSaveDeps())
+
+  expect(result.runs[0]).toBe(tickCopy)
+  expect(result.wake).toEqual(applied.wake)
+  expect((await loadRun(dir, 'personal', run.run_id))?.tasks[0]?.phase).toBe('failed')
+})
+
+test('a run that cannot be saved even after a re-read sits out the rest of the tick', async () => {
+  const run = mkRun([mkTask({})])
+  await saveRun(dir, run)
+  const tickCopy = (await loadRun(dir, 'personal', run.run_id))!
+  const applied = applyEvents([tickCopy], exitEvents, 'personal', new Set())
+
+  const warnings: string[] = []
+  const result = await saveEventedRuns([tickCopy], applied.wake, {
+    ...eventSaveDeps(warnings),
+    save: async (r) => { throw new StaleRunError(r.run_id) },
+  })
+
+  expect(result.runs).toHaveLength(0)
+  expect(result.wake).toHaveLength(0)
+  expect(warnings).toHaveLength(1)
 })

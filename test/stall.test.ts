@@ -6,7 +6,7 @@ import {
   applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
-import { listRuns, newRun, saveRun } from '../src/lib/ledger'
+import { listRuns, newRun, saveOrReapply, saveRun, StaleRunError } from '../src/lib/ledger'
 import { rollUpBucket } from '../src/lib/gh'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
@@ -707,6 +707,68 @@ test('the ledger is persisted before the escalation is sent', async () => {
     sendEscalation: async () => { order.push('send') },
   }))
   expect(order).toEqual(['persist:escalated', 'send'])
+})
+
+test('a sent probe whose save lost to a CLI write is still counted', async () => {
+  // Otherwise the next tick probes again at once instead of waiting a rung.
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
+  const run = runAt('execute', LONG_AGO)
+  run.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+  await saveRun(dir, run)
+  const [tickCopy] = await listRuns(dir, run.session)
+  const [cliCopy] = await listRuns(dir, run.session)
+  cliCopy!.intake_closed = true
+  await saveRun(dir, cliCopy!)
+
+  const deps = mkDeps({ persist: (r, effect) => saveOrReapply(dir, r, effect ? [effect] : []) })
+  await applyStalls(taskStallCandidates([tickCopy!], NOW, 45, 3), deps)
+
+  const [reloaded] = await listRuns(dir, run.session)
+  expect(deps.sent).toEqual(['probe:t1'])
+  expect(reloaded?.intake_closed).toBe(true)
+  expect(stallStateFor(reloaded!, reloaded!.tasks[0]!).probes).toBe(1)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('an undelivered-streak start whose save lost to a CLI write is still recorded', async () => {
+  // Otherwise every lost save restarts the streak and postpones #61's escalation.
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
+  const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  await saveRun(dir, run)
+  const [tickCopy] = await listRuns(dir, run.session)
+  const [cliCopy] = await listRuns(dir, run.session)
+  cliCopy!.intake_closed = true
+  await saveRun(dir, cliCopy!)
+
+  const due = 45 * 60_000
+  await applyStalls(taskStallCandidates([tickCopy!], due, 45, 3), mkDeps({
+    now: () => due,
+    probe: async () => ({ ok: false }),
+    persist: (r, effect) => saveOrReapply(dir, r, effect ? [effect] : []),
+  }))
+
+  const [reloaded] = await listRuns(dir, run.session)
+  expect(reloaded?.intake_closed).toBe(true)
+  expect(stallStateFor(reloaded!, reloaded!.tasks[0]!).undeliverable_since).toBe(due)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('an escalation whose save lost to a CLI write is not sent, and the batch goes on', async () => {
+  const stale = runAt('execute', LONG_AGO)
+  const stuck = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  stale.tasks = [stuck]
+  stuck.stall = {
+    at: LONG_AGO, run_at: stale.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0,
+  }
+  const other = runAt('execute', LONG_AGO)
+  other.run_id = 'other'
+  other.tasks = [mkTask({ task_id: 't9', phase: 'implement', phase_entered_at: LONG_AGO })]
+
+  const deps = mkDeps({
+    persist: async (r) => { if (r === stale) throw new StaleRunError(r.run_id) },
+  })
+  await applyStalls(taskStallCandidates([stale, other], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual(['probe:t9'])
 })
 
 test('every last-mile row is probed via the orchestrator — #19', () => {
