@@ -1,5 +1,5 @@
 import {
-  closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync,
+  closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -52,8 +52,14 @@ function errorCode(error: unknown): string | undefined {
 function tryAcquire(lockPath: string, token: string): boolean {
   try {
     const fd = openSync(lockPath, 'wx')
-    writeSync(fd, token)
-    closeSync(fd)
+    try {
+      writeSync(fd, token)
+    } catch (error) {
+      rmSync(lockPath, { force: true })
+      throw error
+    } finally {
+      closeSync(fd)
+    }
     return true
   } catch (error) {
     if (errorCode(error) === 'EEXIST') return false
@@ -74,9 +80,15 @@ function readToken(path: string): string | null {
  * unlinking it could delete a lock someone took in between, so the lock is moved
  * aside first — one atomic step — and the token is checked on the copy nobody
  * else can reach. A lock that turns out to be someone else's is linked back,
- * which fails rather than overwrites if the path was taken meanwhile. That last
- * case needs three processes and a dead holder at once; its worst outcome is one
- * write outside the lock, which is what every write was before this lock existed.
+ * which fails rather than overwrites if the path was taken meanwhile.
+ *
+ * Two windows remain, both needing a dead holder's stale lock in play. A process
+ * that takes the path between the move-aside and the link-back runs alongside the
+ * live holder whose lock was moved: one write outside the lock, which is what
+ * every write was before this lock existed. And a holder that releases inside
+ * that same window finds nothing to remove, so the link-back restores a lock
+ * nobody owns; it goes stale within `staleMs` of its creation, inside `waitMs`,
+ * so waiters are delayed, not stuck.
  */
 function removeLockIf(lockPath: string, token: string): void {
   const aside = `${lockPath}.${randomUUID()}.aside`
@@ -97,16 +109,26 @@ function removeLockIf(lockPath: string, token: string): void {
   }
 }
 
+/**
+ * Age and token come from one open file, so the token is the one the stale file
+ * carried: read by path, it could belong to a fresh lock that replaced the stale
+ * one after the age check, and `removeLockIf` would then delete a live lock.
+ */
 function reclaimIfStale(lockPath: string, staleMs: number): void {
-  let seen
+  let fd
   try {
-    seen = statSync(lockPath)
+    fd = openSync(lockPath, 'r')
   } catch {
     return
   }
-  if (Date.now() - seen.mtimeMs < staleMs) return
-  const staleToken = readToken(lockPath)
-  if (staleToken !== null) removeLockIf(lockPath, staleToken)
+  let staleToken: string
+  try {
+    if (Date.now() - fstatSync(fd).mtimeMs < staleMs) return
+    staleToken = readFileSync(fd, 'utf8')
+  } finally {
+    closeSync(fd)
+  }
+  removeLockIf(lockPath, staleToken)
 }
 
 /**

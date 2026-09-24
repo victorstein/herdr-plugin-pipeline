@@ -132,13 +132,21 @@ export async function saveOrReapply(
     return 'saved'
   } catch (error) {
     if (!isUnlandedSave(error) || effects.length === 0) throw error
-    return retryOnStaleRun(async () => {
+    const reapply = () => retryOnStaleRun(async () => {
       const fresh = await loadRun(stateDir, run.session, run.run_id)
       if (fresh === null) throw error
       for (const apply of effects) apply(fresh)
       await saveRun(stateDir, fresh)
       return 'reapplied' as const
     })
+    // One more bounded wait: giving up here drops actions already taken, which the
+    // next tick would repeat as a duplicate prompt.
+    try {
+      return await reapply()
+    } catch (reapplyError) {
+      if (!(reapplyError instanceof LockTimeoutError)) throw reapplyError
+      return reapply()
+    }
   }
 }
 
