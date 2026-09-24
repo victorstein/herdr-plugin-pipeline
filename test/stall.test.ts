@@ -730,6 +730,29 @@ test('a sent probe whose save lost to a CLI write is still counted', async () =>
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('an undelivered-streak start whose save lost to a CLI write is still recorded', async () => {
+  // Otherwise every lost save restarts the streak and postpones #61's escalation.
+  const dir = mkdtempSync(join(tmpdir(), 'stall-'))
+  const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  await saveRun(dir, run)
+  const [tickCopy] = await listRuns(dir, run.session)
+  const [cliCopy] = await listRuns(dir, run.session)
+  cliCopy!.intake_closed = true
+  await saveRun(dir, cliCopy!)
+
+  const due = 45 * 60_000
+  await applyStalls(taskStallCandidates([tickCopy!], due, 45, 3), mkDeps({
+    now: () => due,
+    probe: async () => ({ ok: false }),
+    persist: (r, effect) => saveOrReapply(dir, r, effect ? [effect] : []),
+  }))
+
+  const [reloaded] = await listRuns(dir, run.session)
+  expect(reloaded?.intake_closed).toBe(true)
+  expect(stallStateFor(reloaded!, reloaded!.tasks[0]!).undeliverable_since).toBe(due)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('an escalation whose save lost to a CLI write is not sent, and the batch goes on', async () => {
   const stale = runAt('execute', LONG_AGO)
   const stuck = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
