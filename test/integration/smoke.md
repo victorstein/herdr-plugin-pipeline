@@ -84,8 +84,9 @@ hpipe status
 shows `supervisor: live (pid N)`, one run in `[intake]`, and an `orchestrator:` line naming this
 pane.
 
-Now let the orchestrator do intake for real: it files **two** GitHub issues, one per task, and
-registers both. The registration must give the two tasks **overlapping `--files`** — that is the
+Now let the orchestrator do intake for real: two tasks, each backed by a GitHub issue. The first is
+filed with `gh issue create` and registered with `--issue`; the second is filed *by* `hpipe task
+--title … --body-file …`, which is the only live check of that path. The registration must give the two tasks **overlapping `--files`** — that is the
 setup for §3 and the whole reason this run uses two tasks.
 
 First, one deliberately malformed registration, **typed by hand, before the orchestrator registers
@@ -107,12 +108,32 @@ real tasks below to `t2`/`t3`, breaking §3's assertions, which name `t1` and `t
 `hpipe abort <run_id>`, restart this section from `hpipe start`, and report it — the abort leaves the
 run in `done`, so nothing can be registered into it afterwards.
 
-Now the two real registrations, which the orchestrator runs:
+Second, a `--title` registration that fails validation, also typed by hand — it must file nothing:
+
+```bash
+printf 'Smoke: must never be filed.\n' > /tmp/smoke-orphan.md
+hpipe task --branch smoke/orphan --title "smoke orphan" --body-file /tmp/smoke-orphan.md --surface nope
+gh issue list --search "smoke orphan in:title" --state all   # assert: empty
+```
+
+**Expect:** exit 1, `no agent definition at …/nope-dev.md`, and no issue. **Failure looks like:** an
+issue titled `smoke orphan` exists — the gh call ran before validation. Close it and report it.
+
+Now the two real registrations, which the orchestrator runs. The second files its own issue from a
+body file written like any issue body:
 
 ```bash
 hpipe task --branch smoke/one --issue <n1> --surface <surface> --files src/lib
-hpipe task --branch smoke/two --issue <n2> --surface <surface> --files src/lib/config.ts
+hpipe task --branch smoke/two --title "<title>" --body-file <brief.md> --surface <surface> \
+           --files src/lib/config.ts
 ```
+
+**Observe on the second:** a line `issue: #<n2> (filed)` right after `task_id: t2`, a real issue
+`#<n2>` in the target repo (`gh issue view <n2>` shows the body file's text), exactly one such issue
+(a retried registration must never file twice), and a brief headed `smoke/two — issue #<n2>`. If gh
+fails — no auth, or a fork with several remotes and no `gh repo set-default` — the command must exit 1
+with `gh issue create failed in <repo>` and register nothing. If registration fails *after* filing,
+the output must name the filed issue and say `register it with --issue <n2>`; do exactly that.
 
 `src/lib/config.ts` starts with `src/lib`, so `filesOverlap` is true in both directions. Any
 prefix-overlapping pair works; do not use `--depends-on` here, which would serialize the tasks for
@@ -601,5 +622,5 @@ herdr plugin list          # assert: back to empty
 herdr session list         # assert: only the sessions that were there before
 ```
 
-Close the two throwaway GitHub issues and delete the smoke branches and PRs. If the run merged
+Close the two throwaway GitHub issues (`<n1>`, and `<n2>` filed by `--title`) and delete the smoke branches and PRs. If the run merged
 anything into `main` of a real repo, revert it — nothing in this runbook is work you want to keep.

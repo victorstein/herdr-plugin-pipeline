@@ -140,7 +140,7 @@ export function releasableFromFiles(all: Task[]): Task[] {
 }
 
 /** Kahn's algorithm. Returns the ids still in the graph when progress stops. */
-export function detectCycle(tasks: Task[]): string[] | null {
+export function detectCycle(tasks: Pick<Task, 'task_id' | 'depends_on'>[]): string[] | null {
   const indegree = new Map<string, number>()
   const dependents = new Map<string, string[]>()
 

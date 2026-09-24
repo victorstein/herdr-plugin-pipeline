@@ -24,6 +24,10 @@ plans its own issue.
                   [--depends-on <id,id>] [--files <prefix,prefix>] \
                   [--notes "<batch context that does not belong in a public issue>"]
 
+   Not filed yet? `--title "<title>" --body-file <path>` in place of `--issue <n>` files the issue
+   with that body and registers it in one step, and prints `issue: #<n> (filed)`. The body file is
+   the same brief step 3 asks for — write it just as carefully.
+
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
    exists. `--files` and `--depends-on` are **comma-separated**: a value containing whitespace is
    rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the

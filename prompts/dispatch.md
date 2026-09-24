@@ -45,7 +45,8 @@ recorded for the task — its phase, files, dependencies, artifact paths, PR and
                [--depends-on <id,id>] [--files <prefix,prefix>] \
                [--notes "<batch context that does not belong in a public issue>"]
 
-There is no `--text` flag. Never run two agents against the same files in parallel — serialize them
+No issue yet? `--title "<title>" --body-file <path>` in place of `--issue <n>` files one with that
+body and registers it. There is no `--text` flag: whatever the worker needs goes in the issue body. Never run two agents against the same files in parallel — serialize them
 with `--files`, or with `--depends-on` when one needs the other's result.
 
 **When the last task is registered:**

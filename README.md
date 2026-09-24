@@ -104,6 +104,10 @@ body is the brief** — and register each with:
                [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>] \
                [--run <run-id>]
 
+Work that has no issue yet is filed and registered in one step: `--title <title> --body-file <path>`
+in place of `--issue <n>` runs `gh issue create` in the run's repo, after every other check has
+passed, and registers the task under the new number.
+
 When a task is ready the orchestrator creates its worktree, starts a bare agent in the root pane, and
 hands it the brief with:
 

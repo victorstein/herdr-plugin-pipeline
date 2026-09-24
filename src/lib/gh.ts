@@ -8,6 +8,11 @@ export interface PrView {
   headSha: string | null
 }
 
+export interface FiledIssue {
+  number: number
+  url: string
+}
+
 export interface IssueView {
   closed: boolean
   closedAtMs: number | null
@@ -97,5 +102,13 @@ export class Gh {
     )
     if (!view) return null
     return { closed: view.closed, closedAtMs: view.closedAt ? Date.parse(view.closedAt) : null }
+  }
+
+  /** `gh issue create` has no `--json`; the new issue's URL on stdout is the only handle on it. */
+  async issueCreate(title: string, bodyFile: string): Promise<FiledIssue | null> {
+    const { code, text } = await this.run(['issue', 'create', '--title', title, '--body-file', bodyFile])
+    if (code !== 0) return null
+    const match = text.match(/https?:\/\/\S+\/issues\/(\d+)/)
+    return match ? { number: Number(match[1]), url: match[0] } : null
   }
 }
