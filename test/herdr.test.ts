@@ -40,6 +40,14 @@ test('records the argv it was called with', async () => {
   expect(log).toContain('agent get w1:p1')
 })
 
+test('a confirmed prompt waits for the agent to start working, bounded by a timeout', async () => {
+  const bin = await makeFakeBin(dir, { 'agent prompt': { result: {} } })
+  const res = await new Herdr(bin).agentPromptConfirmed('w1:p1', 'brief', 30000)
+  expect(res.ok).toBe(true)
+  const log = await Bun.file(join(dir, 'calls.log')).text()
+  expect(log).toContain('agent prompt w1:p1 brief --wait --until working --until blocked --timeout 30000')
+})
+
 test('a missing binary returns a failed result instead of throwing', async () => {
   const res = await new Herdr(join(dir, 'no-such-binary')).agentPrompt('w1:p1', 'hello')
   expect(res.ok).toBe(false)

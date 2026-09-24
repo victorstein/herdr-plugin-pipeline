@@ -74,6 +74,21 @@ export class Herdr {
     return this.call(['agent', 'prompt', target, text])
   }
 
+  /**
+   * Succeeds only once herdr has seen the agent take the prompt up. Without
+   * `--wait` a success reports the submission, not its effect — and the brief
+   * lost on the berean-os run sat unsubmitted in the input box with nothing
+   * anywhere saying so.
+   */
+  async agentPromptConfirmed(
+    target: string, text: string, timeoutMs: number,
+  ): Promise<CallResult<unknown>> {
+    return this.call([
+      'agent', 'prompt', target, text,
+      '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(timeoutMs),
+    ])
+  }
+
   async paneRead(target: string, lines: number): Promise<string> {
     const res = await this.call<{ text: string }>(
       ['pane', 'read', target, '--source', 'visible', '--lines', String(lines)],

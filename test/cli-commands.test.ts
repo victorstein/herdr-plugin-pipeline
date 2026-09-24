@@ -3,8 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdForget, cmdRelease, cmdResume,
-  cmdRewind, cmdStatus, cmdTask,
+  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
+  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask,
 } from '../src/cli'
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { openDecisionFor } from '../src/lib/decisions'
@@ -722,8 +722,8 @@ test('the dispatched return keeps every header line above the one blank line', a
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
   ])
-  // prompts/dispatch.md tells the orchestrator to hand over everything from the
-  // blank line onward; the brief's heading must be the first thing it finds.
+  // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
+  // so nothing meant for the worker may land among them.
   expect(rest.join('\n\n')).toStartWith('# feat/boot — issue #1')
 })
 
@@ -776,4 +776,137 @@ test('task echoes the repo bootstrap on the queued return as well', async () => 
   expect(gated.ok).toBe(true)
   expect(gated.text).toContain('queued: waiting on t1')
   expect(gated.text).toContain('bootstrap: .claude/pipeline-bootstrap')
+})
+
+test('show prints the recorded task without touching the ledger', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'done' },
+    {
+      task_id: 't2', branch: 'feat/show', issue: 17, surface: 'core',
+      files: ['src/cli.ts', 'README.md'], depends_on: ['t1'],
+      phase: 'implement', phase_entered_at: Date.now() - 42 * 60000,
+      pr: 58, ci: 'pending', checkout_path: '/wt/show',
+      artifacts: {
+        research: 'docs/r.md', spec: 'docs/s.md', plan: 'docs/p.md',
+        verdicts: { 'spec-review-0': 'docs/superpowers/reviews/x-spec-review-0.md' },
+      },
+    },
+  ])
+  await saveRun(dir, run)
+  const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
+
+  const result = await cmdShow(ctx(), { taskId: 't2', repoKey: 'k', runId: null })
+
+  expect(result.ok).toBe(true)
+  for (const line of [
+    `run:        ${run.run_id}`,
+    'branch:     feat/show', 'issue:      #17', 'surface:    core',
+    'files:      src/cli.ts, README.md', 'depends on: t1', 'phase:      implement (42m)',
+    'research:   docs/r.md', 'spec:       docs/s.md', 'plan:       docs/p.md',
+    'spec-review-0: docs/superpowers/reviews/x-spec-review-0.md',
+    'pr:         #58', 'ci:         pending', 'checkout:   /wt/show',
+  ]) expect(result.text).toContain(line)
+  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('show says none rather than printing null for what a task has not reached', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1' }]))
+
+  const result = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+
+  expect(result.text).toContain('files:      none')
+  expect(result.text).toContain('depends on: none')
+  expect(result.text).toContain('pr:         none')
+  expect(result.text).not.toContain('null')
+})
+
+test('show names a missing task', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1' }]))
+  const result = await cmdShow(ctx(), { taskId: 't9', repoKey: 'k', runId: null })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('holding t9')
+})
+
+function recordingSend(reply: { ok: boolean; code?: string; message?: string } = { ok: true }) {
+  const sent: { paneId: string; text: string }[] = []
+  const send = async (paneId: string, text: string) => {
+    sent.push({ paneId, text })
+    return reply
+  }
+  return { sent, send }
+}
+
+async function registerReadyTask(): Promise<void> {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  await cmdTask(ctx(), {
+    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+}
+
+test('dispatch --task hands the bare brief to the pane, not the header lines', async () => {
+  await registerReadyTask()
+  const brief = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('t1')
+  expect(result.text).toContain('w1-2')
+  expect(sent).toEqual([{ paneId: 'w1-2', text: brief.text }])
+  expect(sent[0]!.text).not.toContain('task_id:')
+  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('dispatch --task reports a failed handoff instead of claiming it landed', async () => {
+  await registerReadyTask()
+  const { send } = recordingSend({ ok: false, code: 'agent_prompt_stalled', message: 'no working state' })
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('agent_prompt_stalled')
+  expect(result.text).toContain('pane read w1-2')
+})
+
+test('dispatch --task refuses a task whose gate has not opened', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  await cmdTask(ctx(), {
+    branch: 'feat/first', issue: 1, surface: 'core', notes: '',
+    dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  await cmdTask(ctx(), {
+    branch: 'feat/second', issue: 2, surface: 'core', notes: '',
+    dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null,
+  })
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't2', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('queued')
+  expect(sent).toEqual([])
+})
+
+test('dispatch --task needs a pane', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: '', repoKey: 'k', runId: null,
+  }, send)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--pane')
+  expect(sent).toEqual([])
 })

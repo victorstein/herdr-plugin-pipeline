@@ -176,3 +176,48 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
   })
   expect(byId.exitCode).toBe(0)
 })
+
+const SUBCOMMANDS = [
+  'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
+  'decide', 'answer', 'resume', 'abort', 'forget',
+]
+
+test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
+  // `hpipe start --help` used to start a real run titled "--help", and
+  // `hpipe resume --help` looked up a run with that id.
+  const f = fixture()
+  const outside = tempDir('hpipe-argv-help-')
+
+  for (const command of SUBCOMMANDS) {
+    for (const helpFlag of ['--help', '-h']) {
+      const proc = Bun.spawnSync(['bun', 'run', CLI, command, helpFlag], {
+        cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
+      })
+      const out = proc.stdout.toString() + proc.stderr.toString()
+      expect(proc.exitCode, `${command} ${helpFlag}`).toBe(0)
+      expect(out, `${command} ${helpFlag}`).toContain(`usage: hpipe ${command}`)
+      expect(out).not.toContain('no such run')
+      expect(out).not.toContain('not inside a git repository')
+    }
+  }
+  expect(existsSync(join(f.stateDir, 'runs'))).toBe(false)
+})
+
+test('start --help inside a repo starts no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', '--help'], f)
+  expect(r.code).toBe(0)
+  expect(existsSync(join(f.stateDir, 'runs'))).toBe(false)
+})
+
+test('the top-level usage names every subcommand, brief and show included', () => {
+  const f = fixture()
+  const help = hpipe(['--help'], f)
+  expect(help.code).toBe(0)
+  for (const command of SUBCOMMANDS) expect(help.out).toContain(`hpipe ${command}`)
+
+  const unknown = hpipe(['frobnicate'], f)
+  expect(unknown.code).toBe(1)
+  expect(unknown.out).toContain('brief')
+  expect(unknown.out).toContain('show')
+})

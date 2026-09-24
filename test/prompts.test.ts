@@ -66,6 +66,15 @@ test('the dispatch prompt pins the worktree to the run repo, not the focused wor
   expect(text).toContain('worktree create --cwd {{repo_root}}')
 })
 
+test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
+  // herdr rejects a brief as an `agent start` argument (invalid_agent_argument),
+  // and the send-text workaround left one sitting unsubmitted. Live-run finding.
+  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(text).toContain('{{hpipe}} dispatch --task <task_id> --pane <root_pane_id>')
+  expect(text).not.toContain('"<the worker brief you were given>"')
+  expect(text).not.toMatch(/agent start[^\n]*\\\n[^\n]*brief/)
+})
+
 test('no prompt hardcodes the hpipe binary — it must be rendered', async () => {
   // herdr's manifest cannot put a binary on PATH, so a plugin installed from
   // GitHub has no `hpipe`. A prompt naming it literally is uninvokable there.

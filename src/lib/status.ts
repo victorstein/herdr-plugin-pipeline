@@ -1,8 +1,13 @@
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
+<<<<<<< HEAD
 import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task } from './types'
+=======
+import { taskRow } from './phases'
+import type { Run, SessionKey, Task } from './types'
+>>>>>>> 54b66ab (feat: hand a brief over with hpipe dispatch --task, add hpipe show and --help)
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -172,4 +177,38 @@ export function formatStatus(
   }
 
   return lines.join('\n')
+}
+
+const orNone = (value: string | number | null | undefined): string =>
+  value === null || value === undefined || value === '' ? 'none' : String(value)
+
+const listOrNone = (values: readonly string[]): string =>
+  values.length > 0 ? values.join(', ') : 'none'
+
+export function formatTaskDetail(run: Run, task: Task): string {
+  const verdicts = Object.entries(task.artifacts.verdicts)
+  const open = openDecisionFor(task)
+  return [
+    `task:       ${task.task_id}`,
+    `run:        ${run.run_id}`,
+    `branch:     ${task.branch}`,
+    `issue:      #${task.issue}`,
+    `surface:    ${task.surface}`,
+    `files:      ${listOrNone(task.files)}`,
+    `depends on: ${listOrNone(task.depends_on)}`,
+    `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at)}m)`,
+    `agent:      ${task.agent_status}`,
+    `workspace:  ${orNone(task.workspace_id)}`,
+    `pane:       ${orNone(task.pane_id)}`,
+    `checkout:   ${orNone(task.checkout_path)}`,
+    `research:   ${orNone(task.artifacts.research)}`,
+    `spec:       ${orNone(task.artifacts.spec)}`,
+    `plan:       ${orNone(task.artifacts.plan)}`,
+    verdicts.length === 0 ? 'verdicts:   none' : 'verdicts:',
+    ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
+    `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
+    `ci:         ${orNone(task.ci)}`,
+    `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
+    `notes:      ${orNone(task.notes)}`,
+  ].join('\n')
 }
