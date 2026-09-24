@@ -93,6 +93,35 @@ export interface UncommittedWork {
   sample: string[]
 }
 
+/**
+ * A rendered prompt the supervisor still owes a pane. Written before the send and
+ * removed once herdr confirms the agent took it up, so a prompt that fails to land
+ * is re-sent on a later tick instead of lost with the tick that produced it.
+ */
+export interface OutboxEntry {
+  id: string
+  /**
+   * Addressed by role, not pane id: a rebound orchestrator or a re-dispatched
+   * worker is the same recipient under a new pane.
+   */
+  to: 'orchestrator' | 'worker'
+  /** `null` for a run-level prompt. */
+  task_id: string | null
+  /**
+   * The record's `phase_entered_at` when the prompt was written. A record that has
+   * since moved phase has been sent that phase's own prompt, so this one is stale.
+   */
+  entered_at: number
+  text: string
+  /** The digest header's transition, kept so a late delivery still says why it came. */
+  phase_note?: string
+  queued_at: number
+  /** Sends herdr answered with a failure; a held send is not an attempt. */
+  attempts: number
+  last_code?: string
+  last_attempt_at?: number
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -176,6 +205,8 @@ export interface Run {
   /** Per-phase review count; see the note on `Task.verdict_seq`. */
   verdict_seq?: Partial<Record<RunPhase, number>>
   stall?: StallState
+  /** Optional: ledgers written before #24 lack it, which reads as empty. */
+  outbox?: OutboxEntry[]
 }
 
 export interface HistoryEntry {

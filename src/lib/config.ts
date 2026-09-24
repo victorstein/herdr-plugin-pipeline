@@ -12,6 +12,11 @@ export interface Config {
   ACTOR_SETTLE_MS: number
   CI_POLL_SECONDS: number
   PROMPT_RETRY_MAX: number
+  /** How long a supervisor send waits for herdr to see the agent take it up. */
+  PROMPT_CONFIRM_MS: number
+  DELIVERY_SENDS_PER_TICK: number
+  DELIVERY_BACKOFF_MAX_SECONDS: number
+  DELIVERY_TICK_BUDGET_MS: number
   BLOCKED_TAIL_LINES: number
   REPOS_ALLOW: string[]
   PIPELINE_WORKSPACE_LABEL: string
@@ -31,6 +36,12 @@ const DEFAULTS: Config = {
   ACTOR_SETTLE_MS: 750,
   CI_POLL_SECONDS: 30,
   PROMPT_RETRY_MAX: 5,
+  // Past herdr's own 5s take-up window, so a prompt that is not taken up comes
+  // back as `agent_prompt_stalled` rather than as a caller `timeout`.
+  PROMPT_CONFIRM_MS: 15000,
+  DELIVERY_SENDS_PER_TICK: 8,
+  DELIVERY_BACKOFF_MAX_SECONDS: 300,
+  DELIVERY_TICK_BUDGET_MS: 20000,
   BLOCKED_TAIL_LINES: 8,
   REPOS_ALLOW: [],
   PIPELINE_WORKSPACE_LABEL: 'pipeline',
@@ -42,7 +53,8 @@ const DEFAULTS: Config = {
 const NUMERIC = [
   'TICK_MS', 'MAX_PASSES', 'STALL_MINUTES', 'TASK_STALL_MINUTES',
   'STALL_PROBE_MAX', 'FILE_SETTLE_MS', 'ACTOR_SETTLE_MS', 'CI_POLL_SECONDS',
-  'PROMPT_RETRY_MAX', 'BLOCKED_TAIL_LINES',
+  'PROMPT_RETRY_MAX', 'PROMPT_CONFIRM_MS', 'DELIVERY_SENDS_PER_TICK',
+  'DELIVERY_BACKOFF_MAX_SECONDS', 'DELIVERY_TICK_BUDGET_MS', 'BLOCKED_TAIL_LINES',
 ] as const
 
 const LISTS = ['WAKE_ON', 'REPOS_ALLOW'] as const

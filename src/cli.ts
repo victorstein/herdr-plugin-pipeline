@@ -511,7 +511,9 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
     const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
     return fail(mayHaveLanded
       ? `${reason}\n  → herdr pane read ${input.paneId} before retrying: the brief was ` +
-        'submitted and may already be in the pane, and a retry would send it twice'
+        'submitted and may already be in the pane, and a retry would send it twice; if it ' +
+        `sits unsubmitted in the input box, \`herdr agent send-keys ${input.paneId} ctrl+c\` ` +
+        'empties it while the worker is idle'
       : `${reason}\n  → nothing was sent; fix the cause and run it again`)
   }
 

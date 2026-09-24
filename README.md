@@ -147,6 +147,7 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
 | Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
+| A pane stopped answering (agent exited, usage limit) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |
 | A run from an older plugin version | It is refused, not migrated. `hpipe abort <id>` to release the repo |
 | Plugin misbehaving | `herdr plugin disable stein.pipeline` |
 | Out permanently | `herdr plugin unlink stein.pipeline`, then `rm ~/.local/bin/hpipe` |

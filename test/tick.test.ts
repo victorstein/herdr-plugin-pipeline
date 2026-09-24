@@ -7,7 +7,7 @@ import {
   saveEventedRuns, type WakeLine,
 } from '../src/supervisor/tick'
 import { actionFor, ageMinutes } from '../src/lib/status'
-import { isCurrentSchemaRun, makeSettledIdleReader } from '../src/supervisor/main'
+import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
@@ -760,4 +760,23 @@ test('a dead pane stays nameable after it is unbound — #12', () => {
     kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7',
   }], 'personal', new Set())
   expect(run.tasks[0]!.last_pane_id).toBe('w7:p1')
+})
+
+test('a run asking after a slow send gets a fresh idle reading, not the one from the tick\'s start', async () => {
+  const clock = { now: 0 }
+  let builds = 0
+  const idle = refreshingIdleReader(() => {
+    builds += 1
+    const idleAtBuild = builds === 1
+    return async () => idleAtBuild
+  }, () => clock.now, 2000)
+
+  expect(await idle('w1:p1')).toBe(true)
+  clock.now = 1500
+  expect(await idle('w1:p1')).toBe(true)
+  expect(builds).toBe(1)
+
+  clock.now = 7000
+  expect(await idle('w1:p1')).toBe(false)
+  expect(builds).toBe(2)
 })

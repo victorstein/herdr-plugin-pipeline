@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail } from '../src/lib/status'
+import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -50,6 +51,14 @@ test('reports an orchestrator pane that no longer exists', () => {
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w1:p1']))
   expect(text).toContain('orchestrator pane w4:p9 is gone')
   expect(text).toContain('claim')
+})
+
+test('names prompts held for an orchestrator that cannot answer — #24', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w4:p9'
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'branch review' }, Date.now())
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w1:p1']))
+  expect(text).toContain('1 prompt for the orchestrator undelivered for 0m (pane w4:p9 is gone)')
 })
 
 test('does not warn when the pane is live', () => {

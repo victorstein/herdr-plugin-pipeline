@@ -24,7 +24,13 @@ export interface DigestInput {
   footer?: string
 }
 
-export interface Delivery { paneId: string; text: string; run: Run }
+export interface Delivery {
+  paneId: string
+  text: string
+  run: Run
+  /** The outbox entries this delivery carries, so its outcome can be written back to each. */
+  sources: Array<{ run: Run; outboxId: string }>
+}
 
 export function buildDigest(input: DigestInput): string {
   // Each non-empty tail part brings exactly one blank line with it, so the output
@@ -49,58 +55,76 @@ export interface PendingPrompt {
   phaseNote?: string
   /** The parked-task footer; set on every orchestrator pending, rendered once. */
   footer?: string
+  /** The task this prompt is about; absent for a run-level one. */
+  taskId?: string
+  /** Set on a prompt read back out of the outbox. */
+  outboxId?: string
 }
 
 /**
- * Grouped by pane. The previous design returned ONE delivery per tick and
+ * Grouped by pane and run. The previous design returned ONE delivery per tick and
  * discarded the rest, which was safe only because every prompt-producing row had
  * the same recipient. With eight worker-owned rows a tick routinely produces
  * prompts for several panes, and a dropped one is never regenerated because the
- * run is already saved.
+ * run is already saved. The run is in the key because an `escalated` run releases
+ * its pane to the next run started there, and one digest header names one run.
  */
 export function deliveriesFor(pending: PendingPrompt[]): Delivery[] {
-  const byPane = new Map<string, PendingPrompt[]>()
+  const byRecipient = new Map<string, PendingPrompt[]>()
   for (const p of pending) {
     if (p.text.length === 0 && p.events.length === 0) continue
-    const list = byPane.get(p.paneId) ?? []
+    const key = `${p.paneId}\0${p.run.run_id}`
+    const list = byRecipient.get(key) ?? []
     list.push(p)
-    byPane.set(p.paneId, list)
+    byRecipient.set(key, list)
   }
 
   const out: Delivery[] = []
-  for (const [paneId, group] of byPane) {
-    const first = group[0] as PendingPrompt
-    const body = group.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
-    const events = group.flatMap((p) => p.events)
-    const text = first.isOrchestrator
-      ? buildDigest({
-          run: first.run, eventLines: events,
-          phaseNote: group.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
-          footer: group.find((p) => p.footer)?.footer ?? '',
-          nextPrompt: body,
-        })
-      : body
-    out.push({ paneId, text, run: first.run })
+  for (const group of byRecipient.values()) {
+    // Each outbox entry is its own send, so a text-level rejection drops only the
+    // entry that caused it and a failure is settled against only what it carried.
+    // The tick's event lines, footer and any unqueued text ride with the first.
+    const queued = group.filter((p) => p.outboxId !== undefined)
+    const unqueued = group.filter((p) => p.outboxId === undefined)
+    const units = queued.length === 0
+      ? [unqueued]
+      : queued.map((entry, i) => (i === 0 ? [...unqueued, entry] : [entry]))
+    units.forEach((unit, i) => out.push(deliveryOf(unit, group, i === 0)))
   }
   return out
+}
+
+function deliveryOf(unit: PendingPrompt[], group: PendingPrompt[], leads: boolean): Delivery {
+  const first = group[0] as PendingPrompt
+  const body = unit.map((p) => p.text).filter((t) => t.length > 0).join('\n\n---\n\n')
+  const text = first.isOrchestrator
+    ? buildDigest({
+        run: first.run, eventLines: unit.flatMap((p) => p.events),
+        phaseNote: unit.find((p) => p.phaseNote)?.phaseNote ?? ` → ${first.run.phase}`,
+        footer: leads ? (group.find((p) => p.footer)?.footer ?? '') : '',
+        nextPrompt: body,
+      })
+    : body
+  const sources = unit.flatMap((p) =>
+    (p.outboxId === undefined ? [] : [{ run: p.run, outboxId: p.outboxId }]))
+  return { paneId: first.paneId, text, run: first.run, sources }
 }
 
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */
 export const warnToTick: ReserveWarn = (message) => console.error(`[pipeline] ${message}`)
 
-// Nothing re-sends a failed delivery; the next tick's transitions or the stall
-// ladder regenerate it. This set only decides whether a failure counts against
-// the pane or is logged as giving up at once, so it lists the herdr 0.9.0 codes
-// that are transient: an agent not detected or not ready yet, a busy PTY, a
-// server restarting.
-const RETRYABLE = new Set([
-  'agent_blocked', 'agent_not_found', 'agent_not_ready', 'agent_prompt_failed',
-  'pane_not_found', 'not_found', 'server_unavailable', 'server_not_running', 'unparseable',
+// The only codes that say herdr will never accept this TEXT, however often it is
+// sent — so the prompt is dropped rather than left to block its pane. A deny-list,
+// not an allow-list: dropping is the outbox's one irreversible step, and herdr
+// 0.9.0 has recipient-side codes (`agent_not_running`, `agent_pane_busy`,
+// `agent_pane_unavailable`, `agent_launch_pending`, `agent_not_idle`, …) that no
+// allow-list here had heard of. An unknown code holds and backs the pane off.
+const ABOUT_THE_TEXT: ReadonlySet<string> = new Set([
+  'empty_agent_prompt', 'invalid_agent_argument', 'invalid_params', 'invalid_request',
 ])
 
-export function shouldRetry(code: string | undefined, attempts: number, max: number): boolean {
-  if (attempts >= max) return false
-  return code !== undefined && RETRYABLE.has(code)
+export function isRetryable(code: string): boolean {
+  return !ABOUT_THE_TEXT.has(code)
 }
 
 /**
