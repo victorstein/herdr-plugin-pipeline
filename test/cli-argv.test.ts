@@ -300,6 +300,20 @@ test('task --title --body-file files the issue through gh and registers it', asy
   expect(registeredTasks(f)).toMatchObject([{ issue: 77 }])
 })
 
+test('task --title with its value missing does not file an issue named after the next flag', async () => {
+  const f = started()
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue create': 'https://github.com/o/r/issues/78\n' })
+  writeFileSync(join(f.repo, 'brief.md'), 'Relabel the settings tile.\n')
+
+  const r = hpipe(['task', '--branch', 'feat/t', '--title', '--body-file', 'brief.md', '--surface', 'core'], f)
+
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('the value after --title is missing')
+  expect(existsSync(join(binDir, 'calls.log'))).toBe(false)
+  expect(registeredTasks(f)).toEqual([])
+})
+
 async function withFakeHerdr(f: Fixture, responses: Record<string, unknown>): Promise<string> {
   const binDir = tempDir('hpipe-argv-herdr-')
   f.env.HERDR_BIN_PATH = await makeFakeBin(binDir, responses)

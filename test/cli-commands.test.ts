@@ -248,18 +248,35 @@ test('--issue and --title together are rejected before anything is filed', async
   expect(filed).toBe(0)
 })
 
-test('--title without a readable --body-file is rejected, because the body is the brief', async () => {
+test('--title without a --body-file that is a file is rejected, because the body is the brief', async () => {
   await seedInRepoWithBrief()
+  let filed = 0
+  const fileIssue = async () => { filed++; return issue318 }
 
-  const missing = await cmdTask(ctx(), { ...unfiledTask, title: 't' }, async () => issue318)
-  const absent = await cmdTask(ctx(),
-    { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'nope.md') }, async () => issue318)
+  const missing = await cmdTask(ctx(), { ...unfiledTask, title: 't' }, fileIssue)
+  const absent = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'nope.md') }, fileIssue)
+  const directory = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: repoDir }, fileIssue)
 
   expect(missing.ok).toBe(false)
   expect(missing.text).toContain('--body-file')
   expect(absent.ok).toBe(false)
   expect(absent.text).toContain('nope.md')
+  expect(directory.ok).toBe(false)
+  expect(directory.text).toContain('is not a file')
+  expect(filed).toBe(0)
   expect(await registered()).toEqual([])
+})
+
+test('a --title that swallowed the next flag files nothing', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: '--body-file', bodyFile },
+    async () => { filed++; return issue318 })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('the value after --title is missing')
+  expect(filed).toBe(0)
 })
 
 test('a registration that fails validation files no orphan issue', async () => {
@@ -303,18 +320,35 @@ test('a registration that fails after filing names the issue so it can be regist
 
   expect(result.ok).toBe(false)
   expect(filed).toBe(1)
-  expect(result.text).toContain('issue #318 was filed (https://github.com/o/r/issues/318) but not registered')
+  expect(result.text).toContain('issue #318 was filed (https://github.com/o/r/issues/318) but no task was registered')
   expect(result.text).toContain('--issue 318')
   expect(await registered()).toEqual([])
 })
 
-test('a failed gh issue create registers nothing', async () => {
+test('a failure after the registration landed says so, and does not invite a second registration', async () => {
   const bodyFile = await seedInRepoWithBrief()
+  const noPrompts = mkdtempSync(join(tmpdir(), 'clicmd-noprompts-'))
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, async () => null)
+  const result = await cmdTask({ ...ctx(), pluginRoot: noPrompts }, { ...unfiledTask, title: 't', bodyFile },
+    async () => issue318)
+  rmSync(noPrompts, { recursive: true, force: true })
 
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('gh issue create')
+  expect(result.text).toContain('task t1 is registered with issue #318')
+  expect(result.text).toContain('hpipe brief --task t1')
+  expect(result.text).not.toContain('--issue 318')
+  expect((await registered()).map((t) => t.issue)).toEqual([318])
+})
+
+test('a failed gh issue create registers nothing and passes gh\'s error through', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
+    async () => ({ error: 'HTTP 410: Issues are disabled for this repo' }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('gh issue create failed')
+  expect(result.text).toContain('HTTP 410: Issues are disabled for this repo')
   expect(await registered()).toEqual([])
 })
 

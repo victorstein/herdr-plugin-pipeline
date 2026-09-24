@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
-import { Gh, type FiledIssue } from './lib/gh'
+import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
   activeRunForRepo, isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun,
@@ -187,7 +187,13 @@ export async function cmdStart(ctx: Ctx, input: {
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
 
-type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<FiledIssue | null>
+type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<FiledIssue | GhFailure>
+
+/** What one `hpipe task` call carries across the stale-run retries of its registration. */
+interface RegistrationAttempt {
+  fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
+  landed: (taskId: string) => void
+}
 
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
@@ -200,7 +206,7 @@ interface TaskInput {
 }
 
 async function registerTask(
-  ctx: Ctx, input: TaskInput, fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | null>,
+  ctx: Ctx, input: TaskInput, attempt: RegistrationAttempt,
 ): Promise<CmdResult> {
   const query: RunQuery = {
     runId: input.runId, repoKey: input.repoKey,
@@ -230,8 +236,14 @@ async function registerTask(
   }
   if (filing) {
     if (input.title!.trim().length === 0) return fail('--title cannot be empty')
+    // --title is free text, so the argv layer lets a missing value swallow the
+    // next flag — and the issue it files would be public under that flag's name.
+    if (input.title!.startsWith('--')) {
+      return fail(`--title got a flag where the title belongs: "${input.title}" — the value after --title is missing`)
+    }
     if (input.bodyFile === undefined) return fail('--title needs --body-file: the issue body is the worker\'s brief')
-    if (!existsSync(resolve(input.bodyFile))) return fail(`--body-file does not exist: ${resolve(input.bodyFile)}`)
+    const bodyPath = resolve(input.bodyFile)
+    if (!existsSync(bodyPath) || !statSync(bodyPath).isFile()) return fail(`--body-file is not a file: ${bodyPath}`)
   } else if (input.bodyFile !== undefined) {
     return fail('--body-file only goes with --title; an existing issue already has its body')
   }
@@ -278,9 +290,9 @@ async function registerTask(
 
   // Last, after every check: an issue filed for a registration that then fails
   // is public, and nothing in the pipeline would ever close it.
-  const filed = filing ? await fileIssueOnce(run.repo_root) : null
-  if (filing && filed === null) {
-    return fail(`gh issue create failed in ${run.repo_root} — nothing registered; run it there by hand to see gh's error`)
+  const filed = filing ? await attempt.fileIssueOnce(run.repo_root) : null
+  if (filed !== null && 'error' in filed) {
+    return fail(`gh issue create failed in ${run.repo_root}; nothing was filed or registered:\n  ${filed.error}`)
   }
   const issue = filed?.number ?? input.issue
 
@@ -320,6 +332,7 @@ async function registerTask(
     enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'dispatched at registration')
   }
   await saveRun(ctx.stateDir, run)
+  attempt.landed(task.task_id)
 
   // The recorded set, printed back. A malformed --files is otherwise invisible:
   // the only other place task.files reaches a human is the blocked-on-files
@@ -341,34 +354,52 @@ async function registerTask(
   return ok(`${header}\n\n${prompt}`)
 }
 
-const registerTaskRetrying = retryingOnStale(registerTask)
-
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
 ): Promise<CmdResult> {
   // The retry re-runs registerTask from a fresh read, so the gh call is memoized
   // out here: a second attempt reuses the issue the first one filed, never files another.
-  let filing: Promise<FiledIssue | null> | null = null
-  const fileIssueOnce = (repoRoot: string) => {
-    filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))
-    return filing
+  const outcome: { filing: Promise<FiledIssue | GhFailure> | null; registeredAs: string | null } = {
+    filing: null, registeredAs: null,
   }
-  const unregistered = async (reason: string): Promise<CmdResult> => {
-    const filed = filing === null ? null : await filing
-    if (filed === null) return fail(reason)
-    return fail(
-      `${reason}\nissue #${filed.number} was filed (${filed.url}) but not registered\n` +
-      `  → register it with --issue ${filed.number} in place of --title and --body-file`,
-    )
+  const attempt: RegistrationAttempt = {
+    fileIssueOnce: (repoRoot) =>
+      (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
+    landed: (taskId) => { outcome.registeredAs = taskId },
+  }
+  const filedIssue = async (): Promise<FiledIssue | null> => {
+    const filed = outcome.filing === null ? null : await outcome.filing
+    return filed === null || 'error' in filed ? null : filed
   }
 
+  let reason: string
   try {
-    const result = await registerTaskRetrying(ctx, input, fileIssueOnce)
-    return result.ok ? result : unregistered(result.text)
+    const result = await retryOnStaleRun(() => registerTask(ctx, input, attempt))
+    if (result.ok) return result
+    reason = result.text
   } catch (error) {
-    if (filing === null) throw error
-    return unregistered(String(error))
+    const filed = await filedIssue()
+    if (filed === null) {
+      if (isUnlandedSave(error)) return fail(unlandedSaveMessage(error))
+      throw error
+    }
+    // Not unlandedSaveMessage: its "run it again" would file a second issue.
+    reason = error instanceof Error ? error.message : String(error)
   }
+
+  const filed = await filedIssue()
+  if (filed === null) return fail(reason)
+  if (outcome.registeredAs !== null) {
+    return fail(
+      `task ${outcome.registeredAs} is registered with issue #${filed.number} (${filed.url}), but: ${reason}\n` +
+      `  → hpipe brief --task ${outcome.registeredAs} prints its brief; do not register it again`,
+    )
+  }
+  return fail(
+    `${reason}\nissue #${filed.number} was filed (${filed.url}) but no task was registered\n` +
+    `  → register it with --issue ${filed.number} in place of --title and --body-file; ` +
+    're-running with --title files a second issue',
+  )
 }
 
 /**

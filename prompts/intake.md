@@ -13,10 +13,11 @@ plans its own issue.
    first lands) or with `--depends-on` when the second genuinely needs the first's result. App tasks
    depend on the `core` task that builds what they consume.
 
-3. **Open one GitHub issue per task, no exceptions** — `gh issue create`. The issue body is the
-   worker's entire brief: the goal, the acceptance criteria, the constraints, and `file:line`
-   pointers to where the work belongs. The worker reads the issue, never your message. Write it once,
-   properly; it is durable and reviewable long after this run is gone.
+3. **Back every task with one GitHub issue, no exceptions** — file it with `gh issue create`, or let
+   `{{hpipe}} task --title … --body-file …` file it in step 4. The issue body is the worker's entire
+   brief: the goal, the acceptance criteria, the constraints, and `file:line` pointers to where the
+   work belongs. The worker reads the issue, never your message. Write it once, properly; it is
+   durable and reviewable long after this run is gone.
 
 4. **Register each one:**
 

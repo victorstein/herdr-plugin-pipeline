@@ -67,9 +67,10 @@ test('issueCreate files with the given title and body file and returns the new n
     .toBe('issue create --title Relabel the tile --body-file /tmp/body.md\n')
 })
 
-test('issueCreate is null when gh fails or prints no issue URL', async () => {
+test('issueCreate passes gh\'s stderr through on failure, and fails on output with no issue URL', async () => {
   const failing = await makeFakeBin(dir, { 'issue create': { error: { message: 'auth' } } })
-  expect(await new Gh(failing, dir).issueCreate('t', '/b')).toBeNull()
+  expect(await new Gh(failing, dir).issueCreate('t', '/b'))
+    .toEqual({ error: JSON.stringify({ error: { message: 'auth' } }) })
   const urlless = await makeFakeBin(dir, { 'issue create': 'Creating issue in o/r\n' })
-  expect(await new Gh(urlless, dir).issueCreate('t', '/b')).toBeNull()
+  expect(await new Gh(urlless, dir).issueCreate('t', '/b')).toMatchObject({ error: expect.any(String) })
 })

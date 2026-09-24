@@ -13,6 +13,10 @@ export interface FiledIssue {
   url: string
 }
 
+export interface GhFailure {
+  error: string
+}
+
 export interface IssueView {
   closed: boolean
   closedAtMs: number | null
@@ -35,14 +39,17 @@ export class Gh {
   // Bun.spawn throws synchronously on a missing binary or a cwd that doesn't
   // exist. Callers rely on these methods never throwing, so a spawn failure
   // must degrade to a non-ok result rather than crash the supervisor loop.
-  private async run(args: string[]): Promise<{ code: number; text: string }> {
+  private async run(args: string[]): Promise<{ code: number; text: string; stderr: string }> {
     try {
       const proc = Bun.spawn([this.bin, ...args], { cwd: this.cwd, stdout: 'pipe', stderr: 'pipe' })
-      const text = await new Response(proc.stdout).text()
+      // Drained together: reading one pipe to the end first can deadlock gh on a full other one.
+      const [text, stderr] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+      ])
       const code = await proc.exited
-      return { code, text }
+      return { code, text, stderr }
     } catch (error) {
-      return { code: -1, text: String(error) }
+      return { code: -1, text: '', stderr: String(error) }
     }
   }
 
@@ -105,10 +112,10 @@ export class Gh {
   }
 
   /** `gh issue create` has no `--json`; the new issue's URL on stdout is the only handle on it. */
-  async issueCreate(title: string, bodyFile: string): Promise<FiledIssue | null> {
-    const { code, text } = await this.run(['issue', 'create', '--title', title, '--body-file', bodyFile])
-    if (code !== 0) return null
-    const match = text.match(/https?:\/\/\S+\/issues\/(\d+)/)
-    return match ? { number: Number(match[1]), url: match[0] } : null
+  async issueCreate(title: string, bodyFile: string): Promise<FiledIssue | GhFailure> {
+    const { code, text, stderr } = await this.run(['issue', 'create', '--title', title, '--body-file', bodyFile])
+    const match = code === 0 ? text.match(/https?:\/\/\S+\/issues\/(\d+)/) : null
+    if (match) return { number: Number(match[1]), url: match[0] }
+    return { error: stderr.trim() || text.trim() || `gh exited ${code}` }
   }
 }
