@@ -8,6 +8,7 @@ import {
 } from '../src/cli'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { advanceRun } from '../src/lib/machine'
+import { advanceTasks } from '../src/supervisor/tasks'
 import { openDecisionFor } from '../src/lib/decisions'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
@@ -422,10 +423,47 @@ test('rewind to implement or earlier forgets the PR, so a merged one cannot fini
     const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
     expect(task?.pr, phase).toBeNull()
     expect(task?.ci, phase).toBeNull()
-    expect(task?.head_sha_at_entry, phase).toBeNull()
     expect(task?.merged_at_ms, phase).toBeNull()
     expect(task?.issue_closed_at_entry, phase).toBe(false)
   }
+})
+
+test('a task resumed into implement with its PR still open waits for a new push', async () => {
+  // The #46 resume path: a review sent it back at head H, it escalated from
+  // implement, and the human resumed it. The rejected head must not count as work.
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'escalated', escalated_from: 'implement',
+    workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: '/r/.worktrees/b',
+    pr: 5, head_sha_at_entry: 'H',
+  }])
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
+  const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+
+  let head = 'H'
+  const deps = {
+    pluginRoot: join(import.meta.dir, '..'),
+    liveIdle: async () => true,
+    maxPasses: 2,
+    fileSettleMs: 0,
+    prForBranch: async () => 5,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: head }),
+    issueView: async () => null,
+    verdictFor: async () => null,
+    removeWorktree: async () => 'removed' as const,
+    ciDetail: async () => '',
+    ambiguityLog: new Set<string>(),
+    uncommittedPaths: async () => [],
+  }
+  await advanceTasks(saved, deps)
+  expect(saved.tasks[0]?.phase).toBe('implement')
+
+  head = 'I'
+  await advanceTasks(saved, deps)
+  expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
 })
 
 test('rewind onto a phase that works the current PR keeps it', async () => {

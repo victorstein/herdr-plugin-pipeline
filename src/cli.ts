@@ -634,10 +634,12 @@ async function rewind(ctx: Ctx, input: {
     // is a level: a task sent back to rework after its PR merged would otherwise
     // carry the old PR through `merge` on its old mergedAt, with the new work
     // never merged. `prForBranch` lists open PRs only, so it finds the new one.
+    // `head_sha_at_entry` is kept: a resume with the PR still open must wait for
+    // a push past the head the last review rejected, and a PR opened after a merge
+    // carries commits past it anyway.
     if (PHASES_BEFORE_A_PR.has(task.phase)) {
       task.pr = null
       task.ci = null
-      task.head_sha_at_entry = null
       task.merged_at_ms = null
       task.issue_closed_at_entry = false
     }
