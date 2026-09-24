@@ -127,16 +127,16 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 
 /**
  * The branch every worker worktree is cut from; `prompts/dispatch.md` mandates
- * `--base main`.
- *
- * `main...HEAD` is the merge-base diff, so it names what this branch added — but
- * only while the branch has not merged `main` against a stale local ref. When it
- * has, the merge-base stays behind and every doc that landed on `origin/main`
+ * `--base main`. Its remote-tracking ref counts as mainline too, because the
+ * mandated pre-merge step merges `origin/main` while local `main` is often stale:
+ * against `main` alone the merge-base stays behind and every doc that landed
  * meanwhile reads as added. Measured on this repo: six sibling-owned candidates.
- * That fails closed, because two or more candidates adopt nothing, so it costs a
- * repair rather than causing a wrong one.
+ *
+ * A base pinned at dispatch would not help. Whatever the base, the diff runs to
+ * HEAD's tree, and merging `main` puts the siblings' docs in that tree.
  */
 const ARTIFACT_BASE_REF = 'main'
+const ARTIFACT_REMOTE_BASE_REF = 'refs/remotes/origin/main'
 
 // Bun.spawn throws synchronously on a missing binary, and this runs inside the
 // supervisor tick, so that must degrade to a non-ok result rather than crash the
@@ -168,6 +168,15 @@ async function git(checkoutPath: string, args: string[]): Promise<{ code: number
  * the whole repo's docs.
  *
  * `-z` emits raw NUL-terminated paths, so a non-ASCII filename is not C-quoted.
+ *
+ * A doc a merge commit added relative to its first parent came from the other
+ * side, so it is subtracted even when no mainline ref knows that side — a worker
+ * merging a sibling's branch, or a fork whose remote is not `origin`.
+ *
+ * Two residuals, both failing closed to a repair. A branch with nothing of its
+ * own that fast-forwards onto a ref no mainline contains is indistinguishable from
+ * its own work. And a doc the worker commits inside a conflict-resolving merge
+ * (`git add -A` with its artifact uncommitted) is subtracted as foreign.
  */
 export async function adoptableArtifacts(
   checkoutPath: string | null, claimed: Set<string>,
@@ -177,19 +186,43 @@ export async function adoptableArtifacts(
   // branch-review artifact and every sibling's merged docs.
   if (checkoutPath === null) return []
 
-  const base = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ARTIFACT_BASE_REF])
-  if (base.code !== 0) return []
+  const mainlines: string[] = []
+  for (const ref of [ARTIFACT_BASE_REF, ARTIFACT_REMOTE_BASE_REF]) {
+    const resolved = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ref])
+    if (resolved.code === 0) mainlines.push(ref)
+  }
+  if (mainlines.length === 0) return []
+
+  const forkPoint = await git(checkoutPath, ['merge-base', 'HEAD', ...mainlines])
+  if (forkPoint.code !== 0) return []
 
   const diff = await git(checkoutPath, [
-    'diff', '-z', '--name-only', '--diff-filter=A', `${ARTIFACT_BASE_REF}...HEAD`, '--', 'docs/',
+    'diff', '-z', '--name-only', '--diff-filter=A', forkPoint.text.trim(), 'HEAD', '--', 'docs/',
   ])
   if (diff.code !== 0) return []
 
-  return diff.text
-    .split('\0')
-    .filter((path) => path.length > 0)
+  const mergedIn = await git(checkoutPath, mergeAddedDocsArgs(mainlines))
+  if (mergedIn.code !== 0) return []
+  const addedByMerges = new Set(nulSeparated(mergedIn.text))
+
+  return nulSeparated(diff.text)
     .filter((path) => !path.startsWith(`${REVIEWS_DIR}/`))
+    .filter((path) => !addedByMerges.has(path))
     .filter((path) => !claimed.has(path))
+}
+
+// `-m --first-parent`, not `--diff-merges=first-parent`: the latter needs git 2.31,
+// and on an older git the log exits non-zero and silently turns adoption off.
+export function mergeAddedDocsArgs(mainlines: string[]): string[] {
+  return [
+    'log', '-z', '--format=', '--name-only', '--diff-filter=A',
+    '--first-parent', '--merges', '-m',
+    'HEAD', '--not', ...mainlines, '--', 'docs/',
+  ]
+}
+
+function nulSeparated(text: string): string[] {
+  return text.split('\0').filter((path) => path.length > 0)
 }
 
 export function taskSignalsFor(run: Run) {

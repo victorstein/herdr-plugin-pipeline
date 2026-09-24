@@ -49,3 +49,22 @@ export function commitIn(worktree: string, rel: string, body: string): void {
 export function cleanupFixtures(): void {
   for (const dir of created.splice(0)) rmSync(dir, { recursive: true, force: true })
 }
+
+/**
+ * Commits `rel` on a sibling branch cut from `main`, as another task's PR would,
+ * and moves `landsAt` to it. `origin/main` leaves local `main` stale, which is
+ * what a worker merging `origin/main` without updating `main` sees; `sibling`
+ * moves no mainline ref at all. Returns the ref to merge.
+ */
+export function siblingLands(
+  worktree: string, rel: string, landsAt: 'main' | 'origin/main' | 'sibling',
+): string {
+  const sibling = join(tempDir('hpipe-sib-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'sibling', sibling, 'main'], worktree)
+  commitIn(sibling, rel, 'sibling-owned\n')
+  if (landsAt === 'main') git(['update-ref', 'refs/heads/main', 'refs/heads/sibling'], worktree)
+  if (landsAt === 'origin/main') {
+    git(['update-ref', 'refs/remotes/origin/main', 'refs/heads/sibling'], worktree)
+  }
+  return landsAt
+}

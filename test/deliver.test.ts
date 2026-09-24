@@ -3,10 +3,12 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  promptForRunPhase, shouldRetry, taskSignalsFor,
+  mergeAddedDocsArgs, promptForRunPhase, shouldRetry, taskSignalsFor,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
-import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
+import {
+  cleanupFixtures, commitIn, git, repoWithWorktree, siblingLands, tempDir,
+} from './helpers/git-worktree'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -312,6 +314,59 @@ test('adoptableArtifacts excludes paths already recorded on the task', async () 
   const claimed = new Set(['docs/superpowers/notes/research-note.md'])
   expect(await adoptableArtifacts(worktree, claimed)).toEqual([
     'docs/superpowers/notes/the-spec.md',
+  ])
+})
+
+const SIBLING_DOC = 'docs/superpowers/specs/sibling-design.md'
+
+for (const landsAt of ['main', 'origin/main', 'sibling'] as const) {
+  test(`a sibling doc merged in from ${landsAt} is not a candidate`, async () => {
+    const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+    commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+    git(['merge', '-q', '--no-edit', siblingLands(worktree, SIBLING_DOC, landsAt)], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+      'docs/superpowers/notes/mine.md',
+    ])
+  })
+}
+
+// With nothing of its own yet, the branch fast-forwards and gets no merge commit to
+// subtract, which is the one-candidate window the issue called unrecoverable.
+for (const landsAt of ['main', 'origin/main'] as const) {
+  test(`a sibling doc fast-forwarded in from ${landsAt} is not a candidate`, async () => {
+    const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+    git(['merge', '-q', '--ff-only', siblingLands(worktree, SIBLING_DOC, landsAt)], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+
+    commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+      'docs/superpowers/notes/mine.md',
+    ])
+  })
+}
+
+test('the merge scan diffs each merge against its first parent only, without git 2.31 flags', () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+  git(['merge', '-q', '--no-edit', siblingLands(worktree, SIBLING_DOC, 'sibling')], worktree)
+
+  const args = mergeAddedDocsArgs(['main'])
+  expect(args.some((arg) => arg.startsWith('--diff-merges'))).toBe(false)
+  const proc = Bun.spawnSync(['git', '-C', worktree, ...args], { stdout: 'pipe', stderr: 'pipe' })
+  expect(proc.exitCode).toBe(0)
+  expect(proc.stdout.toString().split('\0').filter((path) => path.length > 0)).toEqual([SIBLING_DOC])
+})
+
+test('adoptableArtifacts falls back to origin/main when local main is missing', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  git(['update-ref', 'refs/remotes/origin/main', 'refs/heads/main'], worktree)
+  git(['update-ref', '-d', 'refs/heads/main'], worktree)
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/mine.md',
   ])
 })
 
