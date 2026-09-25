@@ -427,6 +427,13 @@ export function markAnswerSent(run: Run, taskId: string, decisionId: string, at:
   if (task) task.answer_sent_at = at
 }
 
+export function markAnswerStalled(run: Run, taskId: string, decisionId: string, sentAt: number): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (task?.answer_sent_at !== sentAt) return
+  task.delivery_attempts += 1
+  delete task.answer_sent_at
+}
+
 export function markAnswerDelivered(
   run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase, seenWorking: boolean,
 ): void {
@@ -484,10 +491,11 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
     const decisionId = decision.id
 
     if (task.answer_sent_at !== undefined) {
-      const check = await deps.checkSubmission(task.pane_id, text, task.answer_sent_at)
+      const sentAt = task.answer_sent_at
+      const check = await deps.checkSubmission(task.pane_id, text, sentAt)
       if (check.state === 'stalled') {
-        task.delivery_attempts += 1
-        delete task.answer_sent_at
+        markAnswerStalled(run, taskId, decisionId, sentAt)
+        deps.effects?.push((fresh) => markAnswerStalled(fresh, taskId, decisionId, sentAt))
       }
       if (check.state !== 'submitted') continue
       const seenWorking = check.working === true
@@ -496,6 +504,9 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       continue
     }
 
+    // Stamped before the send: herdr's `working` event can be stamped before the
+    // confirmed send returns, and `noteWorkingAfterAnswer` compares against this.
+    const at = Date.now()
     const result = await deps.send(task.pane_id, text)
     if (!result.ok) {
       // A held send never reached herdr, so it must not spend the attempts that
@@ -504,7 +515,6 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       continue
     }
 
-    const at = Date.now()
     markAnswerSent(run, taskId, decisionId, at)
     deps.effects?.push((fresh) => markAnswerSent(fresh, taskId, decisionId, at))
   }

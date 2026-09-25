@@ -593,8 +593,11 @@ export function makeSubmissionCheck(
   gate: DeliveryGate, io: PromptIO, confirmMs: number, now: () => number = Date.now,
 ): CheckSubmission {
   return async (paneId, sent, sentAt) => {
-    const box = await readInputBox(io, paneId)
-    const state = submissionOf(box, sent)
+    // herdr's failed `pane read` comes back as an empty screen, which is not a
+    // screen showing no box: read as submitted, it resumed an unread answer.
+    const screen = await io.paneReadStyled(paneId, SCREEN_LINES)
+    const box = screen === '' ? undefined : inputBoxText(withoutFaintText(screen))
+    const state = box === undefined ? 'pending' : submissionOf(box, sent)
     if (state === 'stuck') {
       gate.markStuck(paneId)
       return { state }

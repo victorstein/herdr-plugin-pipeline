@@ -910,6 +910,16 @@ test('our paste beside someone else\'s text is neither submitted nor cleared: he
   expect(presses(io)).toEqual([])
 })
 
+test('a failed pane read is not an empty box: pending, then a stall once the window passes', async () => {
+  const clock = { now: 1_000 }
+  const gate = gateAt(clock)
+  const check = makeSubmissionCheck(gate, boxReading(() => ''), 15_000, () => clock.now)
+
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'pending' })
+  clock.now = 15_000
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'stalled' })
+})
+
 test('submissionOf reads the box the answer was sent into', () => {
   expect(submissionOf(null, ANSWER)).toBe('submitted')
   expect(submissionOf('', ANSWER)).toBe('submitted')

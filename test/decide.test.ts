@@ -9,7 +9,8 @@ import { type AnswerDeps, announceDecisions, deliverPendingAnswers } from '../sr
 import type { SubmissionCheck } from '../src/supervisor/courier'
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { verdictFor } from '../src/lib/verdict-path'
-import type { Run, Task, TaskPhase } from '../src/lib/types'
+import type { QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
+import { applyEvents } from '../src/supervisor/tick'
 
 function taskFixture(phase: TaskPhase): Task {
   return {
@@ -709,4 +710,42 @@ test('a fresh answer re-arms a send still awaiting submission — #117', async (
 
   await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'do X', by: 'human', repoKey: 'k', runId: null })
   expect((await savedRun(run.run_id))?.tasks[0]?.answer_sent_at).toBeUndefined()
+})
+
+test('an answer stalled in the box whose save lost still spends its attempt and re-arms the send — #117', async () => {
+  const { run, task } = blockedOnDecision()
+  task.answer_sent_at = 1_000
+  const tickCopy = await staleTickCopy(run)
+  const effects: RunEffect[] = []
+
+  await deliverPendingAnswers(tickCopy, answerDeps({
+    checkSubmission: async () => ({ state: 'stalled' }), effects,
+  }))
+  expect(await saveOrReapply(dir, tickCopy, effects)).toBe('reapplied')
+
+  const onDisk = (await loadRun(dir, run.session, run.run_id))!
+  expect(onDisk.intake_closed).toBe(true)
+  expect(onDisk.tasks[0]?.delivery_attempts).toBe(1)
+  expect(onDisk.tasks[0]?.answer_sent_at).toBeUndefined()
+  expect(onDisk.tasks[0]?.phase).toBe('blocked-on-decision')
+})
+
+test('herdr\'s working event stamped before the confirmed send returns counts as work on the answer — #117', async () => {
+  const { run, task } = blockedOnDecision()
+  let workingAt = 0
+  await deliverPendingAnswers(run, answerDeps({
+    send: async () => {
+      workingAt = Date.now()
+      await Bun.sleep(5)
+      return { ok: true }
+    },
+  }))
+  expect(task.answer_sent_at).toBeLessThanOrEqual(workingAt)
+
+  const working: QueuedEvent = {
+    kind: 'pane.agent_status_changed', session: 'personal', at: workingAt,
+    pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'working',
+  }
+  applyEvents([run], [working], 'personal', new Set())
+  expect(task.worked_on_answer).toBe(true)
 })
