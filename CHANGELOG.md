@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.13](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.12...v1.5.13) (2026-09-25)
+
+
+### Bug Fixes
+
+* measure artifact adoption against the detected default branch, not main ([#113](https://github.com/victorstein/herdr-plugin-pipeline/issues/113)) ([84e8105](https://github.com/victorstein/herdr-plugin-pipeline/commit/84e8105f9777116f96caed058422fca7bd09b9cb)), closes [#108](https://github.com/victorstein/herdr-plugin-pipeline/issues/108)
+
 ## [1.5.12](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.11...v1.5.12) (2026-09-25)
 
 
