@@ -5,7 +5,8 @@ import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '.
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import {
-  briefCommand, overdueUnstartedWorker, startWorkerCommand, unbriefedWorker,
+  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
+  startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
@@ -132,7 +133,8 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-      const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null || owedABrief(run, task)
+      const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
+        overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
         ? Math.min(thresholdMinutes, unstartedThresholdMinutes)
         : thresholdMinutes
@@ -268,6 +270,16 @@ export function stallAwaiting(
       clause: `No agent has been detected in this task's worktree (workspace ` +
         `${unstarted.workspaceId}) since it was created, so this phase cannot advance and it waits ` +
         `on you, not on a worker: ${startWorkerCommand(task, unstarted.workspaceId, hpipe)}.`,
+    }
+  }
+  // Not the overdue form: a probe is only rendered once it is due, and by then
+  // nothing is booting. The artifact branch below would name a path in a
+  // checkout `forget` left on the record, with no worker to write it.
+  if (task !== null && undispatchedWorker(run, task) !== null) {
+    return {
+      short: 'a worktree and an agent for this task',
+      clause: 'This task has no worktree and no agent, so this phase cannot advance and it waits ' +
+        `on you, not on a worker: ${dispatchWorkerCommand(run, task, hpipe)}.`,
     }
   }
 

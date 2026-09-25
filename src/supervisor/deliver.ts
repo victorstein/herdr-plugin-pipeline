@@ -385,8 +385,12 @@ export function taskOutcomesFor(run: Run): string {
 }
 
 export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
-  const pluginRoot = process.env.HERDR_PLUGIN_ROOT ?? process.cwd()
   if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
+  return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd())
+}
+
+/** The run's phase prompt against the verdict path already reserved; see `renderTaskPhasePrompt`. */
+export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promise<string> {
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {

@@ -13,6 +13,7 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
+import { enqueue } from './lib/outbox'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
@@ -23,6 +24,8 @@ import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { bindWorkerPane } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
+import { renderRunPhasePrompt } from './supervisor/deliver'
+import { renderTaskPhasePrompt } from './supervisor/tasks'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
@@ -578,6 +581,38 @@ async function closeIntake(ctx: Ctx, input: {
 }
 export const cmdDispatchDone = retryingOnStale(closeIntake)
 
+/**
+ * The supervisor prompts only for the phase entries it makes, so a rewound worker
+ * sat idle until the stall probe, 45 minutes by default. Measured on a live run.
+ * Queued in the rewind's own save: a rewind that loses to the supervisor re-runs
+ * from its read and queues against the entry that finally lands. Rendered against
+ * the path the rewind already reserved, never through `promptForTaskPhase`, which
+ * would reserve a second one and move the file the rewind just printed.
+ *
+ * Returns what the operator is told about it, or '' when nothing is owed.
+ */
+async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<string> {
+  const row = task ? taskRow(task.phase) : runRow(run.phase)
+  if (row.actor !== 'worker' && row.actor !== 'orchestrator') return ''
+  const worker = task !== null && row.actor === 'worker'
+  const briefedPhase = taskRow('queued').onClear
+  if (worker && task.pane_id === null && task.phase === briefedPhase) {
+    return '; no worker is bound, so nothing is sent — ' +
+      `\`${hpipeCommand(ctx.pluginRoot)} dispatch --task ${task.task_id} --pane <pane>\` briefs the next one`
+  }
+
+  // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
+  const text = task
+    ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, task.phase)
+    : await renderRunPhasePrompt(run, ctx.pluginRoot)
+  if (text.length === 0) return ''
+  enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, text }, Date.now())
+  if (!worker) return '; its prompt is queued for the orchestrator'
+  return task.pane_id === null
+    ? `; its prompt is queued for ${task.task_id}'s worker, sent once an agent is detected in its worktree`
+    : `; its prompt is queued for ${task.pane_id}`
+}
+
 async function rewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
 }): Promise<CmdResult> {
@@ -601,10 +636,12 @@ async function rewind(ctx: Ctx, input: {
   // loop never reaches `promptForTaskPhase`. Without reserving here the next review
   // is handed the previous one's filename, which is this issue.
   let reserved: string | null = null
+  let rewoundTask: Task | null = null
 
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
+    rewoundTask = task
 
     if (task.pending_answer !== null) {
       run.history.push({
@@ -669,10 +706,11 @@ async function rewind(ctx: Ctx, input: {
     }
   }
 
+  const owed = await owePhasePrompt(ctx, run, rewoundTask)
   await saveRun(ctx.stateDir, run)
   return ok(
     `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
-    (reserved === null ? '' : `; next verdict → ${reserved}`),
+    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed,
   )
 }
 export const cmdRewind = retryingOnStale(rewind)

@@ -220,7 +220,9 @@ is the failure above, not this one.
 
 Kill that worker's pane (`herdr pane close`): the task goes to `failed` and `hpipe show` reports
 `pane: none (last: <pane>)`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
-not as bound to the dead pane.
+not as bound to the dead pane. If its workspace went too (`workspace: none`), `hpipe status` lists it under
+`waiting on you:` at once as `YOUR move: no worktree and no agent — herdr worktree create …`, ending in
+`dispatch --task`, and its stall probe to the orchestrator says the same rather than naming the research path.
 
 ---
 
@@ -681,7 +683,7 @@ from the orchestrator pane.
 
 | Symptom | Recovery |
 | --- | --- |
-| A phase advanced early, or on the wrong file | `hpipe rewind <run_id> <phase> [--task <task_id>]` — resets the phase, clears review-pass counters and `delivery_attempts`, discards an undelivered answer (recorded in history), and clears `escalated_from`. Rewinding a *run* to `dispatch` leaves every worktree bound; the run returns to `execute` on the next tick unless a dispatched task still has no worktree. Rewinding a *task* to `implement` or earlier forgets its recorded PR and CI state, so `hpipe status` shows neither until `implement` rediscovers the open PR. Rewinding *onto* a review phase also reserves a fresh verdict path and prints it; write the next review there. |
+| A phase advanced early, or on the wrong file | `hpipe rewind <run_id> <phase> [--task <task_id>]` — resets the phase, clears review-pass counters and `delivery_attempts`, discards an undelivered answer (recorded in history), and clears `escalated_from`. Rewinding a *run* to `dispatch` leaves every worktree bound; the run returns to `execute` on the next tick unless a dispatched task still has no worktree. Rewinding a *task* to `implement` or earlier forgets its recorded PR and CI state, so `hpipe status` shows neither until `implement` rediscovers the open PR. Rewinding *onto* a review phase also reserves a fresh verdict path and prints it; write the next review there. The rewind queues the new phase's prompt, naming that same path, for whoever owns the phase — the worker, or the orchestrator for `merge`, `close` and the run's own phases — and says so; the supervisor sends it on its next tick. A task rewound into `research` with no worker bound gets nothing queued: `dispatch --task` delivers that prompt inside the brief. |
 | A task is stuck in `blocked-on-files` behind a holder that will never finish | Get the holder terminal first (`hpipe rewind … --task <holder>` to a phase it can finish, or let it fail), then `hpipe release --task <holder>`. `release` refuses while the holder is in flight, and only accepts a terminal or `escalated` task. |
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which clears every pass counter on that record and, for a review phase, prints the fresh verdict path it reserved. |

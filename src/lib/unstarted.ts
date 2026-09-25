@@ -55,6 +55,48 @@ export function briefCommand(task: Task, paneId: string | null, hpipe: string): 
 }
 
 /**
+ * A worker row with neither a worktree nor a pane. A task the gate has just opened
+ * is one until the orchestrator's dispatch lands, so it is owed the same bootstrap
+ * grace; a task a human rewound here after its worktree went — the live t3,
+ * `pane.exited` → `failed` → `rewind … research` — has no dispatch under way and
+ * is owed nothing. Measured on a live run.
+ */
+export function undispatchedWorker(run: Run, task: Task): { since: number } | null {
+  if (runRow(run.phase).releasesPane === true) return null
+  if (taskRow(task.phase).actor !== 'worker') return null
+  if (task.pane_id !== null || task.workspace_id !== null) return null
+  return { since: task.phase_entered_at }
+}
+
+function enteredByRewind(run: Run, task: Task): boolean {
+  const entry = run.history.findLast((h) => h.task_id === task.task_id)
+  return entry?.from === 'rewind' && entry.to === task.phase && entry.at >= task.phase_entered_at
+}
+
+export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { since: number } | null {
+  const undispatched = undispatchedWorker(run, task)
+  if (undispatched === null) return null
+  return enteredByRewind(run, task) || now - undispatched.since >= UNSTARTED_GRACE_MS ? undispatched : null
+}
+
+/**
+ * `worktree create` leads because its `worktree.created` event is what binds the
+ * task, by branch. `worktree open` is only the fallback for a checkout that
+ * survived, and whether it emits that event is unverified.
+ */
+export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): string {
+  const create = `\`herdr worktree create --cwd ${run.repo_root} --branch ${task.branch} --base main\``
+  const open = `\`herdr worktree open --cwd ${run.repo_root} --branch ${task.branch}\``
+  const start = '`herdr agent start <name> --kind claude --pane <root pane>`'
+  const setUp = `${create} (${open} if the branch still has one), run the repo's bootstrap in it, ${start}`
+  if (task.phase === taskRow('queued').onClear) {
+    return `${setUp}, then \`${hpipe} dispatch --task ${task.task_id} --pane <root pane>\``
+  }
+  return `${setUp}, then hand it \`${hpipe} brief --task ${task.task_id}\` over \`herdr agent prompt\` ` +
+    `and tell it the task is in ${task.phase}`
+}
+
+/**
  * Records the worker's pane, and re-arms the stall ladder when that changes who
  * the task is waiting on. The ladder is keyed on the phase entry, which a bind
  * does not touch, so without the re-arm the orchestrator's probes about an empty
