@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.15](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.14...v1.5.15) (2026-09-25)
+
+
+### Bug Fixes
+
+* omit the batch-context line from the brief when a task has no notes ([#125](https://github.com/victorstein/herdr-plugin-pipeline/issues/125)) ([dbcb7f0](https://github.com/victorstein/herdr-plugin-pipeline/commit/dbcb7f07b564448d84e1d611c94638adeba3268f)), closes [#119](https://github.com/victorstein/herdr-plugin-pipeline/issues/119)
+
 ## [1.5.14](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.13...v1.5.14) (2026-09-25)
 
 
