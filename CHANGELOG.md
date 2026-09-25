@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.22](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.21...v1.5.22) (2026-09-25)
+
+
+### Documentation
+
+* add a herdr-pipeline skill so Claude can drive and recover runs ([#141](https://github.com/victorstein/herdr-plugin-pipeline/issues/141)) ([338e09a](https://github.com/victorstein/herdr-plugin-pipeline/commit/338e09ae191db5f52e0df2eba6413afaab9bbed8))
+
 ## [1.5.21](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.20...v1.5.21) (2026-09-25)
 
 
