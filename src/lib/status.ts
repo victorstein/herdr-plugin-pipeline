@@ -3,7 +3,7 @@ import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { runIsDriven } from './ledger'
-import { outboxWarnings } from './outbox'
+import { deliveryWarnings, type PaneObservations } from './outbox'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import {
@@ -268,6 +268,7 @@ function intakeWarning(run: Run, hpipe: string): string[] {
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
+  panes: PaneObservations = {},
 ): string {
   const lines: string[] = []
   lines.push(`session: ${session}`)
@@ -331,7 +332,7 @@ export function formatStatus(
       lines.push(...intakeWarning(run, hpipe))
       lines.push(...waitingOnYou(run, hpipe, now))
       lines.push(...taskWarnings(run, hpipe, now))
-      lines.push(...outboxWarnings(run, livePanes, now))
+      lines.push(...deliveryWarnings(run, livePanes, now, panes))
     }
   }
 

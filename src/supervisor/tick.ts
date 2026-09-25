@@ -87,6 +87,25 @@ export function parkedFooter(
   return ['also waiting on you:', ...lines].join('\n')
 }
 
+/**
+ * Sent in place of the digests an orchestrator missed. Their event lines are not
+ * replayed — each described a moment long gone — so this is the ledger now: every
+ * task's phase, age and whose move it is, the lines `hpipe status` would give. An
+ * orchestrator restarted after the window has no context but this.
+ */
+export function catchUpDigest(run: Run, now: number, hpipe: string): string {
+  const lines = [...run.tasks]
+    .sort((a, b) => a.task_id.localeCompare(b.task_id))
+    .map((task) =>
+      `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
+      `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now)}`)
+  return [
+    `catch-up: digests for this run did not reach you, so here is where it stands now ` +
+    `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
+    ...(lines.length === 0 ? ['- no tasks yet'] : lines),
+  ].join('\n')
+}
+
 export interface ApplyResult {
   changed: boolean
   wake: WakeLine[]

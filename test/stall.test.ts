@@ -11,7 +11,7 @@ import { TASK_ROWS } from '../src/lib/phases'
 import { actionFor } from '../src/lib/status'
 import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
-import { enqueue } from '../src/lib/outbox'
+import { enqueue, owedByRecipient } from '../src/lib/outbox'
 import type { Run, RunPhase, Task } from '../src/lib/types'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
@@ -1141,4 +1141,24 @@ test('orchestrator probes about an empty worktree do not count toward the worker
   expect(taskStallCandidates([run], NOW + 44 * 60_000, 45, 3, 15)).toHaveLength(0)
   const due = taskStallCandidates([run], NOW + 45 * 60_000, 45, 3, 15)
   expect(due.map((c) => [c.action, c.probes, c.paneId])).toEqual([['probe', 0, 'w7:p1']])
+})
+
+test('status names the same pane for a held probe that the ladder sends it to', () => {
+  const cases: Array<Partial<Task>> = [
+    { phase: 'research' },
+    { phase: 'research', awaiting_brief: true },
+    { phase: 'research', pane_id: null },
+    { phase: 'merge' },
+  ]
+  for (const over of cases) {
+    const run = runWithTask(over)
+    const [candidate] = taskStallCandidates([run], NOW, 45, 3)
+    const task = run.tasks[0] as Task
+    task.stall = {
+      at: task.phase_entered_at, run_at: run.phase_entered_at, last_probe_at: task.phase_entered_at,
+      probes: 0, holds: 0, undeliverable_since: NOW,
+    }
+    expect(candidate, JSON.stringify(over)).toBeDefined()
+    expect(owedByRecipient(run)[0]?.pane, JSON.stringify(over)).toBe(candidate?.paneId)
+  }
 })

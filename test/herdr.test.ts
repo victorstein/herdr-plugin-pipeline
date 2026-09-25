@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
@@ -8,6 +8,20 @@ import { Herdr } from '../src/lib/herdr'
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'herdr-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+test('a pane read is the screen herdr prints, not an envelope, and a failed one is empty', async () => {
+  const bin = join(dir, 'screen-bin')
+  await Bun.write(bin, [
+    '#!/bin/sh',
+    'if [ "$3" = "w9:p9" ]; then echo \'{"error":{"code":"pane_not_found","message":"x"}}\'; exit 1; fi',
+    'printf "%s" "$*"',
+  ].join('\n'))
+  chmodSync(bin, 0o755)
+  const herdr = new Herdr(bin)
+  expect(await herdr.paneRead('w1:p1', 40)).toBe('pane read w1:p1 --source visible --lines 40 --format text')
+  expect(await herdr.paneReadStyled('w1:p1', 40)).toBe('pane read w1:p1 --source visible --lines 40 --format ansi')
+  expect(await herdr.paneRead('w9:p9', 40)).toBe('')
+})
 
 test('parses a result envelope', async () => {
   const bin = await makeFakeBin(dir, { 'pane list': { result: { panes: [{ pane_id: 'w1:p1' }] } } })

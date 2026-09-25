@@ -61,6 +61,24 @@ test('names prompts held for an orchestrator that cannot answer — #24', () => 
   expect(text).toContain('1 prompt for the orchestrator undelivered for 0m (pane w4:p9 is gone)')
 })
 
+test('names an orchestrator pane left with no agent, and the decision held for it — #90', () => {
+  const run = mkRun()
+  run.orchestrator_pane = 'w2:p1'
+  run.tasks = [mkTask({
+    phase: 'blocked-on-decision', decision_from: 'plan',
+    decisions: [{
+      id: 'd2', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
+      answer: null, answered_by: null, answered_at: null, prompted_at: null,
+    }],
+  })]
+  const holds = { 'w2:p1': { since: 0, failures: 7, code: 'agent_not_found' } }
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w2:p1', 'w7:p1']),
+    5 * 60_000, { agentless: new Set(['w2:p1']), holds })
+  expect(text).toContain('⚠ orchestrator pane w2:p1 has no live agent')
+  expect(text).toContain('1 decision for the orchestrator undelivered for 5m ' +
+    '(pane w2:p1 has no live agent; 7 failed attempts, last agent_not_found)')
+})
+
 test('does not warn when the pane is live', () => {
   const run = mkRun()
   run.orchestrator_pane = 'w1:p1'

@@ -11,7 +11,19 @@ export interface PaneInfo {
   pane_id: string
   workspace_id?: string
   agent_status?: AgentStatus
+  /** The agent herdr detected in the pane; `null` once none is running there. */
+  agent?: string | null
   label?: string
+}
+
+/**
+ * A pane that is still listed but has no agent in it. An orchestrator whose
+ * Claude was `/exit`ed leaves exactly this: `agent: null`, `agent_status:
+ * unknown`. Measured on a live run.
+ */
+export function paneHasNoAgent(pane: PaneInfo): boolean {
+  return (pane.agent === null || pane.agent === undefined) &&
+    (pane.agent_status === undefined || pane.agent_status === 'unknown')
 }
 
 export interface WorkspaceInfo {
@@ -37,21 +49,27 @@ function parseEnvelope<T>(text: string): Envelope<T> | null {
 export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
-  private async call<T>(args: string[]): Promise<CallResult<T>> {
+  private async spawn(
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string; exitCode: number } | { error: unknown }> {
     // Bun.spawn throws synchronously on a missing binary. Callers rely on these
     // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
     // CallResult rather than crash the supervisor loop.
-    let stdout: string
-    let stderr: string
     try {
       const proc = Bun.spawn([this.bin, ...args], { stdout: 'pipe', stderr: 'pipe' })
-      ;[stdout, stderr] = await Promise.all([
+      const [stdout, stderr] = await Promise.all([
         new Response(proc.stdout).text(), new Response(proc.stderr).text(),
       ])
-      await proc.exited
+      return { stdout, stderr, exitCode: await proc.exited }
     } catch (error) {
-      return { ok: false, code: 'spawn_failed', message: String(error) }
+      return { error }
     }
+  }
+
+  private async call<T>(args: string[]): Promise<CallResult<T>> {
+    const output = await this.spawn(args)
+    if ('error' in output) return { ok: false, code: 'spawn_failed', message: String(output.error) }
+    const { stdout, stderr } = output
 
     // herdr 0.9.0 writes a failure's envelope to stderr, exits 1 and leaves
     // stdout empty; reading stdout alone turned every error code into
@@ -107,11 +125,25 @@ export class Herdr {
     return this.call(['agent', 'send-keys', target, ...keys])
   }
 
+  /**
+   * `pane read` prints the screen itself, not a JSON envelope; only a failure is an
+   * envelope, with exit 1. Parsed as an envelope, every read came back empty, so
+   * the input-box checks never saw a box. Measured against herdr 0.9.0.
+   */
   async paneRead(target: string, lines: number): Promise<string> {
-    const res = await this.call<{ text: string }>(
-      ['pane', 'read', target, '--source', 'visible', '--lines', String(lines)],
+    return this.readScreen(target, lines, 'text')
+  }
+
+  /** With its SGR styling: the only way to tell Claude's dim prompt suggestion from typed text. */
+  async paneReadStyled(target: string, lines: number): Promise<string> {
+    return this.readScreen(target, lines, 'ansi')
+  }
+
+  private async readScreen(target: string, lines: number, format: 'text' | 'ansi'): Promise<string> {
+    const output = await this.spawn(
+      ['pane', 'read', target, '--source', 'visible', '--lines', String(lines), '--format', format],
     )
-    return res.result?.text ?? ''
+    return 'error' in output || output.exitCode !== 0 ? '' : output.stdout
   }
 
   /**

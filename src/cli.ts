@@ -2,6 +2,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
+import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
@@ -827,13 +828,19 @@ export const cmdAnswer = retryingOnStale(answer)
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
-  const livePanes = new Set((await new Herdr().paneList()).map((p) => p.pane_id))
+  const herdr = new Herdr()
+  const { livePanes, panes } = await observePanes(
+    () => herdr.paneList(), ctx.stateDir, ctx.session,
+    state.state === 'live' ? state.info.pid : undefined,
+  )
   return ok(formatStatus(
     runs,
     { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
     ctx.session,
     hpipeCommand(ctx.pluginRoot),
     livePanes,
+    Date.now(),
+    panes,
   ))
 }
 

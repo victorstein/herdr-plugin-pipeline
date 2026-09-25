@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { runRow } from './phases'
-import type { OutboxEntry, Run, Task } from './types'
+import { openDecisionFor } from './decisions'
+import type { PaneHold } from './delivery-health'
+import { type PhaseRow, runRow, taskRow } from './phases'
+import type { OutboxEntry, Run, StallState, Task } from './types'
+import { unbriefedWorker } from './unstarted'
 
 function recordOf(run: Run, taskId: string | null): Run | Task | undefined {
   return taskId === null ? run : run.tasks.find((t) => t.task_id === taskId)
@@ -78,63 +81,193 @@ function ageMinutes(sinceMs: number, now: number): number {
   return Math.max(0, Math.floor((now - sinceMs) / 60000))
 }
 
-function recipientLabel(entry: OutboxEntry): string {
-  return entry.to === 'orchestrator' ? 'the orchestrator' : `${entry.task_id ?? '?'}'s worker`
+/**
+ * Where a stall probe for this record is SENT; the ladder and `hpipe status`
+ * both ask here, so status names the pane the probe is actually held for.
+ * - A worker owed its brief: the orchestrator. Probed in its own pane, a
+ *   brief-less agent took the probe as its first instruction (#105).
+ * - A row whose actor has no pane of its own: the orchestrator, which the table
+ *   points it at.
+ * - A paneless worker row — a dispatch prompt that never landed leaves no pane
+ *   to nudge: the orchestrator, so the probe still reaches someone.
+ */
+export function probeRecipient(run: Run, task: Task | null): string | null {
+  if (task !== null && unbriefedWorker(run, task)?.paneId != null) return run.orchestrator_pane
+  const row: PhaseRow<string> = task === null ? runRow(run.phase) : taskRow(task.phase)
+  if (row.probeTarget === 'orchestrator') return run.orchestrator_pane
+  if (row.actor === 'worker') return task?.pane_id ?? run.orchestrator_pane
+  return run.orchestrator_pane
+}
+
+export type OwedKind = 'prompt' | 'decision' | 'answer' | 'stall probe'
+
+export interface Owed {
+  kind: OwedKind
+  since: number
+  /** Sends herdr answered with a failure; a held send is not an attempt. */
+  attempts: number
+  lastCode?: string
+  lastAttemptAt?: number
+  /** Known not to have reached the pane, whether it failed or was held. */
+  undelivered?: boolean
+}
+
+export interface Recipient {
+  label: string
+  pane: string | null
+  owed: Owed[]
 }
 
 /**
- * How long a prompt may sit never attempted before status names it. A supervisor
- * that queues but never reaches delivery — every tick's budget gone to something
- * else, or the supervisor wedged — otherwise leaves no trace but its own log.
+ * Only an outbox entry is kept as a prompt; a decision still to announce, an
+ * answer still to deliver and a probe that could not be sent each live in their
+ * own record. Status read the outbox alone, so a dead orchestrator owed a
+ * decision for minutes showed nothing. Measured on a live run.
+ */
+export function owedByRecipient(run: Run): Recipient[] {
+  if (runRow(run.phase).terminal === true) return []
+  const recipients = new Map<string, Recipient>()
+  const owe = (pane: string | null, taskId: string | null, owed: Owed) => {
+    const toOrchestrator = taskId === null || (pane !== null && pane === run.orchestrator_pane)
+    const key = toOrchestrator ? 'orchestrator' : `worker:${taskId}`
+    const recipient = recipients.get(key) ?? {
+      label: toOrchestrator ? 'the orchestrator' : `${taskId}'s worker`, pane, owed: [],
+    }
+    recipient.owed.push(owed)
+    recipients.set(key, recipient)
+  }
+
+  for (const entry of run.outbox ?? []) {
+    if (!isCurrent(run, entry)) continue
+    owe(recipientPane(run, entry), entry.to === 'orchestrator' ? null : entry.task_id, {
+      kind: 'prompt', since: entry.queued_at, attempts: entry.attempts,
+      lastCode: entry.last_code, lastAttemptAt: entry.last_attempt_at,
+    })
+  }
+
+  for (const task of run.tasks) {
+    if (task.phase === 'blocked-on-decision') {
+      const open = openDecisionFor(task)
+      if (open !== null && open.prompted_at === null) {
+        owe(run.orchestrator_pane, null, { kind: 'decision', since: open.asked_at, attempts: 0 })
+      }
+      const answered = task.decisions.find((d) => d.id === task.pending_answer)
+      if (answered !== undefined) {
+        owe(task.pane_id, task.task_id, {
+          kind: 'answer', since: answered.answered_at ?? answered.asked_at,
+          attempts: task.delivery_attempts,
+        })
+      }
+    }
+    const probeSince = heldProbeSince(run, task, task.stall)
+    if (probeSince !== null) {
+      owe(probeRecipient(run, task), task.task_id,
+        { kind: 'stall probe', since: probeSince, attempts: 0, undelivered: true })
+    }
+  }
+  const runProbeSince = heldProbeSince(run, run, run.stall)
+  if (runProbeSince !== null) {
+    owe(probeRecipient(run, null), null, { kind: 'stall probe', since: runProbeSince, attempts: 0, undelivered: true })
+  }
+
+  return [...recipients.values()]
+}
+
+/** A stall state stamped for an earlier phase entry reads as zero, so its streak is over. */
+function heldProbeSince(run: Run, record: Run | Task, stall: StallState | undefined): number | null {
+  if (stall?.undeliverable_since === undefined) return null
+  if (stall.at !== record.phase_entered_at || stall.run_at !== run.phase_entered_at) return null
+  return stall.undeliverable_since
+}
+
+/**
+ * How long something owed may sit never attempted before status names it. A
+ * supervisor that queues but never reaches delivery — every tick's budget gone to
+ * something else, or the supervisor wedged — otherwise leaves no trace but its
+ * own log.
  */
 export const UNATTEMPTED_WARN_MS = 2 * 60_000
 
+/** What `hpipe status` knows about the panes beyond whether herdr still lists them. */
+export interface PaneObservations {
+  /** Listed panes with no agent running in them. */
+  agentless?: ReadonlySet<string>
+  /** The live supervisor's delivery gate, by pane. */
+  holds?: Readonly<Record<string, PaneHold>>
+}
+
+const KIND_ORDER: readonly OwedKind[] = ['prompt', 'decision', 'answer', 'stall probe']
+
+function countOf(owed: readonly Owed[]): string {
+  const parts = KIND_ORDER.flatMap((kind) => {
+    const n = owed.filter((o) => o.kind === kind).length
+    return n === 0 ? [] : [`${n} ${kind}${n === 1 ? '' : 's'}`]
+  })
+  return parts.length === 1 ? parts[0] as string : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
+}
+
+const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
+
 /**
- * One line per recipient still owed a prompt that has failed, has nowhere to go,
- * or has waited UNATTEMPTED_WARN_MS without being tried. Anything younger and
- * untried is in flight, not held.
+ * One line per recipient still owed something that has failed, has nowhere to
+ * go, or has waited UNATTEMPTED_WARN_MS without being tried — plus one for an
+ * orchestrator pane that is still listed with no agent in it, which a dead
+ * Claude leaves and a pane list alone cannot tell from a live one. Anything
+ * younger and untried is in flight, not held.
  */
-export function outboxWarnings(
+export function deliveryWarnings(
   run: Run, livePanes: ReadonlySet<string>, now: number = Date.now(),
+  panes: PaneObservations = {},
 ): string[] {
   if (runRow(run.phase).terminal === true) return []
-  const groups = new Map<string, { pane: string | null; entries: OutboxEntry[] }>()
-  for (const entry of run.outbox ?? []) {
-    if (!isCurrent(run, entry)) continue
-    const pane = recipientPane(run, entry)
-    const gone = pane === null || (livePanes.size > 0 && !livePanes.has(pane))
-    const inFlight = entry.attempts === 0 && now - entry.queued_at < UNATTEMPTED_WARN_MS
-    if (inFlight && !gone) continue
-    const key = `${entry.to}:${entry.to === 'worker' ? entry.task_id : ''}`
-    const group = groups.get(key) ?? { pane, entries: [] }
-    group.entries.push(entry)
-    groups.set(key, group)
+  const agentless = panes.agentless ?? new Set<string>()
+  const holds = panes.holds ?? {}
+  const isGone = (pane: string) => livePanes.size > 0 && !livePanes.has(pane)
+  const lines: string[] = []
+
+  const orchestrator = run.orchestrator_pane
+  if (orchestrator !== null && !isGone(orchestrator) && agentless.has(orchestrator)) {
+    lines.push(`  ⚠ orchestrator pane ${orchestrator} has no live agent — start Claude in it, ` +
+      'or run the plugin\'s "claim" action from the pane that should drive this run')
   }
 
-  return [...groups.values()].map(({ pane, entries }) => {
-    const first = entries[0] as OutboxEntry
-    const oldest = Math.min(...entries.map((e) => e.queued_at))
-    const attempts = entries.reduce((most, e) => Math.max(most, e.attempts), 0)
-    const latest = entries.reduce<OutboxEntry>(
-      (a, b) => ((b.last_attempt_at ?? 0) > (a.last_attempt_at ?? 0) ? b : a), first)
-    const count = `${entries.length} prompt${entries.length === 1 ? '' : 's'}`
-    if (latest.last_code === 'stuck_input' && pane !== null) {
-      return `  ⚠ stuck input in ${pane}: ${count} for ${recipientLabel(first)} held ` +
+  for (const { label, pane, owed } of owedByRecipient(run)) {
+    const hold = pane === null ? undefined : holds[pane]
+    const unreachable = pane === null || isGone(pane) || agentless.has(pane) || hold !== undefined
+    const held = owed.filter((o) =>
+      unreachable || o.undelivered === true || o.attempts > 0 || now - o.since >= UNATTEMPTED_WARN_MS)
+    if (held.length === 0) continue
+
+    const oldest = Math.min(...held.map((o) => o.since))
+    const latest = held.reduce((a, b) => ((b.lastAttemptAt ?? 0) > (a.lastAttemptAt ?? 0) ? b : a))
+    const count = countOf(held)
+    if (pane !== null && (hold?.code === 'stuck_input' || latest.lastCode === 'stuck_input')) {
+      lines.push(`  ⚠ stuck input in ${pane}: ${count} for ${label} held ` +
         `${ageMinutes(oldest, now)}m because its input box holds text the supervisor did not ` +
-        'send — submit or clear that text and delivery resumes'
+        'send — submit or clear that text and delivery resumes')
+      continue
     }
-    const why = pane === null
-      ? 'it has no pane'
-      : livePanes.size > 0 && !livePanes.has(pane)
-        ? `pane ${pane} is gone`
-        : attempts === 0
-          ? null
-          : `${attempts} failed attempt${attempts === 1 ? '' : 's'}, last ${latest.last_code ?? 'unknown'}`
-    if (why === null) {
-      return `  ⚠ ${count} for ${recipientLabel(first)} queued ${ageMinutes(oldest, now)}m and ` +
-        'never attempted — the supervisor is not reaching delivery; check its pane'
+
+    const why: string[] = []
+    if (pane === null) why.push('it has no pane')
+    else if (isGone(pane)) why.push(`pane ${pane} is gone`)
+    else if (agentless.has(pane)) why.push(`pane ${pane} has no live agent`)
+    const attempts = held.reduce((most, o) => Math.max(most, o.attempts), 0)
+    if (hold !== undefined && hold.failures > 0) {
+      why.push(`${plural(hold.failures, 'failed attempt')}, last ${hold.code}`)
+    } else if (attempts > 0) {
+      why.push(plural(attempts, 'failed attempt') + (latest.lastCode ? `, last ${latest.lastCode}` : ''))
+    } else if (why.length === 0 && held.some((o) => o.undelivered === true)) {
+      why.push('its last stall probe did not reach it')
     }
-    return `  ⚠ ${count} for ${recipientLabel(first)} undelivered for ` +
-      `${ageMinutes(oldest, now)}m (${why}) — held, and sent as soon as it answers again`
-  })
+
+    if (why.length === 0) {
+      lines.push(`  ⚠ ${count} for ${label} queued ${ageMinutes(oldest, now)}m and ` +
+        'never attempted — the supervisor is not reaching delivery; check its pane')
+      continue
+    }
+    lines.push(`  ⚠ ${count} for ${label} undelivered for ` +
+      `${ageMinutes(oldest, now)}m (${why.join('; ')}) — held, and sent as soon as it answers again`)
+  }
+  return lines
 }
