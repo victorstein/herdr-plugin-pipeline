@@ -32,7 +32,7 @@ import {
 } from './stall'
 import {
   applyEvents, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
-  saveEventedRuns, WorkspaceAbsence,
+  saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
@@ -207,14 +207,10 @@ async function main(): Promise<void> {
       const livePanes = new Set(listed.map((p) => p.pane_id))
       gate.beginTick(livePanes)
       for (const pane of readyPanes(drained)) gate.wake(pane)
-      const workspaces = await herdr.workspaceList()
-      // Ahead of the drained batch, so a `worktree.opened` drained in the same
-      // tick finds the task whose workspace it replaces already unbound.
-      const events = [
-        ...workspaceAbsence.reconcile(tickRuns, workspaces, session, Date.now()),
-        ...drained,
-        ...paneAbsence.reconcile(tickRuns, listed, session, Date.now()),
-      ]
+      const events = tickEvents(tickRuns, drained, {
+        panes: { absence: paneAbsence, listed },
+        workspaces: { absence: workspaceAbsence, listed: await herdr.workspaceList() },
+      }, session, Date.now())
 
       const wakeOn = new Set(config.WAKE_ON)
       const applied = applyEvents(tickRuns, events, session, panes, wakeOn)

@@ -219,6 +219,18 @@ export async function freshDispatchBase(
   return base
 }
 
+/**
+ * Best effort, under the same budget as a dispatch fetch: on failure
+ * `refs/remotes/origin/<branch>` is only as new as the last fetch. The explicit
+ * refspec updates that tracking ref even where `remote.origin.fetch` would not.
+ */
+export async function fetchRemoteBranch(repoRoot: string, branch: string): Promise<void> {
+  const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
+  if (origin.code !== 0) return
+  const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  await git(repoRoot, ['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], network)
+}
+
 export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()

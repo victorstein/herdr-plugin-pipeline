@@ -268,6 +268,27 @@ export class WorkspaceAbsence {
   }
 }
 
+export interface Listings {
+  panes: { absence: PaneAbsence; listed: readonly PaneInfo[] }
+  workspaces: { absence: WorkspaceAbsence; listed: readonly WorkspaceInfo[] }
+}
+
+/**
+ * One tick's event batch. Workspace closures go ahead of the drained events, so
+ * a `worktree.opened` drained in the same tick finds the task whose workspace it
+ * replaces already unbound; after it, that event binds nothing.
+ */
+export function tickEvents(
+  runs: readonly Run[], drained: readonly QueuedEvent[], listings: Listings,
+  session: SessionKey, now: number,
+): QueuedEvent[] {
+  return [
+    ...listings.workspaces.absence.reconcile(runs, listings.workspaces.listed, session, now),
+    ...drained,
+    ...listings.panes.absence.reconcile(runs, listings.panes.listed, session, now),
+  ]
+}
+
 function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; task: Task } | null {
   for (const run of runs) {
     const task = run.tasks.find(predicate)

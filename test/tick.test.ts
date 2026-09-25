@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   applyEvents, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
-  pickOneAdvance, saveEventedRuns, type WakeLine, WorkspaceAbsence, workerStillNeeded,
+  pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence, workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
@@ -1095,6 +1095,27 @@ test('a workspace seen again, or a failed list, does not confirm an absence — 
   expect(absence.reconcile([run], workspaces('w1'), 'personal', 3)).toEqual([])
   expect(absence.reconcile([run], [], 'personal', 4)).toEqual([])
   expect(absence.reconcile([run], workspaces('w1'), 'personal', 5)).toHaveLength(1)
+})
+
+test('a worktree.opened drained with the closure that frees its task rebinds it — #116', () => {
+  const run = mkRun([mkTask({ phase: 'research', workspace_id: 'w5', pane_id: null })])
+  const listings = {
+    panes: { absence: new PaneAbsence(), listed: supervisorOnly },
+    workspaces: { absence: new WorkspaceAbsence(), listed: workspaces('w1', 'w7') },
+  }
+  tickEvents([run], [], listings, 'personal', 1)
+  const opened: QueuedEvent = {
+    kind: 'worktree.opened', session: 'personal', at: 2, workspace_id: 'w7', branch: 'feat/x',
+  }
+  applyEvents([run], tickEvents([run], [opened], listings, 'personal', 2), 'personal', new Set())
+  expect(run.tasks[0]?.workspace_id).toBe('w7')
+})
+
+test('main builds its event batch through tickEvents, which owns the ordering — #116', async () => {
+  // main() never runs under test, so a batch assembled inline could reorder unnoticed.
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'supervisor', 'main.ts')).text()
+  expect(src).toMatch(/const events = tickEvents\(tickRuns, drained,/)
+  expect(src).not.toMatch(/Absence\.reconcile\(/)
 })
 
 test('a failed task\'s workspace is reconciled, a done task\'s is not — #116', () => {

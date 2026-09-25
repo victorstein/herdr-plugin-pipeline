@@ -48,6 +48,11 @@ A CLI is only needed for the recovery commands, which take arguments actions can
 the shorthand with the **Install the hpipe shorthand** action — it links `bin/hpipe` into
 `~/.local/bin` (override with `HPIPE_BIN_DIR`) and tells you if that is not on your PATH.
 
+`forget` only unbinds a workspace; it does not keep the checkout. At teardown a merged task's checkout is
+removed by its path even when its workspace is gone or forgotten, as long as it is clean, still on the
+task's branch and pushed. Otherwise it is kept and the task still ends `done`, with the reason in its history.
+Register a task with `--keep-worktree` to keep its checkout regardless.
+
 **If you link it by hand, link `bin/hpipe`, never `src/cli.ts`.** The CLI and the supervisor share one
 ledger — `cli.ts` falls back to `~/.local/state/herdr/plugins/stein.pipeline` when herdr has not
 injected `HERDR_PLUGIN_STATE_DIR` — so a link pinned to a checkout means your hand-typed commands

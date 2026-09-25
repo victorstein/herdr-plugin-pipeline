@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
+import { fetchRemoteBranch } from '../lib/dispatch-base'
 import type { RunEffect } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { TASK_ROWS } from '../lib/phases'
@@ -26,10 +27,13 @@ export function worktreeRemovalFrom(result: { ok: boolean; code?: string }): Wor
   return result.code === WORKSPACE_NOT_FOUND ? 'gone' : 'failed'
 }
 
+/** `kept` says why the checkout was left on disk. */
+export type CheckoutRemoval = { removed: true } | { removed: false; kept: string }
+
 export interface TeardownDeps {
   removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>
   /** For a checkout whose workspace is gone: herdr 0.9.0's `worktree remove` takes only a workspace. */
-  removeCheckout: (repoRoot: string, checkoutPath: string, branch: string) => Promise<boolean>
+  removeCheckout: (repoRoot: string, checkoutPath: string, branch: string) => Promise<CheckoutRemoval>
 }
 
 function markTornDown(run: Run, taskId: string, stillHolds: (task: Task) => boolean): void {
@@ -38,28 +42,78 @@ function markTornDown(run: Run, taskId: string, stillHolds: (task: Task) => bool
   enterTaskPhase(run, task, 'done', 'worktree removed')
 }
 
-async function git(repoRoot: string, args: string[]): Promise<boolean> {
+async function git(repoRoot: string, args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   try {
-    const proc = Bun.spawn(['git', '-C', repoRoot, ...args], { stdout: 'ignore', stderr: 'ignore' })
-    return (await proc.exited) === 0
+    const proc = Bun.spawn(['git', '-C', repoRoot, ...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+    return { ok: (await proc.exited) === 0, out, err }
   } catch {
-    return false
+    return { ok: false, out: '', err: 'git could not be run' }
   }
 }
 
+function samePath(a: string, b: string): boolean {
+  const real = (path: string) => {
+    try { return realpathSync(path) } catch { return path }
+  }
+  return real(a) === real(b)
+}
+
+interface LinkedWorktree { head: string | null; branch: string | null }
+
+/** The first porcelain entry is the main worktree, which is never ours to remove. */
+async function linkedWorktreeAt(repoRoot: string, checkoutPath: string): Promise<LinkedWorktree | null> {
+  const listed = await git(repoRoot, ['worktree', 'list', '--porcelain'])
+  if (!listed.ok) return null
+  for (const entry of listed.out.split(/\n\n+/).slice(1)) {
+    const field = (name: string) =>
+      entry.split('\n').find((line) => line.startsWith(`${name} `))?.slice(name.length + 1) ?? null
+    const path = field('worktree')
+    if (path !== null && samePath(path, checkoutPath)) return { head: field('HEAD'), branch: field('branch') }
+  }
+  return null
+}
+
 /**
- * `git worktree remove` refuses a path that is not one of the repo's worktrees,
- * so a wrong `checkout_path` cannot delete anything else. `branch -d` refuses a
- * branch whose commits are neither in HEAD nor in its upstream, so only work that
- * already lives elsewhere is dropped; its failure leaves the branch and is not a
- * failed teardown.
+ * Only for a checkout that has left herdr's hands: its workspace was closed, or
+ * `forget` unbound it, and a human may still be working in it. So nothing is
+ * forced. Any doubt keeps the checkout, and the task still ends `done`, because
+ * its PR has merged:
+ * - It must be a linked worktree of this repo still on the task's branch. A
+ *   detached or switched checkout may hold commits on no branch at all.
+ * - Its HEAD must be on `origin/<branch>`. Otherwise it has local commits that
+ *   `branch -d` would keep on the branch but nothing would ever report.
+ * - Without `--force`, `worktree remove` refuses modified or untracked files and
+ *   still removes a tree whose only extras are gitignored.
+ *
+ * `branch -d` then drops the local branch only if it is merged into the main
+ * checkout's HEAD or into its upstream; a refusal leaves the branch in place.
  */
 export async function removeCheckoutWithGit(
   repoRoot: string, checkoutPath: string, branch: string,
-): Promise<boolean> {
-  if (!(await git(repoRoot, ['worktree', 'remove', '--force', checkoutPath]))) return false
+): Promise<CheckoutRemoval> {
+  const keep = (why: string): CheckoutRemoval => ({ removed: false, kept: why })
+
+  const worktree = await linkedWorktreeAt(repoRoot, checkoutPath)
+  if (worktree === null) return keep('not a linked worktree of this repo')
+  if (worktree.branch === null) return keep(`detached HEAD, not on ${branch}`)
+  if (worktree.branch !== `refs/heads/${branch}`) {
+    return keep(`on ${worktree.branch.replace(/^refs\/heads\//, '')}, not ${branch}`)
+  }
+
+  await fetchRemoteBranch(repoRoot, branch)
+  const pushed = worktree.head !== null &&
+    (await git(repoRoot, ['merge-base', '--is-ancestor', worktree.head, `refs/remotes/origin/${branch}`])).ok
+  if (!pushed) return keep(`HEAD not pushed to origin/${branch}`)
+
+  const removal = await git(repoRoot, ['worktree', 'remove', checkoutPath])
+  if (!removal.ok) {
+    return keep(/modified or untracked/.test(removal.err)
+      ? 'modified or untracked files'
+      : removal.err.trim().split('\n').pop() || 'git worktree remove failed')
+  }
   await git(repoRoot, ['branch', '-d', branch])
-  return true
+  return { removed: true }
 }
 
 export async function runTeardown(
@@ -107,12 +161,13 @@ export async function runTeardown(
       // A workspace closed under a task in `merge` or `close` leaves its checkout
       // behind; ending there `orphaned` called a merged task a dead end and left
       // the worktree on disk. Measured on a live run.
-      if (await deps.removeCheckout(run.repo_root, checkoutPath, task.branch)) {
+      const removal = await deps.removeCheckout(run.repo_root, checkoutPath, task.branch)
+      if (removal.removed) {
         const holdsCheckout = (t: Task) => t.checkout_path === checkoutPath
         markTornDown(run, task.task_id, holdsCheckout)
         effects.push((fresh) => markTornDown(fresh, task.task_id, holdsCheckout))
       } else {
-        enterTaskPhase(run, task, 'orphaned', `workspace gone and removing the checkout at ${checkoutPath} failed`)
+        enterTaskPhase(run, task, 'done', `worktree kept: ${checkoutPath} (${removal.kept})`)
       }
     }
   }

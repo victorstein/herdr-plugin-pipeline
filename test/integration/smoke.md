@@ -254,6 +254,8 @@ released (`pane: none (last: …)`), and a dependent is not `blocked-on-failure`
 `pane close` and once with `workspace close`, then merge both PRs: each must end `teardown→done worktree
 removed`, never `orphaned`, its checkout directory must be gone (`git worktree list` no longer shows it),
 and `hpipe status` must not call it a dead end (#116). Its local branch goes only if `git branch -d` accepts it.
+Repeat once with an untracked file left in the closed task's checkout. The task still ends `done`, now
+`worktree kept: <path> (modified or untracked files)`, and the file is still there.
 
 ---
 
@@ -741,7 +743,7 @@ from the orchestrator pane.
 | The whole run is wrong and you want out | `hpipe abort <run_id>` — leaves worktrees and branches alone, releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was. |
 | The orchestrator pane died or changed id | `hpipe status` flags it (`⚠ orchestrator pane … is gone`). Run the plugin's `claim` action from the pane that should drive the run. |
 | The supervisor died | `hpipe status` reports `supervisor: none\|stale`. Reopen with `herdr plugin action invoke stein.pipeline.supervisor`. Nothing advances until it is back; no state is lost. |
-| A task is bound to the wrong workspace | `hpipe forget <workspace_id>` clears `workspace_id` and `pane_id` so the binding can be re-made. |
+| A task is bound to the wrong workspace | `hpipe forget <workspace_id>` clears `workspace_id` and `pane_id` so the binding can be re-made. It does not hand the checkout back: once the task merges, teardown still removes it by path when it is clean, on the task's branch and pushed. Register the task with `--keep-worktree` to keep it. |
 | Events look stuck | `hpipe drain` prints and consumes the queue at `$STATE/queue/$SMOKE/`. It is destructive — it unlinks as it reads — so only use it when the supervisor is down. |
 | The plugin itself is misbehaving | `herdr plugin disable stein.pipeline` |
 
