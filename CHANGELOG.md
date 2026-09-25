@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.14](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.13...v1.5.14) (2026-09-25)
+
+
+### Documentation
+
+* record live smoke run 2 against v1.5.13 ([#123](https://github.com/victorstein/herdr-plugin-pipeline/issues/123)) ([324a798](https://github.com/victorstein/herdr-plugin-pipeline/commit/324a798f82ec2b242a88c592228e3ab0b9c201db))
+
 ## [1.5.13](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.12...v1.5.13) (2026-09-25)
 
 
