@@ -135,7 +135,7 @@ test('a clean pushed checkout is removed by path, with its merged branch — #11
   const worktree = repoWithWorktree(['README.md'])
   pushed(worktree)
   const repoRoot = repoRootOf(worktree)
-  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x')).toEqual({ removed: true })
+  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x', null)).toEqual({ removed: true })
   expect(existsSync(worktree)).toBe(false)
   expect(branchExists(repoRoot, 'feat/x')).toBe(false)
 })
@@ -146,7 +146,7 @@ test('gitignored extras do not keep a checkout — #116', async () => {
   pushed(worktree)
   mkdirSync(join(worktree, 'node_modules'))
   writeFileSync(join(worktree, 'node_modules', 'dep.js'), 'x\n')
-  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x')).toEqual({ removed: true })
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null)).toEqual({ removed: true })
   expect(existsSync(worktree)).toBe(false)
 })
 
@@ -155,7 +155,7 @@ test('a pushed branch that main has not merged is kept after the checkout goes �
   commitIn(worktree, 'src/squashed.ts', 'landed as a squash\n')
   pushed(worktree)
   const repoRoot = repoRootOf(worktree)
-  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x')).toEqual({ removed: true })
+  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x', null)).toEqual({ removed: true })
   expect(branchExists(repoRoot, 'feat/x')).toBe(true)
 })
 
@@ -163,7 +163,7 @@ test('an untracked file keeps the checkout and survives — #116', async () => {
   const worktree = repoWithWorktree(['README.md'])
   pushed(worktree)
   writeFileSync(join(worktree, 'notes.md'), 'a human was here\n')
-  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x'))
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null))
     .toEqual(kept('modified or untracked files'))
   expect(readFileSync(join(worktree, 'notes.md'), 'utf8')).toBe('a human was here\n')
 })
@@ -175,7 +175,7 @@ test('a commit on a detached HEAD keeps the checkout and survives — #116', asy
   commitIn(worktree, 'src/detached.ts', 'on no branch\n')
   const detached = revParse(worktree, 'HEAD')
   const repoRoot = repoRootOf(worktree)
-  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x')).toEqual(kept('detached HEAD, not on feat/x'))
+  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x', null)).toEqual(kept('detached HEAD, not on feat/x'))
   expect(existsSync(worktree)).toBe(true)
   expect(revParse(worktree, 'HEAD')).toBe(detached)
 })
@@ -184,7 +184,7 @@ test('a checkout switched to another branch is kept — #116', async () => {
   const worktree = repoWithWorktree(['README.md'])
   pushed(worktree)
   git(['checkout', '-q', '-b', 'human/next'], worktree)
-  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x'))
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null))
     .toEqual(kept('on human/next, not feat/x'))
   expect(existsSync(worktree)).toBe(true)
 })
@@ -193,15 +193,59 @@ test('a commit made after the push keeps the checkout — #116', async () => {
   const worktree = repoWithWorktree(['README.md'])
   pushed(worktree)
   commitIn(worktree, 'src/after-merge.ts', 'local only\n')
-  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x'))
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null))
     .toEqual(kept('HEAD not pushed to origin/feat/x'))
+  expect(existsSync(worktree)).toBe(true)
+})
+
+/** GitHub keeps `refs/pull/<n>/head` after auto-deleting the merged branch; a pruning fetch then drops the tracking ref. */
+function mergedWithBranchDeleted(worktree: string, pr: number): void {
+  const remote = tempDir('teardown-remote-')
+  git(['init', '-q', '--bare', '.'], remote)
+  git(['remote', 'add', 'origin', remote], worktree)
+  git(['push', '-q', 'origin', 'HEAD:refs/heads/feat/x', `HEAD:refs/pull/${pr}/head`], worktree)
+  git(['push', '-q', 'origin', '--delete', 'feat/x'], worktree)
+  git(['fetch', '-q', '--prune', 'origin'], worktree)
+}
+
+test('a merged branch deleted from origin is proven pushed by its PR head — #116', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  commitIn(worktree, 'src/work.ts', 'merged\n')
+  mergedWithBranchDeleted(worktree, 7)
+  expect(Bun.spawnSync(['git', '-C', worktree, 'rev-parse', '--verify', '--quiet', 'refs/remotes/origin/feat/x']).success)
+    .toBe(false)
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', 7)).toEqual({ removed: true })
+  expect(existsSync(worktree)).toBe(false)
+})
+
+test('with no PR to check, a branch deleted from origin keeps the checkout — #116', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  mergedWithBranchDeleted(worktree, 7)
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null))
+    .toEqual(kept('HEAD not pushed to origin/feat/x'))
+})
+
+test('a commit beyond the PR head keeps the checkout — #116', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  mergedWithBranchDeleted(worktree, 7)
+  commitIn(worktree, 'src/after-merge.ts', 'local only\n')
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', 7))
+    .toEqual(kept('HEAD on neither origin/feat/x nor PR #7\'s head'))
+  expect(existsSync(worktree)).toBe(true)
+})
+
+test('a locked worktree is kept under a short label, not git\'s force advice — #116', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  pushed(worktree)
+  git(['worktree', 'lock', worktree], worktree)
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), worktree, 'feat/x', null)).toEqual(kept('locked'))
   expect(existsSync(worktree)).toBe(true)
 })
 
 test('a path that is not a worktree of the repo is refused, never deleted — #116', async () => {
   const worktree = repoWithWorktree(['README.md'])
   const stranger = tempDir('teardown-stranger-')
-  expect(await removeCheckoutWithGit(repoRootOf(worktree), stranger, 'feat/x'))
+  expect(await removeCheckoutWithGit(repoRootOf(worktree), stranger, 'feat/x', null))
     .toEqual(kept('not a linked worktree of this repo'))
   expect(existsSync(stranger)).toBe(true)
 })
