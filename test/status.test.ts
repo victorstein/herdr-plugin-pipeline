@@ -514,9 +514,9 @@ test('a finished run summarises how its tasks ended instead of listing them as w
   run.phase = 'done'
   run.tasks = [
     mkTask({ task_id: 't1', phase: 'done' }),
-    mkTask({ task_id: 't2', phase: 'orphaned', checkout_path: '/wt/t2' }),
-    mkTask({ task_id: 't3', phase: 'failed' }),
-    mkTask({ task_id: 't4', phase: 'orphaned', checkout_path: null, workspace_id: 'w9' }),
+    mkTask({ task_id: 't2', phase: 'orphaned', checkout_path: '/wt/t2', merged_at_ms: 1 }),
+    mkTask({ task_id: 't3', phase: 'failed', branch: 'fix/c', pr: 43 }),
+    mkTask({ task_id: 't4', phase: 'orphaned', checkout_path: null, workspace_id: 'w9', merged_at_ms: 1 }),
     mkTask({ task_id: 't5', phase: 'blocked-on-failure' }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
@@ -527,19 +527,36 @@ test('a finished run summarises how its tasks ended instead of listing them as w
   expect(text).toContain('  ended: done t1 · orphaned t2, t4 · failed t3 · blocked-on-failure t5')
   expect(text).toContain('  ℹ t2 merged but left its worktree at /wt/t2')
   expect(text).toContain('  ℹ t4 merged but left its worktree in workspace w9')
+  expect(text).toContain(`  ℹ t3 [failed] fix/c PR #43 — \`${HP} show --task t3 --run ${run.run_id}\``)
+  expect(text).not.toContain('ℹ t1')
+  expect(text).not.toContain('ℹ t5')
 })
 
-test('an aborted run does not nag about the tasks it stopped mid-flight — #122', () => {
+test('an orphan that never merged keeps its branch visible and is not called disposable — #122', () => {
   const run = mkRun()
+  run.phase = 'done'
+  run.tasks = [mkTask({ task_id: 't2', phase: 'orphaned', branch: 'fix/b', checkout_path: '/wt/t2' })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('nothing unmerged')
+  expect(text).toContain(`  ℹ t2 [orphaned] fix/b — \`${HP} show --task t2 --run ${run.run_id}\``)
+})
+
+test('an aborted run names how to resume it and keeps its unfinished work visible — #122', () => {
+  const run = mkRun()
+  run.history.push({ at: 0, from: 'execute', to: 'done', why: 'aborted from execute' })
   run.phase = 'done'
   run.escalated_from = 'execute'
   run.tasks = [
-    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
-    mkTask({ task_id: 't2', phase: 'merge', pr: 41 }),
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement', branch: 'fix/a' }),
+    mkTask({ task_id: 't2', phase: 'merge', branch: 'fix/b', pr: 41 }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   expect(text).not.toContain('waiting on you')
-  expect(text).toContain('  ended: escalated t1 · merge t2')
+  expect(text).not.toContain('ended:')
+  expect(text).toContain(
+    `  aborted from execute: escalated t1 · merge t2 — \`${HP} resume ${run.run_id}\` puts it back`)
+  expect(text).toContain(`  ℹ t1 [escalated] fix/a — \`${HP} show --task t1 --run ${run.run_id}\``)
+  expect(text).toContain(`  ℹ t2 [merge] fix/b PR #41 — \`${HP} show --task t2 --run ${run.run_id}\``)
 })
 
 test('a finished run with no tasks prints no ended line', () => {
