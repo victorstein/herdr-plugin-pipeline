@@ -490,34 +490,48 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
 `DELIVERY_BACKOFF_MAX_SECONDS` (300), and no tick sends more than `DELIVERY_SENDS_PER_TICK` (8).
 
 1. **Dead orchestrator, workers keep moving.** With a task mid-`spec`, `/exit` the orchestrator's
-   Claude (leave the pane as a shell). Let the worker finish `spec`. **Pass:** the task still
-   advances to `spec-review` and its prompt lands in the worker pane; the supervisor pane logs
-   `delivery to <orchestrator pane> failed (agent_not_found)` **once**, not every tick; and
-   `hpipe status` shows `⚠ N prompts for the orchestrator undelivered for Xm (… last
-   agent_not_found)` once a digest is owed. Count sends in the supervisor log: no more than one
-   attempt per backoff interval.
+   Claude (leave the pane as a shell). Let the worker finish `spec`, and have it `hpipe decide` once
+   the orchestrator is dead. **Pass:** the task still advances to `spec-review` and its prompt lands
+   in the worker pane; the supervisor pane logs `delivery to <orchestrator pane> failed
+   (agent_not_found)` **once**, not every tick; and `hpipe status` shows `⚠ orchestrator pane <id>
+   has no live agent` at once, and `⚠ 1 decision for the orchestrator undelivered for Xm (pane <id>
+   has no live agent; N failed attempts, last agent_not_found)` once the decision is owed. Decisions,
+   answers and held stall probes are counted there as well as outbox prompts; the reason comes from
+   the live supervisor's `delivery.<session>.json` in the state dir. Count sends in the supervisor
+   log: no more than one attempt per backoff interval.
 2. **Resume.** Restart Claude in that pane (`herdr agent start …`) or `claim` a new one. **Pass:**
-   within a tick of the agent reporting idle, the held prompts arrive as one digest, the log says
-   `delivery to <pane> recovered`, and the `hpipe status` line is gone.
+   within a tick of the agent reporting idle, the held decision prompt and outbox prompts arrive, and
+   the digests the dead window lost are replaced by **one catch-up digest** — `[pipeline] run <id> —
+   catch-up` naming every task's phase, age and whose move it is, from the ledger — not by a replay
+   of their stale event lines. It goes to whichever pane now drives the run, a claimed one included.
+   The log says `delivery to <pane> recovered`, and the `hpipe status` lines are gone.
 3. **Gone pane.** Close a worker's pane outright while its task waits on a prompt. **Pass:** the log
-   says `pane <id> is gone; holding …` once, `hpipe status` names it `(pane <id> is gone)`, the task's
-   stall ladder still climbs and escalates on time, and nothing is sent to the missing id.
+   says `pane <id> is gone; holding …` once, `hpipe status` names what is held for it — `⚠ 1 stall
+   probe for tN's worker undelivered for Xm (pane <id> is gone)` once its probe comes due — the
+   task's stall ladder still climbs and escalates on time, and nothing is sent to the missing id.
 4. **Stuck input box.** In an idle worker pane, type text without submitting it, then trigger a
-   prompt to that worker (a rewind into its phase). **Record** what happens: herdr's `agent prompt`
-   does not clear the box, so the prompt is submitted with your text prepended — measured with
-   Claude Code 2.1 in an isolated herdr 0.9.0 session. The supervisor only clears the box after a
-   send herdr reports as `agent_prompt_stalled`, and then re-sends the whole prompt on a later tick.
-   It presses one `ctrl+c` only on a **worker** pane (never the orchestrator's, where you type),
-   only if the agent reads idle both before the box is read and again immediately before the press,
-   only if `pane read --source visible` shows text between the two rules framing the `❯` box and
-   every line of it is a `[Pasted text #N…]` placeholder or a piece of the prompt it just sent, and
-   never twice to one pane within 10s — a second press inside Claude's "again to exit" window quits
-   the agent. Anything else in the box is reported instead: the log and `hpipe status` say
-   `stuck input in <pane>`, and nothing more is sent there until the box is empty. **Check** that
-   typing a draft into the orchestrator's box during a stalled digest leaves the draft intact and
-   produces that status line; that no clear ever hit an empty box or a working agent; and that the
-   box parser still recognises the Claude version in use (a changed layout makes it press nothing,
-   which is the safe failure). Whether a real stall reproduces on demand is still open.
+   prompt to that worker (a rewind into its phase, or a stall probe). herdr's `agent prompt` does not
+   clear the box, so a send there would be submitted with your text prepended — measured with Claude
+   Code 2.1 in an isolated herdr 0.9.0 session, and the agent then ignored the prompt as a draft. The
+   supervisor therefore reads the box (`pane read --source visible --format ansi`) before **every**
+   send, dropping faint text, which is how Claude draws its prompt suggestion. Text between the two
+   rules framing the `❯` box that is not the send's own holds the send: the log and `hpipe status`
+   say `stuck input in <pane>`, and nothing is sent there until the box is empty. The box is read
+   once per tick while it stays stuck. On the orchestrator's pane, where you type, any text holds
+   the send and nothing is ever pressed. On a worker pane the only text it clears is a send the supervisor saw stall on that pane since its
+   last confirmed delivery, and a box holding nothing else: one `ctrl+c`, only if the agent reads idle both before the box is read
+   and again immediately before the press, only if every line of the box is a `[Pasted text #N…]`
+   placeholder or a piece of that prompt, and never twice to one pane within 10s — a second press
+   inside Claude's "again to exit" window quits the agent. **Check** that a draft typed into the
+   orchestrator's box before a decision prompt leaves the draft intact, holds the prompt, and
+   produces that status line; that submitting or clearing the draft releases it within a tick; that a
+   box showing only Claude's greyed suggestion does **not** hold anything; that no clear ever hit an
+   empty box or a working agent; and that the box parser still recognises the Claude version in use
+   (a changed layout makes it read no box and send as before, which is the pre-#92 behaviour). **Record** how the box renders, with
+   `herdr pane read <pane> --source visible --format ansi | cat -v`: a typed draft must carry no
+   `^[[2m` (faint) before it, or it would be dropped as a suggestion and sent over; a pasted draft
+   must show its `[Pasted text #N…]` placeholder (kept even if faint); and a named session's top
+   rule must still show at least two `─` before its name in the narrowest pane you use.
 5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
    for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
    its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see

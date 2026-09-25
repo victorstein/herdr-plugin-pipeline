@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, describeWake, type EventSaveDeps, parkedFooter, pickOneAdvance,
+  applyEvents, catchUpDigest, describeWake, type EventSaveDeps, parkedFooter, pickOneAdvance,
   saveEventedRuns, type WakeLine,
 } from '../src/supervisor/tick'
 import { actionFor, ageMinutes } from '../src/lib/status'
@@ -822,4 +822,19 @@ test('a run asking after a slow send gets a fresh idle reading, not the one from
   clock.now = 7000
   expect(await idle('w1:p1')).toBe(false)
   expect(builds).toBe(2)
+})
+
+test('a catch-up names every task\'s phase, age and whose move it is, from the ledger — #91', () => {
+  const now = 10 * 60_000
+  const run = mkRun([
+    mkTask({ task_id: 't2', branch: 'b/two', issue: 2, phase: 'merge', phase_entered_at: 0 }),
+    mkTask({ task_id: 't1', phase: 'spec', phase_entered_at: 7 * 60_000 }),
+  ])
+  run.phase_entered_at = 0
+  const text = catchUpDigest(run, now, 'hp')
+  expect(text.split('\n')).toEqual([
+    'catch-up: digests for this run did not reach you, so here is where it stands now (run in execute 10m):',
+    `- t1 feat/x (#1) [spec 3m] — ${actionFor(run, run.tasks[1] as Task, 'hp', now)}`,
+    `- t2 b/two (#2) [merge 10m] — ${actionFor(run, run.tasks[0] as Task, 'hp', now)}`,
+  ])
 })

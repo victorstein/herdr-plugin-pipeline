@@ -30,6 +30,8 @@ export interface Delivery {
   run: Run
   /** The outbox entries this delivery carries, so its outcome can be written back to each. */
   sources: Array<{ run: Run; outboxId: string }>
+  /** Carries event lines or text kept nowhere else, so an undelivered one is lost. */
+  ephemeral?: boolean
 }
 
 export function buildDigest(input: DigestInput): string {
@@ -107,7 +109,9 @@ function deliveryOf(unit: PendingPrompt[], group: PendingPrompt[], leads: boolea
     : body
   const sources = unit.flatMap((p) =>
     (p.outboxId === undefined ? [] : [{ run: p.run, outboxId: p.outboxId }]))
-  return { paneId: first.paneId, text, run: first.run, sources }
+  const ephemeral = unit.some((p) =>
+    p.events.length > 0 || (p.outboxId === undefined && p.text.length > 0))
+  return { paneId: first.paneId, text, run: first.run, sources, ephemeral }
 }
 
 /** The tick's prefix for a lib-level anomaly; `src/lib/` emits none of its own. */

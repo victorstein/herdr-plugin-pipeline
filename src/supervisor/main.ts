@@ -16,15 +16,19 @@ import {
   refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
-  boundedProbeSend, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
+  boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending,
+  readyPanes,
 } from './courier'
+import { HEALTH_REFRESH_MS, writeDeliveryHealth } from '../lib/delivery-health'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
   applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
   taskStallCandidates, undeliveredNote,
 } from './stall'
-import { applyEvents, describeWake, parkedFooter, pickOneAdvance, saveEventedRuns } from './tick'
+import {
+  applyEvents, catchUpDigest, describeWake, parkedFooter, pickOneAdvance, saveEventedRuns,
+} from './tick'
 import { ciTransitions } from './ci'
 import { worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
@@ -150,6 +154,9 @@ async function main(): Promise<void> {
       claimedPanes.has(paneId) || knownRuns.some((r) => r.orchestrator_pane === paneId),
   })
   const sendProbe = boundedProbeSend(send)
+  const catchUps = new CatchUps()
+  let healthRevision = -1
+  let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
   let lastCiPollMs = 0
 
@@ -341,8 +348,13 @@ async function main(): Promise<void> {
         }
       }
 
-      for (const run of deliverFrom) pending.push(...outboxPending(run, footers.get(run)))
-      const settlements = await flushDeliveries(deliveriesFor(pending), send)
+      for (const run of deliverFrom) {
+        pending.push(...outboxPending(run, footers.get(run)))
+        pending.push(...catchUps.pendingFor(run, (r) => catchUpDigest(r, tickNow, hpipe)))
+      }
+      const settlements = await flushDeliveries(
+        deliveriesFor(pending), send, undefined, (delivery, delivered) => catchUps.note(delivery, delivered),
+      )
       for (const run of deliverFrom) {
         const settled = settlements.get(run) ?? []
         // Pruned here too, not only in the advancing loop: a run that is never
@@ -412,6 +424,14 @@ async function main(): Promise<void> {
         ),
         stallDeps,
       )
+
+      if (gate.revision !== healthRevision || Date.now() - healthWrittenAt >= HEALTH_REFRESH_MS) {
+        healthWrittenAt = Date.now()
+        await writeDeliveryHealth(stateDir, session, {
+          pid: process.pid, written_at: healthWrittenAt, panes: gate.holds(),
+        })
+        healthRevision = gate.revision
+      }
     } catch (error) {
       console.error('[pipeline] tick error:', error)
     }

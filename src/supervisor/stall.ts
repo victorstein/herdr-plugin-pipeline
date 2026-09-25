@@ -4,24 +4,13 @@ import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
+import { probeRecipient } from '../lib/outbox'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
-
-/**
- * A row whose actor has no pane of its own is stranded until someone outside it
- * acts, so the table points it at the orchestrator. A worker row can also end up
- * paneless — a dispatch prompt that never landed leaves no pane to nudge — and
- * the same fallback keeps the probe reaching someone.
- */
-function probePaneFor(run: Run, row: PhaseRow<string>, taskPane: string | null): string | null {
-  if (row.probeTarget === 'orchestrator') return run.orchestrator_pane
-  if (row.actor === 'worker') return taskPane ?? run.orchestrator_pane
-  return run.orchestrator_pane
-}
 
 const MS_PER_MINUTE = 60_000
 
@@ -55,7 +44,7 @@ export interface StallCandidate {
 /**
  * The pane of the actor that OWNS the row, with no orchestrator fallback. A
  * paneless worker yields `null`, meaning "the owner is gone, escalate without
- * consulting anyone" — consulting `probePaneFor`'s fallback would gate a
+ * consulting anyone" — consulting `probeRecipient`'s fallback would gate a
  * worker's escalation on an unrelated agent's status.
  */
 function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
@@ -76,9 +65,7 @@ function candidateFor(
   now: number, thresholdMinutes: number, probeMax: number,
 ): StallCandidate | null {
   const toOrchestrator = owedABrief(run, task)
-  const paneId = toOrchestrator
-    ? run.orchestrator_pane
-    : probePaneFor(run, row, task?.pane_id ?? null)
+  const paneId = probeRecipient(run, task)
   if (!paneId) return null
 
   const state = stallStateFor(run, record)
