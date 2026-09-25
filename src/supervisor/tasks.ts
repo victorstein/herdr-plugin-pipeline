@@ -8,9 +8,9 @@ import {
 } from '../lib/gating'
 import type { RunEffect } from '../lib/ledger'
 import type { IssueView, PrView } from '../lib/gh'
-import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
+import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
-import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
+import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
@@ -18,6 +18,7 @@ import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
+import type { CheckSubmission } from './courier'
 import { runTeardown, type TeardownDeps } from './teardown'
 
 export interface TaskDeps extends TeardownDeps {
@@ -314,7 +315,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
 
-      if (await isFresh(absolute, task.phase_entered_at)) {
+      if (await isFresh(absolute, artifactFreshAfter(task))) {
         if (!(await isSettled(absolute, deps.fileSettleMs))) return base
         return { ...base, artifactFresh: true }
       }
@@ -395,20 +396,49 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
   }
 }
 
+/** The review verdict at the task's reserved path, if one newer than its baseline has settled. */
+export async function freshVerdict(run: Run, task: Task, settleMs: number): Promise<VerdictResult | null> {
+  const absolute = absoluteArtifactPath(run, task)
+  if (!absolute) return null
+  if (!(await isFresh(absolute, artifactFreshAfter(task)))) return null
+  if (!(await isSettled(absolute, settleMs))) return null
+  return parseVerdict(absolute)
+}
+
 export interface AnswerDeps {
   pluginRoot: string
   promptRetryMax: number
   /** `held` means nothing was sent — the delivery gate is pausing that pane. */
   send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string; held?: string }>
+  /** Reads the worker's box on a later tick to see a sent answer submitted. */
+  checkSubmission: CheckSubmission
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
 }
 
-export function markAnswerDelivered(
-  run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase,
-): void {
+function awaitingAnswer(run: Run, taskId: string, decisionId: string): Task | null {
   const task = run.tasks.find((t) => t.task_id === taskId)
-  if (task?.phase !== 'blocked-on-decision' || task.pending_answer !== decisionId) return
+  if (task?.phase !== 'blocked-on-decision' || task.pending_answer !== decisionId) return null
+  return task
+}
+
+export function markAnswerSent(run: Run, taskId: string, decisionId: string, at: number): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (task) task.answer_sent_at = at
+}
+
+export function markAnswerStalled(run: Run, taskId: string, decisionId: string, sentAt: number): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (task?.answer_sent_at !== sentAt) return
+  task.delivery_attempts += 1
+  delete task.answer_sent_at
+}
+
+export function markAnswerDelivered(
+  run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase, seenWorking: boolean,
+): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (!task) return
   task.pending_answer = null
   task.delivery_attempts = 0
   // No prompt is rendered here, deliberately: `answer.md` has already been sent,
@@ -416,6 +446,7 @@ export function markAnswerDelivered(
   // move the file the agent was told to write. A resume is not a new review.
   enterTaskPhase(run, task, resumeTo, `decision ${decisionId} answered`)
   task.decision_from = null
+  if (seenWorking) task.worked_on_answer = true
 }
 
 export function markDecisionAnnounced(
@@ -431,6 +462,11 @@ export function markDecisionAnnounced(
  * A worker busy for more than PROMPT_RETRY_MAX ticks would otherwise have its
  * phase reset, its delivery abandoned, and would then complete the phase with
  * the answer unread — with run.history asserting the decision was applied.
+ *
+ * Successful means seen submitted on a later tick, not merely taken up: a resumed
+ * phase may clear on a verdict written before the decision, so the answer must be
+ * in, not in the box. Checked across ticks rather than waited on, so one answer
+ * Claude is slow to submit cannot hold every other send of the tick.
  */
 export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise<void> {
   for (const task of run.tasks) {
@@ -451,6 +487,26 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       phase: resumeTo,
     })
 
+    const taskId = task.task_id
+    const decisionId = decision.id
+
+    if (task.answer_sent_at !== undefined) {
+      const sentAt = task.answer_sent_at
+      const check = await deps.checkSubmission(task.pane_id, text, sentAt)
+      if (check.state === 'stalled') {
+        markAnswerStalled(run, taskId, decisionId, sentAt)
+        deps.effects?.push((fresh) => markAnswerStalled(fresh, taskId, decisionId, sentAt))
+      }
+      if (check.state !== 'submitted') continue
+      const seenWorking = check.working === true
+      markAnswerDelivered(run, taskId, decisionId, resumeTo, seenWorking)
+      deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo, seenWorking))
+      continue
+    }
+
+    // Stamped before the send: herdr's `working` event can be stamped before the
+    // confirmed send returns, and `noteWorkingAfterAnswer` compares against this.
+    const at = Date.now()
     const result = await deps.send(task.pane_id, text)
     if (!result.ok) {
       // A held send never reached herdr, so it must not spend the attempts that
@@ -459,10 +515,8 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       continue
     }
 
-    const taskId = task.task_id
-    const decisionId = decision.id
-    markAnswerDelivered(run, taskId, decisionId, resumeTo)
-    deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo))
+    markAnswerSent(run, taskId, decisionId, at)
+    deps.effects?.push((fresh) => markAnswerSent(fresh, taskId, decisionId, at))
   }
 }
 

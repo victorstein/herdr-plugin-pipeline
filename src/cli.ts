@@ -14,7 +14,7 @@ import {
   wasAborted, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
-import { enterTaskPhase } from './lib/machine'
+import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { enqueue } from './lib/outbox'
 import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
@@ -702,6 +702,11 @@ async function rewind(ctx: Ctx, input: {
     task.passes = {}
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
+    // Rewinding into the decision is how an escalation out of one resumes; the
+    // asked-from phase's entry still stands for the answer that is coming.
+    const keptBaseline = input.phase === 'blocked-on-decision' ? task.artifact_fresh_after : undefined
+    forgetDecisionRoundTrip(task)
+    if (keptBaseline !== undefined) task.artifact_fresh_after = keptBaseline
     task.escalated_from = null
     // Written here because a rewind bypasses `enterTaskPhase`. A paneless rewind
     // into the briefed phase is handed to a fresh agent through `dispatch --task`,
@@ -841,6 +846,7 @@ async function answer(ctx: Ctx, input: {
   // the task, or a slow worker's late file touch would complete the phase unread.
   task.pending_answer = decision.id
   task.delivery_attempts = 0
+  delete task.answer_sent_at
   await saveRun(ctx.stateDir, run)
   return ok(`recorded answer to ${decision.id} on ${input.task}; pending delivery`)
 }

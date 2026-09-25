@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test'
-import { advanceTask, bumpCounter, counterFor, enterTaskPhase } from '../src/lib/machine'
+import {
+  advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, noteWorkingAfterAnswer,
+} from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
@@ -323,4 +325,78 @@ test('blocked-on-files advances only when no sibling holds overlapping files', (
   }
   expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
   expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
+})
+
+// ——— resuming from a decision — #115 ———
+
+/** Asks from the task's phase, sends the answer at `sentAt`, and resumes. */
+function roundTrip(run: Run, task: Task, sentAt: number, workedAt: number | null): void {
+  const asked = task.phase
+  task.decision_from = asked
+  enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
+  task.answer_sent_at = sentAt
+  if (workedAt !== null) noteWorkingAfterAnswer(task, workedAt)
+  enterTaskPhase(run, task, asked, 'decision answered')
+}
+
+test('a resume keeps the asked-from phase\'s entry once the worker is seen working on the answer', () => {
+  const { run, task } = fixture('plan-review')
+  task.phase_entered_at = 1_000
+  roundTrip(run, task, 5_000, 5_500)
+
+  expect(task.phase_entered_at).toBeGreaterThan(1_000)
+  expect(artifactFreshAfter(task)).toBe(1_000)
+})
+
+test('until the worker is seen working on the answer, the resumed phase judges against its own entry', () => {
+  const { run, task } = fixture('plan-review')
+  task.phase_entered_at = 1_000
+  roundTrip(run, task, 5_000, null)
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
+
+  noteWorkingAfterAnswer(task, 4_999)
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
+  noteWorkingAfterAnswer(task, 5_000)
+  expect(artifactFreshAfter(task)).toBe(1_000)
+})
+
+test('a second decision in a resumed phase keeps the phase\'s original entry, and needs its own work seen', () => {
+  const { run, task } = fixture('spec')
+  task.phase_entered_at = 1_000
+  roundTrip(run, task, 5_000, 5_500)
+  task.decision_from = 'spec'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'd2')
+  expect(task.worked_on_answer).toBeUndefined()
+  expect(task.answer_sent_at).toBeUndefined()
+  task.answer_sent_at = 9_000
+  noteWorkingAfterAnswer(task, 9_100)
+  enterTaskPhase(run, task, 'spec', 'decision d2 answered')
+
+  expect(artifactFreshAfter(task)).toBe(1_000)
+})
+
+test('an escalation out of a decision keeps the baseline for the rewind back into it', () => {
+  const { run, task } = fixture('plan-review')
+  task.phase_entered_at = 1_000
+  task.decision_from = 'plan-review'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'd1')
+  enterTaskPhase(run, task, 'escalated', 'no answer')
+  expect(task.artifact_fresh_after).toBe(1_000)
+})
+
+test('any transition other than the resume drops the round trip\'s record', () => {
+  const { run, task } = fixture('spec')
+  task.phase_entered_at = 1_000
+  roundTrip(run, task, 5_000, 5_500)
+  enterTaskPhase(run, task, 'spec-review', 'cleared')
+
+  expect(task.artifact_fresh_after).toBeUndefined()
+  expect(task.answer_sent_at).toBeUndefined()
+  expect(task.worked_on_answer).toBeUndefined()
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
+})
+
+test('a task that never asked a decision is judged against its phase entry', () => {
+  const { task } = fixture('research')
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
 })

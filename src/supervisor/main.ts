@@ -16,12 +16,12 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import { crashLogPath, reapSupervisorSiblings } from '../startup'
 import {
-  absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
+  deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
-  boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending,
-  readyPanes,
+  boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, makeSubmissionCheck,
+  outboxPending, queuePending, readyPanes,
 } from './courier'
 import { HEALTH_REFRESH_MS, writeDeliveryHealth } from '../lib/delivery-health'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
@@ -36,8 +36,7 @@ import {
 } from './tick'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
-import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
-import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
+import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
@@ -183,6 +182,7 @@ async function main(): Promise<void> {
     humanTypesIn: (paneId) =>
       claimedPanes.has(paneId) || knownRuns.some((r) => r.orchestrator_pane === paneId),
   })
+  const checkSubmission = makeSubmissionCheck(gate, herdr, config.PROMPT_CONFIRM_MS)
   const sendProbe = boundedProbeSend(send)
   const catchUps = new CatchUps()
   let healthRevision = -1
@@ -304,13 +304,7 @@ async function main(): Promise<void> {
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
             issueView: (issue) => runGh.issueView(issue),
-            verdictFor: async (r, t) => {
-              const absolute = absoluteArtifactPath(r, t)
-              if (!absolute) return null
-              if (!(await isFresh(absolute, t.phase_entered_at))) return null
-              if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return null
-              return parseVerdict(absolute)
-            },
+            verdictFor: (r, t) => freshVerdict(r, t, config.FILE_SETTLE_MS),
             removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             removeCheckout: removeCheckoutWithGit,
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
@@ -333,6 +327,7 @@ async function main(): Promise<void> {
             pluginRoot,
             promptRetryMax: config.PROMPT_RETRY_MAX,
             send,
+            checkSubmission,
             effects,
           }
           await deliverPendingAnswers(run, answerDeps)

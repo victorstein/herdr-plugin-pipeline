@@ -1,13 +1,15 @@
 import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
+import { advanceTasks, deliverPendingAnswers, freshVerdict, promptForTaskPhase } from '../src/supervisor/tasks'
+import { answerDecision, openDecision } from '../src/lib/decisions'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
-import { counterFor } from '../src/lib/machine'
+import { counterFor, enterTaskPhase } from '../src/lib/machine'
 import { hpipeCommand } from '../src/lib/render'
-import type { Run, Task } from '../src/lib/types'
+import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
 afterEach(cleanupFixtures)
@@ -958,4 +960,116 @@ test('leaving the briefed phase drops the awaiting-brief mark — #89', async ()
   await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('spec')
   expect(run.tasks[0]?.awaiting_brief).toBeUndefined()
+})
+
+// ——— a decision asked after the phase's artifact is written — #115 ———
+
+const CLEAR_VERDICT = '# Review\n\nNothing blocks.\n\nVERDICT: CLEAR\nBLOCKERS: 0\nMAJORS: 0\n'
+
+/**
+ * The live sequence: the phase is entered, the worker writes its artifact, asks a
+ * decision, and the answer is sent and then seen submitted — each step on a later
+ * clock. `seenWorking` is whether the confirming read caught the worker on it.
+ */
+async function askAndAnswerAfterWriting(
+  run: Run, task: Task, write: () => string, seenWorking = true,
+): Promise<void> {
+  const now = Date.now()
+  task.phase_entered_at = now - 120_000
+  const written = write()
+  utimesSync(written, new Date(now - 90_000), new Date(now - 90_000))
+  task.decision_from = task.phase
+  const decision = openDecision(task, { question: 'which way?', recommendation: 'A' })
+  enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
+  answerDecision(task, decision.id, 'A', 'orchestrator')
+  task.pending_answer = decision.id
+  const answerDeps = {
+    pluginRoot: process.cwd(), promptRetryMax: 5, send: async () => ({ ok: true }),
+    checkSubmission: async () => ({ state: 'submitted' as const, working: seenWorking }),
+  }
+  await deliverPendingAnswers(run, answerDeps)
+  await deliverPendingAnswers(run, answerDeps)
+}
+
+async function reviewAnsweredAfterItsVerdict(seenWorking: boolean): Promise<{ run: Run; task: Task }> {
+  const worktree = tempDir('hpipe-decided-review-')
+  const task = mkTask({ phase: 'plan-review', checkout_path: worktree, artifacts: designArtifacts() })
+  const run = mkRun([task])
+  await promptForTaskPhase(run, task, deps(), 'plan')
+  await askAndAnswerAfterWriting(run, task, () => {
+    const verdict = absoluteArtifactPath(run, task) as string
+    mkdirSync(dirname(verdict), { recursive: true })
+    writeFileSync(verdict, CLEAR_VERDICT)
+    return verdict
+  }, seenWorking)
+  return { run, task }
+}
+
+test('a verdict written before the worker asked a decision clears the review once it is answered', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(true)
+  expect(task.phase).toBe('plan-review')
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('blocked-on-files')
+})
+
+test('an idle read before the worker is seen on the answer does not clear on the older verdict', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(false)
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('plan-review')
+
+  const working: QueuedEvent = {
+    kind: 'pane.agent_status_changed', session: 'p', at: Date.now(),
+    pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'working',
+  }
+  expect(applyEvents([run], [working], 'p', new Set()).changed).toBe(true)
+  expect(task.worked_on_answer).toBe(true)
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('blocked-on-files')
+})
+
+test('a working report from before the answer was sent does not count as work on it', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(false)
+  const before: QueuedEvent = {
+    kind: 'pane.agent_status_changed', session: 'p', at: (task.answer_sent_at as number) - 1,
+    pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'working',
+  }
+  applyEvents([run], [before], 'p', new Set())
+  expect(task.worked_on_answer).toBeUndefined()
+})
+
+test('an artifact written before the worker asked a decision clears its phase once it is answered', async () => {
+  const artifacts = designArtifacts()
+  const worktree = worktreeWith(artifacts.spec as string)
+  const task = mkTask({ phase: 'spec', checkout_path: worktree, artifacts })
+  const run = mkRun([task])
+
+  await askAndAnswerAfterWriting(run, task, () => join(worktree, artifacts.spec as string))
+  expect(task.phase).toBe('spec')
+
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec-review')
+})
+
+test('a verdict left from before the phase was entered still does not count after a decision', async () => {
+  const worktree = tempDir('hpipe-decided-stale-')
+  const task = mkTask({ phase: 'plan-review', checkout_path: worktree, artifacts: designArtifacts() })
+  const run = mkRun([task])
+  await promptForTaskPhase(run, task, deps(), 'plan')
+  const verdict = absoluteArtifactPath(run, task) as string
+  mkdirSync(dirname(verdict), { recursive: true })
+  writeFileSync(verdict, CLEAR_VERDICT)
+  const before = new Date(Date.now() - 300_000)
+  utimesSync(verdict, before, before)
+
+  await askAndAnswerAfterWriting(run, task, () => {
+    const unrelated = join(worktree, 'unrelated.md')
+    writeFileSync(unrelated, '')
+    return unrelated
+  })
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('plan-review')
 })

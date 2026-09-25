@@ -549,6 +549,70 @@ async function boxHold(
   return null
 }
 
+/** Whether any line of the box carries a paste placeholder or a piece of the sent text. */
+function boxHoldsAnyOf(box: string, sent: string): boolean {
+  const ours = squashSpace(sent)
+  return box.split('\n').some((line) => {
+    if (line.match(PASTE_PLACEHOLDER) !== null) return true
+    const rest = squashSpace(line)
+    return rest.length >= MIN_PIECE_CHARS && ours.includes(rest)
+  })
+}
+
+/**
+ * `pending`: nothing but this send is in the box. `stuck`: it is there beside
+ * someone else's text, so it is neither submitted nor ours to clear. A box of
+ * only someone else's text was typed after this send went in.
+ */
+export type Submission = 'submitted' | 'pending' | 'stuck'
+
+export function submissionOf(box: string | null, sent: string): Submission {
+  if (box === null || box.length === 0) return 'submitted'
+  if (boxHoldsOnly(box, sent)) return 'pending'
+  return boxHoldsAnyOf(box, sent) ? 'stuck' : 'submitted'
+}
+
+export interface SubmissionCheck {
+  state: Submission | 'stalled'
+  /** Read only once submitted: the agent was working on it at the confirming read. */
+  working?: boolean
+}
+
+export type CheckSubmission = (paneId: string, sent: string, sentAt: number) => Promise<SubmissionCheck>
+
+/**
+ * herdr's `--until working` can confirm while Claude still holds a long paste
+ * unsubmitted in its box: an answer read `working` at once and sat there as
+ * `[Pasted text #3 +11 lines]` for several seconds more. Measured on a live run.
+ * A send whose delivery moves state is therefore confirmed by reading the box on
+ * later ticks rather than by waiting inside this one. Still sitting there
+ * `confirmMs` after it was sent, it becomes a stall, so the next send clears it
+ * under #106's rules before sending again.
+ */
+export function makeSubmissionCheck(
+  gate: DeliveryGate, io: PromptIO, confirmMs: number, now: () => number = Date.now,
+): CheckSubmission {
+  return async (paneId, sent, sentAt) => {
+    // herdr's failed `pane read` comes back as an empty screen, which is not a
+    // screen showing no box: read as submitted, it resumed an unread answer.
+    const screen = await io.paneReadStyled(paneId, SCREEN_LINES)
+    const box = screen === '' ? undefined : inputBoxText(withoutFaintText(screen))
+    const state = box === undefined ? 'pending' : submissionOf(box, sent)
+    if (state === 'stuck') {
+      gate.markStuck(paneId)
+      return { state }
+    }
+    if (state === 'pending') {
+      if (now() - sentAt < confirmMs) return { state }
+      gate.noteStalled(paneId, sent)
+      gate.record(paneId, { ok: false, code: 'agent_prompt_stalled' })
+      return { state: 'stalled' }
+    }
+    if (box === '') gate.unstick(paneId)
+    return { state, working: (await io.agentStatus(paneId)) === 'working' }
+  }
+}
+
 /** Panes whose agent has just reported in: an answer is worth trying now, not at the end of a backoff. */
 export function readyPanes(events: readonly QueuedEvent[]): string[] {
   return events
