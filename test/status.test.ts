@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { actionFor, formatStatus, formatTaskDetail } from '../src/lib/status'
+import { actionFor, formatStatus, formatTaskDetail, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -591,4 +591,94 @@ test('a finished run with no tasks prints no ended line', () => {
   const run = mkRun()
   run.phase = 'done'
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('ended:')
+})
+
+test('a dispatch inside its grace reads as under way on its task line — #135', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true, phase_entered_at: now,
+    agent_status: 'unknown',
+  })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
+  expect(taskLine).toEndWith(`[research 0m] unknown — dispatch under way — see \`${HP} show --task t1\``)
+  expect(text).not.toContain('waiting on you:')
+})
+
+test('a run on an earlier schema carries no move on its task lines — #135', () => {
+  const run = mkRun()
+  run.schema_version = 1
+  run.tasks = [mkTask({ phase: 'spec' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain("worker's move")
+})
+
+test('a task line carries whose move it is, and one waiting on you is named only below — #135', () => {
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'spec' }),
+    mkTask({ task_id: 't2', phase: 'merge', pr: 7 }),
+  ]
+  const lines = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n')
+  expect(lines.find((line) => line.startsWith('  t1 ')))
+    .toEndWith("working — worker's move: waiting for its spec artifact")
+  expect(lines.find((line) => line.startsWith('  t2 '))).toEndWith('PR #7')
+  expect(lines.filter((line) => line.includes('YOUR move: waiting for PR #7'))).toHaveLength(1)
+})
+
+const heldSpecPrompt = (lastCode?: string) => {
+  const now = 100_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  const entered = now - 60_000
+  run.tasks = [mkTask({
+    phase: 'spec', phase_entered_at: entered, agent_status: 'idle', pane_id: 'w3:p1',
+    artifact_missing: { at: entered, path: '/wt/docs/specs/s.md', candidates: [] },
+  })]
+  const entry = enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, entered)
+  if (lastCode !== undefined) {
+    Object.assign(entry, { attempts: 1, last_code: lastCode, last_attempt_at: entered })
+  }
+  return { run, now }
+}
+
+test('a worker whose phase prompt is held by stuck input is not called idle with nothing — #136', () => {
+  const { run, now } = heldSpecPrompt()
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w3:p1']), now, {
+    holds: { 'w3:p1': { since: now - 60_000, failures: 0, code: 'stuck_input' } },
+  })
+  expect(text).not.toContain('with nothing at')
+  expect(text).toContain(
+    't1 feat/x (#1) [spec 1m] — YOUR move: its spec prompt is held by text in the input box of w3:p1',
+  )
+  expect(text).toContain('⚠ stuck input in w3:p1')
+})
+
+test('a send refused before it went out is named stuck from the gate\'s holds, as the digest passes them — #136', () => {
+  const { run, now } = heldSpecPrompt()
+  const holds = { 'w3:p1': { since: now - 60_000, failures: 0, code: 'stuck_input' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, holds))
+    .toStartWith('YOUR move: its spec prompt is held by text in the input box of w3:p1')
+  expect(waitsOnYou(run, run.tasks[0] as Task, now, holds)).toBe(true)
+})
+
+test('a send that stalled and then found a human\'s text is named stuck from the outbox alone — #136', () => {
+  const { run, now } = heldSpecPrompt('stuck_input')
+  expect(actionFor(run, run.tasks[0] as Task, HP, now))
+    .toStartWith('YOUR move: its spec prompt is held by text in the input box of w3:p1')
+})
+
+test('a phase prompt failing to reach its worker points at the delivery warning — #136', () => {
+  const { run, now } = heldSpecPrompt('agent_not_found')
+  expect(actionFor(run, run.tasks[0] as Task, HP, now))
+    .toBe('YOUR move: its spec prompt has not reached w3:p1 — see the ⚠ delivery line below')
+})
+
+test('a phase prompt still in flight is nobody\'s move yet — #136', () => {
+  const { run, now } = heldSpecPrompt()
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w3:p1']), now)
+  expect(text).not.toContain('with nothing at')
+  expect(text).not.toContain('waiting on you:')
+  expect(text).toContain('nothing for you — its spec prompt is queued for w3:p1')
 })

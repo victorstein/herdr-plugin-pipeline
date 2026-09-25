@@ -177,8 +177,13 @@ that merge even though nobody pulled local `main` (`git -C <worktree> merge-base
 `dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
 declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
 dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
-to five minutes from the dispatch (or from `worktree create`, once that binds), `hpipe status` reads `dispatch under way — …` for the task, starting at
-`worktree create` while it has no worktree, and lists nothing under `waiting on you:` (#120).
+to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
+in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
+is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
+dispatch in full, starting at `worktree create` while the task has no worktree. Every task line that is
+not waiting on you ends with its move clause the same way (`— worker's move: waiting for …`,
+`— nothing for you …`); a task waiting on you carries its clause under `waiting on you:` instead,
+never on both.
 Within a tick or two `hpipe status` shows the task bound: its `agent_status` stops being `unknown`.
 
 **Failure looks like (handoff):** `dispatch --task` exits 1 naming a herdr code. `agent_prompt_stalled`
@@ -309,7 +314,12 @@ watch -n 2 'hpipe status'
   `waiting on you:`. To provoke it, answer a worker's research prompt without writing the note. A
   line that says `worker's move` for that pane is a **finding**; so is the entry surviving once
   the worker is busy again. A worker that was never handed its brief is the exception — see #89
-  above.
+  above. So is a worker whose prompt for this phase has not reached it (#136): while that prompt
+  is held by stuck input its line reads `YOUR move: its <phase> prompt is held by text in the input
+  box of <pane> — …` beside the `⚠ stuck input in <pane>` line, while it fails to reach the pane
+  `YOUR move: its <phase> prompt has not reached <pane> — …`, and while it is merely queued
+  `nothing for you — its <phase> prompt is queued for <pane>`. `worker idle with nothing at` for
+  a worker owed its phase prompt is a **finding**.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
   all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
   is already sending a digest the footer is what reports it. Every task it names should also appear,
@@ -570,7 +580,9 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
    `herdr pane read <pane> --source visible --format ansi | cat -v`: a typed draft must carry no
    `^[[2m` (faint) before it, or it would be dropped as a suggestion and sent over; a pasted draft
    must show its `[Pasted text #N…]` placeholder (kept even if faint); and a named session's top
-   rule must still show at least two `─` before its name in the narrowest pane you use.
+   rule must still show at least two `─` before its name in the narrowest pane you use. When the
+   held send is a worker's phase prompt, also check that the task names the held prompt rather
+   than `worker idle with nothing at …` (#136; see §2).
 5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
    for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
    its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see

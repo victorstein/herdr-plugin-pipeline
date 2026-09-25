@@ -9,6 +9,7 @@ import {
 import type { RunEffect } from '../lib/ledger'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
+import { queuedWorkerPrompt } from '../lib/outbox'
 import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -59,13 +60,16 @@ const UNCOMMITTED_SAMPLE = 3
  * signal — and only once per idle spell: the worker has to go busy to change the
  * tree, and going busy drops the record, so the next idle spell checks afresh.
  */
-async function noteUncommittedWork(task: Task, actorIdle: boolean, deps: TaskDeps): Promise<void> {
+async function noteUncommittedWork(
+  run: Run, task: Task, actorIdle: boolean, deps: TaskDeps,
+): Promise<void> {
   const row = taskRow(task.phase)
   if (row.actor !== 'worker' || row.holdsFiles !== true || task.checkout_path === null) return
   if (!actorIdle) {
     delete task.uncommitted_work
     return
   }
+  if (queuedWorkerPrompt(run, task) !== null) return
   if (task.uncommitted_work?.at === task.phase_entered_at) return
 
   // An unreadable checkout is recorded as an empty observation, not skipped:
@@ -224,7 +228,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // while it is mid-turn, exactly as run phases are gated.
     if (row.actor === 'orchestrator' && !actorIdle) continue
 
-    await noteUncommittedWork(task, actorIdle, deps)
+    await noteUncommittedWork(run, task, actorIdle, deps)
     const signals = await gatherSignals(run, task, deps, actorIdle)
     if (!signals) continue
 
@@ -330,6 +334,13 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       const checkout = task.checkout_path
       if (slot === undefined || checkout === null) return base
 
+      // A worker not yet handed its brief (idle between `agent start` and
+      // `dispatch --task`), or whose prompt for this phase has not reached it —
+      // held by stuck input, a dead pane, or the next delivery — has written
+      // nothing in answer to it. Both were reported as stopped short, and a stray
+      // doc on the branch would be adopted as its artifact. Measured on a live run.
+      if (task.awaiting_brief === true || queuedWorkerPrompt(run, task) !== null) return base
+
       const claimed = new Set(
         [task.artifacts.research, task.artifacts.spec, task.artifacts.plan]
           .filter((path): path is string => path !== null),
@@ -340,9 +351,6 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         if (candidates.length > 1) {
           logAmbiguous(run, task, candidates, deps.ambiguityLog)
         }
-        // Between `agent start` and `dispatch --task` every worker is idle with
-        // nothing written, and was reported as stopped short. Measured on a live run.
-        if (task.awaiting_brief === true) return base
         task.artifact_missing = { at: task.phase_entered_at, path: absolute, candidates }
         return base
       }

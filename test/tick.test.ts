@@ -11,6 +11,7 @@ import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
 import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { enqueue } from '../src/lib/outbox'
 import { TASK_ROWS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
@@ -660,6 +661,17 @@ test('worker-owned, no-actor and terminal rows are not the footer\'s business', 
     run.tasks = [mkTask({ phase })]
     expect(parkedFooter(run, new Set(), now, 'hp'), `${phase} must not be listed`).toBe('')
   }
+})
+
+test('a worker whose phase prompt the gate holds on stuck input is in the footer and the catch-up — #136', () => {
+  const now = 1_000_000
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'spec', pane_id: 'w3:p1', phase_entered_at: now })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, now)
+  const holds = { 'w3:p1': { since: now, failures: 0, code: 'stuck_input' } }
+  const held = 'YOUR move: its spec prompt is held by text in the input box of w3:p1'
+  expect(parkedFooter(run, new Set(), now, 'hp')).toBe('')
+  expect(parkedFooter(run, new Set(), now, 'hp', holds)).toContain(held)
+  expect(catchUpDigest(run, now, 'hp', holds)).toContain(held)
 })
 
 test('the footer is empty for a run with no tasks', () => {

@@ -18,6 +18,17 @@ export function recipientPane(run: Run, entry: OutboxEntry): string | null {
   return run.tasks.find((t) => t.task_id === entry.task_id)?.pane_id ?? null
 }
 
+/**
+ * The task's own prompt still waiting in the outbox. Until it lands, an idle
+ * worker is idle because it was never told what this phase wants, not because it
+ * stopped short: status once called a worker whose spec prompt was held by stuck
+ * input "idle with nothing at" its spec path. Measured on a live run.
+ */
+export function queuedWorkerPrompt(run: Run, task: Task): OutboxEntry | null {
+  return (run.outbox ?? []).find((entry) =>
+    entry.to === 'worker' && entry.task_id === task.task_id && isCurrent(run, entry)) ?? null
+}
+
 export interface OutboxInput {
   to: OutboxEntry['to']
   taskId: string | null

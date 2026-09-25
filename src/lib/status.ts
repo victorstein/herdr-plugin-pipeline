@@ -3,7 +3,8 @@ import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { runIsDriven, wasAborted } from './ledger'
-import { deliveryWarnings, type PaneObservations } from './outbox'
+import type { PaneHold } from './delivery-health'
+import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import {
@@ -17,6 +18,7 @@ export interface StatusSupervisor {
 }
 
 const MS_PER_MINUTE = 60_000
+const DISPATCH_UNDER_WAY = 'dispatch under way'
 
 /** Clamped: a future stamp from clock skew must not print "-1m" at an operator. */
 export function ageMinutes(sinceMs: number, now: number): number {
@@ -79,6 +81,36 @@ interface Move {
   clause: string
 }
 
+export type PaneHolds = Readonly<Record<string, PaneHold>>
+
+/**
+ * A worker owed its own phase prompt has not been told what this phase wants, so
+ * neither "idle with nothing" nor uncommitted work says anything about it. A send
+ * refused before it goes out settles nothing, so the gate's holds are the only
+ * record of stuck input there; the entry's own last code is set only when a send
+ * stalled and then found a human's text in the box.
+ */
+function undeliveredPhasePrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
+  const entry = queuedWorkerPrompt(run, task)
+  if (entry === null) return null
+  const pane = task.pane_id ?? 'its pane'
+  const hold = task.pane_id === null ? undefined : holds[task.pane_id]
+  if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
+    return {
+      waitsOnYou: true,
+      clause: `YOUR move: its ${task.phase} prompt is held by text in the input box of ${pane} — ` +
+        'submit or clear that text; see the ⚠ stuck input line below',
+    }
+  }
+  if (hold !== undefined || entry.attempts > 0) {
+    return {
+      waitsOnYou: true,
+      clause: `YOUR move: its ${task.phase} prompt has not reached ${pane} — see the ⚠ delivery line below`,
+    }
+  }
+  return { waitsOnYou: false, clause: `nothing for you — its ${task.phase} prompt is queued for ${pane}` }
+}
+
 /**
  * The one way back from an escalation, for a run or for one of its tasks. Every
  * channel that tells an operator how to resume renders it here, so status, the
@@ -110,7 +142,7 @@ export function abandonParagraph(hpipe: string, run: Run, task: Task | null): st
     'stay queued; abandoning it moves them to `blocked-on-failure`.'
 }
 
-function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
+function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds = {}): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
   const notYours = (clause: string): Move => ({ waitsOnYou: false, clause })
@@ -147,11 +179,13 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
       // above claim every other case — and a dispatch still being carried out is
       // not yet the orchestrator's lapse. Measured on a live run.
       if (unbriefed.paneId === null) {
-        return notYours(`dispatch under way — ${remainingDispatchSteps(run, task, hpipe)}`)
+        return notYours(`${DISPATCH_UNDER_WAY} — ${remainingDispatchSteps(run, task, hpipe)}`)
       }
       return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
         briefCommand(task, unbriefed.paneId, hpipe))
     }
+    const undelivered = undeliveredPhasePrompt(run, task, holds)
+    if (undelivered) return undelivered
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
     const missing = currentMissingArtifact(run, task)
@@ -178,8 +212,10 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
  * The digest footer's predicate. It passes no CLI because only the clause needs
  * one, and the footer renders its clause through `actionFor` separately.
  */
-export function waitsOnYou(run: Run, task: Task, now: number = Date.now()): boolean {
-  return moveFor(run, task, '', now).waitsOnYou
+export function waitsOnYou(
+  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {},
+): boolean {
+  return moveFor(run, task, '', now, holds).waitsOnYou
 }
 
 /**
@@ -189,9 +225,24 @@ export function waitsOnYou(run: Run, task: Task, now: number = Date.now()): bool
  * operator different recovery commands for the same task.
  */
 export function actionFor(
-  run: Run, task: Task, hpipe: string, now: number = Date.now(),
+  run: Run, task: Task, hpipe: string, now: number = Date.now(), holds: PaneHolds = {},
 ): string {
-  return moveFor(run, task, hpipe, now).clause
+  return moveFor(run, task, hpipe, now, holds).clause
+}
+
+/**
+ * A move waiting on you is listed under `waiting on you:`; any other clause
+ * printed nowhere, so the grace's "dispatch under way" never showed. Measured on
+ * a live run. The grace's full recipe is left to `show`: on a line where nothing
+ * is owed yet it only buried the task.
+ */
+function taskLineMove(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds): string {
+  const move = moveFor(run, task, hpipe, now, holds)
+  if (move.waitsOnYou) return ''
+  if (move.clause.startsWith(DISPATCH_UNDER_WAY)) {
+    return ` — ${DISPATCH_UNDER_WAY} — see \`${hpipe} show --task ${task.task_id}\``
+  }
+  return ` — ${move.clause}`
 }
 
 /**
@@ -199,10 +250,10 @@ export function actionFor(
  * in `merge` for five hours rendered as one more ordinary line on the berean-os
  * run of 2026-09-16. Measured on a live run.
  */
-function waitingOnYou(run: Run, hpipe: string, now: number): string[] {
+function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const lines = byId.flatMap((task) => {
-    const move = moveFor(run, task, hpipe, now)
+    const move = moveFor(run, task, hpipe, now, holds)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
     return [`    ${task.task_id} ${task.branch} (#${task.issue}) [${task.phase} ${age}m] — ${move.clause}`]
@@ -316,6 +367,7 @@ export function formatStatus(
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
   panes: PaneObservations = {},
 ): string {
+  const holds = panes.holds ?? {}
   const lines: string[] = []
   lines.push(`session: ${session}`)
   lines.push(
@@ -376,12 +428,12 @@ export function formatStatus(
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' '))
+      lines.push(bits.join(' ') + (run.schema_version === 2 ? taskLineMove(run, task, hpipe, now, holds) : ''))
     }
 
     if (run.schema_version === 2) {
       lines.push(...intakeWarning(run, hpipe))
-      lines.push(...waitingOnYou(run, hpipe, now))
+      lines.push(...waitingOnYou(run, hpipe, now, holds))
       lines.push(...taskWarnings(run, hpipe, now))
       lines.push(...deliveryWarnings(run, livePanes, now, panes))
     }

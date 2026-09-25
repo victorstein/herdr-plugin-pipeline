@@ -6,6 +6,7 @@ import { answerDecision, openDecision } from '../src/lib/decisions'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
+import { enqueue } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
@@ -602,6 +603,42 @@ test('an idle worker whose branch added nothing records the missing artifact wit
   expect(run.tasks[0]?.artifact_missing).toEqual({
     at: 5, path: join(worktree, designArtifacts().research as string), candidates: [],
   })
+})
+
+test('an idle worker still owed its phase prompt is not recorded as missing its artifact — #136', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 5)
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeUndefined()
+
+  run.outbox = []
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeDefined()
+})
+
+test('a stray doc is not adopted as the spec of a worker never sent its spec prompt — #136', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/the-research.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/scratch.md', 'unrelated\n')
+  const artifacts = designArtifacts()
+  artifacts.research = 'docs/superpowers/notes/the-research.md'
+  const run = mkRun([mkTask({ phase: 'spec', phase_entered_at: 0, checkout_path: worktree, artifacts })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 0)
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifacts.spec).toBe(designArtifacts().spec)
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('an idle worker still owed its phase prompt is not inspected for uncommitted work — #136', async () => {
+  const git = dirtyTree(['src/a.ts'])
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'implement it' }, 5)
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+  expect(git.calls).toHaveLength(0)
+  expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
 })
 
 test('a working worker clears a missing-artifact record instead of reporting it', async () => {

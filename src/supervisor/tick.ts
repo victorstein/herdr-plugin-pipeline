@@ -2,7 +2,7 @@ import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { taskRow } from '../lib/phases'
-import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
+import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
@@ -47,7 +47,9 @@ function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: n
  * and nothing else, and every one was followed by `hpipe status`.
  * Measured on a live run.
  */
-export function describeWake(line: WakeLine, now: number, hpipe: string): string {
+export function describeWake(
+  line: WakeLine, now: number, hpipe: string, holds: PaneHolds = {},
+): string {
   const { run, task } = line
   if (task === null) {
     const box = phaseBox(line.phaseAtEvent, run.phase, run.phase_entered_at, now)
@@ -56,7 +58,7 @@ export function describeWake(line: WakeLine, now: number, hpipe: string): string
 
   const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
   const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
-    `${line.event} — ${actionFor(run, task, hpipe, now)}`
+    `${line.event} — ${actionFor(run, task, hpipe, now, holds)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
@@ -71,20 +73,20 @@ export function describeWake(line: WakeLine, now: number, hpipe: string): string
  * window, which is #19. Measured on a live run.
  */
 export function parkedFooter(
-  run: Run, covered: ReadonlySet<string>, now: number, hpipe: string,
+  run: Run, covered: ReadonlySet<string>, now: number, hpipe: string, holds: PaneHolds = {},
 ): string {
   const parked = run.tasks
     .filter((task) => !covered.has(task.task_id))
     // Dead ends are left to `hpipe status`: they never move again, so the footer
     // would repeat them on every digest for the rest of the run.
-    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now))
+    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now, holds))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
   if (parked.length === 0) return ''
 
   const lines = parked.map((task) =>
     `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
-    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now)}`)
+    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
   return ['also waiting on you:', ...lines].join('\n')
 }
 
@@ -94,12 +96,12 @@ export function parkedFooter(
  * task's phase, age and whose move it is, the lines `hpipe status` would give. An
  * orchestrator restarted after the window has no context but this.
  */
-export function catchUpDigest(run: Run, now: number, hpipe: string): string {
+export function catchUpDigest(run: Run, now: number, hpipe: string, holds: PaneHolds = {}): string {
   const lines = [...run.tasks]
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
     .map((task) =>
       `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
-      `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now)}`)
+      `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
   return [
     `catch-up: digests for this run did not reach you, so here is where it stands now ` +
     `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
