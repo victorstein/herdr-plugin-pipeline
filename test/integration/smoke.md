@@ -159,7 +159,7 @@ definition at …-dev.md` (wrong `--surface`).
 The orchestrator now creates a worktree per task and adopts its root pane:
 
 ```bash
-herdr worktree create --cwd <repo> --branch smoke/one --base <commit>   # the commit the Dispatch line names
+herdr worktree create --cwd <repo> --branch smoke/one --base <commit>   # the commit on the base: line
 # capture .result.root_pane.pane_id
 herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
 hpipe dispatch --task t1 --pane <root_pane_id>
@@ -168,9 +168,9 @@ hpipe dispatch --task t1 --pane <root_pane_id>
 **Observe:** `pane list --workspace <ws>` shows exactly ONE pane for that workspace before and
 after `agent start` — it adopts the existing root pane and creates no orphan. `hpipe dispatch --task`
 exits 0 with `brief for t1 delivered`, and the worker pane shows the brief submitted and the agent
-working on it — not text sitting in the input box. `hpipe show --task t1` prints the recorded task. The supervisor's `Dispatch tN …` line
-reads `worktree create --cwd <repo> --base <commit> (origin/<default> as just fetched)`; a
-`--depends-on` task dispatched after its dependency merged on GitHub is cut from a commit containing
+working on it — not text sitting in the input box. `hpipe show --task t1` prints the recorded task. Both
+`hpipe task` (dispatching at registration) and the supervisor's `Dispatch tN …` prompt carry a
+`base: <commit> (origin/<default> as just fetched)` header line; a `--depends-on` task dispatched after its dependency merged on GitHub is cut from a commit containing
 that merge even though nobody pulled local `main` (`git -C <worktree> merge-base --is-ancestor
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
 --abbrev-ref @{u}` fails with `no upstream configured`).

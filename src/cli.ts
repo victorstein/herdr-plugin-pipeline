@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
+import { baseLine, dependenciesMergedAt, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
@@ -209,7 +210,10 @@ type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<
 interface RegistrationAttempt {
   fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
   landed: (taskId: string) => void
+  dispatchBase: DispatchBaseFor
 }
+
+type DispatchBaseFor = (repoRoot: string, freshAfterMs: number) => Promise<DispatchBase>
 
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
@@ -366,12 +370,16 @@ async function registerTask(
 
   if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
 
+  // After the save, not before: nothing here is recorded, and a fetch between
+  // the read and the save only widens the window a concurrent write can take.
+  const base = await attempt.dispatchBase(run.repo_root, dependenciesMergedAt(task, run.tasks))
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`${header}\n\n${prompt}`)
+  return ok(`${header}\n${baseLine(base)}\n\n${prompt}`)
 }
 
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
+  dispatchBase: DispatchBaseFor = freshDispatchBase,
 ): Promise<CmdResult> {
   // The retry re-runs registerTask from a fresh read, so the gh call is memoized
   // out here: a second attempt reuses the issue the first one filed, never files another.
@@ -382,6 +390,7 @@ export async function cmdTask(
     fileIssueOnce: (repoRoot) =>
       (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
     landed: (taskId) => { outcome.registeredAs = taskId },
+    dispatchBase,
   }
   const filedIssue = async (): Promise<FiledIssue | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing

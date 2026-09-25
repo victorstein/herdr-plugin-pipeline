@@ -11,12 +11,15 @@ it the brief:
     herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
-**`<base>` is the commit the `Dispatch tN … --base <commit> (origin/main as just fetched)` line
-names** — pass the commit, not the ref in parentheses, and not one you pick. The supervisor fetched
-it just before telling you the task is ready; your local `main` is only as new as your last pull,
-and a task cut from it lacks whatever its dependencies merged since. A commit, unlike
-`origin/main`, leaves the new branch tracking nothing, so the worker's bare `git push` can never
-land on `main`. Measured on a live run.
+**`<base>` is the commit on the `base: <commit> (<ref> as just fetched)` line** — printed by
+`{{hpipe}} task` when it dispatches at registration, and by the `Dispatch tN …` prompt when a task
+becomes ready later. Pass the commit, not the ref in parentheses, and never a base you pick. It was
+fetched just before it was printed; your local `main` is only as new as your last pull, and a task
+cut from it lacks whatever its dependencies merged since. A commit, unlike a remote ref, leaves the
+new branch tracking nothing, so the worker's bare `git push` can never land on the default branch.
+Measured on a live run. If the line says `fetch failed: …; may be stale` instead, the commit is the
+last one fetched: fix what it names, or `git fetch` yourself, before cutting a task whose
+dependencies merged recently.
 
 **Never put the brief on the `agent start` line.** herdr refuses to encode an argument holding fences
 or backticks for the target shell (`invalid_agent_argument`), and every brief has both, so it fails
@@ -46,9 +49,10 @@ The brief is rendered for that task and carries the issue number, the surface, t
 supervisor watches and the task id the worker needs for `{{hpipe}} decide`. Do not summarise it or
 send the worker task text of your own: the issue body is the brief, and anything you say here instead
 of in the issue is lost. The copy you were shown is for you to read; `dispatch --task` sends its
-own. When it came from `{{hpipe}} task`, the three header lines above it — `task_id:`, `files:` and
-`bootstrap:` — are yours: confirm the `files:` line matches what you declared, and run what
-`bootstrap:` names in the new checkout before `agent start`. `{{hpipe}} brief --task <id>` prints
+own. When it came from `{{hpipe}} task`, the four header lines above it — `task_id:`, `files:`,
+`bootstrap:` and `base:` — are yours: confirm the `files:` line matches what you declared, cut the
+worktree from the `base:` commit, and run what `bootstrap:` names in the new checkout before
+`agent start`. `{{hpipe}} brief --task <id>` prints
 the bare brief again if you need to reread it, and `{{hpipe}} show --task <id>` prints what the run
 recorded for the task — its phase, files, dependencies, artifact paths, PR and CI.
 

@@ -159,8 +159,8 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 }
 
 /**
- * The mainline a worker worktree forks from. Dispatch cuts it from
- * `origin/<default>` (`freshDispatchBase`) and the pre-merge step merges
+ * The mainline a worker worktree forks from. Dispatch cuts it from the fetched
+ * `origin/<default>` commit (`freshDispatchBase`) and the pre-merge step merges
  * `origin/main`, while local `main` is often stale, so both refs count: against
  * `main` alone the merge-base stays behind and every doc that landed meanwhile
  * reads as added. Measured on this repo: six sibling-owned candidates.
@@ -179,13 +179,10 @@ const ARTIFACT_REMOTE_BASE_REF = 'refs/remotes/origin/main'
 // `diff.renames=true` is pinned rather than inherited: a user gitconfig disabling
 // rename detection turns a `git mv`d doc into a false `A` and therefore a false
 // candidate, which is the one way this scan can adopt the wrong file.
-async function git(
-  checkoutPath: string, args: string[], timeoutMs?: number,
-): Promise<{ code: number; text: string }> {
+async function git(checkoutPath: string, args: string[]): Promise<{ code: number; text: string }> {
   try {
     const proc = Bun.spawn(['git', '-c', 'diff.renames=true', '-C', checkoutPath, ...args], {
-      stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', timeout: timeoutMs,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      stdout: 'pipe', stderr: 'ignore',
     })
     const text = await new Response(proc.stdout).text()
     const code = await proc.exited
@@ -272,49 +269,6 @@ export async function uncommittedPaths(checkoutPath: string): Promise<string[] |
     .split('\n')
     .filter((line) => line.length > 3)
     .map((line) => line.slice(3))
-}
-
-const DISPATCH_FETCH_TIMEOUT_MS = 30_000
-
-/**
- * The ref a new worktree is cut from, fetched just before the dispatch prompt
- * names it. Local `main` is whatever the orchestrator last pulled, so a task
- * dispatched after its dependency merged upstream was cut without that code.
- * Measured on a live run (#87). The supervisor fetches rather than asking the
- * orchestrator to, because an instruction can be skipped and this cannot.
- *
- * The base is the fetched commit, not the ref: `worktree create --base
- * origin/main` makes the new branch track `origin/main`, and under
- * `push.default=upstream` a worker's bare `git push` would then push to main.
- * A commit start point sets no upstream. Measured on herdr 0.9.0.
- *
- * A failed fetch still names the remote ref: it is only as old as the last
- * fetch, and the orchestrator's `git pull` fetches too. With no remote at all
- * there is nothing newer than local `main`.
- */
-export async function freshDispatchBase(repoRoot: string): Promise<DispatchBase> {
-  const remoteHead = await git(repoRoot, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
-  const branch = remoteHead.code === 0 && remoteHead.text.trim().startsWith('origin/')
-    ? remoteHead.text.trim().slice('origin/'.length)
-    : 'main'
-
-  await git(repoRoot, ['fetch', '--quiet', 'origin', branch], DISPATCH_FETCH_TIMEOUT_MS)
-
-  const candidates: Array<[fullRef: string, ref: string]> = [
-    [`refs/remotes/origin/${branch}`, `origin/${branch}`],
-    [`refs/heads/${branch}`, branch],
-  ]
-  for (const [fullRef, ref] of candidates) {
-    const resolved = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${fullRef}^{commit}`])
-    if (resolved.code === 0) return { commit: resolved.text.trim(), ref }
-  }
-  return { commit: null, ref: branch }
-}
-
-/** `commit` is null only when neither ref resolves; the name is then all there is to pass. */
-export interface DispatchBase {
-  commit: string | null
-  ref: string
 }
 
 /**

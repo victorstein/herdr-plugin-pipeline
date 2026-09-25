@@ -34,7 +34,10 @@ plans its own issue.
    rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the
    task id, then a `files:` line echoing exactly what it recorded (or `files: none`) — check it says
    what you meant — and then either the worker brief to dispatch or `queued: waiting on …`, which is
-   correct, and you will be told when that task is ready.
+   correct, and you will be told when that task is ready. A brief to dispatch comes with a
+   `base: <commit> (…)` line: cut that task's worktree from that commit
+   (`herdr worktree create … --base <commit>`), never from your local `main`, which is only as new
+   as your last pull.
 
 5. **When the last task is registered, close intake:**
 

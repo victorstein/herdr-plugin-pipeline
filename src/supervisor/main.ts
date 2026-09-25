@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { loadConfig } from '../lib/config'
+import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
@@ -13,7 +14,7 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
-  freshDispatchBase, refreshBadges, uncommittedPaths,
+  refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
   boundedProbeSend, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
@@ -271,7 +272,13 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
-            freshDispatchBase,
+            freshDispatchBase: async (repoRoot, freshAfterMs) => {
+              const base = await freshDispatchBase(repoRoot, freshAfterMs)
+              if (base.fetchError !== null) {
+                console.error(`[pipeline] run ${run.run_id}: ${baseLine(base)}`)
+              }
+              return base
+            },
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to

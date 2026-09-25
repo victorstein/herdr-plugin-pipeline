@@ -66,12 +66,16 @@ test('the dispatch prompt pins the worktree to the run repo, not the focused wor
   expect(text).toContain('worktree create --cwd {{repo_root}}')
 })
 
-test('the dispatch prompt takes its base from the Dispatch line, never a stale local main', async () => {
+test('both dispatch paths point the orchestrator at the base: line, never a stale local main', async () => {
   // #87: `--base main` cut a dependent task from a local main that predated its
   // merged dependency. Live-run finding.
-  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  expect(text).not.toContain('--base main')
-  expect(text).toContain('--base <base>')
+  const dispatch = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(dispatch).not.toContain('--base main')
+  expect(dispatch).toContain('--base <base>')
+  expect(dispatch).toContain('`base:`')
+  const intake = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
+  expect(intake).toContain('`base: <commit> (…)`')
+  expect(intake).toContain('--base <commit>')
 })
 
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
@@ -240,13 +244,13 @@ test('the merge prompt asks for a bootstrap re-run where the rebase happens', as
   expect(text).toContain('.claude/pipeline-bootstrap')
 })
 
-test('the dispatch prompt names all three header lines, not two', async () => {
-  // cmdTask emits task_id:, files: and bootstrap:. A stale count here is how the
-  // convention drifts, and nothing else pins it.
+test('the dispatch prompt names all four header lines, not three', async () => {
+  // A dispatching cmdTask emits task_id:, files:, bootstrap: and base:. A stale
+  // count here is how the convention drifts, and nothing else pins it.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
   expect(text).toContain('bootstrap:')
-  expect(text).toContain('three header')
-  expect(text).not.toContain('two header')
+  expect(text).toContain('four header')
+  expect(text).not.toContain('three header')
 })
 
 test('the README documents the per-repo bootstrap contract', async () => {

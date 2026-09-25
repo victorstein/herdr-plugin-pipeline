@@ -183,6 +183,47 @@ test('the three seeded artifact paths are distinct and land in the right directo
   expect(task.artifacts.plan).toContain('docs/superpowers/plans/')
 })
 
+test('a task dispatched at registration prints the base it is cut from, fetched after its dependency merged', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'done', merged_at_ms: 7_000 }])
+  run.repo_root = repoDir
+  await saveRun(dir, run)
+  const requested: Array<[string, number]> = []
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/dependent', issue: 43, surface: 'core', notes: '',
+    dependsOn: ['t1'], files: [], keepWorktree: false,
+    repoKey: 'k', runId: null,
+  }, undefined, async (repoRoot, freshAfterMs) => {
+    requested.push([repoRoot, freshAfterMs])
+    return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
+  })
+
+  expect(result.ok).toBe(true)
+  expect(requested).toEqual([[repoDir, 7_000]])
+  const header = result.text.split('\n\n')[0]!.split('\n')
+  expect(header).toContain('base: 1fb8a43 (origin/main as just fetched)')
+})
+
+test('a queued registration fetches nothing and prints no base', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement' }])
+  run.repo_root = repoDir
+  await saveRun(dir, run)
+  let fetched = false
+
+  const result = await cmdTask(ctx(), {
+    branch: 'feat/later', issue: 44, surface: 'core', notes: '',
+    dependsOn: ['t1'], files: [], keepWorktree: false,
+    repoKey: 'k', runId: null,
+  }, undefined, async () => {
+    fetched = true
+    return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
+  })
+
+  expect(result.text).toContain('queued: waiting on t1')
+  expect(result.text).not.toContain('base:')
+  expect(fetched).toBe(false)
+})
+
 test('registering a task reopens intake', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   run.intake_closed = true
@@ -458,7 +499,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
     ciDetail: async () => '',
     ambiguityLog: new Set<string>(),
     uncommittedPaths: async () => [],
-    freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main' }),
+    freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null }),
   }
   await advanceTasks(saved, deps)
   expect(saved.tasks[0]?.phase).toBe('implement')
@@ -985,6 +1026,8 @@ test('task echoes the repo bootstrap on the dispatched return', async () => {
   expect(result.text).toContain('bootstrap: .claude/pipeline-bootstrap')
 })
 
+const fetchedBase = async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null })
+
 test('the dispatched return keeps every header line above the one blank line', async () => {
   declareBootstrap()
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
@@ -993,13 +1036,14 @@ test('the dispatched return keeps every header line above the one blank line', a
   const result = await cmdTask(ctx(), {
     branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  })
+  }, undefined, fetchedBase)
 
   const [head, ...rest] = result.text.split('\n\n')
   expect(head!.split('\n')).toEqual([
     'task_id: t1',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
+    'base: 1fb8a43 (origin/main as just fetched)',
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
   // so nothing meant for the worker may land among them.
@@ -1026,12 +1070,14 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   const result = await cmdTask(ctx(), {
     branch: 'feat/quiet', issue: 2, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  })
+  }, undefined, fetchedBase)
 
   // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
-  expect(head!.split('\n')).toEqual(['task_id: t1', 'files: none', 'bootstrap: none'])
+  expect(head!.split('\n')).toEqual([
+    'task_id: t1', 'files: none', 'bootstrap: none', 'base: 1fb8a43 (origin/main as just fetched)',
+  ])
   expect(rest.join('\n\n')).toStartWith('# feat/quiet — issue #2')
 })
 

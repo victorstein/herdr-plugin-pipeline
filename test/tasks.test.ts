@@ -44,7 +44,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   ciDetail: async () => '',
   ambiguityLog: new Set<string>(),
   uncommittedPaths: async () => [],
-  freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main' }),
+  freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null }),
   ...over,
 })
 
@@ -804,31 +804,29 @@ test('an unreadable checkout reports nothing and is retried only on the next idl
   expect(brokenGit.calls).toHaveLength(2)
 })
 
-test('the dispatch line bases the worktree on the commit just fetched, fetched once per tick', async () => {
-  const calls: string[] = []
-  const run = mkRun([mkTask({ task_id: 't1' }), mkTask({ task_id: 't2', branch: 'feat/y' })])
-  const prompts = await advanceTasks(run, deps({
-    freshDispatchBase: async (repoRoot: string) => {
-      calls.push(repoRoot)
-      return { commit: '1fb8a43', ref: 'origin/trunk' }
-    },
-  }))
 
-  expect(prompts).toHaveLength(2)
-  for (const prompt of prompts) {
-    expect(prompt.text.split('\n')[0]).toEndWith(
-      'worktree create --cwd /r --base 1fb8a43 (origin/trunk as just fetched):',
-    )
-  }
-  expect(calls).toEqual(['/r'])
-})
-
-test('a base with no resolvable commit is passed by name', async () => {
+test('the dispatch prompt names the base commit on its own line, above the blank line', async () => {
   const run = mkRun([mkTask({})])
   const prompts = await advanceTasks(run, deps({
-    freshDispatchBase: async () => ({ commit: null, ref: 'main' }),
+    freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/trunk', fetchError: null }),
   }))
-  expect(prompts[0]!.text.split('\n')[0]).toEndWith('worktree create --cwd /r --base main:')
+  const head = prompts[0]!.text.split('\n\n')[0]!.split('\n')
+  expect(head).toContain('base: 1fb8a43 (origin/trunk as just fetched)')
+})
+
+test('a dependent task asks for a base fetched after its dependency merged', async () => {
+  const requested: Array<[string, number]> = []
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 5_000 }),
+    mkTask({ task_id: 't2', branch: 'feat/y', depends_on: ['t1'] }),
+  ])
+  await advanceTasks(run, deps({
+    freshDispatchBase: async (repoRoot: string, freshAfterMs: number) => {
+      requested.push([repoRoot, freshAfterMs])
+      return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
+    },
+  }))
+  expect(requested).toEqual([['/r', 5_000]])
 })
 
 test('no fetch runs on a tick that dispatches nothing', async () => {
@@ -837,7 +835,7 @@ test('no fetch runs on a tick that dispatches nothing', async () => {
   await advanceTasks(run, deps({
     freshDispatchBase: async (repoRoot: string) => {
       calls.push(repoRoot)
-      return { commit: '1fb8a43', ref: 'origin/main' }
+      return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
     },
   }))
   expect(calls).toEqual([])

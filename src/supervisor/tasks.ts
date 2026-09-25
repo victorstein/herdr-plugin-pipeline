@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
+import { baseLine, dependenciesMergedAt, type DispatchBase } from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
   gateStatus, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, widenFiles,
@@ -15,9 +16,7 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import {
-  absoluteArtifactPath, adoptableArtifacts, type DispatchBase, warnToTick,
-} from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import { runTeardown, type WorktreeRemoval } from './teardown'
 
 export interface TaskDeps {
@@ -45,8 +44,8 @@ export interface TaskDeps {
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
   uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
-  /** Fetches and names the ref a dispatched worktree is cut from; see deliver.ts. */
-  freshDispatchBase: (repoRoot: string) => Promise<DispatchBase>
+  /** The commit a dispatched worktree is cut from; see lib/dispatch-base.ts. */
+  freshDispatchBase: (repoRoot: string, freshAfterMs: number) => Promise<DispatchBase>
 }
 
 const UNCOMMITTED_SAMPLE = 3
@@ -173,11 +172,6 @@ function actorPane(run: Run, task: Task): string | null {
   return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
 }
 
-function worktreeCreateClause(repoRoot: string, base: DispatchBase): string {
-  const create = `worktree create --cwd ${repoRoot} --base ${base.commit ?? base.ref}`
-  return base.commit === null ? create : `${create} (${base.ref} as just fetched)`
-}
-
 /**
  * Drives every task in a run one step. Each returned prompt names the pane it is
  * addressed to, because worker-owned rows send one tick's prompts to several
@@ -186,7 +180,6 @@ function worktreeCreateClause(repoRoot: string, base: DispatchBase): string {
  */
 export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt[]> {
   const prompts: TaskPrompt[] = []
-  let dispatchBase: DispatchBase | null = null
 
   // Tears down whatever was ALREADY sitting at `teardown` when this tick
   // started, before the loop below can advance anything else into that
@@ -207,10 +200,11 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       if (gate.state !== 'ready') continue
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
-      dispatchBase ??= await deps.freshDispatchBase(run.repo_root)
+      const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependenciesMergedAt(task, run.tasks))
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
-          `${worktreeCreateClause(run.repo_root, dispatchBase)}:\n` +
+          `worktree create --cwd ${run.repo_root}:\n` +
+          `${baseLine(dispatchBase)}\n` +
           `${bootstrapLine(repoBootstrap(run.repo_root))}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
