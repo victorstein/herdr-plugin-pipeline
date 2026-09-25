@@ -1032,6 +1032,67 @@ test('a worktree with no agent in it is probed on the orchestrator cadence — #
   expect(taskStallCandidates([started], NOW, 45, 3, 15)).toHaveLength(0)
 })
 
+test('a worker row with no worktree and no pane is told to the orchestrator as its own move — #94', () => {
+  // The live t3: `pane.exited` → failed → `rewind … research`, its workspace gone.
+  // `forget` leaves `checkout_path`, so the artifact branch named a path in a
+  // worktree nobody was working in.
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({
+    phase: 'research', workspace_id: null, pane_id: null, last_pane_id: 'w7:p1', checkout_path: '/wt',
+  })
+  task.artifacts.research = 'docs/superpowers/research/r.md'
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).not.toContain('Nothing has appeared at')
+  expect(a.clause).not.toContain('If you finished')
+  expect(a.clause).toContain('no worktree and no agent')
+  // Its checkout outlived the workspace, so `create` would fail on the existing path.
+  expect(a.clause.indexOf('`herdr worktree open --cwd /r --branch feat/x`'))
+    .toBeLessThan(a.clause.indexOf('`herdr worktree create --cwd /r --branch feat/x --base main`'))
+  expect(a.clause).toContain('worktree_not_found')
+  expect(a.clause).toContain('`hp dispatch --task t1 --pane <root pane>`')
+  expect(a.short).toContain('worktree')
+})
+
+test('a worktreeless task that never had a checkout is told to create one — #94', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', workspace_id: null, pane_id: null, checkout_path: null })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).toContain('`herdr worktree create --cwd /r --branch feat/x --base main`')
+  expect(a.clause).not.toContain('worktree open')
+})
+
+test('past the briefed phase, a worktreeless task is not offered the dispatch that would refuse it — #94', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', workspace_id: null, pane_id: null })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).not.toContain('dispatch --task')
+  expect(a.clause).toContain('`hp brief --task t1`')
+  expect(a.clause).toContain('in implement')
+})
+
+test('a rewind-queued phase prompt is the only handoff: the brief is not offered alongside it — #94', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', workspace_id: null, pane_id: null })
+  run.tasks = [task]
+  enqueue(run, { to: 'worker', taskId: 't1', text: '# Implement' }, NOW)
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).not.toContain('brief --task')
+  expect(a.clause).toContain('its brief and implement prompt are already queued')
+})
+
+test('a worktreeless worker row is probed on the orchestrator cadence — #94', () => {
+  const entered = NOW - 20 * 60_000
+  const run = runWithTask({
+    phase: 'research', workspace_id: null, pane_id: null, phase_entered_at: entered, adopted_at: null,
+  })
+  const out = taskStallCandidates([run], NOW, 45, 3, 15)
+  expect(out.map((c) => c.paneId)).toEqual([ORCHESTRATOR_PANE])
+  expect(out[0]?.thresholdMs).toBe(15 * 60_000)
+})
+
 test('a worktree still inside the bootstrap grace keeps the worker threshold — #12', () => {
   const unstarted = runWithTask({
     phase: 'research', pane_id: null, phase_entered_at: NOW - 20 * 60_000, adopted_at: NOW - 60_000,

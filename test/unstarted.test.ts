@@ -62,7 +62,7 @@ test('it is overdue only once the bootstrap grace has passed since adoption', ()
 })
 
 test('the command looks for an agent before starting one, then hands the brief over', () => {
-  const text = startWorkerCommand(mkTask({}), 'w23', 'hp')
+  const text = startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp')
   expect(text.indexOf('herdr pane list --workspace w23'))
     .toBeLessThan(text.indexOf('herdr agent start'))
   expect(text).toContain('its detection was missed')
@@ -71,7 +71,7 @@ test('the command looks for an agent before starting one, then hands the brief o
 })
 
 test('past the briefed phase the command does not offer the dispatch that would refuse it', () => {
-  const text = startWorkerCommand(mkTask({ phase: 'implement' }), 'w23', 'hp')
+  const text = startWorkerCommand(mkRun(), mkTask({ phase: 'implement' }), 'w23', 'hp')
   expect(text).not.toContain('dispatch --task')
   expect(text).toContain('`hp brief --task t1`')
   expect(text).toContain('in implement')

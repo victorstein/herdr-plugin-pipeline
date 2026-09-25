@@ -85,7 +85,17 @@ export async function promptForTaskPhase(
   // told where to write. Guarded on `signal`, not on a missing `artifact` — `ci`,
   // `merge`, `close` and `implement` also have no artifact slot and must not reserve.
   if (taskRow(task.phase).signal === 'verdict') reserveVerdict(run, task, task.phase, warnToTick)
+  return renderTaskPhasePrompt(run, task, deps, cameFrom)
+}
 
+/**
+ * The phase prompt against the verdict path already reserved. `cmdRewind` reserves
+ * its own and prints it, so rendering through `promptForTaskPhase` there would burn
+ * a second key and hand the agent a path the rewind did not name.
+ */
+export async function renderTaskPhasePrompt(
+  run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
+): Promise<string> {
   const common = {
     run_id: run.run_id,
     branch: task.branch,

@@ -116,6 +116,16 @@ test('every action declared in the manifest has a script on disk', async () => {
   }
 })
 
+test('every hook declared in the manifest has a script on disk, and worktree.opened is one — #94', async () => {
+  const manifest = await Bun.file(join(ROOT, 'herdr-plugin.toml')).text()
+  for (const [, path] of manifest.matchAll(/command = \["bun", "run", "(src\/hooks\/[^"]+)"\]/g)) {
+    expect(existsSync(join(ROOT, path as string)), `${path} is declared but missing`).toBe(true)
+  }
+  // `herdr worktree open` emits only this, never `worktree.created`, so without it
+  // a task whose checkout survived its workspace can never be bound again.
+  expect(manifest).toMatch(/on = "worktree\.opened"\ncommand = \["bun", "run", "src\/hooks\/worktree-opened\.ts"\]/)
+})
+
 test('the plugin manifest version matches version.txt', async () => {
   // release-please's `simple` type bumps version.txt; the manifest is only kept
   // in step once stein-infra adds extra-files. Until then this catches drift.

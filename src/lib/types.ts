@@ -11,7 +11,7 @@ export type Verdict = 'CLEAR' | 'BLOCKER'
 export type CiBucket = 'pass' | 'fail' | 'pending' | 'skipping' | 'cancel' | 'unknown'
 
 export type EventKind =
-  | 'worktree.created' | 'worktree.removed'
+  | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
   | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited'
 
 export interface QueuedEvent {

@@ -7,6 +7,7 @@ import {
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask, recordWorkerPane,
 } from '../src/cli'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
+import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
 import { openDecisionFor } from '../src/lib/decisions'
@@ -590,6 +591,19 @@ test('brief renders a worker brief without mutating the run', async () => {
   expect(result.text).toContain('11')
   expect(result.text).toContain('land first')
   expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('past research the brief leaves out the research section a fresh agent would obey — #94', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'research' }])
+  run.repo_key = 'k'
+  await saveRun(dir, run)
+  expect((await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })).text)
+    .toContain('## Phase 1 — research')
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
+  const past = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(past.text).toContain('Your task id is `t1`')
+  expect(past.text).not.toContain('## Phase 1 — research')
 })
 
 test('the brief states the path contract without promising a recovery', async () => {
@@ -1376,4 +1390,155 @@ test('concurrent commands on one run each land instead of the last one winning',
 
   const onDisk = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(onDisk?.tasks.map((t) => t.files)).toEqual([[], [], [], [], []])
+})
+
+// #88: a rewind is a phase entry the supervisor never made, so nothing else
+// would ever prompt for it.
+const savedRun = async (runId: string): Promise<Run> =>
+  (await listRuns(dir, 'personal')).find((r) => r.run_id === runId) as Run
+
+test('a task rewind owes its worker the phase prompt, in the same save', async () => {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'escalated', escalated_from: 'implement',
+    workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: repoDir,
+  }])
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+  expect(result.text).toContain('its prompt is queued for w7:p1')
+
+  const saved = await savedRun(run.run_id)
+  const task = saved.tasks[0] as Task
+  expect(saved.outbox).toHaveLength(1)
+  expect(saved.outbox?.[0]).toMatchObject({ to: 'worker', task_id: 't1', entered_at: task.phase_entered_at })
+  expect(saved.outbox?.[0]?.text).toContain('# Implement — b (#1)')
+  // A live agent already holds the brief; only the phase is sent.
+  expect(saved.outbox?.[0]?.text).not.toContain('Your task id is')
+  expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])
+})
+
+test('a rewind onto a review row prompts with the one path it printed, reserved once', async () => {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'escalated', escalated_from: 'pr-review-quality',
+    workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: repoDir,
+  }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'pr-review-quality', taskId: 't1' })
+  expect(result.text).toContain('issue-1-pr-review-quality-0.md')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved.tasks[0]?.verdict_seq?.['pr-review-quality']).toBe(1)
+  expect(saved.outbox?.[0]?.text)
+    .toContain(join(repoDir, 'docs/superpowers/reviews/issue-1-pr-review-quality-0.md'))
+})
+
+test('a rewind into research with no worker owes nothing: the dispatched brief carries it', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'failed', last_pane_id: 'w7:p1' }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'research', taskId: 't1' })
+  // The F10 shape: no workspace either, so the first step is a worktree, not a dispatch.
+  expect(result.text).toContain('no worker is bound, so nothing is sent — `herdr worktree create --cwd /r --branch b')
+  expect(result.text.indexOf('herdr agent start')).toBeLessThan(result.text.indexOf('dispatch --task t1 --pane <root pane>'))
+  expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
+})
+
+test('a rewind past research with no worker holds the prompt until one is bound', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'failed', workspace_id: 'w7', checkout_path: repoDir }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+  expect(result.text).toContain("queued for t1's worker, which is not bound yet")
+  expect(result.text).toContain('herdr pane list --workspace w7')
+  expect(result.text).toContain('send it nothing yourself')
+  expect(result.text).not.toContain('brief --task')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved.outbox).toHaveLength(1)
+  // A fresh agent gets the brief first, without its research section, then the phase.
+  const text = saved.outbox?.[0]?.text ?? ''
+  expect(text).toContain('Your task id is `t1`')
+  expect(text).not.toContain('## Phase 1 — research')
+  expect(text.indexOf('Your task id is `t1`')).toBeLessThan(text.indexOf('# Implement — b (#1)'))
+  expect(outboxPending(saved)).toEqual([])
+  ;(saved.tasks[0] as Task).pane_id = 'w7:p1'
+  expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])
+})
+
+test('a rewind into research with a worker bound re-sends the research prompt', async () => {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'spec', workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: repoDir,
+    artifacts: { research: 'docs/r.md', spec: null, plan: null, verdicts: {} },
+  }])
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'research', taskId: 't1' })).ok).toBe(true)
+  expect((await savedRun(run.run_id)).outbox?.[0]?.text).toContain('## Phase 1 — research')
+})
+
+test('a rewind into an orchestrator row prompts the orchestrator, and a terminal one prompts no one', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'merge', pr: 5 }])
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'merge', taskId: 't1' })).ok).toBe(true)
+  expect((await savedRun(run.run_id)).outbox?.map((e) => e.to)).toEqual(['orchestrator'])
+
+  const abandoned = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'merge', pr: 5 }])
+  abandoned.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, abandoned)
+  expect((await cmdRewind(ctx(), { runId: abandoned.run_id, phase: 'failed', taskId: 't1' })).ok).toBe(true)
+  expect((await savedRun(abandoned.run_id)).outbox ?? []).toEqual([])
+})
+
+test('a run rewind onto branch-review prompts the orchestrator with the path it reserved', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  run.phase = 'escalated'
+  run.escalated_from = 'branch-review'
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'branch-review', taskId: null })).ok).toBe(true)
+
+  const saved = await savedRun(run.run_id)
+  expect(saved.verdict_seq?.['branch-review']).toBe(1)
+  expect(saved.outbox).toHaveLength(1)
+  expect(saved.outbox?.[0]).toMatchObject({ to: 'orchestrator', task_id: null, entered_at: saved.phase_entered_at })
+  expect(saved.outbox?.[0]?.text).toContain(`${run.run_id}-branch-review-0.md`)
+})
+
+test('concurrent rewinds each reserve once and queue one current entry', async () => {
+  const ids = ['t1', 't2', 't3', 't4']
+  const run = runWithTasks(ids.map((task_id) => ({
+    task_id, phase: 'escalated', escalated_from: 'pr-review-quality',
+    workspace_id: `w${task_id}`, pane_id: `w${task_id}:p1`, checkout_path: repoDir,
+  })))
+  await saveRun(dir, run)
+  const results = await Promise.all(ids.map((taskId) =>
+    cmdRewind(ctx(), { runId: run.run_id, phase: 'pr-review-quality', taskId })))
+  expect(results.every((r) => r.ok)).toBe(true)
+  const saved = await savedRun(run.run_id)
+  expect(saved.tasks.map((t) => t.verdict_seq?.['pr-review-quality'])).toEqual([1, 1, 1, 1])
+  expect(outboxPending(saved)).toHaveLength(4)
+})
+
+test('a second rewind leaves the first entry stale, never delivered', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'implement',
+    workspace_id: 'w7', pane_id: 'w7:p1', checkout_path: repoDir }])
+  await saveRun(dir, run)
+  await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+  await Bun.sleep(2)
+  await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+  const saved = await savedRun(run.run_id)
+  expect(saved.outbox).toHaveLength(2)
+  expect(outboxPending(saved).map((p) => p.outboxId)).toEqual([saved.outbox?.[1]?.id])
+})
+
+test('a run rewind into a phase with no prompt owes nothing', async () => {
+  const run = await seed()
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'execute', taskId: null })).ok).toBe(true)
+  expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
 })

@@ -6,7 +6,10 @@ import { runIsDriven } from './ledger'
 import { outboxWarnings } from './outbox'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
-import { briefCommand, overdueUnstartedWorker, startWorkerCommand, unbriefedWorker } from './unstarted'
+import {
+  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
+  startWorkerCommand, unbriefedWorker,
+} from './unstarted'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -131,7 +134,12 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
-        startWorkerCommand(task, unstarted.workspaceId, hpipe))
+        startWorkerCommand(run, task, unstarted.workspaceId, hpipe))
+    }
+    // Ahead of the unbriefed check: a rewind into research with no pane marks the
+    // task awaiting its brief, and "start an agent" skips the worktree it lacks.
+    if (overdueUndispatchedWorker(run, task, now)) {
+      return yours(`YOUR move: no worktree and no agent — ${dispatchWorkerCommand(run, task, hpipe)}`)
     }
     const unbriefed = unbriefedWorker(run, task)
     if (unbriefed) {
