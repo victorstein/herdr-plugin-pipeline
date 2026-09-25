@@ -458,7 +458,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
     ciDetail: async () => '',
     ambiguityLog: new Set<string>(),
     uncommittedPaths: async () => [],
-    freshDispatchBase: async () => 'origin/main',
+    freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main' }),
   }
   await advanceTasks(saved, deps)
   expect(saved.tasks[0]?.phase).toBe('implement')

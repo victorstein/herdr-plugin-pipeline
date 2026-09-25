@@ -86,7 +86,7 @@ the file; every dispatch then reports `bootstrap: none`.
 It is also where a sibling package's build step belongs. If your apps consume another package's
 built `dist` rather than its source, build it here (`pnpm install && pnpm turbo build
 --filter=@repo/core`, say); the plugin itself never names a build command. The script builds
-whatever the checkout contains, and a worktree is cut from `origin/<default branch>`, which the
+whatever the checkout contains, and a worktree is cut from the `origin/<default branch>` commit the
 supervisor fetches just before it tells the orchestrator a task is ready — so a `--depends-on` task
 sees its merged dependencies whether or not your local `main` has been pulled. A repo with no
 `origin` remote falls back to local `main`. The merge prompt asks the orchestrator to re-run the bootstrap after it

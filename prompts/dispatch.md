@@ -11,10 +11,12 @@ it the brief:
     herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
-**`<base>` is the one the `Dispatch tN … --base <base>` line names** — usually `origin/main` — not
-one you pick. The supervisor fetched it just before telling you the task is ready; your
-local `main` is only as new as your last pull, and a task cut from it lacks whatever its
-dependencies merged since. Measured on a live run.
+**`<base>` is the commit the `Dispatch tN … --base <commit> (origin/main as just fetched)` line
+names** — pass the commit, not the ref in parentheses, and not one you pick. The supervisor fetched
+it just before telling you the task is ready; your local `main` is only as new as your last pull,
+and a task cut from it lacks whatever its dependencies merged since. A commit, unlike
+`origin/main`, leaves the new branch tracking nothing, so the worker's bare `git push` can never
+land on `main`. Measured on a live run.
 
 **Never put the brief on the `agent start` line.** herdr refuses to encode an argument holding fences
 or backticks for the target shell (`invalid_agent_argument`), and every brief has both, so it fails

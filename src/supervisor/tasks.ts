@@ -15,7 +15,9 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
+import {
+  absoluteArtifactPath, adoptableArtifacts, type DispatchBase, warnToTick,
+} from './deliver'
 import { runTeardown, type WorktreeRemoval } from './teardown'
 
 export interface TaskDeps {
@@ -44,7 +46,7 @@ export interface TaskDeps {
   effects?: RunEffect[]
   uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
   /** Fetches and names the ref a dispatched worktree is cut from; see deliver.ts. */
-  freshDispatchBase: (repoRoot: string) => Promise<string>
+  freshDispatchBase: (repoRoot: string) => Promise<DispatchBase>
 }
 
 const UNCOMMITTED_SAMPLE = 3
@@ -171,6 +173,11 @@ function actorPane(run: Run, task: Task): string | null {
   return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
 }
 
+function worktreeCreateClause(repoRoot: string, base: DispatchBase): string {
+  const create = `worktree create --cwd ${repoRoot} --base ${base.commit ?? base.ref}`
+  return base.commit === null ? create : `${create} (${base.ref} as just fetched)`
+}
+
 /**
  * Drives every task in a run one step. Each returned prompt names the pane it is
  * addressed to, because worker-owned rows send one tick's prompts to several
@@ -179,7 +186,7 @@ function actorPane(run: Run, task: Task): string | null {
  */
 export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt[]> {
   const prompts: TaskPrompt[] = []
-  let dispatchBase: string | null = null
+  let dispatchBase: DispatchBase | null = null
 
   // Tears down whatever was ALREADY sitting at `teardown` when this tick
   // started, before the loop below can advance anything else into that
@@ -203,7 +210,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       dispatchBase ??= await deps.freshDispatchBase(run.repo_root)
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
-          `worktree create --cwd ${run.repo_root} --base ${dispatchBase}:\n` +
+          `${worktreeCreateClause(run.repo_root, dispatchBase)}:\n` +
           `${bootstrapLine(repoBootstrap(run.repo_root))}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,

@@ -535,12 +535,17 @@ test('adoptableArtifacts falls back to origin/main when local main is missing', 
   ])
 })
 
-// #87: the dispatch base is `origin/<default>`, so the worktree starts ahead of a
-// stale local `main`. The merge-base must then be the remote tip, or every doc
-// that landed upstream reads as the worker's own.
-test('a worktree cut from origin/main ahead of a stale local main adopts only its own doc', async () => {
-  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
-  git(['reset', '-q', '--hard', siblingLands(worktree, SIBLING_DOC, 'origin/main')], worktree)
+const revParse = (cwd: string, ref: string): string =>
+  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
+
+// #87: dispatch cuts from the fetched `origin/<default>` commit, ahead of a stale
+// local `main`. The merge-base must then be that commit, or every doc that landed
+// upstream reads as the worker's own.
+test('a worktree cut from the origin/main commit ahead of a stale local main adopts only its own doc', async () => {
+  const primary = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  siblingLands(primary, SIBLING_DOC, 'origin/main')
+  const worktree = join(tempDir('hpipe-shacut-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/dependent', worktree, revParse(primary, 'origin/main')], primary)
   commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
 
   expect(await adoptableArtifacts(worktree, new Set())).toEqual([
@@ -548,8 +553,15 @@ test('a worktree cut from origin/main ahead of a stale local main adopts only it
   ])
 })
 
-const revParse = (cwd: string, ref: string): string =>
-  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
+test('a branch cut from a commit tracks nothing, so a bare push cannot target main', () => {
+  const primary = repoWithWorktree(['README.md'])
+  git(['update-ref', 'refs/remotes/origin/main', 'refs/heads/main'], primary)
+  const worktree = join(tempDir('hpipe-shacut-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/dependent', worktree, revParse(primary, 'origin/main')], primary)
+
+  const upstream = Bun.spawnSync(['git', '-C', worktree, 'rev-parse', '--abbrev-ref', '@{u}'], { stderr: 'pipe' })
+  expect(upstream.exitCode).not.toBe(0)
+})
 
 function commitAs(checkout: string, rel: string, body: string): void {
   git(['config', 'user.email', 'test@example.com'], checkout)
@@ -582,8 +594,7 @@ test('freshDispatchBase fetches, so a dependency merged upstream is in the base'
   const staleMain = revParse(clone, 'main')
   const merged = landOnRemote(remote, 'main')
 
-  expect(await freshDispatchBase(clone)).toBe('origin/main')
-  expect(revParse(clone, 'origin/main')).toBe(merged)
+  expect(await freshDispatchBase(clone)).toEqual({ commit: merged, ref: 'origin/main' })
   expect(revParse(clone, 'main')).toBe(staleMain)
 })
 
@@ -591,20 +602,24 @@ test('freshDispatchBase follows the remote default branch rather than assuming m
   const { remote, clone } = cloneOfRemote('trunk')
   const merged = landOnRemote(remote, 'trunk')
 
-  expect(await freshDispatchBase(clone)).toBe('origin/trunk')
-  expect(revParse(clone, 'origin/trunk')).toBe(merged)
+  expect(await freshDispatchBase(clone)).toEqual({ commit: merged, ref: 'origin/trunk' })
 })
 
-test('freshDispatchBase keeps the last-fetched remote ref when the remote is unreachable', async () => {
+test('freshDispatchBase keeps the last-fetched remote commit when the remote is unreachable', async () => {
   const { clone } = cloneOfRemote('main')
+  const lastFetched = revParse(clone, 'origin/main')
   git(['remote', 'set-url', 'origin', join(tempDir('hpipe-gone-'), 'missing.git')], clone)
 
-  expect(await freshDispatchBase(clone)).toBe('origin/main')
+  expect(await freshDispatchBase(clone)).toEqual({ commit: lastFetched, ref: 'origin/main' })
 })
 
 test('freshDispatchBase falls back to local main in a repo with no remote', async () => {
   const worktree = repoWithWorktree(['README.md'])
-  expect(await freshDispatchBase(worktree)).toBe('main')
+  expect(await freshDispatchBase(worktree)).toEqual({ commit: revParse(worktree, 'main'), ref: 'main' })
+})
+
+test('freshDispatchBase names no commit when no base resolves', async () => {
+  expect(await freshDispatchBase(tempDir('hpipe-nogit-'))).toEqual({ commit: null, ref: 'main' })
 })
 
 test('a moved doc is a rename even when the repo disables rename detection', async () => {

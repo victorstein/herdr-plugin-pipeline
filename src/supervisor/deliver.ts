@@ -283,11 +283,16 @@ const DISPATCH_FETCH_TIMEOUT_MS = 30_000
  * Measured on a live run (#87). The supervisor fetches rather than asking the
  * orchestrator to, because an instruction can be skipped and this cannot.
  *
+ * The base is the fetched commit, not the ref: `worktree create --base
+ * origin/main` makes the new branch track `origin/main`, and under
+ * `push.default=upstream` a worker's bare `git push` would then push to main.
+ * A commit start point sets no upstream. Measured on herdr 0.9.0.
+ *
  * A failed fetch still names the remote ref: it is only as old as the last
  * fetch, and the orchestrator's `git pull` fetches too. With no remote at all
  * there is nothing newer than local `main`.
  */
-export async function freshDispatchBase(repoRoot: string): Promise<string> {
+export async function freshDispatchBase(repoRoot: string): Promise<DispatchBase> {
   const remoteHead = await git(repoRoot, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
   const branch = remoteHead.code === 0 && remoteHead.text.trim().startsWith('origin/')
     ? remoteHead.text.trim().slice('origin/'.length)
@@ -295,8 +300,21 @@ export async function freshDispatchBase(repoRoot: string): Promise<string> {
 
   await git(repoRoot, ['fetch', '--quiet', 'origin', branch], DISPATCH_FETCH_TIMEOUT_MS)
 
-  const remoteRef = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
-  return remoteRef.code === 0 ? `origin/${branch}` : branch
+  const candidates: Array<[fullRef: string, ref: string]> = [
+    [`refs/remotes/origin/${branch}`, `origin/${branch}`],
+    [`refs/heads/${branch}`, branch],
+  ]
+  for (const [fullRef, ref] of candidates) {
+    const resolved = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${fullRef}^{commit}`])
+    if (resolved.code === 0) return { commit: resolved.text.trim(), ref }
+  }
+  return { commit: null, ref: branch }
+}
+
+/** `commit` is null only when neither ref resolves; the name is then all there is to pass. */
+export interface DispatchBase {
+  commit: string | null
+  ref: string
 }
 
 /**

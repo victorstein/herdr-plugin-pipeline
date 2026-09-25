@@ -44,7 +44,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   ciDetail: async () => '',
   ambiguityLog: new Set<string>(),
   uncommittedPaths: async () => [],
-  freshDispatchBase: async () => 'origin/main',
+  freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main' }),
   ...over,
 })
 
@@ -804,25 +804,41 @@ test('an unreadable checkout reports nothing and is retried only on the next idl
   expect(brokenGit.calls).toHaveLength(2)
 })
 
-test('the dispatch line names the base the supervisor just refreshed, fetched once per tick', async () => {
+test('the dispatch line bases the worktree on the commit just fetched, fetched once per tick', async () => {
   const calls: string[] = []
   const run = mkRun([mkTask({ task_id: 't1' }), mkTask({ task_id: 't2', branch: 'feat/y' })])
   const prompts = await advanceTasks(run, deps({
-    freshDispatchBase: async (repoRoot: string) => { calls.push(repoRoot); return 'origin/trunk' },
+    freshDispatchBase: async (repoRoot: string) => {
+      calls.push(repoRoot)
+      return { commit: '1fb8a43', ref: 'origin/trunk' }
+    },
   }))
 
   expect(prompts).toHaveLength(2)
   for (const prompt of prompts) {
-    expect(prompt.text.split('\n')[0]).toContain('worktree create --cwd /r --base origin/trunk')
+    expect(prompt.text.split('\n')[0]).toEndWith(
+      'worktree create --cwd /r --base 1fb8a43 (origin/trunk as just fetched):',
+    )
   }
   expect(calls).toEqual(['/r'])
+})
+
+test('a base with no resolvable commit is passed by name', async () => {
+  const run = mkRun([mkTask({})])
+  const prompts = await advanceTasks(run, deps({
+    freshDispatchBase: async () => ({ commit: null, ref: 'main' }),
+  }))
+  expect(prompts[0]!.text.split('\n')[0]).toEndWith('worktree create --cwd /r --base main:')
 })
 
 test('no fetch runs on a tick that dispatches nothing', async () => {
   const calls: string[] = []
   const run = mkRun([mkTask({ phase: 'implement' })])
   await advanceTasks(run, deps({
-    freshDispatchBase: async (repoRoot: string) => { calls.push(repoRoot); return 'origin/main' },
+    freshDispatchBase: async (repoRoot: string) => {
+      calls.push(repoRoot)
+      return { commit: '1fb8a43', ref: 'origin/main' }
+    },
   }))
   expect(calls).toEqual([])
 })
