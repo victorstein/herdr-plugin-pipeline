@@ -2,9 +2,9 @@ import { awaitedFor } from './awaiting'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { runIsDriven } from './ledger'
+import { runIsDriven, wasAborted } from './ledger'
 import { deliveryWarnings, type PaneObservations } from './outbox'
-import { taskRow } from './phases'
+import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
@@ -260,6 +260,48 @@ function intakeWarning(run: Run, hpipe: string): string[] {
 }
 
 /**
+ * A finished run stays listed for as long as the session lives, so anything it
+ * says is repeated on every `hpipe status`. After live smoke run 2 left one in
+ * [done], its orphaned and failed tasks were still listed as "needs a human" an
+ * hour later. Measured on a live run.
+ *
+ * Once the run is over, a per-task rewind is no longer the next step, so none is
+ * offered. What stays is one line per task a human may still want: a merged
+ * orphan's worktree, which nothing else will remove, and the branch and PR of
+ * any task that did not land, which the summary alone would hide.
+ */
+function finishedRunSummary(run: Run, hpipe: string): string[] {
+  const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
+  const idsByPhase = new Map<string, string[]>()
+  for (const task of byId) {
+    idsByPhase.set(task.phase, [...(idsByPhase.get(task.phase) ?? []), task.task_id])
+  }
+  const outcomes = [...idsByPhase].map(([phase, ids]) => `${phase} ${ids.join(', ')}`).join(' · ')
+
+  const head = wasAborted(run)
+    ? [`  aborted from ${run.escalated_from}${outcomes === '' ? '' : `: ${outcomes}`} — ` +
+      `\`${hpipe} resume ${run.run_id}\` puts it back`]
+    : outcomes === '' ? [] : [`  ended: ${outcomes}`]
+
+  return [...head, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+}
+
+function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
+  if (task.phase === 'done' || task.phase === 'blocked-on-failure') return []
+  // A manual rewind can put an unmerged task in `orphaned`, and calling its
+  // worktree disposable would invite deleting the only copy of its work.
+  if (task.phase === 'orphaned' && task.merged_at_ms !== null) {
+    const where = task.checkout_path !== null
+      ? `at ${task.checkout_path}`
+      : `in workspace ${task.workspace_id ?? 'unknown'}`
+    return [`  ℹ ${task.task_id} merged but left its worktree ${where} — nothing unmerged is in it`]
+  }
+  const pr = task.pr === null ? '' : ` PR #${task.pr}`
+  return [`  ℹ ${task.task_id} [${task.phase}] ${task.branch}${pr} — ` +
+    `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\``]
+}
+
+/**
  * `hpipe` is the rendered invocation from `hpipeCommand`, never a literal: a
  * plugin installed from GitHub has no `hpipe` on PATH, and the digest already
  * renders it, so a literal here would hand the operator a different — and
@@ -313,6 +355,11 @@ export function formatStatus(
         `${ageMinutes(run.phase_entered_at, now)}m ago — needs a human; ` +
         `\`${resumeCommand(hpipe, run)}\` resumes it`,
       )
+    }
+
+    if (runRow(run.phase).terminal === true) {
+      lines.push(...finishedRunSummary(run, hpipe))
+      continue
     }
 
     for (const task of run.tasks) {

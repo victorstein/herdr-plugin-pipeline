@@ -228,6 +228,13 @@ test('a brief with no notes carries no batch-context heading', async () => {
   }
 })
 
+test('a brief re-sent past research, with no notes, carries no batch-context heading either', async () => {
+  const text = await renderBriefFor([briefTask({ notes: '', phase: 'implement' })], 0)
+  expect(text).not.toContain('Phase 1 — research')
+  expect(text).not.toContain('Batch context')
+  expect(text).not.toMatch(/\n{3,}/)
+})
+
 test('a brief with notes carries them under the batch-context heading', async () => {
   const text = await renderBriefFor([briefTask({ notes: 'land after t1' })], 0)
   expect(text).toContain('Batch context the public issue does not carry: land after t1')

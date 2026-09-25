@@ -255,6 +255,15 @@ export function runPhaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
 }
 
 /**
+ * `abort` parks a run in `done` and overloads `escalated_from` with where it
+ * was, so neither field alone tells an aborted run from one that finished.
+ */
+export function wasAborted(run: Run): boolean {
+  return run.phase === 'done' && run.escalated_from !== null &&
+    run.history.at(-1)?.why?.startsWith('aborted from') === true
+}
+
+/**
  * "Is the supervisor acting on this run?" — a different question from
  * `runPhaseState`'s "is it finished?". `releasesPane` covers `escalated` as well
  * as `done`, so a run parked in `escalated` is unfinished yet nothing announces

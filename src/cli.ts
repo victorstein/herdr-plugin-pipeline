@@ -11,7 +11,7 @@ import { Herdr, type CallResult } from './lib/herdr'
 import {
   isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForRepo,
   runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  writeOrchestrator,
+  wasAborted, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase } from './lib/machine'
@@ -876,8 +876,7 @@ async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
-  const aborted = run.history.at(-1)?.why?.startsWith('aborted from')
-  if (run.phase !== 'done' || !aborted || !run.escalated_from) {
+  if (!wasAborted(run) || !run.escalated_from) {
     return fail(`${run.run_id} was not aborted — nothing to resume`)
   }
 
