@@ -83,17 +83,17 @@ export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { 
 const START_AGENT = '`herdr agent start <name> --kind claude --pane <root pane>`'
 
 /**
- * Past the briefed phase, what a new agent is given once it is bound. When a
- * rewind has queued the phase's prompt, that prompt is the one channel: the
- * courier sends it as soon as herdr detects the agent, and the brief would follow
- * it with the research section — "write this note, then stop" — racing it.
+ * Past the briefed phase, what a new agent is given once it is bound. A rewind
+ * that found no worker queues the brief and the phase prompt as one entry, which
+ * the courier sends as soon as herdr detects the agent — so that entry is the one
+ * channel, and a hand-sent brief would only repeat it out of order.
  */
 function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
   const queued = (run.outbox ?? []).some((entry) =>
     entry.to === 'worker' && entry.task_id === task.task_id && isCurrent(run, entry))
   if (queued) {
-    return `its ${task.phase} prompt is already queued and is sent on its own once herdr detects the ` +
-      'agent — do not send it the brief as well'
+    return `its brief and ${task.phase} prompt are already queued and are sent on their own once ` +
+      'herdr detects the agent — send it nothing yourself'
   }
   return `hand it \`${hpipe} brief --task ${task.task_id}\` over \`herdr agent prompt\` and tell it ` +
     `the task is in ${task.phase}`

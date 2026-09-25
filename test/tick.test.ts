@@ -173,6 +173,18 @@ test('worktree.opened binds a surviving checkout exactly as worktree.created doe
   expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
 })
 
+test('worktree.opened on an already-bound task does not rebind it — #94', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', workspace_id: 'w5', pane_id: 'w5:p1', branch: 'feat/x' }),
+    mkTask({ task_id: 't2', workspace_id: null, pane_id: null, branch: 'feat/y' }),
+  ])
+  const events: QueuedEvent[] = [{
+    kind: 'worktree.opened', session: 'personal', at: 1, workspace_id: 'w9', branch: 'feat/x',
+  }]
+  expect(applyEvents([run], events, 'personal', new Set()).changed).toBe(false)
+  expect(run.tasks.map((t) => t.workspace_id)).toEqual(['w5', null])
+})
+
 test('a run without schema_version 2 is never advanced', () => {
   const run = mkRun([mkTask({ phase: 'implement' })])
   run.phase = 'execute'

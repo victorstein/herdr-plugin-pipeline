@@ -225,8 +225,8 @@ not as bound to the dead pane. If its workspace went too (`workspace: none`), `h
 (its checkout survived, so `open`, with `create` only on `worktree_not_found`), ending in `dispatch --task`, and
 its stall probe to the orchestrator says the same rather than naming the research path. Follow it: `worktree open`
 must bind the task (`hpipe show` → `workspace: w<n>`) through the `worktree.opened` hook. Repeat with a rewind
-into `implement` instead: after `agent start` the queued implement prompt arrives on its own, and the advice
-never also asks for `hpipe brief`.
+into `implement` instead: after `agent start` one message arrives on its own — the brief without its research
+section, then the implement prompt — and the advice never also asks for `hpipe brief`.
 
 ---
 

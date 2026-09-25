@@ -593,6 +593,19 @@ test('brief renders a worker brief without mutating the run', async () => {
   expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
 })
 
+test('past research the brief leaves out the research section a fresh agent would obey — #94', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'research' }])
+  run.repo_key = 'k'
+  await saveRun(dir, run)
+  expect((await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })).text)
+    .toContain('## Phase 1 — research')
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
+  const past = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(past.text).toContain('Your task id is `t1`')
+  expect(past.text).not.toContain('## Phase 1 — research')
+})
+
 test('the brief states the path contract without promising a recovery', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
@@ -1401,6 +1414,8 @@ test('a task rewind owes its worker the phase prompt, in the same save', async (
   expect(saved.outbox).toHaveLength(1)
   expect(saved.outbox?.[0]).toMatchObject({ to: 'worker', task_id: 't1', entered_at: task.phase_entered_at })
   expect(saved.outbox?.[0]?.text).toContain('# Implement — b (#1)')
+  // A live agent already holds the brief; only the phase is sent.
+  expect(saved.outbox?.[0]?.text).not.toContain('Your task id is')
   expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])
 })
 
@@ -1438,11 +1453,16 @@ test('a rewind past research with no worker holds the prompt until one is bound'
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
   expect(result.text).toContain("queued for t1's worker, which is not bound yet")
   expect(result.text).toContain('herdr pane list --workspace w7')
-  expect(result.text).toContain('do not send it the brief')
+  expect(result.text).toContain('send it nothing yourself')
   expect(result.text).not.toContain('brief --task')
 
   const saved = await savedRun(run.run_id)
   expect(saved.outbox).toHaveLength(1)
+  // A fresh agent gets the brief first, without its research section, then the phase.
+  const text = saved.outbox?.[0]?.text ?? ''
+  expect(text).toContain('Your task id is `t1`')
+  expect(text).not.toContain('## Phase 1 — research')
+  expect(text.indexOf('Your task id is `t1`')).toBeLessThan(text.indexOf('# Implement — b (#1)'))
   expect(outboxPending(saved)).toEqual([])
   ;(saved.tasks[0] as Task).pane_id = 'w7:p1'
   expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])

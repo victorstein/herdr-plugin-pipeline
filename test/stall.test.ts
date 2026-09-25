@@ -1080,7 +1080,7 @@ test('a rewind-queued phase prompt is the only handoff: the brief is not offered
   enqueue(run, { to: 'worker', taskId: 't1', text: '# Implement' }, NOW)
   const a = stallAwaiting(run, task, 'hp', NOW)
   expect(a.clause).not.toContain('brief --task')
-  expect(a.clause).toContain('its implement prompt is already queued')
+  expect(a.clause).toContain('its brief and implement prompt are already queued')
 })
 
 test('a worktreeless worker row is probed on the orchestrator cadence — #94', () => {

@@ -605,10 +605,16 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
   }
 
   // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
-  const text = task
+  const phasePrompt = task
     ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, task.phase)
     : await renderRunPhasePrompt(run, ctx.pluginRoot)
-  if (text.length === 0) return ''
+  if (phasePrompt.length === 0) return ''
+  // No pane means the next agent is a fresh one, and every phase prompt assumes the
+  // brief — task id, agent file, `decide`, never main — already arrived. One entry,
+  // so the courier hands it both in order the moment the agent is detected.
+  const text = worker && task.pane_id === null
+    ? `${await renderWorkerPrompt(ctx.pluginRoot, run, task)}\n\n---\n\n${phasePrompt}`
+    : phasePrompt
   enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, text }, Date.now())
   if (!worker) return '; its prompt is queued for the orchestrator'
   return task.pane_id === null
