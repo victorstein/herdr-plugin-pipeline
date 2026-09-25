@@ -24,7 +24,8 @@ cut at its first wildcard, so `**/*.ts` locks the whole repository:
 
 The pipeline adds these to the task's file lock before implementation starts and holds this task
 back while a sibling is working on any of them. A file you edit without declaring it is one a
-sibling can edit at the same time.
+sibling can edit at the same time. Leave out this task's own research, spec, plan and reviews under
+`docs/superpowers/`: every task writes there, and the pipeline does not lock them.
 
 If you are back here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file for this
 issue under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept before

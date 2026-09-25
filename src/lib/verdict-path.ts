@@ -2,7 +2,9 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Run, RunArtifacts, Task } from './types'
 
-export const REVIEWS_DIR = 'docs/superpowers/reviews'
+/** Where every research, spec, plan and verdict the pipeline commissions is written. */
+export const ARTIFACT_ROOT = 'docs/superpowers'
+export const REVIEWS_DIR = join(ARTIFACT_ROOT, 'reviews')
 
 /** The ONE place a verdict filename is spelled. Always repo-relative. */
 export function verdictFilename(prefix: string, phase: string, ordinal: number): string {
@@ -11,7 +13,11 @@ export function verdictFilename(prefix: string, phase: string, ordinal: number):
 
 /** The ONE place the prefix is chosen, so a reserver and a reader cannot spell it differently. */
 export function verdictPrefix(run: Run, task: Task | null): string {
-  return task ? `issue-${task.issue}` : run.run_id
+  return task ? taskVerdictPrefix(task) : run.run_id
+}
+
+export function taskVerdictPrefix(task: Pick<Task, 'issue'>): string {
+  return `issue-${task.issue}`
 }
 
 /**

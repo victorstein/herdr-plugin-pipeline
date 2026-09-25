@@ -102,6 +102,30 @@ test('a plan path written under the worker\'s checkout is locked repo-relative',
   expect(waiter.phase).toBe('blocked-on-files')
 })
 
+test('a plan listing the artifact directory does not serialise it behind a sibling on docs', async () => {
+  const waiter = mkTask({
+    task_id: 't1', phase: 'blocked-on-files', files: ['src/greet.ts'],
+    ...checkoutWithPlan('FILES: test/greet.test.ts, docs/superpowers/\n'),
+  })
+  const run = mkRun([waiter, mkTask({ task_id: 't3', phase: 'implement', files: ['docs'] })])
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps())
+  } finally {
+    console.error = original
+  }
+
+  expect(waiter.files).toEqual(['src/greet.ts', 'test/greet.test.ts'])
+  expect(waiter.phase).toBe('implement')
+  expect(seen.filter((line) => line.includes('plan widened files'))).toEqual([
+    '[pipeline] t1 (feat/x): plan widened files by test/greet.test.ts ' +
+    '(ignored pipeline artifacts: docs/superpowers/)',
+  ])
+})
+
 test('two tasks whose plans each discover the other\'s files run one after the other', async () => {
   const run = mkRun([
     mkTask({

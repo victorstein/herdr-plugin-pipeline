@@ -21,7 +21,7 @@ import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { bindWorkerPane } from './lib/unstarted'
-import { reserveVerdict } from './lib/verdict-path'
+import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
 
@@ -322,9 +322,9 @@ async function registerTask(
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: null, registered_at: Date.now(), adopted_at: null,
     artifacts: {
-      research: join('docs/superpowers/research', `${stem}-research.md`),
-      spec: join('docs/superpowers/specs', `${stem}-design.md`),
-      plan: join('docs/superpowers/plans', `${stem}-plan.md`),
+      research: join(ARTIFACT_ROOT, 'research', `${stem}-research.md`),
+      spec: join(ARTIFACT_ROOT, 'specs', `${stem}-design.md`),
+      plan: join(ARTIFACT_ROOT, 'plans', `${stem}-plan.md`),
       verdicts: {},
     },
     merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
