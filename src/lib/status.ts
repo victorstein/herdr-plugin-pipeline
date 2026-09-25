@@ -4,7 +4,7 @@ import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { runIsDriven } from './ledger'
 import { deliveryWarnings, type PaneObservations } from './outbox'
-import { taskRow } from './phases'
+import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
@@ -260,6 +260,32 @@ function intakeWarning(run: Run, hpipe: string): string[] {
 }
 
 /**
+ * A finished run stays listed for as long as the session lives, so anything it
+ * says is repeated on every `hpipe status`. After live smoke run 2 left one in
+ * [done], its orphaned and failed tasks were still listed as "needs a human" an
+ * hour later. Measured on a live run.
+ *
+ * Once the run is over, a per-task rewind is no longer the next step, so none is
+ * offered. The orphans still get a line each, because their worktrees stay on
+ * disk until someone removes them. A failed task's worktree gets no line: its
+ * work never merged, so the worktree may be the only copy of it.
+ */
+function finishedRunSummary(run: Run): string[] {
+  if (run.tasks.length === 0) return []
+  const idsByPhase = new Map<string, string[]>()
+  for (const task of [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))) {
+    idsByPhase.set(task.phase, [...(idsByPhase.get(task.phase) ?? []), task.task_id])
+  }
+  const ended = [...idsByPhase].map(([phase, ids]) => `${phase} ${ids.join(', ')}`).join(' · ')
+  const leftovers = run.tasks
+    .filter((task) => task.phase === 'orphaned')
+    .map((task) => `  ℹ ${task.task_id} merged but left its worktree ` +
+      (task.checkout_path !== null ? `at ${task.checkout_path}` : `in workspace ${task.workspace_id ?? 'unknown'}`) +
+      ' — nothing unmerged is in it')
+  return [`  ended: ${ended}`, ...leftovers]
+}
+
+/**
  * `hpipe` is the rendered invocation from `hpipeCommand`, never a literal: a
  * plugin installed from GitHub has no `hpipe` on PATH, and the digest already
  * renders it, so a literal here would hand the operator a different — and
@@ -313,6 +339,11 @@ export function formatStatus(
         `${ageMinutes(run.phase_entered_at, now)}m ago — needs a human; ` +
         `\`${resumeCommand(hpipe, run)}\` resumes it`,
       )
+    }
+
+    if (runRow(run.phase).terminal === true) {
+      lines.push(...finishedRunSummary(run))
+      continue
     }
 
     for (const task of run.tasks) {

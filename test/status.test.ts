@@ -506,3 +506,44 @@ test('hpipe show names the pane a failed worker last ran in — #12', () => {
   run.tasks = [task]
   expect(formatTaskDetail(run, task)).toContain('pane:       none (last: w7:p1)')
 })
+
+test('a finished run summarises how its tasks ended instead of listing them as waiting on you — #122', () => {
+  // Live-run finding N9: a run in [done] kept its orphaned and failed tasks under
+  // "waiting on you … dead end, needs a human" for as long as the session lived.
+  const run = mkRun()
+  run.phase = 'done'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'done' }),
+    mkTask({ task_id: 't2', phase: 'orphaned', checkout_path: '/wt/t2' }),
+    mkTask({ task_id: 't3', phase: 'failed' }),
+    mkTask({ task_id: 't4', phase: 'orphaned', checkout_path: null, workspace_id: 'w9' }),
+    mkTask({ task_id: 't5', phase: 'blocked-on-failure' }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('waiting on you')
+  expect(text).not.toContain('needs a human')
+  expect(text).not.toContain('YOUR move')
+  expect(text).not.toContain('  t1 feat/x')
+  expect(text).toContain('  ended: done t1 · orphaned t2, t4 · failed t3 · blocked-on-failure t5')
+  expect(text).toContain('  ℹ t2 merged but left its worktree at /wt/t2')
+  expect(text).toContain('  ℹ t4 merged but left its worktree in workspace w9')
+})
+
+test('an aborted run does not nag about the tasks it stopped mid-flight — #122', () => {
+  const run = mkRun()
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
+    mkTask({ task_id: 't2', phase: 'merge', pr: 41 }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('waiting on you')
+  expect(text).toContain('  ended: escalated t1 · merge t2')
+})
+
+test('a finished run with no tasks prints no ended line', () => {
+  const run = mkRun()
+  run.phase = 'done'
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('ended:')
+})
