@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { Task } from './types'
 
 /**
@@ -74,29 +76,84 @@ async function networkEnv(repoRoot: string): Promise<Record<string, string | und
   return { ...env, GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }
 }
 
+
 const advertisedDefaults = new Map<string, string>()
+const unansweredLookups = new Map<string, number>()
+
+/**
+ * Dispatch asks from the main checkout and adoption from a linked worktree, so
+ * the detection caches are keyed on the repository both share, not the path
+ * asked from; otherwise every worktree pays for its own lookup.
+ */
+async function repoKey(checkoutPath: string): Promise<string> {
+  const commonDir = await git(checkoutPath, ['rev-parse', '--git-common-dir'])
+  if (commonDir.code !== 0) return checkoutPath
+  try {
+    return realpathSync(resolve(checkoutPath, commonDir.out.trim()))
+  } catch {
+    return checkoutPath
+  }
+}
+
+/** Null declines the network call, leaving the lookup unanswered. */
+type OpenNetwork = (cacheKey: string) => Promise<Network | null>
 
 /**
  * `refs/remotes/origin/HEAD` exists only in a clone; a repo created locally and
  * pushed never gets one, so the remote is asked instead of assuming `main`.
  */
 async function defaultBranch(
-  repoRoot: string, network: Network,
+  repoRoot: string, openNetwork: OpenNetwork,
 ): Promise<{ branch: string; error: string | null }> {
   const remoteHead = await git(repoRoot, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
   const local = remoteHead.out.trim()
   if (remoteHead.code === 0 && local.startsWith('origin/')) {
     return { branch: local.slice('origin/'.length), error: null }
   }
-  const known = advertisedDefaults.get(repoRoot)
+  const cacheKey = await repoKey(repoRoot)
+  const known = advertisedDefaults.get(cacheKey)
   if (known !== undefined) return { branch: known, error: null }
 
+  const network = await openNetwork(cacheKey)
+  if (network === null) return { branch: 'main', error: 'the last lookup failed; not retried yet' }
   const advertised = await git(repoRoot, ['ls-remote', '--symref', 'origin', 'HEAD'], network)
   if (advertised.code !== 0) return { branch: 'main', error: failureReason(advertised) }
   const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(advertised.out)
   if (match === null) return { branch: 'main', error: null }
-  advertisedDefaults.set(repoRoot, match[1]!)
+  advertisedDefaults.set(cacheKey, match[1]!)
   return { branch: match[1]!, error: null }
+}
+
+/**
+ * The branch dispatch cuts worktrees from, for a caller that needs the name
+ * rather than a fetch. Null when origin exists but cannot say: guessing `main`
+ * there could name a stale branch that is not the default at all.
+ *
+ * With no origin, dispatch falls back to local `main`, and so does this.
+ *
+ * A failed lookup is not retried for a while: the caller runs on the tick, and
+ * an unreachable remote would otherwise cost the full timeout on every one.
+ * `onFailure` hears each lookup that actually failed, not each cooled-down null.
+ */
+export async function mainlineBranch(
+  repoRoot: string, onFailure: (reason: string) => void = () => {}, now: () => number = Date.now,
+): Promise<string | null> {
+  const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
+  if (origin.code !== 0) return 'main'
+
+  const attempt: { cacheKey: string | null } = { cacheKey: null }
+  const found = await defaultBranch(repoRoot, async (cacheKey) => {
+    const failedAt = unansweredLookups.get(cacheKey)
+    if (failedAt !== undefined && now() - failedAt < CACHE_TTL_MS) return null
+    attempt.cacheKey = cacheKey
+    return { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  })
+  if (found.error === null) return found.branch
+  if (attempt.cacheKey !== null) {
+    unansweredLookups.set(attempt.cacheKey, now())
+    onFailure(found.error)
+  }
+  return null
 }
 
 async function fetchBase(repoRoot: string): Promise<DispatchBase> {
@@ -107,7 +164,7 @@ async function fetchBase(repoRoot: string): Promise<DispatchBase> {
     fetchError = failureReason(origin)
   } else {
     const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
-    const found = await defaultBranch(repoRoot, network)
+    const found = await defaultBranch(repoRoot, async () => network)
     branch = found.branch
     fetchError = found.error
     if (fetchError === null) {
@@ -165,6 +222,7 @@ export async function freshDispatchBase(
 export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()
+  unansweredLookups.clear()
 }
 
 export function dependencyMerges(task: Task, tasks: Task[]): string[] | null {
