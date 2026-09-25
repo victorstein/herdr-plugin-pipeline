@@ -3,7 +3,7 @@ import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
-import { baseLine, dependenciesMergedAt, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
+import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
@@ -213,7 +213,7 @@ interface RegistrationAttempt {
   dispatchBase: DispatchBaseFor
 }
 
-type DispatchBaseFor = (repoRoot: string, freshAfterMs: number) => Promise<DispatchBase>
+type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
@@ -334,7 +334,7 @@ async function registerTask(
       plan: join(ARTIFACT_ROOT, 'plans', `${stem}-plan.md`),
       verdicts: {},
     },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
   }
 
@@ -372,7 +372,7 @@ async function registerTask(
 
   // After the save, not before: nothing here is recorded, and a fetch between
   // the read and the save only widens the window a concurrent write can take.
-  const base = await attempt.dispatchBase(run.repo_root, dependenciesMergedAt(task, run.tasks))
+  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   return ok(`${header}\n${baseLine(base)}\n\n${prompt}`)
 }
@@ -707,6 +707,7 @@ async function rewind(ctx: Ctx, input: {
       task.pr = null
       task.ci = null
       task.merged_at_ms = null
+      task.merge_commit = null
       task.issue_closed_at_entry = false
     }
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })

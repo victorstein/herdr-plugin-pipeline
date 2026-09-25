@@ -110,6 +110,7 @@ export interface TaskSignals {
   headSha: string | null
   merged: boolean
   mergedAtMs?: number
+  mergeCommit?: string
   issueClosed: boolean
   closedAtMs?: number
   filesClear: boolean
@@ -175,6 +176,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       // the CI poll), or a rewind into `merge` after it, stranded the task here.
       if (!s.merged || s.mergedAtMs === undefined) return null
       task.merged_at_ms = s.mergedAtMs
+      task.merge_commit = s.mergeCommit ?? null
       task.issue_closed_at_entry = s.issueClosed
       return enterTaskPhase(run, task, 'close', 'PR merged')
     }

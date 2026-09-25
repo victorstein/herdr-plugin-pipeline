@@ -268,16 +268,17 @@ test('re-entry to implement re-captures head_sha_at_entry', () => {
   expect(task.head_sha_at_entry).toBe('ccc')
 })
 
-test('merge records merged_at_ms and whether the issue was already closed', () => {
+test('merge records merged_at_ms, the merge commit, and whether the issue was already closed', () => {
   const { run, task } = fixture('merge')
   task.phase_entered_at = 1000
   advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
-    merged: true, mergedAtMs: 2000, issueClosed: false, ciBucket: null,
+    merged: true, mergedAtMs: 2000, mergeCommit: 'm3rg3', issueClosed: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   })
   expect(task.phase).toBe('close')
   expect(task.merged_at_ms).toBe(2000)
+  expect(task.merge_commit).toBe('m3rg3')
   expect(task.issue_closed_at_entry).toBe(false)
 })
 

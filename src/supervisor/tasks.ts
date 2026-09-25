@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
-import { baseLine, dependenciesMergedAt, type DispatchBase } from '../lib/dispatch-base'
+import { baseLine, dependencyMerges, type DispatchBase } from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
   gateStatus, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, widenFiles,
@@ -45,7 +45,7 @@ export interface TaskDeps {
   effects?: RunEffect[]
   uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
   /** The commit a dispatched worktree is cut from; see lib/dispatch-base.ts. */
-  freshDispatchBase: (repoRoot: string, freshAfterMs: number) => Promise<DispatchBase>
+  freshDispatchBase: (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 }
 
 const UNCOMMITTED_SAMPLE = 3
@@ -200,12 +200,12 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       if (gate.state !== 'ready') continue
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
-      const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependenciesMergedAt(task, run.tasks))
+      const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
           `worktree create --cwd ${run.repo_root}:\n` +
-          `${baseLine(dispatchBase)}\n` +
-          `${bootstrapLine(repoBootstrap(run.repo_root))}\n\n` +
+          `${bootstrapLine(repoBootstrap(run.repo_root))}\n` +
+          `${baseLine(dispatchBase)}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
         taskId: task.task_id,
@@ -287,6 +287,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     headSha: null as string | null,
     merged: false,
     mergedAtMs: undefined as number | undefined,
+    mergeCommit: undefined as string | undefined,
     issueClosed: false,
     closedAtMs: undefined as number | undefined,
     filesClear: false,
@@ -368,6 +369,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       const issue = await deps.issueView(task.issue)
       return {
         ...base, merged: true, mergedAtMs: view.mergedAtMs ?? undefined,
+        mergeCommit: view.mergeCommit ?? undefined,
         issueClosed: issue?.closed ?? false,
       }
     }

@@ -246,9 +246,10 @@ test('orchestrator-owned task phases are not evaluated while the orchestrator is
 test('a merged PR advances to close, and a closed issue to teardown', async () => {
   const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
   await advanceTasks(run, deps({
-    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, mergeCommit: 'm3rg3', headSha: 'x' }),
   }))
   expect(run.tasks[0]?.phase).toBe('close')
+  expect(run.tasks[0]?.merge_commit).toBe('m3rg3')
 
   run.tasks[0]!.phase_entered_at = 1_000
   await advanceTasks(run, deps({ issueView: async () => ({ closed: true, closedAtMs: 2_000 }) }))
@@ -805,28 +806,28 @@ test('an unreadable checkout reports nothing and is retried only on the next idl
 })
 
 
-test('the dispatch prompt names the base commit on its own line, above the blank line', async () => {
+test('the dispatch prompt ends its header with bootstrap: then base:, the order hpipe task prints', async () => {
   const run = mkRun([mkTask({})])
   const prompts = await advanceTasks(run, deps({
     freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/trunk', fetchError: null }),
   }))
   const head = prompts[0]!.text.split('\n\n')[0]!.split('\n')
-  expect(head).toContain('base: 1fb8a43 (origin/trunk as just fetched)')
+  expect(head.slice(-2)).toEqual(['bootstrap: none', 'base: 1fb8a43 (origin/trunk as just fetched)'])
 })
 
-test('a dependent task asks for a base fetched after its dependency merged', async () => {
-  const requested: Array<[string, number]> = []
+test('a dependent task asks for a base containing its dependency merge', async () => {
+  const requested: Array<[string, string[] | null]> = []
   const run = mkRun([
-    mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 5_000 }),
+    mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 5_000, merge_commit: 'c0ffee1' }),
     mkTask({ task_id: 't2', branch: 'feat/y', depends_on: ['t1'] }),
   ])
   await advanceTasks(run, deps({
-    freshDispatchBase: async (repoRoot: string, freshAfterMs: number) => {
-      requested.push([repoRoot, freshAfterMs])
+    freshDispatchBase: async (repoRoot: string, merges: string[] | null) => {
+      requested.push([repoRoot, merges])
       return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
     },
   }))
-  expect(requested).toEqual([['/r', 5_000]])
+  expect(requested).toEqual([['/r', ['c0ffee1']]])
 })
 
 test('no fetch runs on a tick that dispatches nothing', async () => {

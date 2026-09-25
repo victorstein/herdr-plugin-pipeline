@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  baseLine, dependenciesMergedAt, describeBase, forgetDispatchBases, freshDispatchBase,
+  baseLine, dependencyMerges, describeBase, forgetDispatchBases, freshDispatchBase,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
 import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
@@ -107,23 +107,43 @@ test('a burst of dispatches shares one fetch until it expires', async () => {
   let clock = 1_000_000
   const now = () => clock
 
-  expect((await freshDispatchBase(clone, 0, now)).commit).toBe(first)
+  expect((await freshDispatchBase(clone, [], now)).commit).toBe(first)
   const merged = landOnRemote(remote, 'main')
   clock += 30_000
-  expect((await freshDispatchBase(clone, 0, now)).commit).toBe(first)
+  expect((await freshDispatchBase(clone, [], now)).commit).toBe(first)
   clock += 31_000
-  expect((await freshDispatchBase(clone, 0, now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [], now)).commit).toBe(merged)
 })
 
-test('a fetch older than the dependency merge is not reused', async () => {
+// The clock does not move at all: a merge landing in the same second as the
+// cached fetch is exactly what a mergedAt comparison could not see.
+test('a cached fetch that lacks a dependency merge is not reused, even within the same second', async () => {
   const { remote, clone } = cloneOfRemote('main')
-  let clock = 1_000_000
-  const now = () => clock
+  const now = () => 1_000_000
 
-  await freshDispatchBase(clone, 0, now)
+  await freshDispatchBase(clone, [], now)
   const merged = landOnRemote(remote, 'main')
-  clock += 1_000
-  expect((await freshDispatchBase(clone, clock - 500, now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+})
+
+test('a cached fetch that already contains the dependency merge is reused', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const merged = landOnRemote(remote, 'main')
+  const now = () => 1_000_000
+
+  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+  const later = landOnRemote(remote, 'main')
+  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+  expect(later).not.toBe(merged)
+})
+
+test('a dependency merged with no merge commit on record always fetches', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const now = () => 1_000_000
+
+  await freshDispatchBase(clone, [], now)
+  const merged = landOnRemote(remote, 'main')
+  expect((await freshDispatchBase(clone, null, now)).commit).toBe(merged)
 })
 
 function fakeSsh(): { dir: string; log: string } {
@@ -190,13 +210,14 @@ test('the base line names the commit and whether it was just fetched', () => {
     .toBe('base: main (fetch failed: not a git repository; local main, may be stale)')
 })
 
-test('a task is fresh only after its newest dependency merged', () => {
+test('a base must contain every dependency merge commit, and an unrecorded one forces a fetch', () => {
   const task = (over: Partial<Task>) => ({ task_id: 't', depends_on: [], merged_at_ms: null, ...over }) as Task
   const tasks = [
-    task({ task_id: 't1', merged_at_ms: 100 }),
-    task({ task_id: 't2', merged_at_ms: 300 }),
+    task({ task_id: 't1', merged_at_ms: 100, merge_commit: 'aaa' }),
+    task({ task_id: 't2', merged_at_ms: 300, merge_commit: 'bbb' }),
     task({ task_id: 't3', merged_at_ms: 900 }),
   ]
-  expect(dependenciesMergedAt(task({ task_id: 't4', depends_on: ['t1', 't2'] }), tasks)).toBe(300)
-  expect(dependenciesMergedAt(task({ task_id: 't5' }), tasks)).toBe(0)
+  expect(dependencyMerges(task({ task_id: 't4', depends_on: ['t1', 't2'] }), tasks)).toEqual(['aaa', 'bbb'])
+  expect(dependencyMerges(task({ task_id: 't5' }), tasks)).toEqual([])
+  expect(dependencyMerges(task({ task_id: 't6', depends_on: ['t1', 't3'] }), tasks)).toBeNull()
 })

@@ -244,13 +244,14 @@ test('the merge prompt asks for a bootstrap re-run where the rebase happens', as
   expect(text).toContain('.claude/pipeline-bootstrap')
 })
 
-test('the dispatch prompt names all four header lines, not three', async () => {
-  // A dispatching cmdTask emits task_id:, files:, bootstrap: and base:. A stale
-  // count here is how the convention drifts, and nothing else pins it.
+test('the dispatch prompt names every header line a dispatching task prints', async () => {
+  // Named rather than counted: `issue:` appears only when --title filed one, and
+  // a count is how the convention drifted before.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  expect(text).toContain('bootstrap:')
-  expect(text).toContain('four header')
-  expect(text).not.toContain('three header')
+  for (const line of ['task_id:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
+    expect(text).toContain(`\`${line}\``)
+  }
+  expect(text).not.toMatch(/(two|three|four|five) header/)
 })
 
 test('the README documents the per-repo bootstrap contract', async () => {

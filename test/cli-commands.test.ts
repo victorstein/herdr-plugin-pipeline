@@ -183,23 +183,23 @@ test('the three seeded artifact paths are distinct and land in the right directo
   expect(task.artifacts.plan).toContain('docs/superpowers/plans/')
 })
 
-test('a task dispatched at registration prints the base it is cut from, fetched after its dependency merged', async () => {
-  const run = runWithTasks([{ task_id: 't1', phase: 'done', merged_at_ms: 7_000 }])
+test('a task dispatched at registration prints the base it is cut from, one containing its dependency', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'done', merged_at_ms: 7_000, merge_commit: 'c0ffee1' }])
   run.repo_root = repoDir
   await saveRun(dir, run)
-  const requested: Array<[string, number]> = []
+  const requested: Array<[string, string[] | null]> = []
 
   const result = await cmdTask(ctx(), {
     branch: 'feat/dependent', issue: 43, surface: 'core', notes: '',
     dependsOn: ['t1'], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
-  }, undefined, async (repoRoot, freshAfterMs) => {
-    requested.push([repoRoot, freshAfterMs])
+  }, undefined, async (repoRoot, merges) => {
+    requested.push([repoRoot, merges])
     return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
   })
 
   expect(result.ok).toBe(true)
-  expect(requested).toEqual([[repoDir, 7_000]])
+  expect(requested).toEqual([[repoDir, ['c0ffee1']]])
   const header = result.text.split('\n\n')[0]!.split('\n')
   expect(header).toContain('base: 1fb8a43 (origin/main as just fetched)')
 })
