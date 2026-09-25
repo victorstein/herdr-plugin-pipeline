@@ -115,7 +115,7 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
       "the repo's bootstrap in it"
   const setUp = `${worktree}, then ${START_AGENT}`
   if (task.phase === taskRow('queued').onClear) {
-    return `${setUp}, then \`${hpipe} dispatch --task ${task.task_id} --pane <root pane>\``
+    return `${setUp}, then ${briefCommand(task, '<root pane>', hpipe)}`
   }
   return `${setUp}; ${handoffPastBrief(run, task, hpipe)}`
 }
@@ -148,7 +148,7 @@ export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number
 export function startWorkerCommand(run: Run, task: Task, workspaceId: string, hpipe: string): string {
   const look = `check \`herdr pane list --workspace ${workspaceId}\` first`
   if (task.phase === taskRow('queued').onClear) {
-    const dispatch = `\`${hpipe} dispatch --task ${task.task_id} --pane <pane>\``
+    const dispatch = briefCommand(task, null, hpipe)
     return `${look}. If an agent is already there, its detection was missed: ${dispatch} records ` +
       'it and hands it the brief, so `herdr pane read` it before, in case it already has one. ' +
       `If there is none, ${START_AGENT}, then ${dispatch}`

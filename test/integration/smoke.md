@@ -221,8 +221,12 @@ is the failure above, not this one.
 Kill that worker's pane (`herdr pane close`): the task goes to `failed` and `hpipe show` reports
 `pane: none (last: <pane>)`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
 not as bound to the dead pane. If its workspace went too (`workspace: none`), `hpipe status` lists it under
-`waiting on you:` at once as `YOUR move: no worktree and no agent — herdr worktree create …`, ending in
-`dispatch --task`, and its stall probe to the orchestrator says the same rather than naming the research path.
+`waiting on you:` at once as `YOUR move: no worktree and no agent — herdr worktree open --cwd … --branch …`
+(its checkout survived, so `open`, with `create` only on `worktree_not_found`), ending in `dispatch --task`, and
+its stall probe to the orchestrator says the same rather than naming the research path. Follow it: `worktree open`
+must bind the task (`hpipe show` → `workspace: w<n>`) through the `worktree.opened` hook. Repeat with a rewind
+into `implement` instead: after `agent start` the queued implement prompt arrives on its own, and the advice
+never also asks for `hpipe brief`.
 
 ---
 
