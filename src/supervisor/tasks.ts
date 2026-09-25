@@ -18,9 +18,9 @@ import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
-import { runTeardown, type WorktreeRemoval } from './teardown'
+import { runTeardown, type TeardownDeps } from './teardown'
 
-export interface TaskDeps {
+export interface TaskDeps extends TeardownDeps {
   pluginRoot: string
   /**
    * Live `herdr agent status` read on a pane, already double-checked after
@@ -34,7 +34,6 @@ export interface TaskDeps {
   prView: (pr: number) => Promise<PrView | null>
   issueView: (issue: number) => Promise<IssueView | null>
   verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
-  removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
   /**
@@ -189,7 +188,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // queued task is dispatched); calling this after the loop instead would
   // let a task that reaches `teardown` THIS tick fall straight through to
   // `done` in the same call, skipping that phase's own settle.
-  await runTeardown([run], deps.removeWorktree, deps.effects)
+  await runTeardown([run], deps, deps.effects)
 
   for (const task of run.tasks) {
     if (task.phase === 'queued') {

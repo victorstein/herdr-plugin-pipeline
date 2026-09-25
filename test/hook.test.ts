@@ -55,6 +55,15 @@ test('maps a worktree.opened payload, captured from herdr 0.9.0 — #94', () => 
   })
 })
 
+test('maps a workspace.closed payload to the workspace it names — #116', () => {
+  // Shape from herdr 0.9.0's `api schema`: `workspace_id` is required, `workspace` may be null.
+  const event = toQueuedEvent('workspace.closed', 'personal', JSON.stringify({
+    event: 'workspace_closed',
+    data: { type: 'workspace_closed', workspace_id: 'w5', workspace: null },
+  }))
+  expect(event).toMatchObject({ kind: 'workspace.closed', workspace_id: 'w5' })
+})
+
 test('maps an agent_status_changed payload', () => {
   const event = toQueuedEvent('pane.agent_status_changed', 'personal', JSON.stringify({
     event: 'pane_agent_status_changed',

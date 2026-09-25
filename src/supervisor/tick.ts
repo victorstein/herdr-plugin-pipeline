@@ -4,7 +4,7 @@ import { enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
-import type { PaneInfo } from '../lib/herdr'
+import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
 import { FINISHED } from './teardown'
 
@@ -235,6 +235,60 @@ export class PaneAbsence {
   }
 }
 
+/**
+ * A workspace that goes with its last pane (`pane close`, `pane move`) or with
+ * `workspace close` left its id on the task, so a rewind advised `agent start` in
+ * a workspace that no longer existed, `worktree.opened` could not rebind the
+ * branch, and teardown orphaned the merged task. Measured on a live run. The
+ * `workspace.closed` hook covers this when herdr sends it; this catches it from
+ * `workspace list` when it does not, under the same two-list rule as panes.
+ *
+ * A `done` task is skipped so a finished run's record keeps where it ran.
+ */
+export class WorkspaceAbsence {
+  private missingOnce = new Set<string>()
+
+  reconcile(
+    runs: readonly Run[], listed: readonly WorkspaceInfo[], session: SessionKey, now: number,
+  ): QueuedEvent[] {
+    // An empty list is a failed `workspace list`: the supervisor's own workspace is always in it.
+    if (listed.length === 0) return []
+    const live = new Set(listed.map((workspace) => workspace.workspace_id))
+    const missing = [...new Set(runs
+      .flatMap((run) => run.tasks)
+      .filter((task) => task.phase !== 'done')
+      .flatMap((task) => (task.workspace_id === null ? [] : [task.workspace_id])))]
+      .filter((workspace) => !live.has(workspace))
+
+    const events = missing
+      .filter((workspace) => this.missingOnce.has(workspace))
+      .map((workspace): QueuedEvent => ({ kind: 'workspace.closed', session, at: now, workspace_id: workspace }))
+    this.missingOnce = new Set(missing.filter((workspace) => !this.missingOnce.has(workspace)))
+    return events
+  }
+}
+
+export interface Listings {
+  panes: { absence: PaneAbsence; listed: readonly PaneInfo[] }
+  workspaces: { absence: WorkspaceAbsence; listed: readonly WorkspaceInfo[] }
+}
+
+/**
+ * One tick's event batch. Workspace closures go ahead of the drained events, so
+ * a `worktree.opened` drained in the same tick finds the task whose workspace it
+ * replaces already unbound; after it, that event binds nothing.
+ */
+export function tickEvents(
+  runs: readonly Run[], drained: readonly QueuedEvent[], listings: Listings,
+  session: SessionKey, now: number,
+): QueuedEvent[] {
+  return [
+    ...listings.workspaces.absence.reconcile(runs, listings.workspaces.listed, session, now),
+    ...drained,
+    ...listings.panes.absence.reconcile(runs, listings.panes.listed, session, now),
+  ]
+}
+
 function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; task: Task } | null {
   for (const run of runs) {
     const task = run.tasks.find(predicate)
@@ -261,8 +315,19 @@ export function applyEvents(
       const found = findTask(runs, (t) => t.branch === event.branch && t.workspace_id === null)
       if (found) {
         found.task.workspace_id = event.workspace_id
-        found.task.checkout_path = event.checkout_path ?? null
+        found.task.checkout_path = event.checkout_path ?? found.task.checkout_path
         found.task.adopted_at = Date.now()
+        changed = true
+      }
+      continue
+    }
+
+    // The checkout outlives its workspace, so it is kept: teardown removes it by
+    // path, and `worktree open` on it rebinds the task by branch.
+    if (event.kind === 'workspace.closed') {
+      for (const task of runs.flatMap((run) => run.tasks)) {
+        if (task.workspace_id !== event.workspace_id || task.phase === 'done') continue
+        task.workspace_id = null
         changed = true
       }
       continue

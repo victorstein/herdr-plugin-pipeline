@@ -219,6 +219,17 @@ export async function freshDispatchBase(
   return base
 }
 
+/**
+ * Best effort, under the same budget as a dispatch fetch: on failure the
+ * destination ref is only as new as the last fetch, or absent.
+ */
+export async function fetchFromOrigin(repoRoot: string, refspec: string): Promise<void> {
+  const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
+  if (origin.code !== 0) return
+  const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  await git(repoRoot, ['fetch', '--quiet', 'origin', refspec], network)
+}
+
 export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()

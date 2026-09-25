@@ -43,6 +43,7 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   issueView: async () => null,
   verdictFor: async () => null,
   removeWorktree: async () => 'removed' as const,
+  removeCheckout: async () => ({ removed: true as const }),
   ciDetail: async () => '',
   ambiguityLog: new Set<string>(),
   uncommittedPaths: async () => [],
@@ -895,11 +896,27 @@ test('a second teardown of a workspace herdr no longer knows completes the task'
   expect(run.tasks[0]?.phase).toBe('done')
 })
 
-test('a vanished workspace whose checkout is still on disk is orphaned, not done', async () => {
+test('a vanished workspace whose checkout is still on disk is removed by its path — #116', async () => {
   const checkout = tempDir('tasks-checkout-')
   const run = mkRun([mkTask({ task_id: 't1', phase: 'teardown', checkout_path: checkout })])
-  await advanceTasks(run, deps({ removeWorktree: async () => 'gone' as const }))
-  expect(run.tasks[0]?.phase).toBe('orphaned')
+  const removedCheckouts: string[] = []
+  await advanceTasks(run, deps({
+    removeWorktree: async () => 'gone' as const,
+    removeCheckout: async (_repoRoot, path) => { removedCheckouts.push(path); return { removed: true as const } },
+  }))
+  expect(removedCheckouts).toEqual([checkout])
+  expect(run.tasks[0]?.phase).toBe('done')
+})
+
+test('a vanished workspace whose checkout is kept still ends done, naming why — #116', async () => {
+  const checkout = tempDir('tasks-checkout-')
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'teardown', checkout_path: checkout })])
+  await advanceTasks(run, deps({
+    removeWorktree: async () => 'gone' as const,
+    removeCheckout: async () => ({ removed: false as const, kept: 'modified or untracked files' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('done')
+  expect(run.history.at(-1)?.why).toBe(`worktree kept: ${checkout} (modified or untracked files)`)
 })
 
 test('a task the gate opens is awaiting its brief — #89', async () => {

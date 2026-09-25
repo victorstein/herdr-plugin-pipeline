@@ -13,7 +13,7 @@ export type CiBucket = 'pass' | 'fail' | 'pending' | 'skipping' | 'cancel' | 'un
 export type EventKind =
   | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
   | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited' | 'pane.closed'
-  | 'pane.moved'
+  | 'pane.moved' | 'workspace.closed'
 
 export interface QueuedEvent {
   kind: EventKind
