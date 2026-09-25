@@ -177,6 +177,11 @@ export function applyEvents(
       if (task.agent_status === event.agent_status) continue
       task.agent_status = event.agent_status
       changed = true
+      // Only a positive `working`: a worker goes busy only on something it was
+      // given, so this settles a brief `dispatch --task` delivered but could not
+      // record. `unknown` is any failed `agent get`, and `blocked` is a boot
+      // dialog, so neither proves a brief arrived.
+      if (event.agent_status === 'working') delete task.awaiting_brief
       if (wakeOn.has(event.agent_status)) {
         wake.push({
           run, task, phaseAtEvent,

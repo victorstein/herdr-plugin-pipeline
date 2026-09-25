@@ -636,6 +636,11 @@ async function rewind(ctx: Ctx, input: {
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
     task.escalated_from = null
+    // Written here because a rewind bypasses `enterTaskPhase`. A paneless rewind
+    // into the briefed phase is handed to a fresh agent through `dispatch --task`,
+    // so it owes a brief; a bound worker already has one.
+    if (task.phase === taskRow('queued').onClear && task.pane_id === null) task.awaiting_brief = true
+    else delete task.awaiting_brief
     // `implement` persists the first PR it finds and never asks again, and `merge`
     // is a level: a task sent back to rework after its PR merged would otherwise
     // carry the old PR through `merge` on its old mergedAt, with the new work

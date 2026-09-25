@@ -4,7 +4,9 @@ import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
-import { overdueUnstartedWorker, startWorkerCommand } from '../lib/unstarted'
+import {
+  briefCommand, overdueUnstartedWorker, startWorkerCommand, unbriefedWorker,
+} from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
@@ -59,11 +61,23 @@ function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): strin
   return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
 }
 
+/**
+ * A started but unbriefed agent is the orchestrator's fault, like #12's empty
+ * worktree. Probed in its own pane, a brief-less agent took the probe as its
+ * first instruction and began the phase without the brief.
+ */
+function owedABrief(run: Run, task: Task | null): boolean {
+  return task !== null && unbriefedWorker(run, task)?.paneId != null
+}
+
 function candidateFor(
   run: Run, record: Run | Task, row: PhaseRow<string>, task: Task | null,
   now: number, thresholdMinutes: number, probeMax: number,
 ): StallCandidate | null {
-  const paneId = probePaneFor(run, row, task?.pane_id ?? null)
+  const toOrchestrator = owedABrief(run, task)
+  const paneId = toOrchestrator
+    ? run.orchestrator_pane
+    : probePaneFor(run, row, task?.pane_id ?? null)
   if (!paneId) return null
 
   const state = stallStateFor(run, record)
@@ -83,7 +97,7 @@ function candidateFor(
     escalatable,
     minutes: ageMinutes(record.phase_entered_at, now),
     paneId,
-    actorPaneId: actorPaneFor(run, row, task),
+    actorPaneId: toOrchestrator ? run.orchestrator_pane : actorPaneFor(run, row, task),
   }
 }
 
@@ -118,9 +132,10 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-      const minutes = overdueUnstartedWorker(run, task, now) === null
-        ? thresholdMinutes
-        : Math.min(thresholdMinutes, unstartedThresholdMinutes)
+      const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null || owedABrief(run, task)
+      const minutes = orchestratorsFault
+        ? Math.min(thresholdMinutes, unstartedThresholdMinutes)
+        : thresholdMinutes
       const c = candidateFor(run, task, row, task, now, minutes, probeMax)
       if (c) out.push(c)
     }
@@ -256,8 +271,18 @@ export function stallAwaiting(
     }
   }
 
+  const unbriefed = task === null ? null : unbriefedWorker(run, task)
+  if (task !== null && unbriefed?.paneId != null) {
+    return {
+      short: 'the brief handed to its agent',
+      clause: `The agent in ${unbriefed.paneId} is running but was never handed the brief, so this ` +
+        'phase cannot advance and it waits on you, not on the worker: hand it the brief with ' +
+        `${briefCommand(task, unbriefed.paneId, hpipe)}.`,
+    }
+  }
+
   if (row.signal === 'artifact' || row.signal === 'verdict') {
-    const short = task ? awaitedFor(task) : 'its review verdict'
+    const short =task ? awaitedFor(task) : 'its review verdict'
     // With no worktree `absoluteArtifactPath` falls back to the main checkout,
     // which is the orchestrator's tree and holds every sibling's merged docs — so
     // naming it sends the reader at the wrong file when the real fault is that

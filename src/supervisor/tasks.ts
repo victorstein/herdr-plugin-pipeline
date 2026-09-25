@@ -293,12 +293,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'spec':
     case 'plan': {
       delete task.artifact_missing
-      if (!actorIdle) {
-        // A worker only goes busy on something it was given, so this also
-        // settles a brief whose handoff `dispatch --task` could not record.
-        delete task.awaiting_brief
-        return base
-      }
+      if (!actorIdle) return base
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
 

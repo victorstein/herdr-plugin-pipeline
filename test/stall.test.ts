@@ -309,6 +309,24 @@ test('the blocked rows name the exit, not the symptom', () => {
   expect(stallAwaiting(run, teardown, 'hp').short).toBe('its worktree to be removed')
 })
 
+test('an unbriefed agent is probed through the orchestrator, with the dispatch advice — #89', () => {
+  const run = runWithTask({ phase: 'research', awaiting_brief: true, agent_status: 'idle' })
+  const [c] = taskStallCandidates([run], NOW, 45, 3)
+  expect(c?.paneId).toBe(ORCHESTRATOR_PANE)
+  expect(c?.actorPaneId).toBe(ORCHESTRATOR_PANE)
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp', NOW)
+  expect(a.clause).toContain('never handed the brief')
+  expect(a.clause).toContain('`hp dispatch --task t1 --pane w7:p1`')
+  expect(a.clause).not.toContain('Nothing has appeared')
+})
+
+test('an unbriefed agent is probed on the orchestrator\'s cadence, not the worker\'s — #89', () => {
+  const run = runWithTask({ phase: 'research', awaiting_brief: true, phase_entered_at: NOW - 20 * 60_000 })
+  expect(taskStallCandidates([run], NOW, 45, 3, 15)).toHaveLength(1)
+  delete run.tasks[0]!.awaiting_brief
+  expect(taskStallCandidates([run], NOW, 45, 3, 15)).toHaveLength(0)
+})
+
 test('a move clause names what the stall probe for the same row names — #95', () => {
   for (const row of TASK_ROWS) {
     if (row.actor !== 'orchestrator' && row.actor !== 'worker') continue

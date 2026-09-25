@@ -875,14 +875,14 @@ test('an idle worker that was never briefed is not recorded as missing its artif
   expect(run.tasks[0]?.awaiting_brief).toBe(true)
 })
 
-test('a worker seen working has its brief, however it was handed over — #89', async () => {
+test('a not-idle read is not proof of a brief — it may be a failed agent get — #89', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
   const run = mkRun([mkTask({
     phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
     awaiting_brief: true,
   })])
   await advanceTasks(run, deps({ liveIdle: async () => false }))
-  expect(run.tasks[0]?.awaiting_brief).toBeUndefined()
+  expect(run.tasks[0]?.awaiting_brief).toBe(true)
 })
 
 test('leaving the briefed phase drops the awaiting-brief mark — #89', async () => {

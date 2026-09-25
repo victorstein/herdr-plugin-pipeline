@@ -47,6 +47,20 @@ test('an agent_status event updates the matching task', () => {
   expect(changed).toBe(true)
 })
 
+test('only a positive working reading settles an awaited brief — #89', () => {
+  const statusEvent = (agent_status: AgentStatus): QueuedEvent[] => [
+    { kind: 'pane.agent_status_changed', session: 'personal', at: 1, pane_id: 'w7:p1', workspace_id: 'w7', agent_status },
+  ]
+  for (const status of ['unknown', 'blocked', 'idle', 'done'] as AgentStatus[]) {
+    const run = mkRun([mkTask({ phase: 'research', agent_status: 'working', awaiting_brief: true })])
+    applyEvents([run], statusEvent(status), 'personal', new Set())
+    expect(run.tasks[0]?.awaiting_brief, status).toBe(true)
+  }
+  const run = mkRun([mkTask({ phase: 'research', agent_status: 'idle', awaiting_brief: true })])
+  applyEvents([run], statusEvent('working'), 'personal', new Set())
+  expect(run.tasks[0]?.awaiting_brief).toBeUndefined()
+})
+
 test('events for another session are ignored', () => {
   const run = mkRun([mkTask({})])
   const events: QueuedEvent[] = [
@@ -327,7 +341,9 @@ test('actionFor answers whose move it is, by rung', () => {
   expect(at('close')).toBe('YOUR move: waiting for issue #1 to close')
   expect(at('blocked-on-decision')).toBe('YOUR move: waiting for an answer to the open decision')
   expect(at('blocked-on-decision', { pending_answer: 'd1' }))
-    .toBe('YOUR move: waiting for its recorded answer to reach the worker')
+    .toBe('nothing for you — waiting for its recorded answer to reach the worker')
+  expect(at('research', { awaiting_brief: true, pane_id: null }))
+    .toBe('YOUR move: no agent has been started for it yet — start one, then `hp dispatch --task t1 --pane <pane>`')
   expect(at('research')).toBe("worker's move: waiting for its research artifact")
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")

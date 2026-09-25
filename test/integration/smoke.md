@@ -189,7 +189,12 @@ agent in <pane> has not been handed the brief — <hpipe> dispatch --task <id> -
 **not** read `worker idle with nothing at <research path>` — that was the false alert every freshly
 started worker produced — nor a bare `worker's move`. Once `dispatch --task` confirms, the entry
 goes and the line reads `worker's move: waiting for its research artifact`. An old run whose tasks
-were registered before this change never shows the "not handed the brief" line.
+were registered before this change never shows the "not handed the brief" line. While paused,
+`herdr agent get <pane>` must **never** read `working` before `dispatch --task`: a positive
+`working` is what the supervisor takes as proof the brief arrived, so a boot-time `working` would
+bring the false alert back — record it as a finding. Leave one agent unbriefed past
+`STALL_MINUTES` (15) after the bind: its probe must arrive in the **orchestrator's** pane with the
+`dispatch --task` advice, never in the worker's pane.
 
 Once **both** tasks are bound, the run reads `[execute]` within a tick or two — even when the
 orchestrator dispatched them straight after registering them, before the run itself had entered

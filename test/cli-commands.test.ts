@@ -1169,6 +1169,31 @@ test('a registered task awaits its brief until dispatch --task confirms the hand
   expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
 })
 
+test('a rewind past the briefed phase drops a stale awaiting-brief mark — #89', async () => {
+  await registerReadyTask()
+  const run = (await listRuns(dir, 'personal'))[0]!
+  expect(run.tasks[0]!.awaiting_brief).toBe(true)
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
+})
+
+test('a paneless rewind into research owes the fresh agent a brief; a bound one does not — #89', async () => {
+  await registerReadyTask()
+  await supervisorWrites((run) => {
+    const task = run.tasks[0]!
+    delete task.awaiting_brief
+    task.phase = 'failed'
+    task.pane_id = null
+  })
+  const runId = (await listRuns(dir, 'personal'))[0]!.run_id
+  expect((await cmdRewind(ctx(), { runId, phase: 'research', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBe(true)
+
+  await supervisorWrites((run) => { run.tasks[0]!.pane_id = 'w1-2'; run.tasks[0]!.phase = 'spec' })
+  expect((await cmdRewind(ctx(), { runId, phase: 'research', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
+})
+
 test('a confirmed brief is recorded even when the pane was already bound by detection — #89', async () => {
   // `pane.agent_detected` usually binds the pane first, so the bind alone
   // changes nothing and must not be what decides whether the save happens.
