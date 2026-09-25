@@ -121,7 +121,10 @@ export function applyEvents(
     if (event.session !== session) continue
     if (event.pane_id && orchestratorPanes.has(event.pane_id)) continue
 
-    if (event.kind === 'worktree.created' && event.branch && event.workspace_id) {
+    // `worktree open` on a checkout that outlived its workspace emits `opened`,
+    // never `created`, with the same payload. Captured live on herdr 0.9.0.
+    const boundWorktree = event.kind === 'worktree.created' || event.kind === 'worktree.opened'
+    if (boundWorktree && event.branch && event.workspace_id) {
       const found = findTask(runs, (t) => t.branch === event.branch && t.workspace_id === null)
       if (found) {
         found.task.workspace_id = event.workspace_id

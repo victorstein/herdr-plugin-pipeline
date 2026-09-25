@@ -269,7 +269,7 @@ export function stallAwaiting(
       short: 'an agent detected in its worktree',
       clause: `No agent has been detected in this task's worktree (workspace ` +
         `${unstarted.workspaceId}) since it was created, so this phase cannot advance and it waits ` +
-        `on you, not on a worker: ${startWorkerCommand(task, unstarted.workspaceId, hpipe)}.`,
+        `on you, not on a worker: ${startWorkerCommand(run, task, unstarted.workspaceId, hpipe)}.`,
     }
   }
   // Not the overdue form: a probe is only rendered once it is due, and by then

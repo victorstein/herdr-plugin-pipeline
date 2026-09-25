@@ -161,6 +161,18 @@ test('worktree.created records the checkout path and adoption time', () => {
   expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
 })
 
+test('worktree.opened binds a surviving checkout exactly as worktree.created does — #94', () => {
+  const run = mkRun([mkTask({ workspace_id: null, pane_id: null, branch: 'feat/x', adopted_at: null })])
+  const events: QueuedEvent[] = [{
+    kind: 'worktree.opened', session: 'personal', at: 1, workspace_id: 'w9', branch: 'feat/x',
+    checkout_path: '/r/.worktrees/feat-x',
+  }]
+  expect(applyEvents([run], events, 'personal', new Set()).changed).toBe(true)
+  expect(run.tasks[0]?.workspace_id).toBe('w9')
+  expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
+  expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
+})
+
 test('a run without schema_version 2 is never advanced', () => {
   const run = mkRun([mkTask({ phase: 'implement' })])
   run.phase = 'execute'

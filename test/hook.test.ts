@@ -27,6 +27,34 @@ test('maps a worktree.created payload', () => {
   })
 })
 
+test('maps a worktree.opened payload, captured from herdr 0.9.0 — #94', () => {
+  // Verbatim from an `events.subscribe` on a throwaway session: `herdr worktree
+  // open --branch` on a checkout whose workspace had been closed.
+  const event = toQueuedEvent('worktree.opened', 'personal', JSON.stringify({
+    data: {
+      already_open: false, type: 'worktree_opened',
+      workspace: {
+        active_tab_id: 'w4:t1', agent_status: 'unknown', focused: false, label: 'feat-probe',
+        number: 3, pane_count: 1, tab_count: 1, workspace_id: 'w4',
+        worktree: {
+          checkout_path: '/h/worktrees/probe-repo/feat-probe', is_linked_worktree: true,
+          repo_key: '/s/probe-repo/.git', repo_name: 'probe-repo', repo_root: '/s/probe-repo',
+        },
+      },
+      worktree: {
+        branch: 'feat/probe', is_bare: false, is_detached: false, is_linked_worktree: true,
+        is_prunable: false, label: 'probe-repo', open_workspace_id: 'w4',
+        path: '/h/worktrees/probe-repo/feat-probe',
+      },
+    },
+    event: 'worktree_opened',
+  }))
+  expect(event).toMatchObject({
+    kind: 'worktree.opened', workspace_id: 'w4', branch: 'feat/probe',
+    checkout_path: '/h/worktrees/probe-repo/feat-probe', repo_root: '/s/probe-repo',
+  })
+})
+
 test('maps an agent_status_changed payload', () => {
   const event = toQueuedEvent('pane.agent_status_changed', 'personal', JSON.stringify({
     event: 'pane_agent_status_changed',

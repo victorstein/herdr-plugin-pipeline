@@ -21,7 +21,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { bindWorkerPane } from './lib/unstarted'
+import { bindWorkerPane, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
@@ -595,10 +595,13 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
   const row = task ? taskRow(task.phase) : runRow(run.phase)
   if (row.actor !== 'worker' && row.actor !== 'orchestrator') return ''
   const worker = task !== null && row.actor === 'worker'
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  const setUpWorker = (t: Task): string => (t.workspace_id === null
+    ? dispatchWorkerCommand(run, t, hpipe)
+    : startWorkerCommand(run, t, t.workspace_id, hpipe))
   const briefedPhase = taskRow('queued').onClear
   if (worker && task.pane_id === null && task.phase === briefedPhase) {
-    return '; no worker is bound, so nothing is sent — ' +
-      `\`${hpipeCommand(ctx.pluginRoot)} dispatch --task ${task.task_id} --pane <pane>\` briefs the next one`
+    return `; no worker is bound, so nothing is sent — ${setUpWorker(task)}`
   }
 
   // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
@@ -609,7 +612,7 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
   enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, text }, Date.now())
   if (!worker) return '; its prompt is queued for the orchestrator'
   return task.pane_id === null
-    ? `; its prompt is queued for ${task.task_id}'s worker, sent once an agent is detected in its worktree`
+    ? `; its prompt is queued for ${task.task_id}'s worker, which is not bound yet — ${setUpWorker(task)}`
     : `; its prompt is queued for ${task.pane_id}`
 }
 

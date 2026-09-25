@@ -134,7 +134,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
-        startWorkerCommand(task, unstarted.workspaceId, hpipe))
+        startWorkerCommand(run, task, unstarted.workspaceId, hpipe))
     }
     // Ahead of the unbriefed check: a rewind into research with no pane marks the
     // task awaiting its brief, and "start an agent" skips the worktree it lacks.

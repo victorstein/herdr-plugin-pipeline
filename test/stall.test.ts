@@ -1046,9 +1046,21 @@ test('a worker row with no worktree and no pane is told to the orchestrator as i
   expect(a.clause).not.toContain('Nothing has appeared at')
   expect(a.clause).not.toContain('If you finished')
   expect(a.clause).toContain('no worktree and no agent')
-  expect(a.clause).toContain('`herdr worktree create --cwd /r --branch feat/x --base main`')
+  // Its checkout outlived the workspace, so `create` would fail on the existing path.
+  expect(a.clause.indexOf('`herdr worktree open --cwd /r --branch feat/x`'))
+    .toBeLessThan(a.clause.indexOf('`herdr worktree create --cwd /r --branch feat/x --base main`'))
+  expect(a.clause).toContain('worktree_not_found')
   expect(a.clause).toContain('`hp dispatch --task t1 --pane <root pane>`')
   expect(a.short).toContain('worktree')
+})
+
+test('a worktreeless task that never had a checkout is told to create one — #94', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', workspace_id: null, pane_id: null, checkout_path: null })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).toContain('`herdr worktree create --cwd /r --branch feat/x --base main`')
+  expect(a.clause).not.toContain('worktree open')
 })
 
 test('past the briefed phase, a worktreeless task is not offered the dispatch that would refuse it — #94', () => {
@@ -1059,6 +1071,16 @@ test('past the briefed phase, a worktreeless task is not offered the dispatch th
   expect(a.clause).not.toContain('dispatch --task')
   expect(a.clause).toContain('`hp brief --task t1`')
   expect(a.clause).toContain('in implement')
+})
+
+test('a rewind-queued phase prompt is the only handoff: the brief is not offered alongside it — #94', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', workspace_id: null, pane_id: null })
+  run.tasks = [task]
+  enqueue(run, { to: 'worker', taskId: 't1', text: '# Implement' }, NOW)
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.clause).not.toContain('brief --task')
+  expect(a.clause).toContain('its implement prompt is already queued')
 })
 
 test('a worktreeless worker row is probed on the orchestrator cadence — #94', () => {

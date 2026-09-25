@@ -72,7 +72,7 @@ export async function runHook(
   await enqueue(queueDir, event)
 }
 
-/** Entrypoint shared by all five hook scripts. Parses env, enqueues, exits. */
+/** Entrypoint shared by every hook script. Parses env, enqueues, exits. */
 export async function main(kind: EventKind): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   if (!stateDir) process.exit(0)

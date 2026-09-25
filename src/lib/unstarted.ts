@@ -1,3 +1,4 @@
+import { isCurrent } from './outbox'
 import { runRow, taskRow } from './phases'
 import type { Run, Task } from './types'
 
@@ -79,21 +80,44 @@ export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { 
   return enteredByRewind(run, task) || now - undispatched.since >= UNSTARTED_GRACE_MS ? undispatched : null
 }
 
+const START_AGENT = '`herdr agent start <name> --kind claude --pane <root pane>`'
+
 /**
- * `worktree create` leads because its `worktree.created` event is what binds the
- * task, by branch. `worktree open` is only the fallback for a checkout that
- * survived, and whether it emits that event is unverified.
+ * Past the briefed phase, what a new agent is given once it is bound. When a
+ * rewind has queued the phase's prompt, that prompt is the one channel: the
+ * courier sends it as soon as herdr detects the agent, and the brief would follow
+ * it with the research section — "write this note, then stop" — racing it.
+ */
+function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
+  const queued = (run.outbox ?? []).some((entry) =>
+    entry.to === 'worker' && entry.task_id === task.task_id && isCurrent(run, entry))
+  if (queued) {
+    return `its ${task.phase} prompt is already queued and is sent on its own once herdr detects the ` +
+      'agent — do not send it the brief as well'
+  }
+  return `hand it \`${hpipe} brief --task ${task.task_id}\` over \`herdr agent prompt\` and tell it ` +
+    `the task is in ${task.phase}`
+}
+
+/**
+ * Leads with `worktree open` once a checkout has been recorded: `forget` and a
+ * closed workspace leave it on disk, `worktree create` then fails on the existing
+ * path, and `open` emits `worktree.opened`, which binds by branch. `create` on a
+ * branch that already exists checks it out rather than cutting a new one from the
+ * base. Both measured on herdr 0.9.0.
  */
 export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): string {
   const create = `\`herdr worktree create --cwd ${run.repo_root} --branch ${task.branch} --base main\``
   const open = `\`herdr worktree open --cwd ${run.repo_root} --branch ${task.branch}\``
-  const start = '`herdr agent start <name> --kind claude --pane <root pane>`'
-  const setUp = `${create} (${open} if the branch still has one), run the repo's bootstrap in it, ${start}`
+  const worktree = task.checkout_path === null
+    ? `${create}, run the repo's bootstrap in the new checkout`
+    : `${open}; if that answers \`worktree_not_found\` the checkout is gone, so ${create} and run ` +
+      "the repo's bootstrap in it"
+  const setUp = `${worktree}, then ${START_AGENT}`
   if (task.phase === taskRow('queued').onClear) {
     return `${setUp}, then \`${hpipe} dispatch --task ${task.task_id} --pane <root pane>\``
   }
-  return `${setUp}, then hand it \`${hpipe} brief --task ${task.task_id}\` over \`herdr agent prompt\` ` +
-    `and tell it the task is in ${task.phase}`
+  return `${setUp}; ${handoffPastBrief(run, task, hpipe)}`
 }
 
 /**
@@ -121,16 +145,14 @@ export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number
  * The pane is not named because the ledger never learns it: `worktree.created`
  * carries no root pane.
  */
-export function startWorkerCommand(task: Task, workspaceId: string, hpipe: string): string {
+export function startWorkerCommand(run: Run, task: Task, workspaceId: string, hpipe: string): string {
   const look = `check \`herdr pane list --workspace ${workspaceId}\` first`
-  const start = '`herdr agent start <name> --kind claude --pane <root pane>`'
   if (task.phase === taskRow('queued').onClear) {
     const dispatch = `\`${hpipe} dispatch --task ${task.task_id} --pane <pane>\``
     return `${look}. If an agent is already there, its detection was missed: ${dispatch} records ` +
       'it and hands it the brief, so `herdr pane read` it before, in case it already has one. ' +
-      `If there is none, ${start}, then ${dispatch}`
+      `If there is none, ${START_AGENT}, then ${dispatch}`
   }
   // `dispatch --task` refuses every phase but the briefed one.
-  return `${look}. If there is none, ${start}, then hand it \`${hpipe} brief --task ` +
-    `${task.task_id}\` over \`herdr agent prompt\` and tell it the task is in ${task.phase}`
+  return `${look}. If there is none, ${START_AGENT}; ${handoffPastBrief(run, task, hpipe)}`
 }
