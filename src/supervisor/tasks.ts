@@ -9,6 +9,7 @@ import {
 import type { RunEffect } from '../lib/ledger'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
+import { queuedWorkerPrompt } from '../lib/outbox'
 import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -59,13 +60,16 @@ const UNCOMMITTED_SAMPLE = 3
  * signal — and only once per idle spell: the worker has to go busy to change the
  * tree, and going busy drops the record, so the next idle spell checks afresh.
  */
-async function noteUncommittedWork(task: Task, actorIdle: boolean, deps: TaskDeps): Promise<void> {
+async function noteUncommittedWork(
+  run: Run, task: Task, actorIdle: boolean, deps: TaskDeps,
+): Promise<void> {
   const row = taskRow(task.phase)
   if (row.actor !== 'worker' || row.holdsFiles !== true || task.checkout_path === null) return
   if (!actorIdle) {
     delete task.uncommitted_work
     return
   }
+  if (queuedWorkerPrompt(run, task) !== null) return
   if (task.uncommitted_work?.at === task.phase_entered_at) return
 
   // An unreadable checkout is recorded as an empty observation, not skipped:
@@ -224,7 +228,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // while it is mid-turn, exactly as run phases are gated.
     if (row.actor === 'orchestrator' && !actorIdle) continue
 
-    await noteUncommittedWork(task, actorIdle, deps)
+    await noteUncommittedWork(run, task, actorIdle, deps)
     const signals = await gatherSignals(run, task, deps, actorIdle)
     if (!signals) continue
 
@@ -343,6 +347,10 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         // Between `agent start` and `dispatch --task` every worker is idle with
         // nothing written, and was reported as stopped short. Measured on a live run.
         if (task.awaiting_brief === true) return base
+        // Nor has a worker whose prompt for this phase has not reached it yet —
+        // held by stuck input, by a dead pane, or just waiting for the next
+        // delivery. Measured on a live run.
+        if (queuedWorkerPrompt(run, task) !== null) return base
         task.artifact_missing = { at: task.phase_entered_at, path: absolute, candidates }
         return base
       }

@@ -1,6 +1,6 @@
 import { BOOTSTRAP_REL, type Bootstrap } from './bootstrap'
 import { baseArgument, type DispatchBase } from './dispatch-base'
-import { isCurrent } from './outbox'
+import { queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow } from './phases'
 import type { Run, Task } from './types'
 
@@ -122,9 +122,7 @@ export function dispatchSequence(
  * channel, and a hand-sent brief would only repeat it out of order.
  */
 function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
-  const queued = (run.outbox ?? []).some((entry) =>
-    entry.to === 'worker' && entry.task_id === task.task_id && isCurrent(run, entry))
-  if (queued) {
+  if (queuedWorkerPrompt(run, task) !== null) {
     return `its brief and ${task.phase} prompt are already queued and are sent on their own once ` +
       'herdr detects the agent — send it nothing yourself'
   }
