@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.7](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.6...v1.5.7) (2026-09-25)
+
+
+### Bug Fixes
+
+* stop plans widening the file lock onto the pipeline's own artifact directory ([#100](https://github.com/victorstein/herdr-plugin-pipeline/issues/100)) ([e9a1fcd](https://github.com/victorstein/herdr-plugin-pipeline/commit/e9a1fcd4392b62456fae1c3d6f457feb2524a5dc)), closes [#96](https://github.com/victorstein/herdr-plugin-pipeline/issues/96)
+
 ## [1.5.6](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.5...v1.5.6) (2026-09-25)
 
 
