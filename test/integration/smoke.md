@@ -449,14 +449,18 @@ than one candidate, pass `--run <run-id>`; the brief names the run in its first 
    in the pane *before* `hpipe status` stops saying `blocked-on-decision`. The phase reset is a
    consequence of a successful send, never of the write — and successful means **submitted**: a
    long answer can sit in the box as `❯ [Pasted text #N +M lines]` after herdr already reads the
-   agent `working`, and the phase must not move while it does (#117).
+   agent `working`, and the phase must not move while it does (#117). The supervisor sees it
+   submitted on a later tick, so a slow submission never holds other deliveries. Typing beside the
+   held paste must hold the answer as `⚠ stuck input`, not resume the task.
 
    Do it in this order so you can see it: `hpipe status`, then read the pane, then `hpipe status`
    again.
 6. **A decision asked after the phase's artifact is written** (#115). Have a reviewer write its
    verdict and then `hpipe decide` before the supervisor clears the phase. Once the answer lands and
    the worker goes idle again, the phase clears on that verdict (or on the one it rewrote) within a
-   tick or two — it must not sit `[<phase> Nm] done` until a stall probe.
+   tick or two — it must not sit `[<phase> Nm] done` until a stall probe. The older verdict counts
+   only once herdr has reported the worker `working` after the answer was sent; if the worker idles
+   without that report, the phase waits for a newer verdict or the stall probe, which is a finding.
 
 **Failure looks like:** the phase moving while the pane still shows the old prompt (the worker
 would resume having never read the answer, with `run.history` asserting otherwise — a serious

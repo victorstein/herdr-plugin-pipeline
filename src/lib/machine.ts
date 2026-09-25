@@ -97,24 +97,51 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   // told about it yet; every later transition follows the worker's own work.
   if (task.phase === 'queued' && phase === taskRow('queued').onClear) task.awaiting_brief = true
   else delete task.awaiting_brief
-  const resumingAskedPhase = task.phase === 'blocked-on-decision' && phase === task.decision_from
-  if (phase === 'blocked-on-decision') task.artifact_fresh_after ??= task.phase_entered_at
-  else if (!resumingAskedPhase) delete task.artifact_fresh_after
+  if (phase === 'blocked-on-decision') {
+    task.artifact_fresh_after ??= task.phase_entered_at
+    delete task.answer_sent_at
+    delete task.worked_on_answer
+  } else if (!leavesDecisionPending(task, phase)) {
+    forgetDecisionRoundTrip(task)
+  }
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
 }
 
 /**
+ * Resuming the asked-from phase, or escalating out of the decision — which a
+ * rewind back into `blocked-on-decision` resumes — keeps the round trip's record.
+ */
+function leavesDecisionPending(task: Task, phase: TaskPhase): boolean {
+  return task.phase === 'blocked-on-decision' && (phase === task.decision_from || phase === 'escalated')
+}
+
+export function forgetDecisionRoundTrip(task: Task): void {
+  delete task.artifact_fresh_after
+  delete task.answer_sent_at
+  delete task.worked_on_answer
+}
+
+/**
  * What the current phase's artifact or verdict must be newer than. A worker that
  * writes its verdict and then asks a decision resumes into a re-stamped phase, and
  * judged against that entry its verdict read as stale and the task sat idle until a
- * stall probe. Measured on a live run. The earlier verdict is only read once the
- * worker goes idle again after the answer, so one the answer changes has been
- * rewritten by then.
+ * stall probe. Measured on a live run. The earlier entry counts only once the
+ * worker has been seen working after its answer went in: the verdict is read on
+ * the next idle, so one the answer changes has been rewritten by then, and an
+ * idle read before that turn cannot clear the phase on a verdict the answer might
+ * overturn.
  */
 export function artifactFreshAfter(task: Task): number {
-  return task.artifact_fresh_after ?? task.phase_entered_at
+  return task.artifact_fresh_after !== undefined && task.worked_on_answer === true
+    ? task.artifact_fresh_after
+    : task.phase_entered_at
+}
+
+/** A working report after the answer was sent; before it, working is about something else. */
+export function noteWorkingAfterAnswer(task: Task, at: number): void {
+  if (task.answer_sent_at !== undefined && at >= task.answer_sent_at) task.worked_on_answer = true
 }
 
 export interface TaskSignals {

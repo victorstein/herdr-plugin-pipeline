@@ -18,7 +18,7 @@ import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
-import type { SendOptions } from './courier'
+import type { CheckSubmission } from './courier'
 import { runTeardown, type TeardownDeps } from './teardown'
 
 export interface TaskDeps extends TeardownDeps {
@@ -409,18 +409,29 @@ export interface AnswerDeps {
   pluginRoot: string
   promptRetryMax: number
   /** `held` means nothing was sent — the delivery gate is pausing that pane. */
-  send: (
-    paneId: string, text: string, options?: SendOptions,
-  ) => Promise<{ ok: boolean; code?: string; held?: string }>
+  send: (paneId: string, text: string) => Promise<{ ok: boolean; code?: string; held?: string }>
+  /** Reads the worker's box on a later tick to see a sent answer submitted. */
+  checkSubmission: CheckSubmission
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
 }
 
-export function markAnswerDelivered(
-  run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase,
-): void {
+function awaitingAnswer(run: Run, taskId: string, decisionId: string): Task | null {
   const task = run.tasks.find((t) => t.task_id === taskId)
-  if (task?.phase !== 'blocked-on-decision' || task.pending_answer !== decisionId) return
+  if (task?.phase !== 'blocked-on-decision' || task.pending_answer !== decisionId) return null
+  return task
+}
+
+export function markAnswerSent(run: Run, taskId: string, decisionId: string, at: number): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (task) task.answer_sent_at = at
+}
+
+export function markAnswerDelivered(
+  run: Run, taskId: string, decisionId: string, resumeTo: TaskPhase, seenWorking: boolean,
+): void {
+  const task = awaitingAnswer(run, taskId, decisionId)
+  if (!task) return
   task.pending_answer = null
   task.delivery_attempts = 0
   // No prompt is rendered here, deliberately: `answer.md` has already been sent,
@@ -428,6 +439,7 @@ export function markAnswerDelivered(
   // move the file the agent was told to write. A resume is not a new review.
   enterTaskPhase(run, task, resumeTo, `decision ${decisionId} answered`)
   task.decision_from = null
+  if (seenWorking) task.worked_on_answer = true
 }
 
 export function markDecisionAnnounced(
@@ -443,8 +455,11 @@ export function markDecisionAnnounced(
  * A worker busy for more than PROMPT_RETRY_MAX ticks would otherwise have its
  * phase reset, its delivery abandoned, and would then complete the phase with
  * the answer unread — with run.history asserting the decision was applied.
- * Successful means seen submitted, not merely taken up: a resumed phase may clear
- * on a verdict written before the decision, so the answer must be in, not in the box.
+ *
+ * Successful means seen submitted on a later tick, not merely taken up: a resumed
+ * phase may clear on a verdict written before the decision, so the answer must be
+ * in, not in the box. Checked across ticks rather than waited on, so one answer
+ * Claude is slow to submit cannot hold every other send of the tick.
  */
 export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise<void> {
   for (const task of run.tasks) {
@@ -465,7 +480,23 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       phase: resumeTo,
     })
 
-    const result = await deps.send(task.pane_id, text, { awaitSubmission: true })
+    const taskId = task.task_id
+    const decisionId = decision.id
+
+    if (task.answer_sent_at !== undefined) {
+      const check = await deps.checkSubmission(task.pane_id, text, task.answer_sent_at)
+      if (check.state === 'stalled') {
+        task.delivery_attempts += 1
+        delete task.answer_sent_at
+      }
+      if (check.state !== 'submitted') continue
+      const seenWorking = check.working === true
+      markAnswerDelivered(run, taskId, decisionId, resumeTo, seenWorking)
+      deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo, seenWorking))
+      continue
+    }
+
+    const result = await deps.send(task.pane_id, text)
     if (!result.ok) {
       // A held send never reached herdr, so it must not spend the attempts that
       // decide when this answer is abandoned.
@@ -473,10 +504,9 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       continue
     }
 
-    const taskId = task.task_id
-    const decisionId = decision.id
-    markAnswerDelivered(run, taskId, decisionId, resumeTo)
-    deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo))
+    const at = Date.now()
+    markAnswerSent(run, taskId, decisionId, at)
+    deps.effects?.push((fresh) => markAnswerSent(fresh, taskId, decisionId, at))
   }
 }
 

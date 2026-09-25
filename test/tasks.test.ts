@@ -7,8 +7,9 @@ import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
 import { hpipeCommand } from '../src/lib/render'
-import type { Run, Task } from '../src/lib/types'
+import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
 afterEach(cleanupFixtures)
@@ -967,9 +968,12 @@ const CLEAR_VERDICT = '# Review\n\nNothing blocks.\n\nVERDICT: CLEAR\nBLOCKERS: 
 
 /**
  * The live sequence: the phase is entered, the worker writes its artifact, asks a
- * decision, and the answer is delivered — each step on a later clock.
+ * decision, and the answer is sent and then seen submitted — each step on a later
+ * clock. `seenWorking` is whether the confirming read caught the worker on it.
  */
-async function askAndAnswerAfterWriting(run: Run, task: Task, write: () => string): Promise<void> {
+async function askAndAnswerAfterWriting(
+  run: Run, task: Task, write: () => string, seenWorking = true,
+): Promise<void> {
   const now = Date.now()
   task.phase_entered_at = now - 120_000
   const written = write()
@@ -979,27 +983,61 @@ async function askAndAnswerAfterWriting(run: Run, task: Task, write: () => strin
   enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
   answerDecision(task, decision.id, 'A', 'orchestrator')
   task.pending_answer = decision.id
-  await deliverPendingAnswers(run, {
+  const answerDeps = {
     pluginRoot: process.cwd(), promptRetryMax: 5, send: async () => ({ ok: true }),
-  })
+    checkSubmission: async () => ({ state: 'submitted' as const, working: seenWorking }),
+  }
+  await deliverPendingAnswers(run, answerDeps)
+  await deliverPendingAnswers(run, answerDeps)
 }
 
-test('a verdict written before the worker asked a decision clears the review once it is answered', async () => {
+async function reviewAnsweredAfterItsVerdict(seenWorking: boolean): Promise<{ run: Run; task: Task }> {
   const worktree = tempDir('hpipe-decided-review-')
   const task = mkTask({ phase: 'plan-review', checkout_path: worktree, artifacts: designArtifacts() })
   const run = mkRun([task])
   await promptForTaskPhase(run, task, deps(), 'plan')
-
   await askAndAnswerAfterWriting(run, task, () => {
     const verdict = absoluteArtifactPath(run, task) as string
     mkdirSync(dirname(verdict), { recursive: true })
     writeFileSync(verdict, CLEAR_VERDICT)
     return verdict
-  })
+  }, seenWorking)
+  return { run, task }
+}
+
+test('a verdict written before the worker asked a decision clears the review once it is answered', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(true)
   expect(task.phase).toBe('plan-review')
 
   await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
   expect(run.tasks[0]?.phase).toBe('blocked-on-files')
+})
+
+test('an idle read before the worker is seen on the answer does not clear on the older verdict', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(false)
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('plan-review')
+
+  const working: QueuedEvent = {
+    kind: 'pane.agent_status_changed', session: 'p', at: Date.now(),
+    pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'working',
+  }
+  expect(applyEvents([run], [working], 'p', new Set()).changed).toBe(true)
+  expect(task.worked_on_answer).toBe(true)
+
+  await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
+  expect(run.tasks[0]?.phase).toBe('blocked-on-files')
+})
+
+test('a working report from before the answer was sent does not count as work on it', async () => {
+  const { run, task } = await reviewAnsweredAfterItsVerdict(false)
+  const before: QueuedEvent = {
+    kind: 'pane.agent_status_changed', session: 'p', at: (task.answer_sent_at as number) - 1,
+    pane_id: 'w7:p1', workspace_id: 'w7', agent_status: 'working',
+  }
+  applyEvents([run], [before], 'p', new Set())
+  expect(task.worked_on_answer).toBeUndefined()
 })
 
 test('an artifact written before the worker asked a decision clears its phase once it is answered', async () => {

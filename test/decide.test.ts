@@ -6,6 +6,7 @@ import { cmdAnswer, cmdDecide, cmdRewind } from '../src/cli'
 import { openDecision, answerDecision, abandonDecisions, openDecisionFor } from '../src/lib/decisions'
 import { listRuns, loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { type AnswerDeps, announceDecisions, deliverPendingAnswers } from '../src/supervisor/tasks'
+import type { SubmissionCheck } from '../src/supervisor/courier'
 import { artifactPathFor } from '../src/supervisor/deliver'
 import { verdictFor } from '../src/lib/verdict-path'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
@@ -219,14 +220,21 @@ const answerDeps = (over: Partial<AnswerDeps> = {}): AnswerDeps => ({
   pluginRoot: join(import.meta.dir, '..'),
   promptRetryMax: 5,
   send: async () => ({ ok: true }),
+  checkSubmission: async () => ({ state: 'submitted', working: true }),
   ...over,
 })
+
+/** The tick that sends the answer, then the tick whose box read sees it submitted. */
+async function sendAndConfirm(run: Run, deps: AnswerDeps = answerDeps()): Promise<void> {
+  await deliverPendingAnswers(run, deps)
+  await deliverPendingAnswers(run, deps)
+}
 
 test('a delivered answer returns the task and resets phase_entered_at', async () => {
   const { run, task } = blockedOnDecision()
   const enteredBefore = task.phase_entered_at
 
-  await deliverPendingAnswers(run, answerDeps())
+  await sendAndConfirm(run)
 
   expect(task.phase).toBe('plan')
   expect(task.pending_answer).toBeNull()
@@ -248,22 +256,58 @@ test('a failed send leaves the task blocked and counts the attempt', async () =>
   expect(task.delivery_attempts).toBe(1)
 })
 
-test('an answer is sent to be seen submitted, and one still in the box leaves the task blocked — #117', async () => {
+test('a sent answer resumes nothing until a later tick sees it submitted — #117', async () => {
   const { run, task, decisionId } = blockedOnDecision()
   const enteredBefore = task.phase_entered_at
-  const options: unknown[] = []
-
-  await deliverPendingAnswers(run, answerDeps({
-    send: async (_pane, _text, sendOptions) => {
-      options.push(sendOptions)
-      return { ok: false, code: 'agent_prompt_stalled' }
+  const checks: Array<SubmissionCheck['state']> = ['pending', 'stuck']
+  let sends = 0
+  const deps = answerDeps({
+    send: async () => { sends += 1; return { ok: true } },
+    checkSubmission: async () => {
+      const state = checks.shift()
+      return state === undefined ? { state: 'submitted', working: false } : { state }
     },
-  }))
+  })
 
-  expect(options).toEqual([{ awaitSubmission: true }])
+  await deliverPendingAnswers(run, deps)
+  expect(task.answer_sent_at).toBeGreaterThan(0)
+  for (let tick = 0; tick < 2; tick++) {
+    await deliverPendingAnswers(run, deps)
+    expect(task.phase).toBe('blocked-on-decision')
+    expect(task.pending_answer).toBe(decisionId)
+    expect(task.phase_entered_at).toBe(enteredBefore)
+  }
+  expect(task.delivery_attempts).toBe(0)
+
+  await deliverPendingAnswers(run, deps)
+  expect(sends).toBe(1)
+  expect(run.tasks[0]?.phase).toBe('plan')
+  expect(task.worked_on_answer).toBeUndefined()
+})
+
+test('an answer never submitted within the confirm window spends an attempt and is sent again — #117', async () => {
+  const { run, task } = blockedOnDecision()
+  let sends = 0
+  let stalled = false
+  const deps = answerDeps({
+    send: async () => { sends += 1; return { ok: true } },
+    checkSubmission: async () => {
+      if (stalled) return { state: 'submitted', working: true }
+      stalled = true
+      return { state: 'stalled' }
+    },
+  })
+
+  await deliverPendingAnswers(run, deps)
+  await deliverPendingAnswers(run, deps)
   expect(task.phase).toBe('blocked-on-decision')
-  expect(task.pending_answer).toBe(decisionId)
-  expect(task.phase_entered_at).toBe(enteredBefore)
+  expect(task.delivery_attempts).toBe(1)
+  expect(task.answer_sent_at).toBeUndefined()
+
+  await sendAndConfirm(run, deps)
+  expect(sends).toBe(2)
+  expect(run.tasks[0]?.phase).toBe('plan')
+  expect(task.worked_on_answer).toBe(true)
 })
 
 test('a send the delivery gate held spends no attempt — #24', async () => {
@@ -296,7 +340,7 @@ test('counters are untouched by a decision round trip', async () => {
   const { run, task } = blockedOnDecision()
   task.passes = { plan: 2 }
 
-  await deliverPendingAnswers(run, answerDeps())
+  await sendAndConfirm(run)
 
   expect(task.phase).toBe('plan')
   expect(task.passes).toEqual({ plan: 2 })
@@ -556,7 +600,7 @@ test('answering a decision raised on a review row does not move the verdict path
   const handed = verdictFor(task, 'spec-review')
   expect(handed).toBe('docs/superpowers/reviews/issue-1-spec-review-0.md')
 
-  await deliverPendingAnswers(run, answerDeps())
+  await sendAndConfirm(run)
 
   // Read through `run.tasks` so the literal assignment above does not narrow the
   // comparison type to `blocked-on-decision`.
@@ -592,10 +636,11 @@ test('a delivered answer whose save lost is recorded, so the next tick does not 
 
   const nextTick = (await loadRun(dir, tickCopy.session, tickCopy.run_id))!
   expect(nextTick.intake_closed).toBe(true)
-  expect(nextTick.tasks[0]?.phase).toBe('plan')
-  expect(nextTick.tasks[0]?.pending_answer).toBeNull()
+  expect(nextTick.tasks[0]?.answer_sent_at).toBeGreaterThan(0)
   await deliverPendingAnswers(nextTick, answerDeps({ send: async () => { sends += 1; return { ok: true } } }))
   expect(sends).toBe(1)
+  expect(nextTick.tasks[0]?.phase).toBe('plan')
+  expect(nextTick.tasks[0]?.pending_answer).toBeNull()
 })
 
 test('an answer rewound away by the CLI is not resurrected by the re-apply', async () => {
@@ -629,9 +674,39 @@ test('an announced decision whose save lost is recorded, so it is announced once
   expect(sends).toBe(1)
 })
 
-test('a rewind drops the baseline a decision resume kept, so the rewound phase starts clean — #115', async () => {
-  const run = await runWithTask({ task_id: 't1', phase: 'plan-review', artifact_fresh_after: 1_000 })
+test('a rewind drops the round trip a decision resume kept, so the rewound phase starts clean — #115', async () => {
+  const run = await runWithTask({
+    task_id: 't1', phase: 'plan-review', artifact_fresh_after: 1_000, answer_sent_at: 2_000,
+    worked_on_answer: true,
+  })
   const rewound = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
   expect(rewound.ok).toBe(true)
-  expect((await savedRun(run.run_id))?.tasks[0]?.artifact_fresh_after).toBeUndefined()
+  const task = (await savedRun(run.run_id))?.tasks[0]
+  expect(task?.artifact_fresh_after).toBeUndefined()
+  expect(task?.answer_sent_at).toBeUndefined()
+  expect(task?.worked_on_answer).toBeUndefined()
+})
+
+test('rewinding an escalated decision back into it keeps the asked-from phase\'s entry — #115', async () => {
+  const run = await runWithTask({
+    task_id: 't1', phase: 'escalated', escalated_from: 'blocked-on-decision', decision_from: 'plan-review',
+    artifact_fresh_after: 1_000, answer_sent_at: 2_000,
+  })
+  const rewound = await cmdRewind(ctx(), { runId: run.run_id, phase: 'blocked-on-decision', taskId: 't1' })
+  expect(rewound.ok).toBe(true)
+  const task = (await savedRun(run.run_id))?.tasks[0]
+  expect(task?.artifact_fresh_after).toBe(1_000)
+  expect(task?.answer_sent_at).toBeUndefined()
+})
+
+test('a fresh answer re-arms a send still awaiting submission — #117', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan' })
+  await cmdDecide(ctx(), { task: 't1', question: 'q', recommendation: 'r', repoKey: 'k', runId: null })
+  const decided = (await savedRun(run.run_id))!
+  const decisionId = openDecisionFor(decided.tasks[0]!)!.id
+  decided.tasks[0]!.answer_sent_at = 2_000
+  await saveRun(dir, decided)
+
+  await cmdAnswer(ctx(), { task: 't1', decision: decisionId, answer: 'do X', by: 'human', repoKey: 'k', runId: null })
+  expect((await savedRun(run.run_id))?.tasks[0]?.answer_sent_at).toBeUndefined()
 })

@@ -180,6 +180,14 @@ export interface Task {
    * Optional: absent outside a decision, and on ledgers written before #115.
    */
   artifact_fresh_after?: number
+  /**
+   * When the pending answer was sent. Its delivery is confirmed on later ticks,
+   * once the worker's input box no longer holds it. Optional, like the next field:
+   * absent outside a decision, and on ledgers written before #117.
+   */
+  answer_sent_at?: number
+  /** The worker was seen working after its answer was sent; `artifactFreshAfter` needs it. */
+  worked_on_answer?: true
   pending_answer: string | null
   delivery_attempts: number
   stall?: StallState

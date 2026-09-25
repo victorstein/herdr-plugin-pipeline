@@ -1,6 +1,6 @@
 import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
-import { enterTaskPhase } from '../lib/machine'
+import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
@@ -394,6 +394,12 @@ export function applyEvents(
     }
 
     if (event.kind === 'pane.agent_status_changed' && event.agent_status) {
+      // Ahead of the unchanged-status skip: the cached status is already `working`
+      // whenever herdr confirmed the answer's own send that way.
+      if (event.agent_status === 'working' && task.worked_on_answer !== true) {
+        noteWorkingAfterAnswer(task, event.at)
+        if (task.worked_on_answer === true) changed = true
+      }
       if (task.agent_status === event.agent_status) continue
       task.agent_status = event.agent_status
       changed = true

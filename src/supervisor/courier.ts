@@ -239,13 +239,9 @@ export interface SendOutcome {
   held?: HoldReason
 }
 
-export interface SendOptions {
-  overBudget?: boolean
-  /** Delivered only once the box no longer holds the text; see `submittedWithin`. */
-  awaitSubmission?: boolean
-}
-
-export type Send = (paneId: string, text: string, options?: SendOptions) => Promise<SendOutcome>
+export type Send = (
+  paneId: string, text: string, options?: { overBudget?: boolean },
+) => Promise<SendOutcome>
 
 /**
  * Consecutive ticks a stall probe may be deferred by the tick's budget before it
@@ -494,28 +490,6 @@ export interface CourierOptions {
   clears?: ClearGuard
   /** Panes a human types in — every orchestrator pane — whose input box is never cleared. */
   humanTypesIn?: (paneId: string) => boolean
-  sleep?: (ms: number) => Promise<void>
-}
-
-const SUBMIT_POLL_MS = 500
-
-/**
- * herdr's `--until working` can confirm while Claude still holds a long paste
- * unsubmitted in its box: an answer read `working` at once and sat there as
- * `[Pasted text #3 +11 lines]` for several seconds more. Measured on a live run.
- * So a send whose delivery moves state waits, up to `timeoutMs`, for the box to
- * stop holding nothing but this send. A box someone else has typed into since is
- * not ours to wait on.
- */
-async function submittedWithin(
-  io: PromptIO, paneId: string, text: string, timeoutMs: number, sleep: (ms: number) => Promise<void>,
-): Promise<boolean> {
-  for (let waited = 0; ; waited += SUBMIT_POLL_MS) {
-    const box = await readInputBox(io, paneId)
-    if (box === null || box.length === 0 || !boxHoldsOnly(box, text)) return true
-    if (waited >= timeoutMs) return false
-    await sleep(SUBMIT_POLL_MS)
-  }
 }
 
 export function makeCourier(
@@ -523,7 +497,6 @@ export function makeCourier(
 ): Send {
   const clears = options.clears ?? new ClearGuard()
   const humanTypesIn = options.humanTypesIn ?? (() => false)
-  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms))
   const heldStuck: SendOutcome = { ok: false, code: STUCK_INPUT, held: STUCK_INPUT }
   return async (paneId, text, sendOptions = {}) => {
     if (gate.isStuck(paneId) && gate.boxReadAlready(paneId)) return heldStuck
@@ -531,15 +504,7 @@ export function makeCourier(
     if (held !== null) return { ok: false, code: held, held }
     const boxHeld = await boxHold(io, gate, paneId, text, clears, humanTypesIn(paneId))
     if (boxHeld !== null) return boxHeld
-    let result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
-    if (result.ok && sendOptions.awaitSubmission === true &&
-      !(await submittedWithin(io, paneId, text, confirmMs, sleep))) {
-      // Left to the stall path, so the next attempt clears it before re-sending.
-      result = {
-        ok: false, code: 'agent_prompt_stalled',
-        message: `${paneId} read as taking the prompt up, but its input box still holds it`,
-      }
-    }
+    const result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
     if (result.boxClear === true) gate.forgetStalled(paneId)
     else if (!result.ok && MAY_HAVE_LANDED.has(result.code ?? '')) gate.noteStalled(paneId, text)
     gate.record(paneId, result)
@@ -582,6 +547,67 @@ async function boxHold(
   }
   gate.forgetStalled(paneId)
   return null
+}
+
+/** Whether any line of the box carries a paste placeholder or a piece of the sent text. */
+function boxHoldsAnyOf(box: string, sent: string): boolean {
+  const ours = squashSpace(sent)
+  return box.split('\n').some((line) => {
+    if (line.match(PASTE_PLACEHOLDER) !== null) return true
+    const rest = squashSpace(line)
+    return rest.length >= MIN_PIECE_CHARS && ours.includes(rest)
+  })
+}
+
+/**
+ * `pending`: nothing but this send is in the box. `stuck`: it is there beside
+ * someone else's text, so it is neither submitted nor ours to clear. A box of
+ * only someone else's text was typed after this send went in.
+ */
+export type Submission = 'submitted' | 'pending' | 'stuck'
+
+export function submissionOf(box: string | null, sent: string): Submission {
+  if (box === null || box.length === 0) return 'submitted'
+  if (boxHoldsOnly(box, sent)) return 'pending'
+  return boxHoldsAnyOf(box, sent) ? 'stuck' : 'submitted'
+}
+
+export interface SubmissionCheck {
+  state: Submission | 'stalled'
+  /** Read only once submitted: the agent was working on it at the confirming read. */
+  working?: boolean
+}
+
+export type CheckSubmission = (paneId: string, sent: string, sentAt: number) => Promise<SubmissionCheck>
+
+/**
+ * herdr's `--until working` can confirm while Claude still holds a long paste
+ * unsubmitted in its box: an answer read `working` at once and sat there as
+ * `[Pasted text #3 +11 lines]` for several seconds more. Measured on a live run.
+ * A send whose delivery moves state is therefore confirmed by reading the box on
+ * later ticks rather than by waiting inside this one. Still sitting there
+ * `confirmMs` after it was sent, it becomes a stall, so the next send clears it
+ * under #106's rules before sending again.
+ */
+export function makeSubmissionCheck(
+  gate: DeliveryGate, io: PromptIO, confirmMs: number, now: () => number = Date.now,
+): CheckSubmission {
+  return async (paneId, sent, sentAt) => {
+    const box = await readInputBox(io, paneId)
+    const state = submissionOf(box, sent)
+    if (state === 'stuck') {
+      gate.markStuck(paneId)
+      return { state }
+    }
+    if (state === 'pending') {
+      if (now() - sentAt < confirmMs) return { state }
+      gate.noteStalled(paneId, sent)
+      gate.record(paneId, { ok: false, code: 'agent_prompt_stalled' })
+      return { state: 'stalled' }
+    }
+    if (box === '') gate.unstick(paneId)
+    return { state, working: (await io.agentStatus(paneId)) === 'working' }
+  }
 }
 
 /** Panes whose agent has just reported in: an answer is worth trying now, not at the end of a backoff. */

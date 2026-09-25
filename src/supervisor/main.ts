@@ -20,8 +20,8 @@ import {
   refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
-  boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending,
-  readyPanes,
+  boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, makeSubmissionCheck,
+  outboxPending, queuePending, readyPanes,
 } from './courier'
 import { HEALTH_REFRESH_MS, writeDeliveryHealth } from '../lib/delivery-health'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
@@ -182,6 +182,7 @@ async function main(): Promise<void> {
     humanTypesIn: (paneId) =>
       claimedPanes.has(paneId) || knownRuns.some((r) => r.orchestrator_pane === paneId),
   })
+  const checkSubmission = makeSubmissionCheck(gate, herdr, config.PROMPT_CONFIRM_MS)
   const sendProbe = boundedProbeSend(send)
   const catchUps = new CatchUps()
   let healthRevision = -1
@@ -326,6 +327,7 @@ async function main(): Promise<void> {
             pluginRoot,
             promptRetryMax: config.PROMPT_RETRY_MAX,
             send,
+            checkSubmission,
             effects,
           }
           await deliverPendingAnswers(run, answerDeps)

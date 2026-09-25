@@ -7,7 +7,8 @@ import {
   BACKOFF_BASE_MS, boundedProbeSend, boxHoldsOnly, CatchUps, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate,
   flushDeliveries,
   inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
-  PROBE_DEFERRALS_MAX, sendConfirmed, STALLED_SEND_TTL_MS, STUCK_INPUT, withoutFaintText,
+  makeSubmissionCheck, PROBE_DEFERRALS_MAX, sendConfirmed, STALLED_SEND_TTL_MS, STUCK_INPUT,
+  submissionOf, withoutFaintText,
 } from '../src/supervisor/courier'
 import { deliveriesFor, type PendingPrompt } from '../src/supervisor/deliver'
 
@@ -858,71 +859,63 @@ test('a stall that leaves the box empty arms nothing, so a paste seconds later i
   expect(presses(w.io)).toEqual([])
 })
 
-// ——— a send that must be seen submitted — #117 ———
+// ——— seeing a sent answer submitted — #117 ———
 
 const HELD_PASTE = claudeScreen('[Pasted text #3 +11 lines]')
 const ANSWER = '# Decision answered — resume `spec`\n\n**Q:** which way?\n\n**A:** A\n'
 
-/** herdr confirms take-up; the screen then reads `screens` in order, the last one for good. */
-function takenUpWhileBoxReads(screens: string[]): { io: FakeIO; waits: number[] } {
-  const io = fakeIO()
-  let sent = false
-  const queue = [...screens]
-  io.agentPromptConfirmed = async (pane, text) => {
-    io.calls.push(`prompt ${pane} ${text}`)
-    sent = true
-    return { ok: true }
-  }
-  io.paneReadStyled = async (pane) => {
-    io.calls.push(`read ${pane}`)
-    if (!sent) return claudeScreen('')
-    return queue.length > 1 ? queue.shift()! : queue[0]!
-  }
-  return { io, waits: [] }
+function boxReading(screen: () => string, status: AgentStatus = 'working'): FakeIO {
+  const io = fakeIO({ status })
+  io.paneReadStyled = async (pane) => { io.calls.push(`read ${pane}`); return screen() }
+  return io
 }
 
-test('a send that must be seen submitted waits out a paste Claude still holds after reading working — #117', async () => {
-  const gate = gateAt({ now: 0 })
-  gate.beginTick(new Set(['w7:p1']))
-  const { io, waits } = takenUpWhileBoxReads([HELD_PASTE, HELD_PASTE, claudeScreen('')])
-  const send = makeCourier(gate, io, 15000, { sleep: async (ms) => { waits.push(ms) } })
+test('an answer is pending while nothing but its paste is in the box, and submitted once the box empties', async () => {
+  const clock = { now: 1_000 }
+  const gate = gateAt(clock)
+  let screen = HELD_PASTE
+  const check = makeSubmissionCheck(gate, boxReading(() => screen), 15_000, () => clock.now)
 
-  expect(await send('w7:p1', ANSWER, { awaitSubmission: true })).toEqual({ ok: true })
-  expect(io.calls.filter((c) => c.startsWith('read'))).toHaveLength(4)
-  expect(waits).toHaveLength(2)
-  expect(presses(io)).toEqual([])
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'pending' })
+  clock.now = 8_000
+  screen = claudeScreen('')
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'submitted', working: true })
 })
 
-test('a send still sitting in the box past the confirm window is a stall, cleared before the next send — #117', async () => {
-  const clock = { now: 0 }
+test('the confirming read reports whether the agent is working on the answer', async () => {
+  const check = makeSubmissionCheck(gateAt({ now: 0 }), boxReading(() => claudeScreen(''), 'idle'), 15_000, () => 0)
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'submitted', working: false })
+})
+
+test('an answer still alone in the box past the confirm window is a stall the next send clears first', async () => {
+  const clock = { now: 15_000 }
   const gate = gateAt(clock)
   gate.beginTick(new Set(['w7:p1']))
-  const { io, waits } = takenUpWhileBoxReads([HELD_PASTE])
-  const send = makeCourier(gate, io, 15000, {
-    sleep: async (ms) => { waits.push(ms); clock.now += ms },
-  })
+  const io = boxReading(() => HELD_PASTE)
+  const check = makeSubmissionCheck(gate, io, 15_000, () => clock.now)
 
-  expect(await send('w7:p1', ANSWER, { awaitSubmission: true }))
-    .toEqual({ ok: false, code: 'agent_prompt_stalled' })
-  expect(waits.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(15000)
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'stalled' })
   expect(gate.stalledSendTo('w7:p1')).toBe(ANSWER)
+  expect(gate.failuresFor('w7:p1')).toBe(1)
   expect(presses(io)).toEqual([])
 })
 
-test('a box a human typed into after the send is not ours to wait on', async () => {
+test('our paste beside someone else\'s text is neither submitted nor cleared: held as stuck input', async () => {
   const gate = gateAt({ now: 0 })
-  gate.beginTick(new Set(['w7:p1']))
-  const { io, waits } = takenUpWhileBoxReads([HUMAN_DRAFT])
-  const send = makeCourier(gate, io, 15000, { sleep: async (ms) => { waits.push(ms) } })
+  const io = boxReading(() => claudeScreen('[Pasted text #3 +11 lines] also check the migration order please'))
+  const check = makeSubmissionCheck(gate, io, 15_000, () => 60_000)
 
-  expect(await send('w7:p1', ANSWER, { awaitSubmission: true })).toEqual({ ok: true })
-  expect(waits).toEqual([])
+  expect(await check('w7:p1', ANSWER, 0)).toEqual({ state: 'stuck' })
+  expect(gate.isStuck('w7:p1')).toBe(true)
+  expect(presses(io)).toEqual([])
 })
 
-test('a send not asked to be seen submitted reads no box after it', async () => {
-  const gate = gateAt({ now: 0 })
-  gate.beginTick(new Set(['w7:p1']))
-  const { io } = takenUpWhileBoxReads([HELD_PASTE])
-  expect(await makeCourier(gate, io, 15000)('w7:p1', ANSWER)).toEqual({ ok: true })
-  expect(io.calls.filter((c) => c.startsWith('read'))).toHaveLength(1)
+test('submissionOf reads the box the answer was sent into', () => {
+  expect(submissionOf(null, ANSWER)).toBe('submitted')
+  expect(submissionOf('', ANSWER)).toBe('submitted')
+  expect(submissionOf('[Pasted text #3 +11 lines]', ANSWER)).toBe('pending')
+  expect(submissionOf('**Q:** which way? **A:** A', ANSWER)).toBe('pending')
+  expect(submissionOf('[Pasted text #3 +11 lines] also this', ANSWER)).toBe('stuck')
+  expect(submissionOf('also this\n**Q:** which way? **A:** A', ANSWER)).toBe('stuck')
+  expect(submissionOf('a draft typed after the answer went in', ANSWER)).toBe('submitted')
 })
