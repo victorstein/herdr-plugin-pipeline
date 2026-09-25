@@ -99,6 +99,33 @@ async function defaultBranch(
   return { branch: match[1]!, error: null }
 }
 
+const unansweredLookups = new Map<string, number>()
+
+/**
+ * The branch dispatch cuts worktrees from, for a caller that needs the name
+ * rather than a fetch. Null when origin exists but cannot say: guessing `main`
+ * there could name a stale branch that is not the default at all.
+ *
+ * With no origin, dispatch falls back to local `main`, and so does this.
+ *
+ * A failed lookup is not retried for a while: the caller runs on the tick, and
+ * an unreachable remote would otherwise cost the full timeout on every one.
+ */
+export async function mainlineBranch(repoRoot: string): Promise<string | null> {
+  const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
+  if (origin.code !== 0) return 'main'
+
+  const failedAt = unansweredLookups.get(repoRoot)
+  const coolingDown = failedAt !== undefined && Date.now() - failedAt < CACHE_TTL_MS
+  const network = coolingDown
+    ? { env: process.env, deadline: 0 }
+    : { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  const found = await defaultBranch(repoRoot, network)
+  if (found.error === null) return found.branch
+  if (!coolingDown) unansweredLookups.set(repoRoot, Date.now())
+  return null
+}
+
 async function fetchBase(repoRoot: string): Promise<DispatchBase> {
   let branch = 'main'
   let fetchError: string | null
@@ -165,6 +192,7 @@ export async function freshDispatchBase(
 export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()
+  unansweredLookups.clear()
 }
 
 export function dependencyMerges(task: Task, tasks: Task[]): string[] | null {

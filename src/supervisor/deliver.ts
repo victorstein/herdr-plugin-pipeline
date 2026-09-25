@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
+import { mainlineBranch } from '../lib/dispatch-base'
 import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
@@ -162,19 +163,6 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
   return join(artifactBase(run, task), rel)
 }
 
-/**
- * The mainline a worker worktree forks from. Dispatch cuts it from the fetched
- * `origin/<default>` commit (`freshDispatchBase`) and the pre-merge step merges
- * `origin/main`, while local `main` is often stale, so both refs count: against
- * `main` alone the merge-base stays behind and every doc that landed meanwhile
- * reads as added. Measured on this repo: six sibling-owned candidates.
- *
- * A base pinned at dispatch would not help. Whatever the base, the diff runs to
- * HEAD's tree, and merging `main` puts the siblings' docs in that tree.
- */
-const ARTIFACT_BASE_REF = 'main'
-const ARTIFACT_REMOTE_BASE_REF = 'refs/remotes/origin/main'
-
 // Bun.spawn throws synchronously on a missing binary, and this runs inside the
 // supervisor tick, so that must degrade to a non-ok result rather than crash the
 // loop — the same contract Gh.run holds. A bad `-C` path does not throw; git exits
@@ -224,7 +212,7 @@ export async function adoptableArtifacts(
   if (checkoutPath === null) return []
 
   const mainlines: string[] = []
-  for (const ref of [ARTIFACT_BASE_REF, ARTIFACT_REMOTE_BASE_REF]) {
+  for (const ref of await mainlineRefs(checkoutPath)) {
     const resolved = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ref])
     if (resolved.code === 0) mainlines.push(ref)
   }
@@ -246,6 +234,26 @@ export async function adoptableArtifacts(
     .filter((path) => !path.startsWith(`${REVIEWS_DIR}/`))
     .filter((path) => !addedByMerges.has(path))
     .filter((path) => !claimed.has(path))
+}
+
+/**
+ * The mainline a worker worktree forks from. Dispatch cuts it from the fetched
+ * `origin/<default>` commit (`freshDispatchBase`) and the pre-merge step merges
+ * `origin/<default>`, while the local branch is often stale, so both refs count:
+ * against the local branch alone the merge-base stays behind and every doc that
+ * landed meanwhile reads as added. Measured on this repo: six sibling-owned
+ * candidates.
+ *
+ * The default branch comes from dispatch's own detection, so adoption cannot
+ * measure against a different branch than the worktree was cut from (#108).
+ *
+ * A base pinned at dispatch would not help. Whatever the base, the diff runs to
+ * HEAD's tree, and merging the default branch puts the siblings' docs in that tree.
+ */
+async function mainlineRefs(checkoutPath: string): Promise<string[]> {
+  const branch = await mainlineBranch(checkoutPath)
+  if (branch === null) return []
+  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
 }
 
 // `-m --first-parent`, not `--diff-merges=first-parent`: the latter needs git 2.31,

@@ -5,47 +5,14 @@ import {
   baseLine, dependencyMerges, describeBase, forgetDispatchBases, freshDispatchBase,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
-import { cleanupFixtures, commitIn, git, repoWithWorktree, tempDir } from './helpers/git-worktree'
+import {
+  bareRemote, cleanupFixtures, cloneOfRemote, git, landOnRemote, repoWithWorktree, revParse, tempDir,
+} from './helpers/git-worktree'
 
 afterEach(() => {
   forgetDispatchBases()
   cleanupFixtures()
 })
-
-const revParse = (cwd: string, ref: string): string =>
-  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
-
-function commitAs(checkout: string, rel: string, body: string): void {
-  git(['config', 'user.email', 'test@example.com'], checkout)
-  git(['config', 'user.name', 'Test'], checkout)
-  commitIn(checkout, rel, body)
-}
-
-function bareRemote(defaultBranch: string): string {
-  const remote = tempDir('hpipe-remote-')
-  git(['init', '-q', '--bare', `--initial-branch=${defaultBranch}`, '.'], remote)
-  const seed = join(tempDir('hpipe-seed-'), 'seed')
-  git(['clone', '-q', remote, seed], tempDir('hpipe-cwd-'))
-  commitAs(seed, 'README.md', 'scaffold\n')
-  git(['push', '-q', 'origin', `HEAD:${defaultBranch}`], seed)
-  return remote
-}
-
-function cloneOfRemote(defaultBranch: string): { remote: string; clone: string } {
-  const remote = bareRemote(defaultBranch)
-  const clone = join(tempDir('hpipe-clone-'), 'clone')
-  git(['clone', '-q', remote, clone], tempDir('hpipe-cwd-'))
-  return { remote, clone }
-}
-
-let landings = 0
-function landOnRemote(remote: string, branch: string): string {
-  const sibling = join(tempDir('hpipe-landing-'), 'sib')
-  git(['clone', '-q', remote, sibling], tempDir('hpipe-cwd-'))
-  commitAs(sibling, `src/landed-${++landings}.ts`, 'export const farewell = 1\n')
-  git(['push', '-q', 'origin', `HEAD:${branch}`], sibling)
-  return revParse(sibling, 'HEAD')
-}
 
 test('a dependency merged upstream is in the base though local main is stale', async () => {
   const { remote, clone } = cloneOfRemote('main')
@@ -69,6 +36,8 @@ test('a repo created locally and pushed has no origin/HEAD, so the remote is ask
   git(['init', '-q', '--initial-branch=master', '.'], local)
   git(['remote', 'add', 'origin', remote], local)
   git(['fetch', '-q', 'origin'], local)
+  // git 2.48 records origin/HEAD on fetch; a repo pushed from an older git has none.
+  git(['update-ref', '--no-deref', '-d', 'refs/remotes/origin/HEAD'], local)
   const merged = landOnRemote(remote, 'master')
 
   expect(await freshDispatchBase(local)).toEqual({ commit: merged, ref: 'origin/master', fetchError: null })

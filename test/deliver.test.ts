@@ -7,12 +7,17 @@ import {
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
-  cleanupFixtures, commitIn, git, repoWithWorktree, siblingLands, tempDir,
+  bareRemote, cleanupFixtures, cloneOfRemote, commitAs, commitIn, git, landOnRemote,
+  repoWithWorktree, revParse, siblingLands, tempDir,
 } from './helpers/git-worktree'
+import { forgetDispatchBases } from '../src/lib/dispatch-base'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
-afterEach(cleanupFixtures)
+afterEach(() => {
+  forgetDispatchBases()
+  cleanupFixtures()
+})
 
 const mkTask = (over: Partial<Task>): Task => ({
   task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
@@ -535,9 +540,6 @@ test('adoptableArtifacts falls back to origin/main when local main is missing', 
   ])
 })
 
-const revParse = (cwd: string, ref: string): string =>
-  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
-
 // #87: dispatch cuts from the fetched `origin/<default>` commit, ahead of a stale
 // local `main`. The merge-base must then be that commit, or every doc that landed
 // upstream reads as the worker's own.
@@ -551,6 +553,90 @@ test('a worktree cut from the origin/main commit ahead of a stale local main ado
   expect(await adoptableArtifacts(worktree, new Set())).toEqual([
     'docs/superpowers/notes/mine.md',
   ])
+})
+
+const MY_DOC = 'docs/superpowers/notes/mine.md'
+
+/**
+ * `trunk` is a clone, so `origin/HEAD` names it; `master` was created locally and
+ * pushed, so only the remote can say what its default is.
+ */
+function primaryOn(defaultBranch: 'trunk' | 'master'): { remote: string; primary: string } {
+  if (defaultBranch === 'trunk') {
+    const { remote, clone } = cloneOfRemote('trunk')
+    return { remote, primary: clone }
+  }
+  const remote = bareRemote('master')
+  const primary = tempDir('hpipe-local-')
+  git(['init', '-q', '--initial-branch=master', '.'], primary)
+  git(['remote', 'add', 'origin', remote], primary)
+  git(['fetch', '-q', 'origin'], primary)
+  git(['reset', '-q', '--hard', 'origin/master'], primary)
+  // git 2.48 records origin/HEAD on fetch; a repo pushed from an older git has none.
+  git(['update-ref', '--no-deref', '-d', 'refs/remotes/origin/HEAD'], primary)
+  return { remote, primary }
+}
+
+function workerCutFrom(primary: string, start: string): string {
+  const worktree = join(tempDir('hpipe-wt-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/x', worktree, revParse(primary, start)], primary)
+  return worktree
+}
+
+for (const defaultBranch of ['trunk', 'master'] as const) {
+  test(`on a ${defaultBranch} repo, the worker's own doc is adopted`, async () => {
+    const { primary } = primaryOn(defaultBranch)
+    const worktree = workerCutFrom(primary, `origin/${defaultBranch}`)
+    commitAs(worktree, MY_DOC, 'mine\n')
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([MY_DOC])
+  })
+
+  test(`on a ${defaultBranch} repo, a sibling doc merged in from origin/${defaultBranch} is not a candidate`, async () => {
+    const { remote, primary } = primaryOn(defaultBranch)
+    const worktree = workerCutFrom(primary, `origin/${defaultBranch}`)
+    commitAs(worktree, MY_DOC, 'mine\n')
+    landOnRemote(remote, defaultBranch, SIBLING_DOC)
+    git(['fetch', '-q', 'origin'], worktree)
+    git(['merge', '-q', '--no-edit', `origin/${defaultBranch}`], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([MY_DOC])
+  })
+
+  test(`on a ${defaultBranch} repo, a sibling doc fast-forwarded in past a stale local ${defaultBranch} is not a candidate`, async () => {
+    const { remote, primary } = primaryOn(defaultBranch)
+    const worktree = workerCutFrom(primary, defaultBranch)
+    landOnRemote(remote, defaultBranch, SIBLING_DOC)
+    git(['fetch', '-q', 'origin'], worktree)
+    git(['merge', '-q', '--ff-only', `origin/${defaultBranch}`], worktree)
+
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+
+    commitAs(worktree, MY_DOC, 'mine\n')
+    expect(await adoptableArtifacts(worktree, new Set())).toEqual([MY_DOC])
+  })
+}
+
+// Before #108 adoption measured against `main` whatever the default was, so a
+// leftover `main` from before a rename put the fork point behind every sibling doc.
+test('a leftover main branch is not taken for the mainline of a trunk repo', async () => {
+  const { remote, primary } = primaryOn('trunk')
+  git(['branch', 'main', 'trunk'], primary)
+  const worktree = workerCutFrom(primary, 'trunk')
+  landOnRemote(remote, 'trunk', SIBLING_DOC)
+  git(['fetch', '-q', 'origin'], worktree)
+  git(['merge', '-q', '--ff-only', 'origin/trunk'], worktree)
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
+})
+
+test('an origin that cannot name its default branch adopts nothing', async () => {
+  const { primary } = primaryOn('master')
+  git(['remote', 'set-url', 'origin', join(tempDir('hpipe-gone-'), 'missing.git')], primary)
+  const worktree = workerCutFrom(primary, 'master')
+  commitAs(worktree, MY_DOC, 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([])
 })
 
 test('a moved doc is a rename even when the repo disables rename detection', async () => {
