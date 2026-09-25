@@ -219,6 +219,20 @@ test('a rendered worker brief leaves no placeholder behind', async () => {
   expect(text).not.toContain('{{')
 })
 
+test('a brief with no notes carries no batch-context heading', async () => {
+  // Live-run finding N2: the bare heading rendered with nothing after it.
+  for (const notes of ['', '   ']) {
+    const text = await renderBriefFor([briefTask({ notes })], 0)
+    expect(text).not.toContain('Batch context')
+    expect(text).not.toMatch(/\n{3,}/)
+  }
+})
+
+test('a brief with notes carries them under the batch-context heading', async () => {
+  const text = await renderBriefFor([briefTask({ notes: 'land after t1' })], 0)
+  expect(text).toContain('Batch context the public issue does not carry: land after t1')
+})
+
 test('a task depending on a core-surface sibling gets no repo-specific build command', async () => {
   // A plugin-side build line can only be one repo's convention shipped to every
   // other repo; the build belongs in that repo's own bootstrap.
