@@ -5,7 +5,8 @@ import { join } from 'node:path'
  * Writes an executable that echoes a canned JSON response per argv prefix and
  * appends every invocation to `calls.log`. Responses are matched on the longest
  * prefix, so 'pane list' wins over 'pane'. An `error` envelope goes to stderr
- * with exit 1 and nothing on stdout, which is what herdr 0.9.0 does.
+ * with exit 1 and nothing on stdout, which is what herdr 0.9.0 does. A string
+ * response is printed as it is, the way herdr 0.9.0 prints `pane read`.
  */
 export async function makeFakeBin(
   dir: string,
@@ -34,7 +35,8 @@ if (key === undefined) {
 }
 const response = table[key]
 const isError = typeof response === 'object' && response !== null && 'error' in response
-;(isError ? process.stderr : process.stdout).write(JSON.stringify(response))
+;(isError ? process.stderr : process.stdout)
+  .write(typeof response === 'string' ? response : JSON.stringify(response))
 process.exit(codes[key] ?? (isError ? 1 : 0))
 `)
   chmodSync(path, 0o755)

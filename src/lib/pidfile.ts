@@ -1,6 +1,6 @@
 import { unlinkSync } from 'node:fs'
 import { join } from 'node:path'
-import { readJson, writeJson } from './store'
+import { readJson, removeJsonIf, writeJson, writeJsonExclusive } from './store'
 import type { SessionKey, SupervisorPid } from './types'
 
 const pidPath = (stateDir: string, session: SessionKey) =>
@@ -23,6 +23,23 @@ export async function processStartedAtMs(pid: number): Promise<number | null> {
 
 export async function writePid(stateDir: string, info: SupervisorPid): Promise<void> {
   await writeJson(pidPath(stateDir, info.session), info)
+}
+
+/**
+ * The one way a supervisor takes the session: two started together — the startup
+ * hook and the reopen action — must not both win, since each closes every other
+ * supervisor pane on start and they would close each other's.
+ */
+export async function claimPid(stateDir: string, info: SupervisorPid): Promise<boolean> {
+  return writeJsonExclusive(pidPath(stateDir, info.session), info)
+}
+
+/** Removes the pid file only if it still names `stale`, so a file a rival just claimed survives. */
+export function clearStalePid(stateDir: string, session: SessionKey, stale: SupervisorPid): void {
+  removeJsonIf(pidPath(stateDir, session), (current) => {
+    const info = current as Partial<SupervisorPid> | null
+    return info?.pid === stale.pid && info.started_at_ms === stale.started_at_ms
+  })
 }
 
 export async function readPid(

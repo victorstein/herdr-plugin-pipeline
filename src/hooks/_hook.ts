@@ -5,6 +5,8 @@ import type { AgentStatus, EventKind, QueuedEvent } from '../lib/types'
 
 interface RawEvent {
   pane_id?: string
+  previous_pane_id?: string
+  pane?: { pane_id?: string }
   workspace_id?: string
   agent_status?: AgentStatus
   released?: boolean
@@ -39,6 +41,9 @@ export function toQueuedEvent(
   const event: QueuedEvent = { kind, session, at: Date.now() }
 
   if (raw.pane_id) event.pane_id = raw.pane_id
+  // `pane.moved` carries the pane nested, beside the id it had before.
+  else if (raw.pane?.pane_id) event.pane_id = raw.pane.pane_id
+  if (raw.previous_pane_id) event.previous_pane_id = raw.previous_pane_id
   if (raw.agent_status) event.agent_status = raw.agent_status
   if (raw.released !== undefined) event.released = raw.released
   event.workspace_id = raw.workspace?.workspace_id ?? raw.workspace_id

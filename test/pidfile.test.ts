@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { processStartedAtMs, readPid, supervisorState, writePid } from '../src/lib/pidfile'
+import {
+  claimPid, clearStalePid, processStartedAtMs, readPid, supervisorState, writePid,
+} from '../src/lib/pidfile'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'pid-')) })
@@ -43,4 +45,24 @@ test('another session owns its own file and does not collide', async () => {
   })
   expect((await supervisorState(dir, 'default')).state).toBe('none')
   expect((await readPid(dir, 'personal'))?.pane_id).toBe('w1:p2')
+})
+
+const stalePid = {
+  pid: 999_999, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2',
+}
+
+test('a pid file can be claimed only while none exists — #97', async () => {
+  expect(await claimPid(dir, stalePid)).toBe(true)
+  expect(await claimPid(dir, { ...stalePid, pid: 1 })).toBe(false)
+  expect((await readPid(dir, 'personal'))?.pid).toBe(999_999)
+})
+
+test('clearing a stale pid file spares one a rival has since claimed — #97', async () => {
+  await writePid(dir, { ...stalePid, pid: 5, started_at_ms: 7 })
+  clearStalePid(dir, 'personal', stalePid)
+  expect((await readPid(dir, 'personal'))?.pid).toBe(5)
+
+  await writePid(dir, stalePid)
+  clearStalePid(dir, 'personal', stalePid)
+  expect(await readPid(dir, 'personal')).toBeNull()
 })

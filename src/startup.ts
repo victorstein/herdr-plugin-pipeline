@@ -43,7 +43,8 @@ export async function ensureWorkspace(
 }
 
 export async function reapGhostPanes(
-  herdr: Herdr, workspaceId: string, livePanePid: number | null,
+  herdr: Herdr, workspaceId: string, livePanePid: number | null, keepPaneId?: string,
+  beforeClose: (paneId: string) => Promise<void> = async () => {},
 ): Promise<string[]> {
   const panes = await herdr.paneList(workspaceId)
   // Never close the last pane: that destroys the workspace the supervisor is
@@ -53,7 +54,7 @@ export async function reapGhostPanes(
   const closed: string[] = []
 
   for (const pane of panes) {
-    if (pane.label !== SUPERVISOR_LABEL) continue
+    if (pane.label !== SUPERVISOR_LABEL || pane.pane_id === keepPaneId) continue
 
     const shellPid = await herdr.paneShellPid(pane.pane_id)
     // undefined means the pid lookup failed. Closing a pane we cannot identify
@@ -61,11 +62,61 @@ export async function reapGhostPanes(
     if (shellPid === undefined) continue
     if (livePanePid !== null && shellPid === livePanePid) continue
 
+    await beforeClose(pane.pane_id)
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
 
   return closed
+}
+
+/**
+ * Run by a supervisor that has just won the pid file, so every other supervisor
+ * pane in the pipeline workspace is a dead one: the pane command drops to a shell
+ * when the supervisor exits, and reopening it with the plugin action opened a new
+ * pane beside that shell rather than in it. Measured on a live run. Startup's own
+ * reap cannot catch this, because it runs only when herdr starts, and before the
+ * new pane exists — when the dead pane is the workspace's last.
+ */
+export async function reapSupervisorSiblings(
+  herdr: Herdr, stateDir: string, session: string, ownPaneId: string, ownShellPid: number,
+): Promise<string[]> {
+  const recorded = Bun.file(workspaceIdPath(stateDir, session))
+  if (!(await recorded.exists())) return []
+  const workspaceId = (await recorded.text()).trim()
+  if (workspaceId.length === 0) return []
+  return reapGhostPanes(herdr, workspaceId, ownShellPid, ownPaneId, (paneId) =>
+    keepCrashTail(herdr, crashLogPath(stateDir, session), paneId))
+}
+
+export const crashLogPath = (stateDir: string, session: string) =>
+  join(stateDir, `supervisor.${session}.crash.log`)
+
+const CRASH_TAIL_LINES = 200
+/** Room for several crashes' tails; the oldest is dropped first. */
+export const CRASH_LOG_MAX_BYTES = 64 * 1024
+
+/**
+ * The supervisor writes no log file: its output, and the stack trace of whatever
+ * killed it, exist only in its pane. Closing that pane unread would destroy the
+ * one record of why it died.
+ */
+export async function keepCrashTail(herdr: Herdr, logPath: string, paneId: string): Promise<void> {
+  // Best effort: a supervisor that has claimed the session must still start, and
+  // the startup hook must still open its pane, whatever the state dir does.
+  try {
+    const tail = await herdr.paneRead(paneId, CRASH_TAIL_LINES, 'recent')
+    const file = Bun.file(logPath)
+    const previous = (await file.exists()) ? await file.text() : ''
+    const entry = `=== ${new Date().toISOString()} pane ${paneId}, closed as a dead supervisor ===\n` +
+      `${tail.trimEnd()}\n`
+    const combined = previous + entry
+    await Bun.write(logPath, combined.length > CRASH_LOG_MAX_BYTES
+      ? combined.slice(combined.length - CRASH_LOG_MAX_BYTES)
+      : combined)
+  } catch (error) {
+    console.error(`[pipeline] could not keep the output of ${paneId} in ${logPath}: ${error}`)
+  }
 }
 
 /**
@@ -120,8 +171,12 @@ async function main(): Promise<void> {
   if (!workspaceId) return
 
   const live = await readPid(stateDir, session)
-  const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null)
-  if (ghosts.length > 0) console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}`)
+  const crashLog = crashLogPath(stateDir, session)
+  const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null, undefined,
+    (paneId) => keepCrashTail(herdr, crashLog, paneId))
+  if (ghosts.length > 0) {
+    console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}; their output is in ${crashLog}`)
+  }
 
   const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
   if (!opened.ok) {

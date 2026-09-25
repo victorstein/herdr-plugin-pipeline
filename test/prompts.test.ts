@@ -121,9 +121,9 @@ test('the README presents the CLI as optional, not as setup', async () => {
   expect(readme).toContain('Install the hpipe shorthand')
 })
 
-test('every action declared in the manifest has a script on disk', async () => {
+test('every action and hook declared in the manifest has a script on disk', async () => {
   const manifest = await Bun.file(join(ROOT, 'herdr-plugin.toml')).text()
-  for (const [, path] of manifest.matchAll(/command = \["bun", "run", "(src\/actions\/[^"]+)"\]/g)) {
+  for (const [, path] of manifest.matchAll(/command = \["bun", "run", "(src\/(?:actions|hooks)\/[^"]+)"\]/g)) {
     expect(existsSync(join(ROOT, path as string)), `${path} is declared but missing`).toBe(true)
   }
 })

@@ -12,7 +12,8 @@ export type CiBucket = 'pass' | 'fail' | 'pending' | 'skipping' | 'cancel' | 'un
 
 export type EventKind =
   | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
-  | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited'
+  | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited' | 'pane.closed'
+  | 'pane.moved'
 
 export interface QueuedEvent {
   kind: EventKind
@@ -20,6 +21,8 @@ export interface QueuedEvent {
   at: number
   workspace_id?: string
   pane_id?: string
+  /** `pane.moved` only: the id the pane had before herdr renamed it. */
+  previous_pane_id?: string
   agent_status?: AgentStatus
   released?: boolean
   branch?: string

@@ -3,7 +3,9 @@ import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
-import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
+import {
+  claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
+} from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
   allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, type RunEffect, saveOrReapply, saveRun,
@@ -12,6 +14,7 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
+import { crashLogPath, reapSupervisorSiblings } from '../startup'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, uncommittedPaths,
@@ -28,13 +31,14 @@ import {
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
-  applyEvents, catchUpDigest, describeWake, parkedFooter, pickOneAdvance, saveEventedRuns,
+  applyEvents, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
+  saveEventedRuns,
 } from './tick'
 import { ciTransitions } from './ci'
 import { worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
-import type { AgentStatus, Run } from '../lib/types'
+import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
 /** Two ticks' worth: a healthy tick never reaches it, a tick slowed by stalled sends does. */
@@ -87,6 +91,40 @@ export function refreshingIdleReader(
   }
 }
 
+/**
+ * Takes the session's pid file, or says another supervisor holds it. Only the
+ * winner closes the dead supervisor panes beside its own, so two supervisors
+ * started together cannot close each other's.
+ */
+export async function claimSupervisor(
+  stateDir: string, herdr: Herdr, self: SupervisorPid,
+  log: (message: string) => void = console.log,
+): Promise<boolean> {
+  const { session } = self
+  const existing = await supervisorState(stateDir, session)
+  if (existing.state === 'live') {
+    log(`[pipeline] another supervisor is live (pid ${existing.info.pid}, session ${session})`)
+    return false
+  }
+  if (existing.state === 'stale') {
+    log(`[pipeline] reclaiming stale pid file (pid ${existing.info.pid})`)
+    clearStalePid(stateDir, session, existing.info)
+  }
+  if (!(await claimPid(stateDir, self))) {
+    log(`[pipeline] another supervisor claimed session ${session} first`)
+    return false
+  }
+
+  if (self.pane_id.length > 0) {
+    const dead = await reapSupervisorSiblings(herdr, stateDir, session, self.pane_id, self.pane_pid)
+    if (dead.length > 0) {
+      log(`[pipeline] closed dead supervisor panes: ${dead.join(', ')}; ` +
+        `their last output is in ${crashLogPath(stateDir, session)}`)
+    }
+  }
+  return true
+}
+
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR
@@ -96,17 +134,8 @@ async function main(): Promise<void> {
   }
 
   const session = sessionKey()
-  const existing = await supervisorState(stateDir, session)
-  if (existing.state === 'live') {
-    console.log(`[pipeline] another supervisor is live (pid ${existing.info.pid}, session ${session})`)
-    process.exit(EXIT_DUPLICATE)
-  }
-  if (existing.state === 'stale') {
-    console.log(`[pipeline] reclaiming stale pid file (pid ${existing.info.pid})`)
-    clearPid(stateDir, session)
-  }
-
-  await writePid(stateDir, {
+  const herdr = new Herdr()
+  const claimed = await claimSupervisor(stateDir, herdr, {
     pid: process.pid,
     pane_pid: process.ppid,
     started_at_ms: (await processStartedAtMs(process.pid)) ?? Date.now(),
@@ -114,9 +143,9 @@ async function main(): Promise<void> {
     socket_path: process.env.HERDR_SOCKET_PATH ?? '',
     pane_id: process.env.HERDR_PANE_ID ?? '',
   })
+  if (!claimed) process.exit(EXIT_DUPLICATE)
 
   const config = await loadConfig(configDir)
-  const herdr = new Herdr()
 
   // gh must run inside the run's own checkout: a PR lookup resolves against the
   // repo of the working directory, and the supervisor's own cwd is the pipeline
@@ -159,11 +188,12 @@ async function main(): Promise<void> {
   let healthRevision = -1
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
+  const paneAbsence = new PaneAbsence()
   let lastCiPollMs = 0
 
   for (;;) {
     try {
-      const events = await drain(queueDir)
+      const drained = await drain(queueDir)
       const allRuns = await listRuns(stateDir, session)
       const tickRuns = (config.REPOS_ALLOW.length === 0
         ? allRuns
@@ -172,8 +202,11 @@ async function main(): Promise<void> {
       const panes = await allOrchestratorPanes(stateDir, session)
       claimedPanes = panes
       knownRuns = allRuns
-      gate.beginTick(new Set((await herdr.paneList()).map((p) => p.pane_id)))
-      for (const pane of readyPanes(events)) gate.wake(pane)
+      const listed = await herdr.paneList()
+      const livePanes = new Set(listed.map((p) => p.pane_id))
+      gate.beginTick(livePanes)
+      for (const pane of readyPanes(drained)) gate.wake(pane)
+      const events = [...drained, ...paneAbsence.reconcile(tickRuns, listed, session, Date.now())]
 
       const wakeOn = new Set(config.WAKE_ON)
       const applied = applyEvents(tickRuns, events, session, panes, wakeOn)

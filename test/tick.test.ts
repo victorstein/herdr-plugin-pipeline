@@ -3,9 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, catchUpDigest, describeWake, type EventSaveDeps, parkedFooter, pickOneAdvance,
-  saveEventedRuns, type WakeLine,
+  applyEvents, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
+  pickOneAdvance, saveEventedRuns, type WakeLine, workerStillNeeded,
 } from '../src/supervisor/tick'
+import { gateStatus } from '../src/lib/gating'
+import type { PaneInfo } from '../src/lib/herdr'
 import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
@@ -837,4 +839,192 @@ test('a catch-up names every task\'s phase, age and whose move it is, from the l
     `- t1 feat/x (#1) [spec 3m] — ${actionFor(run, run.tasks[1] as Task, 'hp', now)}`,
     `- t2 b/two (#2) [merge 10m] — ${actionFor(run, run.tasks[0] as Task, 'hp', now)}`,
   ])
+})
+
+const closed = (paneId: string, workspaceId?: string): QueuedEvent => ({
+  kind: 'pane.closed', session: 'personal', at: 1, pane_id: paneId,
+  ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }),
+})
+
+test('pane.closed fails the bound task and releases its pane, as pane.exited does — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const { changed, wake } = applyEvents([run], [closed('w7:p1', 'w7')], 'personal', new Set())
+  const task = run.tasks[0]
+  expect(changed).toBe(true)
+  expect(task?.phase).toBe('failed')
+  expect(task?.pane_id).toBeNull()
+  expect(task?.last_pane_id).toBe('w7:p1')
+  expect(wake[0]?.event).toBe('pane exited, no PR')
+})
+
+test('a released pane no longer reports the agent status it had while alive — #86', () => {
+  const run = mkRun([mkTask({ agent_status: 'working' })])
+  applyEvents([run], exitEvents, 'personal', new Set())
+  expect(run.tasks[0]?.agent_status).toBe('unknown')
+})
+
+test('closing another pane in the worker\'s workspace leaves the task alone — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const { changed } = applyEvents([run], [closed('w7:p2', 'w7')], 'personal', new Set())
+  expect(changed).toBe(false)
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.pane_id).toBe('w7:p1')
+})
+
+test('a pane lost once its worker has nothing left to do is released, not failed — #86', () => {
+  for (const phase of ['merge', 'close', 'teardown', 'done', 'failed'] as TaskPhase[]) {
+    for (const event of [closed('w7:p1', 'w7'), ...exitEvents]) {
+      const run = mkRun([mkTask({ phase, pr: 12 })])
+      const { wake } = applyEvents([run], [event], 'personal', new Set())
+      expect(run.tasks[0]?.phase, `${phase} on ${event.kind}`).toBe(phase)
+      expect(run.tasks[0]?.pane_id).toBeNull()
+      expect(run.tasks[0]?.last_pane_id).toBe('w7:p1')
+      expect(wake).toEqual([])
+    }
+  }
+})
+
+test('closing the worker pane in close does not block the task\'s dependents — #86', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'close', pr: 12 }),
+    mkTask({ task_id: 't2', phase: 'queued', depends_on: ['t1'], pane_id: null, workspace_id: null }),
+  ])
+  applyEvents([run], [closed('w7:p1', 'w7')], 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('close')
+  expect(gateStatus(run.tasks[1]!, run.tasks).state).not.toBe('blocked-on-failure')
+})
+
+test('a pane lost while the worker may still be needed fails the task — #86', () => {
+  for (const [phase, over] of [
+    ['research', {}], ['blocked-on-files', {}], ['ci', { pr: 12 }],
+    ['blocked-on-decision', { decision_from: 'plan' }], ['escalated', { escalated_from: 'implement' }],
+  ] as [TaskPhase, Partial<Task>][]) {
+    const run = mkRun([mkTask({ phase, ...over })])
+    applyEvents([run], [closed('w7:p1', 'w7')], 'personal', new Set())
+    expect(run.tasks[0]?.phase, phase).toBe('failed')
+  }
+})
+
+test('a decision opened in merge returns to merge when the worker pane goes, not to failed — #86', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'blocked-on-decision', decision_from: 'merge', pr: 12 }),
+    mkTask({ task_id: 't2', phase: 'queued', depends_on: ['t1'], pane_id: null, workspace_id: null }),
+  ])
+  const t1 = run.tasks[0]!
+  t1.decisions = [{
+    id: 'd1', asked_at: 0, from_phase: 'merge', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: null,
+  }]
+  applyEvents([run], [closed('w7:p1', 'w7')], 'personal', new Set())
+  expect(t1.phase).toBe('merge')
+  expect(t1.decision_from).toBeNull()
+  expect(t1.pane_id).toBeNull()
+  expect(t1.decisions[0]?.answered_by).toBe('abandoned')
+  expect(gateStatus(run.tasks[1]!, run.tasks).state).not.toBe('blocked-on-failure')
+})
+
+test('a pane.moved that keeps the id changes nothing — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w3:p2' })])
+  const { changed } = applyEvents([run], [{
+    kind: 'pane.moved', session: 'personal', at: 1, pane_id: 'w3:p2', previous_pane_id: 'w3:p2',
+  }], 'personal', new Set())
+  expect(changed).toBe(false)
+})
+
+test('the worker is needed exactly while some reachable row is the worker\'s — #86', () => {
+  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: 'close' }))).toBe(false)
+  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: null }))).toBe(true)
+  expect(workerStillNeeded(mkTask({ phase: 'implement' }))).toBe(true)
+  expect(workerStillNeeded(mkTask({ phase: 'ci' }))).toBe(true)
+  expect(workerStillNeeded(mkTask({ phase: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'spec' }))).toBe(true)
+})
+
+test('pane.moved rebinds the task to the pane\'s new id and fails nothing — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w3:p2' })])
+  const { changed } = applyEvents([run], [{
+    kind: 'pane.moved', session: 'personal', at: 1, pane_id: 'w5:p2', previous_pane_id: 'w3:p2',
+  }], 'personal', new Set())
+  expect(changed).toBe(true)
+  expect(run.tasks[0]?.pane_id).toBe('w5:p2')
+  expect(run.tasks[0]?.phase).toBe('research')
+})
+
+const listed = (...panes: [string, string?][]): PaneInfo[] =>
+  panes.map(([pane_id, terminal_id]) => (terminal_id === undefined ? { pane_id } : { pane_id, terminal_id }))
+const supervisorOnly = listed(['w1:p1'])
+
+test('a bound pane is reported closed only once two lists in a row lack it — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const absence = new PaneAbsence()
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 5)).toEqual([])
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 6)).toEqual([
+    { kind: 'pane.closed', session: 'personal', at: 6, pane_id: 'w7:p1' },
+  ])
+})
+
+test('a pane seen again between two absent lists starts its count over — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], supervisorOnly, 'personal', 1)
+  absence.reconcile([run], listed(['w1:p1'], ['w7:p1']), 'personal', 2)
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 3)).toEqual([])
+})
+
+test('a failed pane list neither confirms nor clears an absence — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], supervisorOnly, 'personal', 1)
+  expect(absence.reconcile([run], [], 'personal', 2)).toEqual([])
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 3)).toHaveLength(1)
+})
+
+test('panes of finished tasks are not reconciled — #86', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'done', pane_id: 'w7:p1' }),
+    mkTask({ task_id: 't2', phase: 'failed', pane_id: 'w8:p1' }),
+  ])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], supervisorOnly, 'personal', 1)
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 2)).toEqual([])
+})
+
+test('a pane reconciled as gone fails its task and is not reported again — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research' })])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], supervisorOnly, 'personal', 1)
+  applyEvents([run], absence.reconcile([run], supervisorOnly, 'personal', 2), 'personal', new Set())
+  expect(run.tasks[0]?.phase).toBe('failed')
+  expect(absence.reconcile([run], supervisorOnly, 'personal', 3)).toEqual([])
+})
+
+test('a pane moved to another workspace is followed by its terminal, not failed — #86', () => {
+  // herdr renames a pane moved across workspaces and keeps its terminal. Measured live.
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w3:p2' })])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], listed(['w1:p1', 'term_a'], ['w3:p2', 'term_w']), 'personal', 1)
+  const afterMove = listed(['w1:p1', 'term_a'], ['w5:p2', 'term_w'])
+  const events = absence.reconcile([run], afterMove, 'personal', 2)
+  expect(events).toEqual([
+    { kind: 'pane.moved', session: 'personal', at: 2, pane_id: 'w5:p2', previous_pane_id: 'w3:p2' },
+  ])
+  applyEvents([run], events, 'personal', new Set())
+  expect(absence.reconcile([run], afterMove, 'personal', 3)).toEqual([])
+  expect(absence.reconcile([run], afterMove, 'personal', 4)).toEqual([])
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.pane_id).toBe('w5:p2')
+})
+
+test('a moved pane still rebinds when herdr\'s own pane.moved was applied first — #86', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w3:p2' })])
+  const absence = new PaneAbsence()
+  absence.reconcile([run], listed(['w1:p1', 'term_a'], ['w3:p2', 'term_w']), 'personal', 1)
+  const afterMove = listed(['w1:p1', 'term_a'], ['w5:p2', 'term_w'])
+  const drained: QueuedEvent = {
+    kind: 'pane.moved', session: 'personal', at: 2, pane_id: 'w5:p2', previous_pane_id: 'w3:p2',
+  }
+  applyEvents([run], [drained, ...absence.reconcile([run], afterMove, 'personal', 2)], 'personal', new Set())
+  expect(run.tasks[0]?.pane_id).toBe('w5:p2')
+  expect(run.tasks[0]?.phase).toBe('research')
 })
