@@ -37,7 +37,10 @@ plans its own issue.
    correct, and you will be told when that task is ready. A brief to dispatch comes with a
    `base: <commit> (…)` line: cut that task's worktree from that commit
    (`herdr worktree create … --base <commit>`), never from your local `main`, which is only as new
-   as your last pull.
+   as your last pull. Under it, `dispatch, in order:` lists the whole dispatch with that commit
+   already filled in — worktree, bootstrap, `agent start … -- --dangerously-skip-permissions`,
+   `dispatch --task` — so run it as printed, filling in the pane and path the create response
+   returns.
 
 5. **When the last task is registered, close intake:**
 

@@ -11,6 +11,9 @@ it the brief:
     herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
+Both `{{hpipe}} task` and the `Dispatch tN …` prompt print this sequence for the task, under
+`dispatch, in order:`, with its branch, task id and base filled in — run that copy.
+
 **`<base>` is the commit on the `base: <commit> (<ref> as just fetched)` line** — printed by
 `{{hpipe}} task` when it dispatches at registration, and by the `Dispatch tN …` prompt when a task
 becomes ready later. Pass the commit, not the ref in parentheses, and never a base you pick. It was

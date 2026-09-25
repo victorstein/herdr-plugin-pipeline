@@ -173,7 +173,12 @@ working on it — not text sitting in the input box. `hpipe show --task t1` prin
 `base: <commit> (origin/<default> as just fetched)` header line; a `--depends-on` task dispatched after its dependency merged on GitHub is cut from a commit containing
 that merge even though nobody pulled local `main` (`git -C <worktree> merge-base --is-ancestor
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
---abbrev-ref @{u}` fails with `no upstream configured`).
+--abbrev-ref @{u}` fails with `no upstream configured`). Under that line both print the same
+`dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
+declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
+dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
+to five minutes from the dispatch (or from `worktree create`, once that binds), `hpipe status` reads `dispatch under way — …` for the task, starting at
+`worktree create` while it has no worktree, and lists nothing under `waiting on you:` (#120).
 Within a tick or two `hpipe status` shows the task bound: its `agent_status` stops being `unknown`.
 
 **Failure looks like (handoff):** `dispatch --task` exits 1 naming a herdr code. `agent_prompt_stalled`

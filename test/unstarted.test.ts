@@ -2,7 +2,8 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import {
-  bindWorkerPane, overdueUnstartedWorker, startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
+  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, startWorkerCommand,
+  UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
 
 const NOW = 10_000_000
@@ -75,6 +76,41 @@ test('past the briefed phase the command does not offer the dispatch that would 
   expect(text).not.toContain('dispatch --task')
   expect(text).toContain('`hp brief --task t1`')
   expect(text).toContain('in implement')
+})
+
+const FETCHED = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
+
+test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, then the brief — #118', () => {
+  expect(dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'ready' }, 'hp').split('\n')).toEqual([
+    'dispatch, in order:',
+    '    herdr worktree create --cwd /r --branch feat/x --base c0ffee1',
+    '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
+    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
+  ])
+})
+
+test('a repo with no bootstrap gets no bootstrap step; a failed fetch still names the stale commit', () => {
+  const text = dispatchSequence(mkRun(), mkTask({}), { ...FETCHED, fetchError: 'timed out' }, { kind: 'none' }, 'hp')
+  expect(text).not.toContain('pipeline-bootstrap')
+  expect(text).toContain('--base c0ffee1')
+})
+
+test('every recovery path starts the agent with the same flag as the dispatch — #118', () => {
+  for (const text of [
+    startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+  ]) {
+    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions`')
+  }
+})
+
+test('the recovery create is cut from the task\'s base: commit, never main — #121', () => {
+  for (const checkout of [null, '/wt']) {
+    const text = dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: checkout }), 'hp')
+    expect(text).toContain('--base <commit>` (the commit on this task\'s `base:` line, never a base you pick)')
+    expect(text).not.toContain('--base main')
+  }
 })
 
 test('binding a pane re-arms the ladder from now; rebinding the same pane changes nothing', () => {

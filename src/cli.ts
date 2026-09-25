@@ -23,7 +23,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { bindWorkerPane, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
+import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
@@ -364,7 +364,8 @@ async function registerTask(
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
   // supervisor's tick. Measured on the live ledger.
-  const bootLine = bootstrapLine(repoBootstrap(run.repo_root))
+  const bootstrap = repoBootstrap(run.repo_root)
+  const bootLine = bootstrapLine(bootstrap)
 
   const header = [`task_id: ${task.task_id}`, ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine]
     .join('\n')
@@ -375,7 +376,8 @@ async function registerTask(
   // the read and the save only widens the window a concurrent write can take.
   const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`${header}\n${baseLine(base)}\n\n${prompt}`)
+  const sequence = dispatchSequence(run, task, base, bootstrap, hpipeCommand(ctx.pluginRoot))
+  return ok(`${header}\n${baseLine(base)}\n${sequence}\n\n${prompt}`)
 }
 
 export async function cmdTask(
