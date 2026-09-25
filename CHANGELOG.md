@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.17](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.16...v1.5.17) (2026-09-25)
+
+
+### Bug Fixes
+
+* print one full dispatch sequence on both dispatch paths and in recovery advice ([#128](https://github.com/victorstein/herdr-plugin-pipeline/issues/128)) ([aa6d349](https://github.com/victorstein/herdr-plugin-pipeline/commit/aa6d34905601fb8fbd396462831a7f0ff5df1bbd)), closes [#118](https://github.com/victorstein/herdr-plugin-pipeline/issues/118) [#120](https://github.com/victorstein/herdr-plugin-pipeline/issues/120) [#121](https://github.com/victorstein/herdr-plugin-pipeline/issues/121)
+
 ## [1.5.16](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.15...v1.5.16) (2026-09-25)
 
 
