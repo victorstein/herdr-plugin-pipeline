@@ -13,7 +13,7 @@ worktree, only on `{{branch}}`.
 
 {{bootstrap_note}}
 
-Batch context the public issue does not carry: {{notes}}
+{{batch_context}}
 
 ## The loop
 

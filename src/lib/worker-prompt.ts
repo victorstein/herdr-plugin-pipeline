@@ -23,7 +23,7 @@ export async function renderWorkerPrompt(
     issue: String(task.issue),
     surface: task.surface,
     agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
-    notes: task.notes,
+    batch_context: batchContext(task.notes),
     research_path: task.artifacts.research ?? '',
     spec_path: task.artifacts.spec ?? '',
     plan_path: task.artifacts.plan ?? '',
@@ -32,7 +32,17 @@ export async function renderWorkerPrompt(
 
   const brief = await renderPrompt(pluginRoot, 'worker-brief', vars)
   const briefedPhase = taskRow('queued').onClear
-  if (task.phase !== 'queued' && task.phase !== briefedPhase) return brief
+  if (task.phase !== 'queued' && task.phase !== briefedPhase) return collapseBlankRuns(brief)
   const research = await renderPrompt(pluginRoot, 'research', vars)
-  return `${brief}\n\n${research}`
+  return collapseBlankRuns(`${brief}\n\n${research}`)
+}
+
+function batchContext(notes: string): string {
+  return notes.trim() === '' ? '' : `Batch context the public issue does not carry: ${notes}`
+}
+
+// An optional section renders to '' on a line of its own and would leave a
+// double gap behind it; `render()` cannot drop the line, since it only knows tokens.
+function collapseBlankRuns(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n')
 }
