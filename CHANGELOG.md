@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.19](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.18...v1.5.19) (2026-09-25)
+
+
+### Bug Fixes
+
+* keep a pre-decision verdict fresh and resume only once the answer is submitted ([#127](https://github.com/victorstein/herdr-plugin-pipeline/issues/127)) ([4d17d99](https://github.com/victorstein/herdr-plugin-pipeline/commit/4d17d99e36f4b59fa898366dda4e3446998c58d1)), closes [#115](https://github.com/victorstein/herdr-plugin-pipeline/issues/115) [#117](https://github.com/victorstein/herdr-plugin-pipeline/issues/117)
+
 ## [1.5.18](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.17...v1.5.18) (2026-09-25)
 
 
