@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   detectCycle, filesClearFor, filesOverlap, gateStatus, planDeclaredFiles,
-  releasableFromFiles, widenFiles,
+  releasableFromFiles, separatePipelineArtifacts, widenFiles,
 } from '../src/lib/gating'
 import type { Task } from '../src/lib/types'
 
@@ -167,6 +167,52 @@ test('globs and absolute paths narrow to the prefix they imply, never to nothing
 test('widening adds only what the held prefixes do not already cover', () => {
   expect(widenFiles(['a/', 'b.ts'], ['a/x.ts', 'b.ts', 'c.ts', 'c.ts'])).toEqual(['c.ts'])
   expect(widenFiles(['a/'], [])).toEqual([])
+})
+
+const withArtifacts = (): Task => task({
+  issue: 96,
+  artifacts: {
+    research: 'docs/superpowers/research/2026-09-24-issue-96-research.md',
+    spec: 'docs/superpowers/specs/2026-09-24-issue-96-design.md',
+    plan: 'docs/superpowers/plans/2026-09-24-issue-96-plan.md',
+    verdicts: { 'plan-review-0': 'docs/superpowers/reviews/issue-96-plan-review-0.md' },
+  },
+})
+
+test('a plan naming the pipeline\'s own artifact locations locks none of them', () => {
+  const declared = [
+    'docs/superpowers/', 'docs/superpowers', 'docs/superpowers/plans/', 'docs/superpowers/reviews',
+    'docs/superpowers/specs/2026-09-24-issue-96-design.md',
+    'docs/superpowers/plans/2026-09-24-issue-96-plan.md',
+    'docs/superpowers/reviews/issue-96-plan-review-0.md',
+    'docs/superpowers/reviews/issue-96-pr-review-quality-3.md',
+    'src/lib/gating.ts',
+  ]
+  expect(separatePipelineArtifacts(declared, withArtifacts())).toEqual({
+    kept: ['src/lib/gating.ts'],
+    ignored: declared.slice(0, -1),
+  })
+})
+
+test('real files beside the artifacts, and broader prefixes, stay locked', () => {
+  const declared = [
+    'docs/', 'docs/runbook.md', 'docs/superpowers-notes.md',
+    'docs/superpowers/reviews/2026-09-24-live-smoke-run.md',
+    'docs/superpowers/plans/2026-09-20-issue-12-plan.md',
+    'docs/superpowers/reviews/issue-960-plan-review-0.md',
+    '',
+  ]
+  expect(separatePipelineArtifacts(declared, withArtifacts())).toEqual({ kept: declared, ignored: [] })
+})
+
+test('a sibling declaring docs no longer overlaps a plan that only wrote its own artifacts', () => {
+  const planner = withArtifacts()
+  planner.files = ['src/greet.ts']
+  const declared = planDeclaredFiles('FILES: test/greet.test.ts, docs/superpowers/\n')
+  const { kept } = separatePipelineArtifacts(declared, planner)
+  planner.files.push(...widenFiles(planner.files, kept))
+  expect(planner.files).toEqual(['src/greet.ts', 'test/greet.test.ts'])
+  expect(filesOverlap(planner.files, ['docs'])).toBe(false)
 })
 
 test('two waiters that each discover the other\'s files are serialised, not deadlocked', () => {

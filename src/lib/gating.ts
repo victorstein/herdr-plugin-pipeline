@@ -1,4 +1,6 @@
+import { dirname, join } from 'node:path'
 import { taskRow } from './phases'
+import { ARTIFACT_ROOT, REVIEWS_DIR, taskVerdictPrefix } from './verdict-path'
 import type { Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
@@ -79,6 +81,35 @@ function normaliseDeclared(entry: string, roots: string[]): string | null {
   path = path.replace(/^\/+/, '').replace(/^(\.\/)+/, '')
   const glob = path.search(GLOB_CHAR)
   return glob === -1 ? path : path.slice(0, glob)
+}
+
+/**
+ * #96. Every plan's own research, spec, plan and verdicts live under the artifact
+ * root, so a plan that declares them — or the root itself — would lock a
+ * directory every sibling writes to, and any task that declares `docs` would then
+ * wait on all of them. Only the locations themselves and this task's own files are
+ * set aside: a broader prefix such as `docs/`, a sibling's artifact, or a real
+ * document that happens to live under the root is still a file this task edits.
+ */
+export function separatePipelineArtifacts(
+  declared: string[], task: Pick<Task, 'issue' | 'artifacts'>,
+): { kept: string[]; ignored: string[] } {
+  const { research, spec, plan, verdicts } = task.artifacts
+  const ownFiles = [research, spec, plan].filter((p): p is string => p !== null)
+  const artifactDirs = new Set([ARTIFACT_ROOT, REVIEWS_DIR, ...ownFiles.map(dirname)])
+  const ownFileSet = new Set([...ownFiles, ...Object.values(verdicts)])
+  const ownVerdictStem = join(REVIEWS_DIR, `${taskVerdictPrefix(task)}-`)
+
+  const kept: string[] = []
+  const ignored: string[] = []
+  for (const path of declared) {
+    const isArtifact = artifactDirs.has(path.replace(/\/+$/, ''))
+      || ownFileSet.has(path)
+      || path.startsWith(ownVerdictStem)
+    if (isArtifact) ignored.push(path)
+    else kept.push(path)
+  }
+  return { kept, ignored }
 }
 
 /**

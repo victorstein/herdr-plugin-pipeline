@@ -2,7 +2,9 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { openDecisionFor } from '../lib/decisions'
-import { gateStatus, planDeclaredFiles, releasableFromFiles, widenFiles } from '../lib/gating'
+import {
+  gateStatus, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, widenFiles,
+} from '../lib/gating'
 import type { RunEffect } from '../lib/ledger'
 import type { IssueView, PrView } from '../lib/gh'
 import { advanceTask, counterFor, enterTaskPhase } from '../lib/machine'
@@ -237,12 +239,14 @@ async function widenFromPlan(run: Run, task: Task): Promise<void> {
   if (planPath === '' || !existsSync(planPath)) return
   const roots = [task.checkout_path, run.repo_root].filter((r): r is string => r !== null)
   const declared = planDeclaredFiles(await Bun.file(planPath).text(), roots)
-  const added = widenFiles(task.files, declared)
+  const { kept, ignored } = separatePipelineArtifacts(declared, task)
+  const added = widenFiles(task.files, kept)
   if (added.length === 0) return
   task.files = [...task.files, ...added]
+  const ignoredNote = ignored.length === 0 ? '' : ` (ignored pipeline artifacts: ${ignored.join(', ')})`
   console.error(
     `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ` +
-    added.map((path) => (path === '' ? '(whole repo)' : path)).join(', '),
+    added.map((path) => (path === '' ? '(whole repo)' : path)).join(', ') + ignoredNote,
   )
 }
 
