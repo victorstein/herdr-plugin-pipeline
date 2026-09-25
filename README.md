@@ -30,6 +30,12 @@ or, for local development:
 Requires herdr 0.9.0+, bun, and gh. No build step, and no runtime dependencies —
 `@types/bun` and `typescript` are devDependencies for `bun run typecheck` only.
 
+**Claude Code skill.** `skills/herdr-pipeline/SKILL.md` teaches an agent to drive the pipeline:
+the ground rules, running a batch, and recovery. Link it into your user skills so it loads in any
+repo you orchestrate from:
+
+    ln -sfn "$PWD/skills/herdr-pipeline" ~/.claude/skills/herdr-pipeline
+
 **There is nothing else to install.** Agents never need `hpipe` on your PATH — every prompt renders
 the CLI invocation in full, so the pipeline works the moment the plugin is installed.
 
