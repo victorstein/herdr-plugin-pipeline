@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.21](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.20...v1.5.21) (2026-09-25)
+
+
+### Bug Fixes
+
+* print not-yours moves on status task lines and name a held phase prompt ([#139](https://github.com/victorstein/herdr-plugin-pipeline/issues/139)) ([e6ea141](https://github.com/victorstein/herdr-plugin-pipeline/commit/e6ea141faeec32e8ba47362ee2962a9eae366e15)), closes [#135](https://github.com/victorstein/herdr-plugin-pipeline/issues/135) [#136](https://github.com/victorstein/herdr-plugin-pipeline/issues/136)
+
 ## [1.5.20](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.19...v1.5.20) (2026-09-25)
 
 
