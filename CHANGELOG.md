@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.10](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.9...v1.5.10) (2026-09-25)
+
+
+### Bug Fixes
+
+* show every held delivery in status, catch up a recovered orchestrator, and never send into a drafted box ([#106](https://github.com/victorstein/herdr-plugin-pipeline/issues/106)) ([58611fe](https://github.com/victorstein/herdr-plugin-pipeline/commit/58611fe4887ae088fb7f453a41af8d787361bf63)), closes [#90](https://github.com/victorstein/herdr-plugin-pipeline/issues/90) [#91](https://github.com/victorstein/herdr-plugin-pipeline/issues/91) [#92](https://github.com/victorstein/herdr-plugin-pipeline/issues/92)
+
 ## [1.5.9](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.8...v1.5.9) (2026-09-25)
 
 
