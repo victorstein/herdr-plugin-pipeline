@@ -7,7 +7,7 @@ import {
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
-  bareRemote, cleanupFixtures, cloneOfRemote, commitAs, commitIn, git, landOnRemote,
+  cleanupFixtures, cloneOfRemote, commitAs, commitIn, git, landOnRemote, pushedFromLocal,
   repoWithWorktree, revParse, siblingLands, tempDir,
 } from './helpers/git-worktree'
 import { forgetDispatchBases } from '../src/lib/dispatch-base'
@@ -566,15 +566,8 @@ function primaryOn(defaultBranch: 'trunk' | 'master'): { remote: string; primary
     const { remote, clone } = cloneOfRemote('trunk')
     return { remote, primary: clone }
   }
-  const remote = bareRemote('master')
-  const primary = tempDir('hpipe-local-')
-  git(['init', '-q', '--initial-branch=master', '.'], primary)
-  git(['remote', 'add', 'origin', remote], primary)
-  git(['fetch', '-q', 'origin'], primary)
-  git(['reset', '-q', '--hard', 'origin/master'], primary)
-  // git 2.48 records origin/HEAD on fetch; a repo pushed from an older git has none.
-  git(['update-ref', '--no-deref', '-d', 'refs/remotes/origin/HEAD'], primary)
-  return { remote, primary }
+  const { remote, local } = pushedFromLocal('master')
+  return { remote, primary: local }
 }
 
 function workerCutFrom(primary: string, start: string): string {

@@ -251,7 +251,9 @@ export async function adoptableArtifacts(
  * HEAD's tree, and merging the default branch puts the siblings' docs in that tree.
  */
 async function mainlineRefs(checkoutPath: string): Promise<string[]> {
-  const branch = await mainlineBranch(checkoutPath)
+  const branch = await mainlineBranch(checkoutPath, (reason) => warnToTick(
+    `adoption offers no candidates in ${checkoutPath}: origin's default branch is unknown (${reason})`,
+  ))
   if (branch === null) return []
   return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
 }

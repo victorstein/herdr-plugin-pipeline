@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  baseLine, dependencyMerges, describeBase, forgetDispatchBases, freshDispatchBase,
+  baseLine, dependencyMerges, describeBase, forgetDispatchBases, freshDispatchBase, mainlineBranch,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
 import {
-  bareRemote, cleanupFixtures, cloneOfRemote, git, landOnRemote, repoWithWorktree, revParse, tempDir,
+  cleanupFixtures, cloneOfRemote, git, landOnRemote, pushedFromLocal, repoWithWorktree, revParse, tempDir,
 } from './helpers/git-worktree'
 
 afterEach(() => {
@@ -31,13 +31,7 @@ test('the remote default branch is followed rather than assumed to be main', asy
 })
 
 test('a repo created locally and pushed has no origin/HEAD, so the remote is asked for its default', async () => {
-  const remote = bareRemote('master')
-  const local = tempDir('hpipe-local-')
-  git(['init', '-q', '--initial-branch=master', '.'], local)
-  git(['remote', 'add', 'origin', remote], local)
-  git(['fetch', '-q', 'origin'], local)
-  // git 2.48 records origin/HEAD on fetch; a repo pushed from an older git has none.
-  git(['update-ref', '--no-deref', '-d', 'refs/remotes/origin/HEAD'], local)
+  const { remote, local } = pushedFromLocal('master')
   const merged = landOnRemote(remote, 'master')
 
   expect(await freshDispatchBase(local)).toEqual({ commit: merged, ref: 'origin/master', fetchError: null })
@@ -158,6 +152,54 @@ test('a user-configured core.sshCommand is left alone', async () => {
   const argv = readFileSync(ssh.log, 'utf8')
   expect(argv).toContain('UserChoice=yes')
   expect(argv).not.toContain('BatchMode=yes')
+})
+
+/** Points origin at a fake ssh that logs each connection and fails, so network calls can be counted. */
+function remoteCountingCalls(local: string): () => number {
+  const ssh = fakeSsh()
+  git(['remote', 'set-url', 'origin', 'ssh://git@example.invalid/repo.git'], local)
+  git(['config', 'core.sshCommand', join(ssh.dir, 'ssh')], local)
+  return () => existsSync(ssh.log) ? readFileSync(ssh.log, 'utf8').split('\n').filter(Boolean).length : 0
+}
+
+function worktreeOf(primary: string): string {
+  const worktree = join(tempDir('hpipe-wt-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/x', worktree, 'HEAD'], primary)
+  return worktree
+}
+
+test('a default dispatch learned from the main checkout answers a worktree without asking the remote', async () => {
+  const { local } = pushedFromLocal('master')
+  const worktree = worktreeOf(local)
+  expect((await freshDispatchBase(local)).ref).toBe('origin/master')
+  const networkCalls = remoteCountingCalls(local)
+
+  expect(await mainlineBranch(worktree)).toBe('master')
+  expect(networkCalls()).toBe(0)
+})
+
+test('a failed default-branch lookup is not retried, from any worktree, until the cache expires', async () => {
+  const { local } = pushedFromLocal('master')
+  const worktree = worktreeOf(local)
+  const networkCalls = remoteCountingCalls(local)
+  const failures: string[] = []
+  const onFailure = (reason: string) => { failures.push(reason) }
+  let clock = 1_000_000
+  const now = () => clock
+
+  expect(await mainlineBranch(local, onFailure, now)).toBeNull()
+  expect(networkCalls()).toBe(1)
+  expect(failures).toHaveLength(1)
+
+  clock += 59_000
+  expect(await mainlineBranch(worktree, onFailure, now)).toBeNull()
+  expect(networkCalls()).toBe(1)
+  expect(failures).toHaveLength(1)
+
+  clock += 2_000
+  expect(await mainlineBranch(worktree, onFailure, now)).toBeNull()
+  expect(networkCalls()).toBe(2)
+  expect(failures).toHaveLength(2)
 })
 
 test('a branch cut from a commit tracks nothing, so a bare push cannot target main', () => {

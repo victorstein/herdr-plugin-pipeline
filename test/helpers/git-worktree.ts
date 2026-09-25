@@ -96,6 +96,19 @@ export function cloneOfRemote(defaultBranch: string): { remote: string; clone: s
   return { remote, clone }
 }
 
+/** A repo created locally and pushed, so it has no `origin/HEAD` and only the remote knows its default. */
+export function pushedFromLocal(defaultBranch: string): { remote: string; local: string } {
+  const remote = bareRemote(defaultBranch)
+  const local = tempDir('hpipe-local-')
+  git(['init', '-q', `--initial-branch=${defaultBranch}`, '.'], local)
+  git(['remote', 'add', 'origin', remote], local)
+  git(['fetch', '-q', 'origin'], local)
+  git(['reset', '-q', '--hard', `origin/${defaultBranch}`], local)
+  // git 2.48 records origin/HEAD on fetch; a repo pushed from an older git has none.
+  git(['update-ref', '--no-deref', '-d', 'refs/remotes/origin/HEAD'], local)
+  return { remote, local }
+}
+
 let landings = 0
 /** Another clone pushes one commit to `branch`, as a merged sibling PR would. Returns its sha. */
 export function landOnRemote(remote: string, branch: string, rel = `src/landed-${++landings}.ts`): string {
