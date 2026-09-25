@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.12](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.11...v1.5.12) (2026-09-25)
+
+
+### Bug Fixes
+
+* fail a task whose pane is closed and clear dead supervisor panes on reopen ([#103](https://github.com/victorstein/herdr-plugin-pipeline/issues/103)) ([8f3c4cc](https://github.com/victorstein/herdr-plugin-pipeline/commit/8f3c4cc444d1d3a8ab3472a352d5a8c3b5edadd3)), closes [#86](https://github.com/victorstein/herdr-plugin-pipeline/issues/86) [#97](https://github.com/victorstein/herdr-plugin-pipeline/issues/97)
+
 ## [1.5.11](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.10...v1.5.11) (2026-09-25)
 
 
