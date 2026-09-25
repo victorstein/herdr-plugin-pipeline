@@ -343,14 +343,14 @@ async function main(): Promise<void> {
             .filter((w) => w.run.run_id === run.run_id)
             .map((w) => {
               if (w.task) covered.add(w.task.task_id)
-              return `- ${describeWake(w, tickNow, hpipe)}`
+              return `- ${describeWake(w, tickNow, hpipe, gate.holds())}`
             })
           // Attached to every orchestrator-pane pending, not just the first: that
           // one is dropped when it has no text and no events, while a task prompt
           // on the same pane still produces a digest — which is the tick a task
           // advances off the CI poll rather than a pane event. `deliveriesFor`
           // renders it once.
-          const footer = parkedFooter(run, covered, tickNow, hpipe)
+          const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds())
           footers.set(run, footer)
 
           addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`,
@@ -391,7 +391,7 @@ async function main(): Promise<void> {
 
       for (const run of deliverFrom) {
         pending.push(...outboxPending(run, footers.get(run)))
-        pending.push(...catchUps.pendingFor(run, (r) => catchUpDigest(r, tickNow, hpipe)))
+        pending.push(...catchUps.pendingFor(run, (r) => catchUpDigest(r, tickNow, hpipe, gate.holds())))
       }
       const settlements = await flushDeliveries(
         deliveriesFor(pending), send, undefined, (delivery, delivered) => catchUps.note(delivery, delivered),

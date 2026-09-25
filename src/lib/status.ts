@@ -18,6 +18,7 @@ export interface StatusSupervisor {
 }
 
 const MS_PER_MINUTE = 60_000
+const DISPATCH_UNDER_WAY = 'dispatch under way'
 
 /** Clamped: a future stamp from clock skew must not print "-1m" at an operator. */
 export function ageMinutes(sinceMs: number, now: number): number {
@@ -80,13 +81,14 @@ interface Move {
   clause: string
 }
 
-type PaneHolds = Readonly<Record<string, PaneHold>>
+export type PaneHolds = Readonly<Record<string, PaneHold>>
 
 /**
  * A worker owed its own phase prompt has not been told what this phase wants, so
- * neither "idle with nothing" nor uncommitted work says anything about it. The
- * digest has no holds file and falls back on the entry's own last code, which a
- * stuck box sets on the first send it refuses.
+ * neither "idle with nothing" nor uncommitted work says anything about it. A send
+ * refused before it goes out settles nothing, so the gate's holds are the only
+ * record of stuck input there; the entry's own last code is set only when a send
+ * stalled and then found a human's text in the box.
  */
 function undeliveredPhasePrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
   const entry = queuedWorkerPrompt(run, task)
@@ -177,7 +179,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       // above claim every other case — and a dispatch still being carried out is
       // not yet the orchestrator's lapse. Measured on a live run.
       if (unbriefed.paneId === null) {
-        return notYours(`dispatch under way — ${remainingDispatchSteps(run, task, hpipe)}`)
+        return notYours(`${DISPATCH_UNDER_WAY} — ${remainingDispatchSteps(run, task, hpipe)}`)
       }
       return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
         briefCommand(task, unbriefed.paneId, hpipe))
@@ -210,8 +212,10 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
  * The digest footer's predicate. It passes no CLI because only the clause needs
  * one, and the footer renders its clause through `actionFor` separately.
  */
-export function waitsOnYou(run: Run, task: Task, now: number = Date.now()): boolean {
-  return moveFor(run, task, '', now).waitsOnYou
+export function waitsOnYou(
+  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {},
+): boolean {
+  return moveFor(run, task, '', now, holds).waitsOnYou
 }
 
 /**
@@ -221,9 +225,24 @@ export function waitsOnYou(run: Run, task: Task, now: number = Date.now()): bool
  * operator different recovery commands for the same task.
  */
 export function actionFor(
-  run: Run, task: Task, hpipe: string, now: number = Date.now(),
+  run: Run, task: Task, hpipe: string, now: number = Date.now(), holds: PaneHolds = {},
 ): string {
-  return moveFor(run, task, hpipe, now).clause
+  return moveFor(run, task, hpipe, now, holds).clause
+}
+
+/**
+ * A move waiting on you is listed under `waiting on you:`; any other clause
+ * printed nowhere, so the grace's "dispatch under way" never showed. Measured on
+ * a live run. The grace's full recipe is left to `show`: on a line where nothing
+ * is owed yet it only buried the task.
+ */
+function taskLineMove(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds): string {
+  const move = moveFor(run, task, hpipe, now, holds)
+  if (move.waitsOnYou) return ''
+  if (move.clause.startsWith(DISPATCH_UNDER_WAY)) {
+    return ` — ${DISPATCH_UNDER_WAY} — see \`${hpipe} show --task ${task.task_id}\``
+  }
+  return ` — ${move.clause}`
 }
 
 /**
@@ -348,6 +367,7 @@ export function formatStatus(
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
   panes: PaneObservations = {},
 ): string {
+  const holds = panes.holds ?? {}
   const lines: string[] = []
   lines.push(`session: ${session}`)
   lines.push(
@@ -408,16 +428,12 @@ export function formatStatus(
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      // A move waiting on you is listed under `waiting on you:`; any other clause
-      // printed nowhere, so the grace's "dispatch under way" never showed. Measured
-      // on a live run.
-      const move = moveFor(run, task, hpipe, now, panes.holds)
-      lines.push(bits.join(' ') + (move.waitsOnYou ? '' : ` — ${move.clause}`))
+      lines.push(bits.join(' ') + (run.schema_version === 2 ? taskLineMove(run, task, hpipe, now, holds) : ''))
     }
 
     if (run.schema_version === 2) {
       lines.push(...intakeWarning(run, hpipe))
-      lines.push(...waitingOnYou(run, hpipe, now, panes.holds ?? {}))
+      lines.push(...waitingOnYou(run, hpipe, now, holds))
       lines.push(...taskWarnings(run, hpipe, now))
       lines.push(...deliveryWarnings(run, livePanes, now, panes))
     }

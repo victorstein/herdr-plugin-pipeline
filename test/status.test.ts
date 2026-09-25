@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { actionFor, formatStatus, formatTaskDetail } from '../src/lib/status'
+import { actionFor, formatStatus, formatTaskDetail, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -603,8 +603,15 @@ test('a dispatch inside its grace reads as under way on its task line — #135',
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
-  expect(taskLine).toContain("[research 0m] unknown — dispatch under way — `herdr worktree create --cwd '/r'")
+  expect(taskLine).toEndWith(`[research 0m] unknown — dispatch under way — see \`${HP} show --task t1\``)
   expect(text).not.toContain('waiting on you:')
+})
+
+test('a run on an earlier schema carries no move on its task lines — #135', () => {
+  const run = mkRun()
+  run.schema_version = 1
+  run.tasks = [mkTask({ phase: 'spec' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain("worker's move")
 })
 
 test('a task line carries whose move it is, and one waiting on you is named only below — #135', () => {
@@ -648,7 +655,15 @@ test('a worker whose phase prompt is held by stuck input is not called idle with
   expect(text).toContain('⚠ stuck input in w3:p1')
 })
 
-test('the stuck prompt is named from the outbox alone, which is all the digest has — #136', () => {
+test('a send refused before it went out is named stuck from the gate\'s holds, as the digest passes them — #136', () => {
+  const { run, now } = heldSpecPrompt()
+  const holds = { 'w3:p1': { since: now - 60_000, failures: 0, code: 'stuck_input' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, holds))
+    .toStartWith('YOUR move: its spec prompt is held by text in the input box of w3:p1')
+  expect(waitsOnYou(run, run.tasks[0] as Task, now, holds)).toBe(true)
+})
+
+test('a send that stalled and then found a human\'s text is named stuck from the outbox alone — #136', () => {
   const { run, now } = heldSpecPrompt('stuck_input')
   expect(actionFor(run, run.tasks[0] as Task, HP, now))
     .toStartWith('YOUR move: its spec prompt is held by text in the input box of w3:p1')

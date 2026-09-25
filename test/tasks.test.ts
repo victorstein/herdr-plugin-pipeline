@@ -619,6 +619,19 @@ test('an idle worker still owed its phase prompt is not recorded as missing its 
   expect(run.tasks[0]?.artifact_missing).toBeDefined()
 })
 
+test('a stray doc is not adopted as the spec of a worker never sent its spec prompt — #136', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, 'docs/superpowers/notes/the-research.md', 'research\n')
+  commitIn(worktree, 'docs/superpowers/notes/scratch.md', 'unrelated\n')
+  const artifacts = designArtifacts()
+  artifacts.research = 'docs/superpowers/notes/the-research.md'
+  const run = mkRun([mkTask({ phase: 'spec', phase_entered_at: 0, checkout_path: worktree, artifacts })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 0)
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifacts.spec).toBe(designArtifacts().spec)
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
 test('an idle worker still owed its phase prompt is not inspected for uncommitted work — #136', async () => {
   const git = dirtyTree(['src/a.ts'])
   const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])

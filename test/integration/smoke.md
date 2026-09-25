@@ -178,8 +178,9 @@ that merge even though nobody pulled local `main` (`git -C <worktree> merge-base
 declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
 dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
-in `hpipe status` ends `… unknown — dispatch under way — …`, starting at `worktree create` while it
-has no worktree, and nothing is listed under `waiting on you:` (#120, #135). Every task line that is
+in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
+is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
+dispatch in full, starting at `worktree create` while the task has no worktree. Every task line that is
 not waiting on you ends with its move clause the same way (`— worker's move: waiting for …`,
 `— nothing for you …`); a task waiting on you carries its clause under `waiting on you:` instead,
 never on both.
