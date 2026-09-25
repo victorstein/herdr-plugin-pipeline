@@ -1,9 +1,12 @@
 import { existsSync } from 'node:fs'
+import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
-import { overdueUnstartedWorker, startWorkerCommand } from '../lib/unstarted'
+import {
+  briefCommand, overdueUnstartedWorker, startWorkerCommand, unbriefedWorker,
+} from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 
@@ -58,11 +61,23 @@ function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): strin
   return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
 }
 
+/**
+ * A started but unbriefed agent is the orchestrator's fault, like #12's empty
+ * worktree. Probed in its own pane, a brief-less agent took the probe as its
+ * first instruction and began the phase without the brief.
+ */
+function owedABrief(run: Run, task: Task | null): boolean {
+  return task !== null && unbriefedWorker(run, task)?.paneId != null
+}
+
 function candidateFor(
   run: Run, record: Run | Task, row: PhaseRow<string>, task: Task | null,
   now: number, thresholdMinutes: number, probeMax: number,
 ): StallCandidate | null {
-  const paneId = probePaneFor(run, row, task?.pane_id ?? null)
+  const toOrchestrator = owedABrief(run, task)
+  const paneId = toOrchestrator
+    ? run.orchestrator_pane
+    : probePaneFor(run, row, task?.pane_id ?? null)
   if (!paneId) return null
 
   const state = stallStateFor(run, record)
@@ -82,7 +97,7 @@ function candidateFor(
     escalatable,
     minutes: ageMinutes(record.phase_entered_at, now),
     paneId,
-    actorPaneId: actorPaneFor(run, row, task),
+    actorPaneId: toOrchestrator ? run.orchestrator_pane : actorPaneFor(run, row, task),
   }
 }
 
@@ -117,9 +132,10 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-      const minutes = overdueUnstartedWorker(run, task, now) === null
-        ? thresholdMinutes
-        : Math.min(thresholdMinutes, unstartedThresholdMinutes)
+      const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null || owedABrief(run, task)
+      const minutes = orchestratorsFault
+        ? Math.min(thresholdMinutes, unstartedThresholdMinutes)
+        : thresholdMinutes
       const c = candidateFor(run, task, row, task, now, minutes, probeMax)
       if (c) out.push(c)
     }
@@ -223,7 +239,7 @@ export function stallAwaiting(
   // `ci` and `merge` deadlock identically on a missing PR and share one way out,
   // so the command a reader will paste is composed in one place.
   const missingPr = (t: Task, consequence: string): Awaiting => ({
-    short: 'a PR number this task never recorded',
+    short: UNRECORDED_PR,
     clause: 'This phase is waiting for a PR number that was never recorded for this task, ' +
       `${consequence} The rewind is what produces one: \`${hpipe} rewind ` +
       `${run.run_id} implement --task ${t.task_id}\`.`,
@@ -255,8 +271,18 @@ export function stallAwaiting(
     }
   }
 
+  const unbriefed = task === null ? null : unbriefedWorker(run, task)
+  if (task !== null && unbriefed?.paneId != null) {
+    return {
+      short: 'the brief handed to its agent',
+      clause: `The agent in ${unbriefed.paneId} is running but was never handed the brief, so this ` +
+        'phase cannot advance and it waits on you, not on the worker: hand it the brief with ' +
+        `${briefCommand(task, unbriefed.paneId, hpipe)}.`,
+    }
+  }
+
   if (row.signal === 'artifact' || row.signal === 'verdict') {
-    const short = row.signal === 'artifact' ? 'its research/spec/plan artifact' : 'its review verdict'
+    const short =task ? awaitedFor(task) : 'its review verdict'
     // With no worktree `absoluteArtifactPath` falls back to the main checkout,
     // which is the orchestrator's tree and holds every sibling's merged docs — so
     // naming it sends the reader at the wrong file when the real fault is that
@@ -284,7 +310,7 @@ export function stallAwaiting(
     }
   }
   if (row.signal === 'pr' && task) {
-    return sentence(`a pushed PR for ${task.branch} (#${task.issue})`)
+    return sentence(awaitedFor(task))
   }
   if (row.signal === 'ci' && task) {
     // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
@@ -294,7 +320,7 @@ export function stallAwaiting(
     // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
     // advances the row back to `implement` — one of the fastest ways OUT of ci.
     return {
-      short: `CI on PR #${task.pr}`,
+      short: awaitedFor(task),
       clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
         `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
         'conclusion, and this phase waits on it forever.',
@@ -307,7 +333,7 @@ export function stallAwaiting(
     // Not "the PR is unmerged": this row is evaluated only while the orchestrator
     // is idle, so a merged PR can sit here as long as the orchestrator stays busy.
     return {
-      short: `PR #${task.pr} to be merged`,
+      short: awaitedFor(task),
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
         "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
         'merged, end your turn: this phase is read only while you are idle.',
@@ -319,7 +345,7 @@ export function stallAwaiting(
     // has none, so a closed issue never satisfies it and this row parks with the
     // work already done; a rewind into `merge` records the merge and passes through.
     return {
-      short: `issue #${task.issue} to close`,
+      short: awaitedFor(task),
       clause: `This phase is waiting for issue #${task.issue} to close. Check it with ` +
         `\`gh issue view ${task.issue} --json closed,state\`; if the PR body used a phrase ` +
         'GitHub does not treat as a closing keyword, close it by hand. If it is already ' +
@@ -328,16 +354,16 @@ export function stallAwaiting(
         `${task.task_id}\` records.`,
     }
   }
-  if (row.signal === 'files') {
+  if (row.signal === 'files' && task) {
     return {
-      short: 'the files another task holds',
+      short: awaitedFor(task),
       clause: 'This phase is waiting for another task to release the files this one declared.',
     }
   }
-  if (row.signal === 'manual') return sentence('an answer to the open decision')
+  if (row.signal === 'manual' && task) return sentence(awaitedFor(task))
   if (row.signal === 'worktree') {
     return task
-      ? { short: 'its worktree to be removed',
+      ? { short: awaitedFor(task),
           clause: "This phase is waiting for this task's worktree to be removed. Teardown is " +
             'unconditional and runs first in every tick, so a task still here means this run is ' +
             "not being advanced — check the supervisor pane's log, and check whether another run " +

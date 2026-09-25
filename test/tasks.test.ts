@@ -856,3 +856,44 @@ test('a vanished workspace whose checkout is still on disk is orphaned, not done
   await advanceTasks(run, deps({ removeWorktree: async () => 'gone' as const }))
   expect(run.tasks[0]?.phase).toBe('orphaned')
 })
+
+test('a task the gate opens is awaiting its brief — #89', async () => {
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'queued' })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.awaiting_brief).toBe(true)
+})
+
+test('an idle worker that was never briefed is not recorded as missing its artifact — #89', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+    awaiting_brief: true,
+  })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeUndefined()
+  expect(run.tasks[0]?.awaiting_brief).toBe(true)
+})
+
+test('a not-idle read is not proof of a brief — it may be a failed agent get — #89', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+    awaiting_brief: true,
+  })])
+  await advanceTasks(run, deps({ liveIdle: async () => false }))
+  expect(run.tasks[0]?.awaiting_brief).toBe(true)
+})
+
+test('leaving the briefed phase drops the awaiting-brief mark — #89', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const artifacts = designArtifacts()
+  mkdirSync(join(worktree, dirname(artifacts.research as string)), { recursive: true })
+  writeFileSync(join(worktree, artifacts.research as string), 'the note\n')
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 5, checkout_path: worktree, artifacts, awaiting_brief: true,
+  })])
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.tasks[0]?.awaiting_brief).toBeUndefined()
+})

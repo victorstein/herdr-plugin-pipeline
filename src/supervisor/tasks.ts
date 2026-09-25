@@ -322,6 +322,9 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         if (candidates.length > 1) {
           logAmbiguous(run, task, candidates, deps.ambiguityLog)
         }
+        // Between `agent start` and `dispatch --task` every worker is idle with
+        // nothing written, and was reported as stopped short. Measured on a live run.
+        if (task.awaiting_brief === true) return base
         task.artifact_missing = { at: task.phase_entered_at, path: absolute, candidates }
         return base
       }

@@ -1,3 +1,4 @@
+import { awaitedFor } from './awaiting'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
@@ -5,7 +6,7 @@ import { runIsDriven } from './ledger'
 import { outboxWarnings } from './outbox'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
-import { overdueUnstartedWorker, startWorkerCommand } from './unstarted'
+import { briefCommand, overdueUnstartedWorker, startWorkerCommand, unbriefedWorker } from './unstarted'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -120,12 +121,24 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
       (run.phase === 'execute' ? ' — the run holds in execute until one is run' : ''),
     )
   }
-  if (row.actor === 'orchestrator') return yours('YOUR move')
+  if (row.actor === 'orchestrator') {
+    // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
+    return task.pending_answer === null
+      ? yours(`YOUR move: waiting for ${awaitedFor(task)}`)
+      : notYours(`nothing for you — waiting for ${awaitedFor(task)}`)
+  }
   if (row.actor === 'worker') {
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
         startWorkerCommand(task, unstarted.workspaceId, hpipe))
+    }
+    const unbriefed = unbriefedWorker(run, task)
+    if (unbriefed) {
+      const dispatch = briefCommand(task, unbriefed.paneId, hpipe)
+      return yours(unbriefed.paneId === null
+        ? `YOUR move: no agent has been started for it yet — start one, then ${dispatch}`
+        : `YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ${dispatch}`)
     }
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
@@ -135,7 +148,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
     }
     const work = currentUncommittedWork(run, task)
     if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
-    return notYours("worker's move")
+    return notYours(`worker's move: waiting for ${awaitedFor(task)}`)
   }
   if (task.phase === 'blocked-on-files') {
     // This row has no escalation path of its own — `files` is not in stall.ts's

@@ -93,6 +93,10 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
 export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: string): Task {
   run.history.push({ at: Date.now(), task_id: task.task_id, from: task.phase, to: phase, why })
   if (phase === 'escalated') task.escalated_from = task.phase
+  // Only the gate opening puts a task in front of a worker that has not been
+  // told about it yet; every later transition follows the worker's own work.
+  if (task.phase === 'queued' && phase === taskRow('queued').onClear) task.awaiting_brief = true
+  else delete task.awaiting_brief
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task

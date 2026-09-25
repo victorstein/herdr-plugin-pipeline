@@ -34,6 +34,26 @@ export function overdueUnstartedWorker(run: Run, task: Task, now: number): Unsta
   return unstarted !== null && now - unstarted.since >= UNSTARTED_GRACE_MS ? unstarted : null
 }
 
+export interface UnbriefedWorker {
+  /** Null until an agent has been detected or recorded for the task. */
+  paneId: string | null
+}
+
+/**
+ * A worker row still owed its brief — before `agent start`, or in the gap
+ * between it and `dispatch --task`. Either way the next move is the
+ * orchestrator's, not the worker's.
+ */
+export function unbriefedWorker(run: Run, task: Task): UnbriefedWorker | null {
+  if (runRow(run.phase).releasesPane === true) return null
+  if (task.awaiting_brief !== true || task.phase !== taskRow('queued').onClear) return null
+  return { paneId: task.pane_id }
+}
+
+export function briefCommand(task: Task, paneId: string | null, hpipe: string): string {
+  return `\`${hpipe} dispatch --task ${task.task_id} --pane ${paneId ?? '<pane>'}\``
+}
+
 /**
  * Records the worker's pane, and re-arms the stall ladder when that changes who
  * the task is waiting on. The ladder is keyed on the phase entry, which a bind

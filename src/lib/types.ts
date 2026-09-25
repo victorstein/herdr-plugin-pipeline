@@ -173,6 +173,12 @@ export interface Task {
   artifact_missing?: MissingArtifact
   /** Optional: ledgers written before #14 lack it. */
   uncommitted_work?: UncommittedWork
+  /**
+   * Set when the gate opens and cleared once the worker has the brief. Marks the
+   * pending state rather than stamping the briefed one so that a ledger written
+   * before #89, which lacks it, reads as already briefed.
+   */
+  awaiting_brief?: true
   notes: string
 }
 

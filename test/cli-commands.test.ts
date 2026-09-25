@@ -1130,6 +1130,8 @@ test('dispatch --task hands the bare brief to the pane, not the header lines', a
   delete after.tasks[0]!.stall
   const { revision: _after, ...afterRest } = after
   const { revision: _before, ...beforeRest } = JSON.parse(before) as Run
+  expect(beforeRest.tasks[0]!.awaiting_brief).toBe(true)
+  delete beforeRest.tasks[0]!.awaiting_brief
   expect(afterRest).toEqual(beforeRest)
 })
 
@@ -1154,7 +1156,52 @@ test('dispatch --task records nothing when the handoff was not confirmed — #12
   await registerReadyTask()
   const { send } = recordingSend({ ok: false, code: 'agent_not_found', message: 'not found' })
   await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
-  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+  const task = (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+  expect(task.pane_id).toBeNull()
+  expect(task.awaiting_brief).toBe(true)
+})
+
+test('a registered task awaits its brief until dispatch --task confirms the handoff — #89', async () => {
+  await registerReadyTask()
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBe(true)
+  const { send } = recordingSend()
+  await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
+})
+
+test('a rewind past the briefed phase drops a stale awaiting-brief mark — #89', async () => {
+  await registerReadyTask()
+  const run = (await listRuns(dir, 'personal'))[0]!
+  expect(run.tasks[0]!.awaiting_brief).toBe(true)
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
+})
+
+test('a paneless rewind into research owes the fresh agent a brief; a bound one does not — #89', async () => {
+  await registerReadyTask()
+  await supervisorWrites((run) => {
+    const task = run.tasks[0]!
+    delete task.awaiting_brief
+    task.phase = 'failed'
+    task.pane_id = null
+  })
+  const runId = (await listRuns(dir, 'personal'))[0]!.run_id
+  expect((await cmdRewind(ctx(), { runId, phase: 'research', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBe(true)
+
+  await supervisorWrites((run) => { run.tasks[0]!.pane_id = 'w1-2'; run.tasks[0]!.phase = 'spec' })
+  expect((await cmdRewind(ctx(), { runId, phase: 'research', taskId: 't1' })).ok).toBe(true)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
+})
+
+test('a confirmed brief is recorded even when the pane was already bound by detection — #89', async () => {
+  // `pane.agent_detected` usually binds the pane first, so the bind alone
+  // changes nothing and must not be what decides whether the save happens.
+  await registerReadyTask()
+  await supervisorWrites((run) => { run.tasks[0]!.pane_id = 'w1-2' })
+  const { send } = recordingSend()
+  await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.awaiting_brief).toBeUndefined()
 })
 
 test('dispatch --task refuses the orchestrator\'s own pane before sending anything — #12', async () => {
