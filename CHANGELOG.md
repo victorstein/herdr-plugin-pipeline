@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.11](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.10...v1.5.11) (2026-09-25)
+
+
+### Bug Fixes
+
+* cut dispatched worktrees from a freshly fetched origin default branch ([#101](https://github.com/victorstein/herdr-plugin-pipeline/issues/101)) ([3061260](https://github.com/victorstein/herdr-plugin-pipeline/commit/3061260ae23b2c406bfbea1c049bfc57c83fdbad)), closes [#87](https://github.com/victorstein/herdr-plugin-pipeline/issues/87)
+
 ## [1.5.10](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.9...v1.5.10) (2026-09-25)
 
 
