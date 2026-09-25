@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.18](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.17...v1.5.18) (2026-09-25)
+
+
+### Bug Fixes
+
+* unbind a closed workspace and remove its checkout by path at teardown ([#129](https://github.com/victorstein/herdr-plugin-pipeline/issues/129)) ([e898730](https://github.com/victorstein/herdr-plugin-pipeline/commit/e89873028421ac6556424a8602afc84e2ccc0d2b)), closes [#116](https://github.com/victorstein/herdr-plugin-pipeline/issues/116)
+
 ## [1.5.17](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.16...v1.5.17) (2026-09-25)
 
 
