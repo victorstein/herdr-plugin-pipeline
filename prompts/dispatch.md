@@ -6,10 +6,15 @@ two agents off the same files.
 **When you are told a task is ready**, create its worktree, start the worker on it bare, then hand
 it the brief:
 
-    herdr worktree create --cwd {{repo_root}} --branch <branch> --base main
+    herdr worktree create --cwd {{repo_root}} --branch <branch> --base <base>
     # capture .result.root_pane.pane_id and .result.worktree.path from that response
     herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
+
+**`<base>` is the one the `Dispatch tN … --base <base>` line names** — usually `origin/main` — not
+one you pick. The supervisor fetched it just before telling you the task is ready; your
+local `main` is only as new as your last pull, and a task cut from it lacks whatever its
+dependencies merged since. Measured on a live run.
 
 **Never put the brief on the `agent start` line.** herdr refuses to encode an argument holding fences
 or backticks for the target shell (`invalid_agent_argument`), and every brief has both, so it fails

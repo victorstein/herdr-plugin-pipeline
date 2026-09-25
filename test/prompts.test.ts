@@ -66,6 +66,14 @@ test('the dispatch prompt pins the worktree to the run repo, not the focused wor
   expect(text).toContain('worktree create --cwd {{repo_root}}')
 })
 
+test('the dispatch prompt takes its base from the Dispatch line, never a stale local main', async () => {
+  // #87: `--base main` cut a dependent task from a local main that predated its
+  // merged dependency. Live-run finding.
+  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(text).not.toContain('--base main')
+  expect(text).toContain('--base <base>')
+})
+
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
   // herdr rejects a brief as an `agent start` argument (invalid_agent_argument),
   // and the send-text workaround left one sitting unsubmitted. Live-run finding.

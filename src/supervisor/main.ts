@@ -13,7 +13,7 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import {
   absoluteArtifactPath, deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
-  refreshBadges, uncommittedPaths,
+  freshDispatchBase, refreshBadges, uncommittedPaths,
 } from './deliver'
 import {
   boundedProbeSend, DeliveryGate, flushDeliveries, makeCourier, outboxPending, queuePending, readyPanes,
@@ -271,6 +271,7 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
+            freshDispatchBase,
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to

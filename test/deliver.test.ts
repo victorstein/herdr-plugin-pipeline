@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  isRetryable, mergeAddedDocsArgs, promptForRunPhase, taskSignalsFor, uncommittedPaths,
+  freshDispatchBase, isRetryable, mergeAddedDocsArgs, promptForRunPhase, taskSignalsFor, uncommittedPaths,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
@@ -533,6 +533,78 @@ test('adoptableArtifacts falls back to origin/main when local main is missing', 
   expect(await adoptableArtifacts(worktree, new Set())).toEqual([
     'docs/superpowers/notes/mine.md',
   ])
+})
+
+// #87: the dispatch base is `origin/<default>`, so the worktree starts ahead of a
+// stale local `main`. The merge-base must then be the remote tip, or every doc
+// that landed upstream reads as the worker's own.
+test('a worktree cut from origin/main ahead of a stale local main adopts only its own doc', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  git(['reset', '-q', '--hard', siblingLands(worktree, SIBLING_DOC, 'origin/main')], worktree)
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/mine.md',
+  ])
+})
+
+const revParse = (cwd: string, ref: string): string =>
+  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
+
+function commitAs(checkout: string, rel: string, body: string): void {
+  git(['config', 'user.email', 'test@example.com'], checkout)
+  git(['config', 'user.name', 'Test'], checkout)
+  commitIn(checkout, rel, body)
+}
+
+function cloneOfRemote(defaultBranch: string): { remote: string; clone: string } {
+  const remote = tempDir('hpipe-remote-')
+  git(['init', '-q', '--bare', `--initial-branch=${defaultBranch}`, '.'], remote)
+  const seed = join(tempDir('hpipe-seed-'), 'seed')
+  git(['clone', '-q', remote, seed], tempDir('hpipe-cwd-'))
+  commitAs(seed, 'README.md', 'scaffold\n')
+  git(['push', '-q', 'origin', `HEAD:${defaultBranch}`], seed)
+  const clone = join(tempDir('hpipe-clone-'), 'clone')
+  git(['clone', '-q', remote, clone], tempDir('hpipe-cwd-'))
+  return { remote, clone }
+}
+
+function landOnRemote(remote: string, branch: string): string {
+  const sibling = join(tempDir('hpipe-landing-'), 'sib')
+  git(['clone', '-q', remote, sibling], tempDir('hpipe-cwd-'))
+  commitAs(sibling, 'src/farewell.ts', 'export const farewell = 1\n')
+  git(['push', '-q', 'origin', `HEAD:${branch}`], sibling)
+  return revParse(sibling, 'HEAD')
+}
+
+test('freshDispatchBase fetches, so a dependency merged upstream is in the base', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const staleMain = revParse(clone, 'main')
+  const merged = landOnRemote(remote, 'main')
+
+  expect(await freshDispatchBase(clone)).toBe('origin/main')
+  expect(revParse(clone, 'origin/main')).toBe(merged)
+  expect(revParse(clone, 'main')).toBe(staleMain)
+})
+
+test('freshDispatchBase follows the remote default branch rather than assuming main', async () => {
+  const { remote, clone } = cloneOfRemote('trunk')
+  const merged = landOnRemote(remote, 'trunk')
+
+  expect(await freshDispatchBase(clone)).toBe('origin/trunk')
+  expect(revParse(clone, 'origin/trunk')).toBe(merged)
+})
+
+test('freshDispatchBase keeps the last-fetched remote ref when the remote is unreachable', async () => {
+  const { clone } = cloneOfRemote('main')
+  git(['remote', 'set-url', 'origin', join(tempDir('hpipe-gone-'), 'missing.git')], clone)
+
+  expect(await freshDispatchBase(clone)).toBe('origin/main')
+})
+
+test('freshDispatchBase falls back to local main in a repo with no remote', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  expect(await freshDispatchBase(worktree)).toBe('main')
 })
 
 test('a moved doc is a rename even when the repo disables rename detection', async () => {

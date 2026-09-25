@@ -159,11 +159,11 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 }
 
 /**
- * The branch every worker worktree is cut from; `prompts/dispatch.md` mandates
- * `--base main`. Its remote-tracking ref counts as mainline too, because the
- * mandated pre-merge step merges `origin/main` while local `main` is often stale:
- * against `main` alone the merge-base stays behind and every doc that landed
- * meanwhile reads as added. Measured on this repo: six sibling-owned candidates.
+ * The mainline a worker worktree forks from. Dispatch cuts it from
+ * `origin/<default>` (`freshDispatchBase`) and the pre-merge step merges
+ * `origin/main`, while local `main` is often stale, so both refs count: against
+ * `main` alone the merge-base stays behind and every doc that landed meanwhile
+ * reads as added. Measured on this repo: six sibling-owned candidates.
  *
  * A base pinned at dispatch would not help. Whatever the base, the diff runs to
  * HEAD's tree, and merging `main` puts the siblings' docs in that tree.
@@ -179,10 +179,13 @@ const ARTIFACT_REMOTE_BASE_REF = 'refs/remotes/origin/main'
 // `diff.renames=true` is pinned rather than inherited: a user gitconfig disabling
 // rename detection turns a `git mv`d doc into a false `A` and therefore a false
 // candidate, which is the one way this scan can adopt the wrong file.
-async function git(checkoutPath: string, args: string[]): Promise<{ code: number; text: string }> {
+async function git(
+  checkoutPath: string, args: string[], timeoutMs?: number,
+): Promise<{ code: number; text: string }> {
   try {
     const proc = Bun.spawn(['git', '-c', 'diff.renames=true', '-C', checkoutPath, ...args], {
-      stdout: 'pipe', stderr: 'ignore',
+      stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', timeout: timeoutMs,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     })
     const text = await new Response(proc.stdout).text()
     const code = await proc.exited
@@ -269,6 +272,31 @@ export async function uncommittedPaths(checkoutPath: string): Promise<string[] |
     .split('\n')
     .filter((line) => line.length > 3)
     .map((line) => line.slice(3))
+}
+
+const DISPATCH_FETCH_TIMEOUT_MS = 30_000
+
+/**
+ * The ref a new worktree is cut from, fetched just before the dispatch prompt
+ * names it. Local `main` is whatever the orchestrator last pulled, so a task
+ * dispatched after its dependency merged upstream was cut without that code.
+ * Measured on a live run (#87). The supervisor fetches rather than asking the
+ * orchestrator to, because an instruction can be skipped and this cannot.
+ *
+ * A failed fetch still names the remote ref: it is only as old as the last
+ * fetch, and the orchestrator's `git pull` fetches too. With no remote at all
+ * there is nothing newer than local `main`.
+ */
+export async function freshDispatchBase(repoRoot: string): Promise<string> {
+  const remoteHead = await git(repoRoot, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+  const branch = remoteHead.code === 0 && remoteHead.text.trim().startsWith('origin/')
+    ? remoteHead.text.trim().slice('origin/'.length)
+    : 'main'
+
+  await git(repoRoot, ['fetch', '--quiet', 'origin', branch], DISPATCH_FETCH_TIMEOUT_MS)
+
+  const remoteRef = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
+  return remoteRef.code === 0 ? `origin/${branch}` : branch
 }
 
 /**

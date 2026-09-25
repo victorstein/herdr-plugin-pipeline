@@ -43,6 +43,8 @@ export interface TaskDeps {
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
   uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
+  /** Fetches and names the ref a dispatched worktree is cut from; see deliver.ts. */
+  freshDispatchBase: (repoRoot: string) => Promise<string>
 }
 
 const UNCOMMITTED_SAMPLE = 3
@@ -177,6 +179,7 @@ function actorPane(run: Run, task: Task): string | null {
  */
 export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt[]> {
   const prompts: TaskPrompt[] = []
+  let dispatchBase: string | null = null
 
   // Tears down whatever was ALREADY sitting at `teardown` when this tick
   // started, before the loop below can advance anything else into that
@@ -197,9 +200,10 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       if (gate.state !== 'ready') continue
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
+      dispatchBase ??= await deps.freshDispatchBase(run.repo_root)
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
-          `worktree create --cwd ${run.repo_root}:\n` +
+          `worktree create --cwd ${run.repo_root} --base ${dispatchBase}:\n` +
           `${bootstrapLine(repoBootstrap(run.repo_root))}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
