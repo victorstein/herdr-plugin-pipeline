@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.9](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.8...v1.5.9) (2026-09-25)
+
+
+### Bug Fixes
+
+* prompt the owner of a rewound phase, and flag a worker row with no worktree ([#104](https://github.com/victorstein/herdr-plugin-pipeline/issues/104)) ([51636fc](https://github.com/victorstein/herdr-plugin-pipeline/commit/51636fc6f7be9ce6a09b3cb6b578bc9917bf4555)), closes [#88](https://github.com/victorstein/herdr-plugin-pipeline/issues/88) [#94](https://github.com/victorstein/herdr-plugin-pipeline/issues/94)
+
 ## [1.5.8](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.7...v1.5.8) (2026-09-25)
 
 
