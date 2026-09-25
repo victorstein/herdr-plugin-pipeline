@@ -4,7 +4,8 @@ import { enterTaskPhase } from '../lib/machine'
 import { taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
-import type { QueuedEvent, Run, SessionKey, Task } from '../lib/types'
+import type { PaneInfo } from '../lib/herdr'
+import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
 import { FINISHED } from './teardown'
 
 export interface WakeLine {
@@ -119,6 +120,119 @@ export interface ApplyResult {
 function releaseWorkerPane(task: Task): void {
   if (task.pane_id !== null) task.last_pane_id = task.pane_id
   task.pane_id = null
+  // Nothing reports a status for a pane that is gone, so the last one would be
+  // shown for good: t3 read `working` for 50 minutes after its pane was closed.
+  // Measured on a live run.
+  task.agent_status = 'unknown'
+}
+
+/**
+ * Whether any phase this task can still reach is one its worker acts in. Past
+ * that point — `merge`, `close`, `teardown`, a finished task — closing the
+ * worker's pane is cleanup, and failing the task for it would block every task
+ * that depends on it for good.
+ *
+ * A row whose exit is recorded on the task is judged by where it returns: a
+ * decision opened in `merge` resumes `merge`, which the worker takes no part in.
+ * Only a return target the task never recorded falls back to `resumeActor`.
+ */
+export function workerStillNeeded(task: Task): boolean {
+  const seen = new Set<TaskPhase>()
+  const reachable: TaskPhase[] = [task.phase]
+  for (let phase = reachable.pop(); phase !== undefined; phase = reachable.pop()) {
+    if (seen.has(phase)) continue
+    seen.add(phase)
+    const row = taskRow(phase)
+    if (row.actor === 'worker') return true
+    if (row.onClear) reachable.push(row.onClear)
+    if (row.onBlocker) reachable.push(row.onBlocker)
+    if (row.returnsTo !== undefined) {
+      const returnsTo = task[row.returnsTo]
+      if (returnsTo) reachable.push(returnsTo)
+      else if (row.resumeActor === 'worker') return true
+    }
+  }
+  return false
+}
+
+function losePane(run: Run, task: Task, wake: WakeLine[]): void {
+  if (!workerStillNeeded(task)) {
+    // The answer to an open decision is delivered to the worker's pane, so with
+    // that pane gone the question is moot and the task goes back to the row the
+    // orchestrator was driving rather than waiting on a delivery that cannot happen.
+    if (task.phase === 'blocked-on-decision' && task.decision_from !== null) {
+      abandonDecisions(task)
+      enterTaskPhase(run, task, task.decision_from, 'worker pane gone; its open decision abandoned')
+      task.decision_from = null
+    }
+    releaseWorkerPane(task)
+    return
+  }
+  const phaseAtEvent = task.phase
+  if (task.phase === 'blocked-on-decision') abandonDecisions(task)
+  enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
+  releaseWorkerPane(task)
+  wake.push({
+    run, task, phaseAtEvent,
+    event: `pane exited${task.pr ? '' : ', no PR'}`,
+  })
+}
+
+/**
+ * herdr 0.9.0 emits no `pane.exited` for `herdr pane close` and no `pane.closed`
+ * for the panes of a `workspace close`, so a closed worker pane left its task
+ * bound to it for 50 minutes. Measured on a live run. This notices such a pane
+ * from the supervisor's own `pane list` and reports it as `pane.closed`. A pane
+ * must be missing from two successful lists in a row, so one list taken while
+ * herdr is mid-change cannot fail a task.
+ *
+ * A pane moved to another workspace is renamed (`w3:p2` → `w5:p2`) and keeps its
+ * `terminal_id`, measured live, so a missing pane whose terminal is still listed
+ * is reported as `pane.moved` instead. Terminal ids change across a herdr
+ * restart and pane ids do not, so the terminal is only remembered in memory,
+ * from the last list that showed the pane.
+ */
+export class PaneAbsence {
+  private missingOnce = new Set<string>()
+  private terminalOf = new Map<string, string>()
+
+  reconcile(
+    runs: readonly Run[], listed: readonly PaneInfo[], session: SessionKey, now: number,
+  ): QueuedEvent[] {
+    // An empty list is a failed `pane list`: the supervisor's own pane is always in it.
+    if (listed.length === 0) return []
+    const live = new Map(listed.map((pane) => [pane.pane_id, pane]))
+    const paneOnTerminal = new Map(listed.flatMap((pane) =>
+      pane.terminal_id === undefined ? [] : [[pane.terminal_id, pane.pane_id] as const]))
+
+    const bound = runs
+      .flatMap((run) => run.tasks)
+      .filter((task) => !FINISHED.has(task.phase))
+      .flatMap((task) => (task.pane_id === null ? [] : [task.pane_id]))
+
+    const events: QueuedEvent[] = []
+    const missing: string[] = []
+    const terminalOf = new Map<string, string>()
+    for (const pane of bound) {
+      const terminal = live.get(pane)?.terminal_id ?? this.terminalOf.get(pane)
+      const movedTo = terminal === undefined ? undefined : paneOnTerminal.get(terminal)
+      if (live.has(pane)) {
+        if (terminal !== undefined) terminalOf.set(pane, terminal)
+      } else if (movedTo !== undefined) {
+        events.push({ kind: 'pane.moved', session, at: now, pane_id: movedTo, previous_pane_id: pane })
+      } else {
+        missing.push(pane)
+        if (terminal !== undefined) terminalOf.set(pane, terminal)
+      }
+    }
+    this.terminalOf = terminalOf
+
+    for (const pane of missing.filter((p) => this.missingOnce.has(p))) {
+      events.push({ kind: 'pane.closed', session, at: now, pane_id: pane })
+    }
+    this.missingOnce = new Set(missing.filter((pane) => !this.missingOnce.has(pane)))
+    return events
+  }
 }
 
 function findTask(runs: Run[], predicate: (t: Task) => boolean): { run: Run; task: Task } | null {
@@ -154,6 +268,31 @@ export function applyEvents(
       continue
     }
 
+    // Matched on the pane alone: closing a second pane in a worker's workspace
+    // says nothing about the worker.
+    if (event.kind === 'pane.closed') {
+      const found = event.pane_id === undefined
+        ? null
+        : findTask(runs, (t) => t.pane_id === event.pane_id)
+      if (found) {
+        losePane(found.run, found.task, wake)
+        changed = true
+      }
+      continue
+    }
+
+    if (event.kind === 'pane.moved') {
+      const found = event.pane_id === undefined || event.previous_pane_id === undefined
+        ? null
+        : findTask(runs, (t) => t.pane_id === event.previous_pane_id)
+      // herdr also sends it for a move within a workspace, which keeps the id.
+      if (found && event.pane_id !== undefined && event.pane_id !== event.previous_pane_id) {
+        found.task.pane_id = event.pane_id
+        changed = true
+      }
+      continue
+    }
+
     if (!event.pane_id && !event.workspace_id) continue
 
     const found = findTask(
@@ -184,13 +323,7 @@ export function applyEvents(
     }
 
     if (event.kind === 'pane.exited') {
-      if (task.phase === 'blocked-on-decision') abandonDecisions(task)
-      enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
-      releaseWorkerPane(task)
-      wake.push({
-        run, task, phaseAtEvent,
-        event: `pane exited${task.pr ? '' : ', no PR'}`,
-      })
+      losePane(run, task, wake)
       changed = true
       continue
     }

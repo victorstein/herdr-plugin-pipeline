@@ -218,8 +218,13 @@ appeared at <path>". Then start the agent and dispatch: all three go quiet withi
 its escalation. If the task is still flagged once its agent is working, the pane never bound, which
 is the failure above, not this one.
 
-Kill that worker's pane (`herdr pane close`): the task goes to `failed` and `hpipe show` reports
-`pane: none (last: <pane>)`. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
+Kill that worker's pane (`herdr pane close`): the task goes to `failed`, `hpipe show` reports
+`pane: none (last: <pane>)` and `agent: unknown`. herdr 0.9.0 sends `pane.closed {pane_id, workspace_id}`
+for `pane close`, including a workspace's last pane (measured over the socket, #103 review), so
+`plugin log list` should show a `pane.closed` hook run; if it does not, the plugin hook is not being
+dispatched and the supervisor's `pane list` reconciliation failed the task within two ticks instead.
+`herdr workspace close` sends only `workspace.closed`, never `pane.closed`, so reconciliation is the
+only path there. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
 not as bound to the dead pane. If its workspace went too (`workspace: none`), `hpipe status` lists it under
 `waiting on you:` at once as `YOUR move: no worktree and no agent — herdr worktree open --cwd … --branch …`
 (its checkout survived, so `open`, with `create` only on `worktree_not_found`), ending in `dispatch --task`, and
@@ -227,6 +232,13 @@ its stall probe to the orchestrator says the same rather than naming the researc
 must bind the task (`hpipe show` → `workspace: w<n>`) through the `worktree.opened` hook. Repeat with a rewind
 into `implement` instead: after `agent start` one message arrives on its own — the brief without its research
 section, then the implement prompt — and the advice never also asks for `hpipe brief`.
+
+Move a bound worker's pane to another workspace (`herdr pane move <pane> --new-tab --workspace <w>`):
+herdr renames it (`w3:p2` → `w5:p2`) and keeps its terminal. The task must stay in its phase and
+`hpipe show` must name the new pane id, never `failed` (#86).
+
+Close a worker's pane while its task is in `merge` or `close`: the task keeps its phase, its pane is
+released (`pane: none (last: …)`), and a dependent is not `blocked-on-failure` (#86).
 
 ---
 
@@ -691,6 +703,11 @@ clears to `done`.
 
   assert: contains `supervisor exited`, and the pane still exists. Reopen it with the plugin's
   `supervisor` action before continuing.
+  assert: the new supervisor logs `closed dead supervisor panes: <supervisor_pane_id>; their last
+  output is in …/supervisor.<session>.crash.log`, that file holds the dead pane's `supervisor exited`
+  tail, and
+  `pane list --workspace <pipeline workspace>` shows exactly one "Pipeline supervisor" pane (#97).
+  Invoking the action again while it runs prints `already running` and opens nothing.
 
 ---
 

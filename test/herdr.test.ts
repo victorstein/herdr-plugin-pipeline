@@ -20,6 +20,7 @@ test('a pane read is the screen herdr prints, not an envelope, and a failed one 
   const herdr = new Herdr(bin)
   expect(await herdr.paneRead('w1:p1', 40)).toBe('pane read w1:p1 --source visible --lines 40 --format text')
   expect(await herdr.paneReadStyled('w1:p1', 40)).toBe('pane read w1:p1 --source visible --lines 40 --format ansi')
+  expect(await herdr.paneRead('w1:p1', 200, 'recent')).toBe('pane read w1:p1 --source recent --lines 200 --format text')
   expect(await herdr.paneRead('w9:p9', 40)).toBe('')
 })
 

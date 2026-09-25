@@ -25,6 +25,48 @@ export async function writeJson(path: string, value: unknown): Promise<void> {
   renameSync(await writeTemp(path, value), path)
 }
 
+/**
+ * Writes `path` only if nothing is there, and says whether it did. A hard link
+ * fails with EEXIST atomically, and unlike an `O_EXCL` create it never exposes a
+ * half-written file to a reader.
+ */
+export async function writeJsonExclusive(path: string, value: unknown): Promise<boolean> {
+  const tmp = await writeTemp(path, value)
+  try {
+    linkSync(tmp, path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  } finally {
+    rmSync(tmp, { force: true })
+  }
+}
+
+/**
+ * Removes `path` only if its content passes `matches`, by the same move-aside and
+ * link-back as `removeLockIf`: reading the path and then unlinking it could delete
+ * a file someone wrote in between.
+ */
+export function removeJsonIf(path: string, matches: (current: unknown) => boolean): void {
+  const aside = `${path}.${randomUUID()}.aside`
+  try {
+    renameSync(path, aside)
+  } catch {
+    return
+  }
+  try {
+    if (matches(readCurrent(aside))) return
+    try {
+      linkSync(aside, path)
+    } catch {
+      // EEXIST: someone has written the path since, and theirs stands.
+    }
+  } finally {
+    rmSync(aside, { force: true })
+  }
+}
+
 export class LockTimeoutError extends Error {
   constructor(readonly lockPath: string) {
     super(`timed out waiting for ${lockPath}`)

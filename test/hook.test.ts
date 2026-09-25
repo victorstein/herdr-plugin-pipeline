@@ -94,6 +94,24 @@ test('the enqueued event survives a round trip through the queue', async () => {
   expect(drained[0]).toMatchObject({ kind: 'pane.exited', pane_id: 'w7:p1' })
 })
 
+test('a pane.closed payload is queued with its pane — #86', () => {
+  const event = toQueuedEvent('pane.closed', 'personal', JSON.stringify({
+    event: 'pane.closed', data: { pane_id: 'w5:p1', workspace_id: 'w5' },
+  }))
+  expect(event).toMatchObject({ kind: 'pane.closed', pane_id: 'w5:p1', workspace_id: 'w5' })
+})
+
+test('a pane.moved payload is queued with the pane\'s new and previous ids — #86', () => {
+  const event = toQueuedEvent('pane.moved', 'personal', JSON.stringify({
+    event: 'pane.moved',
+    data: {
+      pane: { pane_id: 'w5:p2', workspace_id: 'w5' },
+      previous_pane_id: 'w3:p2', previous_workspace_id: 'w3', previous_tab_id: 'w3:t1',
+    },
+  }))
+  expect(event).toMatchObject({ kind: 'pane.moved', pane_id: 'w5:p2', previous_pane_id: 'w3:p2' })
+})
+
 test('an unwrapped payload still parses, so a shape change fails soft', () => {
   const event = toQueuedEvent('pane.exited', 'personal', JSON.stringify({
     pane_id: 'w7:p1', workspace_id: 'w7',

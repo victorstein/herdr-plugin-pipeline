@@ -32,6 +32,14 @@ command = ["bun", "run", "src/hooks/agent-status.ts"]
 on = "pane.exited"
 command = ["bun", "run", "src/hooks/pane-exited.ts"]
 
+[[events]]
+on = "pane.closed"
+command = ["bun", "run", "src/hooks/pane-closed.ts"]
+
+[[events]]
+on = "pane.moved"
+command = ["bun", "run", "src/hooks/pane-moved.ts"]
+
 [[actions]]
 id = "status"
 title = "Pipeline status"

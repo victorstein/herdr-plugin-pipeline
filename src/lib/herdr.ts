@@ -14,6 +14,7 @@ export interface PaneInfo {
   /** The agent herdr detected in the pane; `null` once none is running there. */
   agent?: string | null
   label?: string
+  terminal_id?: string
 }
 
 /**
@@ -130,18 +131,22 @@ export class Herdr {
    * envelope, with exit 1. Parsed as an envelope, every read came back empty, so
    * the input-box checks never saw a box. Measured against herdr 0.9.0.
    */
-  async paneRead(target: string, lines: number): Promise<string> {
-    return this.readScreen(target, lines, 'text')
+  async paneRead(
+    target: string, lines: number, source: 'visible' | 'recent' = 'visible',
+  ): Promise<string> {
+    return this.readScreen(target, lines, 'text', source)
   }
 
   /** With its SGR styling: the only way to tell Claude's dim prompt suggestion from typed text. */
   async paneReadStyled(target: string, lines: number): Promise<string> {
-    return this.readScreen(target, lines, 'ansi')
+    return this.readScreen(target, lines, 'ansi', 'visible')
   }
 
-  private async readScreen(target: string, lines: number, format: 'text' | 'ansi'): Promise<string> {
+  private async readScreen(
+    target: string, lines: number, format: 'text' | 'ansi', source: 'visible' | 'recent',
+  ): Promise<string> {
     const output = await this.spawn(
-      ['pane', 'read', target, '--source', 'visible', '--lines', String(lines), '--format', format],
+      ['pane', 'read', target, '--source', source, '--lines', String(lines), '--format', format],
     )
     return 'error' in output || output.exitCode !== 0 ? '' : output.stdout
   }
