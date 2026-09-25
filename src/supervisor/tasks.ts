@@ -293,7 +293,12 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'spec':
     case 'plan': {
       delete task.artifact_missing
-      if (!actorIdle) return base
+      if (!actorIdle) {
+        // A worker only goes busy on something it was given, so this also
+        // settles a brief whose handoff `dispatch --task` could not record.
+        delete task.awaiting_brief
+        return base
+      }
       const absolute = absoluteArtifactPath(run, task)
       if (absolute === null) return base
 
@@ -322,6 +327,9 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         if (candidates.length > 1) {
           logAmbiguous(run, task, candidates, deps.ambiguityLog)
         }
+        // Between `agent start` and `dispatch --task` every worker is idle with
+        // nothing written, and was reported as stopped short. Measured on a live run.
+        if (task.awaiting_brief === true) return base
         task.artifact_missing = { at: task.phase_entered_at, path: absolute, candidates }
         return base
       }

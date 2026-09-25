@@ -534,8 +534,9 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
  * the copy the send began with: the supervisor saves the run many times during
  * a confirmation wait. Recording the pane here, as well as on
  * `pane.agent_detected`, is what keeps a lost hook event from leaving a briefed
- * worker looking as though no agent was ever started for it. Returns why the
- * pane was not recorded, or null.
+ * worker looking as though no agent was ever started for it — and recording the
+ * handoff is what stops an idle, freshly started worker reading as one that
+ * stopped short (#89). Returns why the pane was not recorded, or null.
  */
 export async function recordWorkerPane(ctx: Ctx, input: {
   runId: string; taskId: string; paneId: string; briefedPhase: TaskPhase
@@ -548,7 +549,10 @@ export async function recordWorkerPane(ctx: Ctx, input: {
       // A pane that exited during the confirmation wait has already failed the
       // task and been unbound; binding it again would make a rewind read as bound.
       if (task.phase !== input.briefedPhase) return null
-      if (bindWorkerPane(run, task, input.paneId, Date.now())) await save(ctx.stateDir, run)
+      const wasAwaitingBrief = task.awaiting_brief === true
+      delete task.awaiting_brief
+      const rebound = bindWorkerPane(run, task, input.paneId, Date.now())
+      if (rebound || wasAwaitingBrief) await save(ctx.stateDir, run)
       return null
     })
   } catch (error) {

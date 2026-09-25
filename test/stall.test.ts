@@ -7,6 +7,8 @@ import {
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
+import { TASK_ROWS } from '../src/lib/phases'
+import { actionFor } from '../src/lib/status'
 import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
 import { enqueue } from '../src/lib/outbox'
@@ -214,7 +216,7 @@ test('an artifact row names a real absolute path and says how to fix a misfile',
   const a = stallAwaiting(run, task, 'hp')
   expect(a.clause).toContain('/wt/docs/superpowers/research/r.md')
   expect(a.clause).toContain('Nothing has appeared at')
-  expect(a.short).toBe('its research/spec/plan artifact')
+  expect(a.short).toBe('its research artifact')
 })
 
 test('the artifact clause does not reassert the sentence #9 retired from the brief', () => {
@@ -305,6 +307,21 @@ test('the blocked rows name the exit, not the symptom', () => {
   })
   expect(stallAwaiting(run, decision, 'hp').short).toBe('an answer to the open decision')
   expect(stallAwaiting(run, teardown, 'hp').short).toBe('its worktree to be removed')
+})
+
+test('a move clause names what the stall probe for the same row names — #95', () => {
+  for (const row of TASK_ROWS) {
+    if (row.actor !== 'orchestrator' && row.actor !== 'worker') continue
+    for (const pr of [null, 7]) {
+      const task = mkTask({
+        phase: row.phase, pr,
+        artifacts: { research: 'r.md', spec: 's.md', plan: 'p.md', verdicts: {} },
+      })
+      const run = runWithTasks([task])
+      expect(actionFor(run, task, 'hp', NOW), row.phase)
+        .toEndWith(`waiting for ${stallAwaiting(run, task, 'hp', NOW).short}`)
+    }
+  }
 })
 
 test('an unrecognised signal falls back to naming the phase', () => {

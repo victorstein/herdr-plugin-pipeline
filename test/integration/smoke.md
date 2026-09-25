@@ -183,6 +183,14 @@ binding comes from two separate events — `worktree.created` (matched on `branc
 but the pane did not, the agent was started somewhere the plugin did not see. `hpipe forget
 <workspace_id>` unbinds so you can retry.
 
+**Between `agent start` and `dispatch --task` (#89).** Pause for a tick after `agent start` and run
+`hpipe status` before dispatching: the task is listed under `waiting on you:` as `YOUR move: its
+agent in <pane> has not been handed the brief — <hpipe> dispatch --task <id> --pane <pane>`. It must
+**not** read `worker idle with nothing at <research path>` — that was the false alert every freshly
+started worker produced — nor a bare `worker's move`. Once `dispatch --task` confirms, the entry
+goes and the line reads `worker's move: waiting for its research artifact`. An old run whose tasks
+were registered before this change never shows the "not handed the brief" line.
+
 Once **both** tasks are bound, the run reads `[execute]` within a tick or two — even when the
 orchestrator dispatched them straight after registering them, before the run itself had entered
 `dispatch`. That ordering is the normal one, and it is what #22 deadlocked on.
@@ -243,21 +251,25 @@ watch -n 2 'hpipe status'
   prompts that are its own. Every event line in that digest must carry, in this order, the task id,
   the branch and issue, a bracketed phase box with the age in that phase — `[spec 12m]`, or a
   transition box `[research → spec]` on the tick a phase advances — and an action clause naming
-  whose move it is: `YOUR move`, `worker's move`, `needs a human: <rewind cmd>`, `dead end`, or
-  `nothing for you …`. A line of the old shape — `branch (#n, tN) done`, carrying herdr's agent
-  status and nothing else — is a **finding**: that form is what issue #13 was filed over, because
+  whose move it is: `YOUR move: …`, `worker's move: waiting for …`, `needs a human: <rewind cmd>`,
+  `dead end`, or `nothing for you …`. A move clause always names what it waits for — `YOUR move:
+  waiting for PR #7 to be merged`, `worker's move: waiting for its spec artifact` — and the noun
+  phrase after `waiting for` is the one the stall probe for that row uses. A bare `YOUR move` or a
+  bare `worker's move` is a **finding** (#95). A line of the old shape — `branch (#n, tN) done`,
+  carrying herdr's agent status and nothing else — is a **finding**: that form is what issue #13 was filed over, because
   `done` there means "the agent stopped typing", not "the phase completed".
 - **Confirm the `→` arrow specifically.** #13 shipped without ever being observed live: the
   supervisor that drove its own run was the released plugin, so the transition box has only ever
   been exercised by unit tests. Watch for one digest where a phase advances and record whether the
   box reads `[research → spec]` rather than `[spec 0m]`.
 - **An idle worker in `research`, `spec` or `plan` with nothing at its artifact path** (#23) must
-  not read as a plain `worker's move`: its line reads `YOUR move: worker idle with nothing at
+  not read as `worker's move: waiting for …`: its line reads `YOUR move: worker idle with nothing at
   <path>` followed by what the adoption scan found — `its branch added no document to adopt` or
   `N candidates, too many to adopt: …` — and `hpipe status` lists the same clause under
   `waiting on you:`. To provoke it, answer a worker's research prompt without writing the note. A
-  line that says `worker's move` alone for that pane is a **finding**; so is the entry surviving
-  once the worker is busy again.
+  line that says `worker's move` for that pane is a **finding**; so is the entry surviving once
+  the worker is busy again. A worker that was never handed its brief is the exception — see #89
+  above.
 - **A digest may end with an `also waiting on you:` footer** listing tasks that produced no event at
   all — a task parked in `merge`, `close` or `blocked-on-decision` emits nothing, so on a tick that
   is already sending a digest the footer is what reports it. Every task it names should also appear,
@@ -361,11 +373,15 @@ than one candidate, pass `--run <run-id>`; the brief names the run in its first 
 1. The worker's task goes to `[blocked-on-decision]`, and `decision_from` remembers the phase it
    was in.
 2. Within a tick, the **orchestrator's pane** receives the `decision` prompt: the question, the
-   worker's recommendation, and the exact `hpipe answer` line to run. That same delivery will also
-   carry an `also waiting on you:` footer line for this task — `- tN <branch> (#n)
-   [blocked-on-decision 0m] — YOUR move`. `hpipe decide` is not a pane event, so the task produces
-   no wake line of its own and the footer is what reports it; seeing both the prompt and the footer
-   line for one task is correct, not a duplicate.
+   worker's recommendation, and the exact `hpipe answer` line to run. The prompt arrives **on its
+   own**, with no `also waiting on you:` footer: it is sent directly, outside the digest courier
+   that renders footers, and a footer line about the very task the prompt is about would say less
+   than the prompt does (#93). The task then reaches the next digest anyway, because the worker
+   ends its turn after `hpipe decide` and that idle is a pane event: an event line
+   `- tN <branch> (#n) [blocked-on-decision 0m] agent:done — YOUR move: waiting for an answer to
+   the open decision`. If the worker's idle was missed, the same clause appears in that digest's
+   `also waiting on you:` footer instead. Either way, a `YOUR move` with nothing after it is a
+   finding (#95).
 3. **While the question is open**, `hpipe status` prints:
 
    ```

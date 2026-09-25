@@ -256,8 +256,33 @@ test('a PR parked in merge is named under waiting on you, not left among the res
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const section = text.slice(text.indexOf('waiting on you:'))
-  expect(section).toContain('t1 fix/a (#30) [merge 297m] — YOUR move')
+  expect(section).toContain('t1 fix/a (#30) [merge 297m] — YOUR move: waiting for PR #41 to be merged')
   expect(section).not.toContain('t2')
+})
+
+test('a started worker that has not been briefed names dispatch, not a missing artifact — #89', () => {
+  const now = 100_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  const entered = now - 9 * 60_000
+  run.tasks = [mkTask({
+    phase: 'research', phase_entered_at: entered, agent_status: 'idle', awaiting_brief: true,
+    artifact_missing: { at: entered, path: '/wt/docs/research/r.md', candidates: [] },
+  })]
+  const out = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  const section = out.slice(out.indexOf('waiting on you:'))
+  expect(section).toContain(
+    't1 feat/x (#1) [research 9m] — YOUR move: its agent in w7:p1 has not been handed the brief — ' +
+    `\`${HP} dispatch --task t1 --pane w7:p1\``,
+  )
+  expect(out).not.toContain('with nothing at')
+})
+
+test('a run written before #89 reads its research workers as briefed', () => {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({ phase: 'research', agent_status: 'working' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('handed the brief')
 })
 
 test('waiting on you speaks the same clause as the digest for every task it lists', () => {

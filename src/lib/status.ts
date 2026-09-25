@@ -1,3 +1,4 @@
+import { awaitedFor } from './awaiting'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
@@ -5,7 +6,7 @@ import { runIsDriven } from './ledger'
 import { outboxWarnings } from './outbox'
 import { taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
-import { overdueUnstartedWorker, startWorkerCommand } from './unstarted'
+import { overdueUnstartedWorker, startWorkerCommand, unbriefedWorkerPane } from './unstarted'
 
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
@@ -120,12 +121,17 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
       (run.phase === 'execute' ? ' — the run holds in execute until one is run' : ''),
     )
   }
-  if (row.actor === 'orchestrator') return yours('YOUR move')
+  if (row.actor === 'orchestrator') return yours(`YOUR move: waiting for ${awaitedFor(task)}`)
   if (row.actor === 'worker') {
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
         startWorkerCommand(task, unstarted.workspaceId, hpipe))
+    }
+    const unbriefed = unbriefedWorkerPane(run, task)
+    if (unbriefed !== null) {
+      return yours(`YOUR move: its agent in ${unbriefed} has not been handed the brief — ` +
+        `\`${hpipe} dispatch --task ${task.task_id} --pane ${unbriefed}\``)
     }
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
@@ -135,7 +141,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
     }
     const work = currentUncommittedWork(run, task)
     if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
-    return notYours("worker's move")
+    return notYours(`worker's move: waiting for ${awaitedFor(task)}`)
   }
   if (task.phase === 'blocked-on-files') {
     // This row has no escalation path of its own — `files` is not in stall.ts's

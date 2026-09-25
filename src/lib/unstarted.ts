@@ -35,6 +35,17 @@ export function overdueUnstartedWorker(run: Run, task: Task, now: number): Unsta
 }
 
 /**
+ * The pane of a worker whose agent is running but has not been handed its
+ * brief — the gap between `agent start` and `dispatch --task`, which is the
+ * orchestrator's to close, not the worker's.
+ */
+export function unbriefedWorkerPane(run: Run, task: Task): string | null {
+  if (runRow(run.phase).releasesPane === true) return null
+  if (task.awaiting_brief !== true || task.phase !== taskRow('queued').onClear) return null
+  return task.pane_id
+}
+
+/**
  * Records the worker's pane, and re-arms the stall ladder when that changes who
  * the task is waiting on. The ladder is keyed on the phase entry, which a bind
  * does not touch, so without the re-arm the orchestrator's probes about an empty

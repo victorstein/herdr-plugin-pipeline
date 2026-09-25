@@ -322,13 +322,16 @@ test('actionFor answers whose move it is, by rung', () => {
     .toBe('needs a human: `hp rewind r1 implement --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
   expect(at('escalated', { escalated_from: null }))
     .toBe('needs a human: `hp rewind r1 <phase> --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
-  for (const phase of ['merge', 'close', 'blocked-on-decision'] as TaskPhase[]) {
-    expect(at(phase)).toBe('YOUR move')
-  }
-  for (const phase of ['research', 'spec', 'spec-review', 'plan', 'plan-review',
-                       'implement', 'pr-review-intent', 'pr-review-quality'] as TaskPhase[]) {
-    expect(at(phase)).toBe("worker's move")
-  }
+  // #95: the same noun phrase the stall probe uses, so the three channels agree.
+  expect(at('merge', { pr: 7 })).toBe('YOUR move: waiting for PR #7 to be merged')
+  expect(at('close')).toBe('YOUR move: waiting for issue #1 to close')
+  expect(at('blocked-on-decision')).toBe('YOUR move: waiting for an answer to the open decision')
+  expect(at('blocked-on-decision', { pending_answer: 'd1' }))
+    .toBe('YOUR move: waiting for its recorded answer to reach the worker')
+  expect(at('research')).toBe("worker's move: waiting for its research artifact")
+  expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
+  expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
+  expect(at('implement')).toBe("worker's move: waiting for a pushed PR for feat/x (#1)")
   for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
     expect(at(phase)).toBe('nothing for you — the supervisor is driving')
     // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
@@ -398,9 +401,9 @@ test('every row in TASK_ROWS gets a clause that matches who its actor is', () =>
     } else if (row.actor === 'human') {
       expect(clause, where).toContain('needs a human')
     } else if (row.actor === 'orchestrator') {
-      expect(clause, where).toContain('YOUR move')
+      expect(clause, where).toStartWith('YOUR move: waiting for ')
     } else if (row.actor === 'worker') {
-      expect(clause, where).toBe("worker's move")
+      expect(clause, where).toStartWith("worker's move: waiting for ")
     } else {
       expect(clause, where).toContain('nothing for you')
     }
@@ -465,7 +468,7 @@ test('a digest line carries the task, the phase, the age and the action', () => 
   const now = 1_000_000
   const line = wakeLine({ task: mkTask({ phase: 'implement', phase_entered_at: now - 720_000 }) })
   expect(describeWake(line, now, 'hp'))
-    .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move")
+    .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move: waiting for a pushed PR for feat/x (#1)")
 })
 
 test('a digest line names the missing artifact of an idle worker', () => {
@@ -493,7 +496,7 @@ test('a phase that moved this tick renders as a transition and drops the age', (
     task: mkTask({ phase: 'spec', phase_entered_at: now }),
   })
   expect(describeWake(line, now, 'hp'))
-    .toBe("t1 feat/x (#1) [research → spec] agent:idle — worker's move")
+    .toBe("t1 feat/x (#1) [research → spec] agent:idle — worker's move: waiting for its spec artifact")
 })
 
 test('a blocked line indents its pane tail four spaces under the bullet', () => {
@@ -504,7 +507,7 @@ test('a blocked line indents its pane tail four spaces under the bullet', () => 
     task: mkTask({ phase: 'plan', phase_entered_at: now }),
   })
   expect(describeWake(line, now, 'hp')).toBe(
-    "t1 feat/x (#1) [implement → plan] agent:blocked — worker's move\n" +
+    "t1 feat/x (#1) [implement → plan] agent:blocked — worker's move: waiting for its plan artifact\n" +
     '    Do you want to proceed?\n' +
     '    yes / no',
   )
@@ -545,12 +548,12 @@ test('the footer names orchestrator-owned and escalated tasks that produced no l
   run.tasks = [
     mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'escalated',
              escalated_from: 'plan', phase_entered_at: now - 3_780_000 }),
-    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge',
+    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge', pr: 41,
              phase_entered_at: now - 2_460_000 }),
   ]
   expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
     'also waiting on you:\n' +
-    '- t1 fix/a (#30) [merge 41m] — YOUR move\n' +
+    '- t1 fix/a (#30) [merge 41m] — YOUR move: waiting for PR #41 to be merged\n' +
     '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2` resumes it, `hp rewind r1 failed --task t2` abandons it — the run holds in execute until one is run',
   )
 })
@@ -693,7 +696,7 @@ test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12'
   expect(clause).toContain('`hp dispatch --task t1 --pane <pane>`')
 
   const booting = mkTask({ phase: 'research', pane_id: null, workspace_id: 'w23', adopted_at: now })
-  expect(actionFor(run, booting, 'hp', now)).toBe("worker's move")
+  expect(actionFor(run, booting, 'hp', now)).toBe("worker's move: waiting for its research artifact")
 })
 
 test('the footer lists an unstarted worker a quiet digest would otherwise hide — #12', () => {
