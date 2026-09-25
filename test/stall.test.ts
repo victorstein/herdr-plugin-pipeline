@@ -1047,8 +1047,8 @@ test('a worker row with no worktree and no pane is told to the orchestrator as i
   expect(a.clause).not.toContain('If you finished')
   expect(a.clause).toContain('no worktree and no agent')
   // Its checkout outlived the workspace, so `create` would fail on the existing path.
-  expect(a.clause.indexOf('`herdr worktree open --cwd /r --branch feat/x`'))
-    .toBeLessThan(a.clause.indexOf('`herdr worktree create --cwd /r --branch feat/x --base main`'))
+  expect(a.clause.indexOf("`herdr worktree open --cwd '/r' --branch feat/x`"))
+    .toBeLessThan(a.clause.indexOf("`herdr worktree create --cwd '/r' --branch feat/x --base <commit>`"))
   expect(a.clause).toContain('worktree_not_found')
   expect(a.clause).toContain('`hp dispatch --task t1 --pane <root pane>`')
   expect(a.short).toContain('worktree')
@@ -1059,7 +1059,10 @@ test('a worktreeless task that never had a checkout is told to create one — #9
   const task = mkTask({ phase: 'research', workspace_id: null, pane_id: null, checkout_path: null })
   run.tasks = [task]
   const a = stallAwaiting(run, task, 'hp', NOW)
-  expect(a.clause).toContain('`herdr worktree create --cwd /r --branch feat/x --base main`')
+  expect(a.clause).toContain("`herdr worktree create --cwd '/r' --branch feat/x --base <commit>`")
+  // #121: the fetched `base:` commit, never a local `main` the orchestrator last pulled.
+  expect(a.clause).toContain('the commit on the `base:` line `hp show --task t1` prints')
+  expect(a.clause).not.toContain('--base main')
   expect(a.clause).not.toContain('worktree open')
 })
 

@@ -14,6 +14,7 @@ import { isFresh, isSettled, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
+import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
@@ -201,11 +202,12 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
       const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+      const bootstrap = repoBootstrap(run.repo_root)
       prompts.push({
-        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}) — ` +
-          `worktree create --cwd ${run.repo_root}:\n` +
-          `${bootstrapLine(repoBootstrap(run.repo_root))}\n` +
-          `${baseLine(dispatchBase)}\n\n` +
+        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n` +
+          `${bootstrapLine(bootstrap)}\n` +
+          `${baseLine(dispatchBase)}\n` +
+          `${dispatchSequence(run, task, dispatchBase, bootstrap, hpipeCommand(deps.pluginRoot))}\n\n` +
           (await renderWorkerPrompt(deps.pluginRoot, run, task)),
         paneId: run.orchestrator_pane,
         taskId: task.task_id,

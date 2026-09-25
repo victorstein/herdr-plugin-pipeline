@@ -485,9 +485,23 @@ test('a task rewound into a worker row with no worktree is waiting on you at onc
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain('waiting on you:')
   expect(text).toContain('t1 feat/x (#1) [research 0m] — YOUR move: no worktree and no agent')
-  expect(text).toContain('herdr worktree create --cwd /r --branch feat/x --base main')
+  expect(text).toContain("herdr worktree create --cwd '/r' --branch feat/x --base <commit>")
   expect(text).toContain('herdr agent start')
   expect(text).toContain(`\`${HP} dispatch --task t1 --pane <root pane>\``)
+})
+
+test('a rewound task awaiting its brief with no worktree is flagged at once, not under way — #120', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true, phase_entered_at: now,
+  })]
+  run.history.push({ at: now, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' })
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('waiting on you:')
+  expect(text).toContain('YOUR move: no worktree and no agent')
+  expect(text).not.toContain('dispatch under way')
 })
 
 test('a task the gate just opened is not flagged while its dispatch is under way — #94', () => {
@@ -498,6 +512,20 @@ test('a task the gate just opened is not flagged while its dispatch is under way
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)).not.toContain('no worktree')
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now + 5 * 60_000))
     .toContain('YOUR move: no worktree and no agent')
+})
+
+test('a task dispatched at registration is not flagged before its grace, and starts at the worktree — #120', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true, phase_entered_at: now,
+  })]
+  const inGrace = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(inGrace).not.toContain('waiting on you:')
+  expect(inGrace).not.toContain('no agent has been started')
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now + 5 * 60_000))
+    .toContain("YOUR move: no worktree and no agent — `herdr worktree create --cwd '/r' --branch feat/x")
 })
 
 test('hpipe show names the pane a failed worker last ran in — #12', () => {

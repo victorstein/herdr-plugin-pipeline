@@ -2,7 +2,8 @@ import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Task } from '../src/lib/types'
+import type { Run, Task } from '../src/lib/types'
+import { dispatchSequence } from '../src/lib/unstarted'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
@@ -76,6 +77,16 @@ test('both dispatch paths point the orchestrator at the base: line, never a stal
   const intake = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
   expect(intake).toContain('`base: <commit> (…)`')
   expect(intake).toContain('--base <commit>')
+})
+
+test('the dispatch prompt shows the same agent start line both dispatch paths print — #118', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  const run = { repo_root: '/r' } as Run
+  const task = { task_id: 't1', branch: 'feat/x' } as Task
+  const base = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
+  const printed = dispatchSequence(run, task, base, { kind: 'none' }, 'hp')
+  const startLine = printed.split('\n').find((line) => line.includes('herdr agent start'))!.trim()
+  expect(text).toContain(startLine.replace('<.result.root_pane.pane_id>', '<root_pane_id>'))
 })
 
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {

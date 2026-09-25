@@ -1039,11 +1039,20 @@ test('the dispatched return keeps every header line above the one blank line', a
   }, undefined, fetchedBase)
 
   const [head, ...rest] = result.text.split('\n\n')
-  expect(head!.split('\n')).toEqual([
+  const lines = head!.split('\n')
+  expect(lines.slice(0, 4)).toEqual([
     'task_id: t1',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
+  ])
+  // #118: the registration path prints the whole dispatch, `agent start` flag included.
+  expect(lines.slice(4)).toEqual([
+    'dispatch, in order:',
+    `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
+    '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
+    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    expect.stringMatching(/ dispatch --task t1 --pane <\.result\.root_pane\.pane_id>$/),
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
   // so nothing meant for the worker may land among them.
@@ -1075,9 +1084,12 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
-  expect(head!.split('\n')).toEqual([
+  const lines = head!.split('\n')
+  expect(lines.slice(0, 4)).toEqual([
     'task_id: t1', 'files: none', 'bootstrap: none', 'base: 1fb8a43 (origin/main as just fetched)',
   ])
+  expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
+  expect(lines.join('\n')).toContain('-- --dangerously-skip-permissions')
   expect(rest.join('\n\n')).toStartWith('# feat/quiet — issue #2')
 })
 
@@ -1143,6 +1155,28 @@ test('show says none rather than printing null for what a task has not reached',
   expect(result.text).toContain('depends on: none')
   expect(result.text).toContain('pr:         none')
   expect(result.text).not.toContain('null')
+})
+
+test('show prints a freshly fetched base for an unfinished task, containing its dependency merges', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'done', merged_at_ms: 5_000, merge_commit: 'c0ffee1' },
+    { task_id: 't2', phase: 'research', depends_on: ['t1'] },
+  ])
+  run.repo_root = repoDir
+  await saveRun(dir, run)
+  const requested: Array<[string, string[] | null]> = []
+  const fetchBase = async (repoRoot: string, merges: string[] | null) => {
+    requested.push([repoRoot, merges])
+    return { commit: '1fb8a43', ref: 'origin/main', fetchError: null }
+  }
+
+  const unfinished = await cmdShow(ctx(), { taskId: 't2', repoKey: 'k', runId: null }, fetchBase)
+  expect(unfinished.text).toContain('base: 1fb8a43 (origin/main as just fetched)')
+  expect(requested).toEqual([[repoDir, ['c0ffee1']]])
+
+  const finished = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
+  expect(finished.text).not.toContain('base:')
+  expect(requested).toHaveLength(1)
 })
 
 test('show names a missing task', async () => {
@@ -1488,7 +1522,7 @@ test('a rewind into research with no worker owes nothing: the dispatched brief c
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'research', taskId: 't1' })
   // The F10 shape: no workspace either, so the first step is a worktree, not a dispatch.
-  expect(result.text).toContain('no worker is bound, so nothing is sent — `herdr worktree create --cwd /r --branch b')
+  expect(result.text).toContain("no worker is bound, so nothing is sent — `herdr worktree create --cwd '/r' --branch b")
   expect(result.text.indexOf('herdr agent start')).toBeLessThan(result.text.indexOf('dispatch --task t1 --pane <root pane>'))
   expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
 })

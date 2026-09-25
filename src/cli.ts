@@ -23,7 +23,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { bindWorkerPane, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
+import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
@@ -364,7 +364,8 @@ async function registerTask(
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
   // supervisor's tick. Measured on the live ledger.
-  const bootLine = bootstrapLine(repoBootstrap(run.repo_root))
+  const bootstrap = repoBootstrap(run.repo_root)
+  const bootLine = bootstrapLine(bootstrap)
 
   const header = [`task_id: ${task.task_id}`, ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine]
     .join('\n')
@@ -375,7 +376,8 @@ async function registerTask(
   // the read and the save only widens the window a concurrent write can take.
   const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`${header}\n${baseLine(base)}\n\n${prompt}`)
+  const sequence = dispatchSequence(run, task, base, bootstrap, hpipeCommand(ctx.pluginRoot))
+  return ok(`${header}\n${baseLine(base)}\n${sequence}\n\n${prompt}`)
 }
 
 export async function cmdTask(
@@ -445,16 +447,25 @@ export async function cmdBrief(ctx: Ctx, input: {
   return ok(await renderWorkerPrompt(ctx.pluginRoot, found.value.run, found.value.task))
 }
 
-/** Read-only, and reaches a finished run under --run, like `brief`. */
+/**
+ * Read-only, and reaches a finished run under --run, like `brief`. An unfinished
+ * task also gets a freshly fetched `base:` line: it is what the recovery advice
+ * cuts a lost worktree from, and the one its dispatch printed may be long gone
+ * from the orchestrator's context and stale besides.
+ */
 export async function cmdShow(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
-}): Promise<CmdResult> {
+}, dispatchBase: DispatchBaseFor = freshDispatchBase): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
     reach: 'finished-if-named', escape: '--run <run-id> shows it anyway',
   })
   if (!found.ok) return found.result
-  return ok(formatTaskDetail(found.value.run, found.value.task))
+  const { run, task } = found.value
+  const detail = formatTaskDetail(run, task)
+  if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
+  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+  return ok(`${detail}\n${baseLine(base)}`)
 }
 
 export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unknown>>

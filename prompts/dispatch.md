@@ -11,6 +11,9 @@ it the brief:
     herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
+Both `{{hpipe}} task` and the `Dispatch tN …` prompt print this sequence for the task, under
+`dispatch, in order:`, with its branch, task id and base filled in — run that copy.
+
 **`<base>` is the commit on the `base: <commit> (<ref> as just fetched)` line** — printed by
 `{{hpipe}} task` when it dispatches at registration, and by the `Dispatch tN …` prompt when a task
 becomes ready later. Pass the commit, not the ref in parentheses, and never a base you pick. It was
@@ -50,11 +53,13 @@ supervisor watches and the task id the worker needs for `{{hpipe}} decide`. Do n
 send the worker task text of your own: the issue body is the brief, and anything you say here instead
 of in the issue is lost. The copy you were shown is for you to read; `dispatch --task` sends its
 own. When it came from `{{hpipe}} task`, the header lines above it — `task_id:`, `issue:` when it
-filed one, `files:`, `bootstrap:` and `base:` — are yours: confirm the `files:` line matches what you declared, cut the
-worktree from the `base:` commit, and run what `bootstrap:` names in the new checkout before
-`agent start`. `{{hpipe}} brief --task <id>` prints
-the bare brief again if you need to reread it, and `{{hpipe}} show --task <id>` prints what the run
-recorded for the task — its phase, files, dependencies, artifact paths, PR and CI.
+filed one, `files:`, `bootstrap:`, `base:` and the `dispatch, in order:` block — are yours: confirm
+the `files:` line matches what you declared, then run the block, which cuts the worktree from the
+`base:` commit and runs what `bootstrap:` names in the new checkout before `agent start`.
+`{{hpipe}} brief --task <id>` prints the bare brief again if you need to reread it, and
+`{{hpipe}} show --task <id>` prints what the run recorded for the task — its phase, files,
+dependencies, artifact paths, PR and CI — and, while it is unfinished, a freshly fetched `base:`
+line to cut a lost worktree from.
 
 **Still registering?** Every new task is backed by an issue — file it with `gh issue create`, then:
 

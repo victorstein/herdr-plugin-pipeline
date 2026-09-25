@@ -5,7 +5,9 @@ import { advanceTasks, promptForTaskPhase } from '../src/supervisor/tasks'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor } from '../src/lib/machine'
+import { hpipeCommand } from '../src/lib/render'
 import type { Run, Task } from '../src/lib/types'
+import { dispatchSequence } from '../src/lib/unstarted'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
 afterEach(cleanupFixtures)
@@ -806,13 +808,17 @@ test('an unreadable checkout reports nothing and is retried only on the next idl
 })
 
 
-test('the dispatch prompt ends its header with bootstrap: then base:, the order hpipe task prints', async () => {
+test('the dispatch prompt carries bootstrap:, base: and the dispatch sequence, as hpipe task prints them', async () => {
   const run = mkRun([mkTask({})])
-  const prompts = await advanceTasks(run, deps({
-    freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/trunk', fetchError: null }),
-  }))
-  const head = prompts[0]!.text.split('\n\n')[0]!.split('\n')
-  expect(head.slice(-2)).toEqual(['bootstrap: none', 'base: 1fb8a43 (origin/trunk as just fetched)'])
+  const base = { commit: '1fb8a43', ref: 'origin/trunk', fetchError: null }
+  const prompts = await advanceTasks(run, deps({ freshDispatchBase: async () => base }))
+  const head = prompts[0]!.text.split('\n\n')[0]!
+  const sequence = dispatchSequence(run, run.tasks[0]!, base, { kind: 'none' }, hpipeCommand(process.cwd()))
+  expect(head.split('\n').slice(1)).toEqual([
+    'bootstrap: none', 'base: 1fb8a43 (origin/trunk as just fetched)', ...sequence.split('\n'),
+  ])
+  expect(sequence).toContain('--base 1fb8a43')
+  expect(sequence).toContain('-- --dangerously-skip-permissions')
 })
 
 test('a dependent task asks for a base containing its dependency merge', async () => {

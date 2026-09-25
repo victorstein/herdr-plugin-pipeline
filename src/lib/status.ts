@@ -8,7 +8,7 @@ import { runRow, taskRow } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
-  startWorkerCommand, unbriefedWorker,
+  remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
 } from './unstarted'
 
 export interface StatusSupervisor {
@@ -143,10 +143,14 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number): Move {
     }
     const unbriefed = unbriefedWorker(run, task)
     if (unbriefed) {
-      const dispatch = briefCommand(task, unbriefed.paneId, hpipe)
-      return yours(unbriefed.paneId === null
-        ? `YOUR move: no agent has been started for it yet — start one, then ${dispatch}`
-        : `YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ${dispatch}`)
+      // No pane reaches here only inside the bootstrap grace — the overdue checks
+      // above claim every other case — and a dispatch still being carried out is
+      // not yet the orchestrator's lapse. Measured on a live run.
+      if (unbriefed.paneId === null) {
+        return notYours(`dispatch under way — ${remainingDispatchSteps(run, task, hpipe)}`)
+      }
+      return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
+        briefCommand(task, unbriefed.paneId, hpipe))
     }
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.

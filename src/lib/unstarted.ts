@@ -1,3 +1,5 @@
+import { BOOTSTRAP_REL, type Bootstrap } from './bootstrap'
+import { baseArgument, type DispatchBase } from './dispatch-base'
 import { isCurrent } from './outbox'
 import { runRow, taskRow } from './phases'
 import type { Run, Task } from './types'
@@ -80,7 +82,38 @@ export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { 
   return enteredByRewind(run, task) || now - undispatched.since >= UNSTARTED_GRACE_MS ? undispatched : null
 }
 
-const START_AGENT = '`herdr agent start <name> --kind claude --pane <root pane>`'
+/** Printed for pasting into a shell, where a repo path with a space would split. */
+function shellQuoted(path: string): string {
+  return `'${path.replaceAll("'", "'\\''")}'`
+}
+
+/** Workers run unattended: a permission prompt would hold one with nobody watching its pane. */
+function startAgentCommand(paneId: string): string {
+  return `herdr agent start <name> --kind claude --pane ${paneId} -- --dangerously-skip-permissions`
+}
+
+const START_AGENT = `\`${startAgentCommand('<root pane>')}\``
+
+const CREATED_ROOT_PANE = '<.result.root_pane.pane_id>'
+
+/**
+ * The whole dispatch, in order, for both paths that dispatch: `hpipe task` at
+ * registration and the supervisor's prompt when a gate opens later. Most tasks
+ * dispatch at registration, and that path once printed only the header lines,
+ * so the orchestrator started its workers without the permissions flag, which
+ * only the other path's prompt carried. Measured on a live run.
+ */
+export function dispatchSequence(
+  run: Run, task: Task, base: DispatchBase, bootstrap: Bootstrap, hpipe: string,
+): string {
+  const steps = [
+    `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base ${baseArgument(base)}`,
+    ...(bootstrap.kind === 'none' ? [] : [`(cd "<.result.worktree.path>" && ./${BOOTSTRAP_REL})`]),
+    startAgentCommand(CREATED_ROOT_PANE),
+    `${hpipe} dispatch --task ${task.task_id} --pane ${CREATED_ROOT_PANE}`,
+  ]
+  return ['dispatch, in order:', ...steps.map((step) => `    ${step}`)].join('\n')
+}
 
 /**
  * Past the briefed phase, what a new agent is given once it is bound. A rewind
@@ -107,8 +140,9 @@ function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
  * base. Both measured on herdr 0.9.0.
  */
 export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): string {
-  const create = `\`herdr worktree create --cwd ${run.repo_root} --branch ${task.branch} --base main\``
-  const open = `\`herdr worktree open --cwd ${run.repo_root} --branch ${task.branch}\``
+  const create = `\`herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base <commit>\` ` +
+    `(the commit on the \`base:\` line \`${hpipe} show --task ${task.task_id}\` prints, never a base you pick)`
+  const open = `\`herdr worktree open --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch}\``
   const worktree = task.checkout_path === null
     ? `${create}, run the repo's bootstrap in the new checkout`
     : `${open}; if that answers \`worktree_not_found\` the checkout is gone, so ${create} and run ` +
@@ -118,6 +152,16 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
     return `${setUp}, then ${briefCommand(task, '<root pane>', hpipe)}`
   }
   return `${setUp}; ${handoffPastBrief(run, task, hpipe)}`
+}
+
+/**
+ * What is left of a dispatch still inside its bootstrap grace, from the worktree
+ * step on when there is no worktree yet.
+ */
+export function remainingDispatchSteps(run: Run, task: Task, hpipe: string): string {
+  if (task.workspace_id === null) return dispatchWorkerCommand(run, task, hpipe)
+  return `once the repo's bootstrap has run in its checkout, ${START_AGENT}, then ` +
+    briefCommand(task, '<root pane>', hpipe)
 }
 
 /**
