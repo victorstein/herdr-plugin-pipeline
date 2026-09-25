@@ -447,16 +447,25 @@ export async function cmdBrief(ctx: Ctx, input: {
   return ok(await renderWorkerPrompt(ctx.pluginRoot, found.value.run, found.value.task))
 }
 
-/** Read-only, and reaches a finished run under --run, like `brief`. */
+/**
+ * Read-only, and reaches a finished run under --run, like `brief`. An unfinished
+ * task also gets a freshly fetched `base:` line: it is what the recovery advice
+ * cuts a lost worktree from, and the one its dispatch printed may be long gone
+ * from the orchestrator's context and stale besides.
+ */
 export async function cmdShow(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
-}): Promise<CmdResult> {
+}, dispatchBase: DispatchBaseFor = freshDispatchBase): Promise<CmdResult> {
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
     reach: 'finished-if-named', escape: '--run <run-id> shows it anyway',
   })
   if (!found.ok) return found.result
-  return ok(formatTaskDetail(found.value.run, found.value.task))
+  const { run, task } = found.value
+  const detail = formatTaskDetail(run, task)
+  if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
+  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+  return ok(`${detail}\n${baseLine(base)}`)
 }
 
 export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unknown>>

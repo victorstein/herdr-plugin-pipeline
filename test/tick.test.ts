@@ -378,7 +378,7 @@ test('actionFor answers whose move it is, by rung', () => {
     awaiting_brief: true as const, pane_id: null, workspace_id: null, checkout_path: null, phase_entered_at: Date.now(),
   }
   expect(at('research', justDispatched))
-    .toStartWith('dispatch under way — `herdr worktree create --cwd /r --branch feat/x --base <commit>`')
+    .toStartWith("dispatch under way — `herdr worktree create --cwd '/r' --branch feat/x --base <commit>`")
   expect(at('research')).toBe("worker's move: waiting for its research artifact")
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
