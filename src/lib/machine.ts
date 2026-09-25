@@ -97,9 +97,24 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   // told about it yet; every later transition follows the worker's own work.
   if (task.phase === 'queued' && phase === taskRow('queued').onClear) task.awaiting_brief = true
   else delete task.awaiting_brief
+  const resumingAskedPhase = task.phase === 'blocked-on-decision' && phase === task.decision_from
+  if (phase === 'blocked-on-decision') task.artifact_fresh_after ??= task.phase_entered_at
+  else if (!resumingAskedPhase) delete task.artifact_fresh_after
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
+}
+
+/**
+ * What the current phase's artifact or verdict must be newer than. A worker that
+ * writes its verdict and then asks a decision resumes into a re-stamped phase, and
+ * judged against that entry its verdict read as stale and the task sat idle until a
+ * stall probe. Measured on a live run. The earlier verdict is only read once the
+ * worker goes idle again after the answer, so one the answer changes has been
+ * rewritten by then.
+ */
+export function artifactFreshAfter(task: Task): number {
+  return task.artifact_fresh_after ?? task.phase_entered_at
 }
 
 export interface TaskSignals {

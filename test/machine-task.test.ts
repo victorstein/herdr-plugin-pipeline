@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { advanceTask, bumpCounter, counterFor, enterTaskPhase } from '../src/lib/machine'
+import { advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 
@@ -323,4 +323,47 @@ test('blocked-on-files advances only when no sibling holds overlapping files', (
   }
   expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
   expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
+})
+
+// ——— resuming from a decision — #115 ———
+
+test('a resume from a decision keeps the asked-from phase\'s entry as the artifact baseline', () => {
+  const { run, task } = fixture('plan-review')
+  task.phase_entered_at = 1_000
+  task.decision_from = 'plan-review'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'worker surfaced a decision')
+  enterTaskPhase(run, task, 'plan-review', 'decision d1 answered')
+
+  expect(task.phase_entered_at).toBeGreaterThan(1_000)
+  expect(artifactFreshAfter(task)).toBe(1_000)
+})
+
+test('a second decision in a resumed phase keeps the phase\'s original entry', () => {
+  const { run, task } = fixture('spec')
+  task.phase_entered_at = 1_000
+  task.decision_from = 'spec'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'd1')
+  enterTaskPhase(run, task, 'spec', 'decision d1 answered')
+  task.decision_from = 'spec'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'd2')
+  enterTaskPhase(run, task, 'spec', 'decision d2 answered')
+
+  expect(artifactFreshAfter(task)).toBe(1_000)
+})
+
+test('any transition other than the resume drops the baseline back to phase entry', () => {
+  const { run, task } = fixture('spec')
+  task.phase_entered_at = 1_000
+  task.decision_from = 'spec'
+  enterTaskPhase(run, task, 'blocked-on-decision', 'd1')
+  enterTaskPhase(run, task, 'spec', 'decision d1 answered')
+  enterTaskPhase(run, task, 'spec-review', 'cleared')
+
+  expect(task.artifact_fresh_after).toBeUndefined()
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
+})
+
+test('a task that never asked a decision is judged against its phase entry', () => {
+  const { task } = fixture('research')
+  expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
 })

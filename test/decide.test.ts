@@ -248,6 +248,24 @@ test('a failed send leaves the task blocked and counts the attempt', async () =>
   expect(task.delivery_attempts).toBe(1)
 })
 
+test('an answer is sent to be seen submitted, and one still in the box leaves the task blocked — #117', async () => {
+  const { run, task, decisionId } = blockedOnDecision()
+  const enteredBefore = task.phase_entered_at
+  const options: unknown[] = []
+
+  await deliverPendingAnswers(run, answerDeps({
+    send: async (_pane, _text, sendOptions) => {
+      options.push(sendOptions)
+      return { ok: false, code: 'agent_prompt_stalled' }
+    },
+  }))
+
+  expect(options).toEqual([{ awaitSubmission: true }])
+  expect(task.phase).toBe('blocked-on-decision')
+  expect(task.pending_answer).toBe(decisionId)
+  expect(task.phase_entered_at).toBe(enteredBefore)
+})
+
 test('a send the delivery gate held spends no attempt — #24', async () => {
   const { run, task } = blockedOnDecision()
 
@@ -609,4 +627,11 @@ test('an announced decision whose save lost is recorded, so it is announced once
   expect(nextTick.intake_closed).toBe(true)
   await announceDecisions(nextTick, answerDeps({ send: async () => { sends += 1; return { ok: true } } }))
   expect(sends).toBe(1)
+})
+
+test('a rewind drops the baseline a decision resume kept, so the rewound phase starts clean — #115', async () => {
+  const run = await runWithTask({ task_id: 't1', phase: 'plan-review', artifact_fresh_after: 1_000 })
+  const rewound = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
+  expect(rewound.ok).toBe(true)
+  expect((await savedRun(run.run_id))?.tasks[0]?.artifact_fresh_after).toBeUndefined()
 })

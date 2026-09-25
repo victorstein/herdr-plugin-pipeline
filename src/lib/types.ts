@@ -174,6 +174,12 @@ export interface Task {
   verdict_seq?: Partial<Record<TaskPhase, number>>
   decisions: Decision[]
   decision_from: TaskPhase | null
+  /**
+   * The entry of the phase a decision was asked from, kept across the round trip
+   * so an artifact written before asking still counts; see `artifactFreshAfter`.
+   * Optional: absent outside a decision, and on ledgers written before #115.
+   */
+  artifact_fresh_after?: number
   pending_answer: string | null
   delivery_attempts: number
   stall?: StallState

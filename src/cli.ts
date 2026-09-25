@@ -702,6 +702,7 @@ async function rewind(ctx: Ctx, input: {
     task.passes = {}
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
+    delete task.artifact_fresh_after
     task.escalated_from = null
     // Written here because a rewind bypasses `enterTaskPhase`. A paneless rewind
     // into the briefed phase is handed to a fresh agent through `dispatch --task`,

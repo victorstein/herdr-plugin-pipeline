@@ -857,3 +857,72 @@ test('a stall that leaves the box empty arms nothing, so a paste seconds later i
   expect((await w.send('w7:p1', 'a different long prompt')).held).toBe(STUCK_INPUT)
   expect(presses(w.io)).toEqual([])
 })
+
+// ——— a send that must be seen submitted — #117 ———
+
+const HELD_PASTE = claudeScreen('[Pasted text #3 +11 lines]')
+const ANSWER = '# Decision answered — resume `spec`\n\n**Q:** which way?\n\n**A:** A\n'
+
+/** herdr confirms take-up; the screen then reads `screens` in order, the last one for good. */
+function takenUpWhileBoxReads(screens: string[]): { io: FakeIO; waits: number[] } {
+  const io = fakeIO()
+  let sent = false
+  const queue = [...screens]
+  io.agentPromptConfirmed = async (pane, text) => {
+    io.calls.push(`prompt ${pane} ${text}`)
+    sent = true
+    return { ok: true }
+  }
+  io.paneReadStyled = async (pane) => {
+    io.calls.push(`read ${pane}`)
+    if (!sent) return claudeScreen('')
+    return queue.length > 1 ? queue.shift()! : queue[0]!
+  }
+  return { io, waits: [] }
+}
+
+test('a send that must be seen submitted waits out a paste Claude still holds after reading working — #117', async () => {
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w7:p1']))
+  const { io, waits } = takenUpWhileBoxReads([HELD_PASTE, HELD_PASTE, claudeScreen('')])
+  const send = makeCourier(gate, io, 15000, { sleep: async (ms) => { waits.push(ms) } })
+
+  expect(await send('w7:p1', ANSWER, { awaitSubmission: true })).toEqual({ ok: true })
+  expect(io.calls.filter((c) => c.startsWith('read'))).toHaveLength(4)
+  expect(waits).toHaveLength(2)
+  expect(presses(io)).toEqual([])
+})
+
+test('a send still sitting in the box past the confirm window is a stall, cleared before the next send — #117', async () => {
+  const clock = { now: 0 }
+  const gate = gateAt(clock)
+  gate.beginTick(new Set(['w7:p1']))
+  const { io, waits } = takenUpWhileBoxReads([HELD_PASTE])
+  const send = makeCourier(gate, io, 15000, {
+    sleep: async (ms) => { waits.push(ms); clock.now += ms },
+  })
+
+  expect(await send('w7:p1', ANSWER, { awaitSubmission: true }))
+    .toEqual({ ok: false, code: 'agent_prompt_stalled' })
+  expect(waits.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(15000)
+  expect(gate.stalledSendTo('w7:p1')).toBe(ANSWER)
+  expect(presses(io)).toEqual([])
+})
+
+test('a box a human typed into after the send is not ours to wait on', async () => {
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w7:p1']))
+  const { io, waits } = takenUpWhileBoxReads([HUMAN_DRAFT])
+  const send = makeCourier(gate, io, 15000, { sleep: async (ms) => { waits.push(ms) } })
+
+  expect(await send('w7:p1', ANSWER, { awaitSubmission: true })).toEqual({ ok: true })
+  expect(waits).toEqual([])
+})
+
+test('a send not asked to be seen submitted reads no box after it', async () => {
+  const gate = gateAt({ now: 0 })
+  gate.beginTick(new Set(['w7:p1']))
+  const { io } = takenUpWhileBoxReads([HELD_PASTE])
+  expect(await makeCourier(gate, io, 15000)('w7:p1', ANSWER)).toEqual({ ok: true })
+  expect(io.calls.filter((c) => c.startsWith('read'))).toHaveLength(1)
+})

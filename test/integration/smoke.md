@@ -447,10 +447,16 @@ than one candidate, pass `--run <run-id>`; the brief names the run in its first 
    phase must move back to `decision_from` **only after the answer text lands in its pane** — you
    should be able to see the `# Decision answered — resume <phase>` block, with the Q and A in it,
    in the pane *before* `hpipe status` stops saying `blocked-on-decision`. The phase reset is a
-   consequence of a successful send, never of the write.
+   consequence of a successful send, never of the write — and successful means **submitted**: a
+   long answer can sit in the box as `❯ [Pasted text #N +M lines]` after herdr already reads the
+   agent `working`, and the phase must not move while it does (#117).
 
    Do it in this order so you can see it: `hpipe status`, then read the pane, then `hpipe status`
    again.
+6. **A decision asked after the phase's artifact is written** (#115). Have a reviewer write its
+   verdict and then `hpipe decide` before the supervisor clears the phase. Once the answer lands and
+   the worker goes idle again, the phase clears on that verdict (or on the one it rewrote) within a
+   tick or two — it must not sit `[<phase> Nm] done` until a stall probe.
 
 **Failure looks like:** the phase moving while the pane still shows the old prompt (the worker
 would resume having never read the answer, with `run.history` asserting otherwise — a serious
