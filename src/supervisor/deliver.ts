@@ -163,11 +163,11 @@ export function absoluteArtifactPath(run: Run, task: Task | null): string | null
 }
 
 /**
- * The branch every worker worktree is cut from; `prompts/dispatch.md` mandates
- * `--base main`. Its remote-tracking ref counts as mainline too, because the
- * mandated pre-merge step merges `origin/main` while local `main` is often stale:
- * against `main` alone the merge-base stays behind and every doc that landed
- * meanwhile reads as added. Measured on this repo: six sibling-owned candidates.
+ * The mainline a worker worktree forks from. Dispatch cuts it from the fetched
+ * `origin/<default>` commit (`freshDispatchBase`) and the pre-merge step merges
+ * `origin/main`, while local `main` is often stale, so both refs count: against
+ * `main` alone the merge-base stays behind and every doc that landed meanwhile
+ * reads as added. Measured on this repo: six sibling-owned candidates.
  *
  * A base pinned at dispatch would not help. Whatever the base, the diff runs to
  * HEAD's tree, and merging `main` puts the siblings' docs in that tree.

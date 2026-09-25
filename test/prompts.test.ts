@@ -66,6 +66,18 @@ test('the dispatch prompt pins the worktree to the run repo, not the focused wor
   expect(text).toContain('worktree create --cwd {{repo_root}}')
 })
 
+test('both dispatch paths point the orchestrator at the base: line, never a stale local main', async () => {
+  // #87: `--base main` cut a dependent task from a local main that predated its
+  // merged dependency. Live-run finding.
+  const dispatch = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
+  expect(dispatch).not.toContain('--base main')
+  expect(dispatch).toContain('--base <base>')
+  expect(dispatch).toContain('`base:`')
+  const intake = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
+  expect(intake).toContain('`base: <commit> (…)`')
+  expect(intake).toContain('--base <commit>')
+})
+
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
   // herdr rejects a brief as an `agent start` argument (invalid_agent_argument),
   // and the send-text workaround left one sitting unsubmitted. Live-run finding.
@@ -232,13 +244,14 @@ test('the merge prompt asks for a bootstrap re-run where the rebase happens', as
   expect(text).toContain('.claude/pipeline-bootstrap')
 })
 
-test('the dispatch prompt names all three header lines, not two', async () => {
-  // cmdTask emits task_id:, files: and bootstrap:. A stale count here is how the
-  // convention drifts, and nothing else pins it.
+test('the dispatch prompt names every header line a dispatching task prints', async () => {
+  // Named rather than counted: `issue:` appears only when --title filed one, and
+  // a count is how the convention drifted before.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  expect(text).toContain('bootstrap:')
-  expect(text).toContain('three header')
-  expect(text).not.toContain('two header')
+  for (const line of ['task_id:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
+    expect(text).toContain(`\`${line}\``)
+  }
+  expect(text).not.toMatch(/(two|three|four|five) header/)
 })
 
 test('the README documents the per-repo bootstrap contract', async () => {

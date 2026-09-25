@@ -5,6 +5,8 @@ export interface CheckRow { bucket: string }
 export interface PrView {
   merged: boolean
   mergedAtMs: number | null
+  /** The commit the merge put on the base branch; null until merged. */
+  mergeCommit?: string | null
   headSha: string | null
 }
 
@@ -92,13 +94,16 @@ export class Gh {
   }
 
   async prView(pr: number): Promise<PrView | null> {
-    const view = await this.json<{ state: string; mergedAt: string | null; headRefOid: string | null }>(
-      ['pr', 'view', String(pr), '--json', 'state,mergedAt,headRefOid'],
+    const view = await this.json<{
+      state: string; mergedAt: string | null; mergeCommit: { oid: string } | null; headRefOid: string | null
+    }>(
+      ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeCommit,headRefOid'],
     )
     if (!view) return null
     return {
       merged: view.state === 'MERGED',
       mergedAtMs: view.mergedAt ? Date.parse(view.mergedAt) : null,
+      mergeCommit: view.mergeCommit?.oid ?? null,
       headSha: view.headRefOid,
     }
   }

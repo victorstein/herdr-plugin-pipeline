@@ -155,6 +155,11 @@ export interface Task {
   registered_at: number
   adopted_at: number | null
   merged_at_ms: number | null
+  /**
+   * The merge's commit on the base branch, which a dependent's dispatch base must
+   * contain. Optional because runs written before it existed lack it.
+   */
+  merge_commit?: string | null
   /** True when the issue was already closed at `merge` completion. */
   issue_closed_at_entry: boolean
   passes: Partial<Record<TaskPhase, number>>

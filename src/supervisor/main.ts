@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { loadConfig } from '../lib/config'
+import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
 import { Herdr } from '../lib/herdr'
 import { clearPid, processStartedAtMs, supervisorState, writePid } from '../lib/pidfile'
@@ -278,6 +279,13 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
+            freshDispatchBase: async (repoRoot, dependencyMerges) => {
+              const base = await freshDispatchBase(repoRoot, dependencyMerges)
+              if (base.fetchError !== null) {
+                console.error(`[pipeline] run ${run.run_id}: ${baseLine(base)}`)
+              }
+              return base
+            },
           })
 
           // After advanceTasks, so a task resumed this tick gets a full tick to

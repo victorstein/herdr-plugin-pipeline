@@ -535,6 +535,24 @@ test('adoptableArtifacts falls back to origin/main when local main is missing', 
   ])
 })
 
+const revParse = (cwd: string, ref: string): string =>
+  Bun.spawnSync(['git', '-C', cwd, 'rev-parse', ref], { stdout: 'pipe' }).stdout.toString().trim()
+
+// #87: dispatch cuts from the fetched `origin/<default>` commit, ahead of a stale
+// local `main`. The merge-base must then be that commit, or every doc that landed
+// upstream reads as the worker's own.
+test('a worktree cut from the origin/main commit ahead of a stale local main adopts only its own doc', async () => {
+  const primary = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  siblingLands(primary, SIBLING_DOC, 'origin/main')
+  const worktree = join(tempDir('hpipe-shacut-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/dependent', worktree, revParse(primary, 'origin/main')], primary)
+  commitIn(worktree, 'docs/superpowers/notes/mine.md', 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([
+    'docs/superpowers/notes/mine.md',
+  ])
+})
+
 test('a moved doc is a rename even when the repo disables rename detection', async () => {
   const worktree = repoWithWorktree(
     ['docs/superpowers/notes/original.md'],

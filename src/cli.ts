@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
+import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
 import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
 import { Herdr, type CallResult } from './lib/herdr'
@@ -210,7 +211,10 @@ type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<
 interface RegistrationAttempt {
   fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
   landed: (taskId: string) => void
+  dispatchBase: DispatchBaseFor
 }
+
+type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
@@ -331,7 +335,7 @@ async function registerTask(
       plan: join(ARTIFACT_ROOT, 'plans', `${stem}-plan.md`),
       verdicts: {},
     },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
   }
 
@@ -367,12 +371,16 @@ async function registerTask(
 
   if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
 
+  // After the save, not before: nothing here is recorded, and a fetch between
+  // the read and the save only widens the window a concurrent write can take.
+  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  return ok(`${header}\n\n${prompt}`)
+  return ok(`${header}\n${baseLine(base)}\n\n${prompt}`)
 }
 
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
+  dispatchBase: DispatchBaseFor = freshDispatchBase,
 ): Promise<CmdResult> {
   // The retry re-runs registerTask from a fresh read, so the gh call is memoized
   // out here: a second attempt reuses the issue the first one filed, never files another.
@@ -383,6 +391,7 @@ export async function cmdTask(
     fileIssueOnce: (repoRoot) =>
       (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
     landed: (taskId) => { outcome.registeredAs = taskId },
+    dispatchBase,
   }
   const filedIssue = async (): Promise<FiledIssue | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
@@ -699,6 +708,7 @@ async function rewind(ctx: Ctx, input: {
       task.pr = null
       task.ci = null
       task.merged_at_ms = null
+      task.merge_commit = null
       task.issue_closed_at_entry = false
     }
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
