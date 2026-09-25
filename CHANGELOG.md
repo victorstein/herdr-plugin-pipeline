@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.16](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.15...v1.5.16) (2026-09-25)
+
+
+### Bug Fixes
+
+* summarise a finished run's tasks in status instead of listing them as waiting on you ([#126](https://github.com/victorstein/herdr-plugin-pipeline/issues/126)) ([ac95254](https://github.com/victorstein/herdr-plugin-pipeline/commit/ac952548666a211f61c25be739a5438b3a43d895)), closes [#122](https://github.com/victorstein/herdr-plugin-pipeline/issues/122)
+
 ## [1.5.15](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.14...v1.5.15) (2026-09-25)
 
 
