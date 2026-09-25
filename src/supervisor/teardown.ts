@@ -26,15 +26,44 @@ export function worktreeRemovalFrom(result: { ok: boolean; code?: string }): Wor
   return result.code === WORKSPACE_NOT_FOUND ? 'gone' : 'failed'
 }
 
-export function markTornDown(run: Run, taskId: string, workspaceId: string): void {
+export interface TeardownDeps {
+  removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>
+  /** For a checkout whose workspace is gone: herdr 0.9.0's `worktree remove` takes only a workspace. */
+  removeCheckout: (repoRoot: string, checkoutPath: string, branch: string) => Promise<boolean>
+}
+
+function markTornDown(run: Run, taskId: string, stillHolds: (task: Task) => boolean): void {
   const task = run.tasks.find((t) => t.task_id === taskId)
-  if (task?.phase !== 'teardown' || task.workspace_id !== workspaceId) return
+  if (task?.phase !== 'teardown' || !stillHolds(task)) return
   enterTaskPhase(run, task, 'done', 'worktree removed')
 }
 
+async function git(repoRoot: string, args: string[]): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(['git', '-C', repoRoot, ...args], { stdout: 'ignore', stderr: 'ignore' })
+    return (await proc.exited) === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `git worktree remove` refuses a path that is not one of the repo's worktrees,
+ * so a wrong `checkout_path` cannot delete anything else. `branch -d` refuses a
+ * branch whose commits are neither in HEAD nor in its upstream, so only work that
+ * already lives elsewhere is dropped; its failure leaves the branch and is not a
+ * failed teardown.
+ */
+export async function removeCheckoutWithGit(
+  repoRoot: string, checkoutPath: string, branch: string,
+): Promise<boolean> {
+  if (!(await git(repoRoot, ['worktree', 'remove', '--force', checkoutPath]))) return false
+  await git(repoRoot, ['branch', '-d', branch])
+  return true
+}
+
 export async function runTeardown(
-  runs: Run[], removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>,
-  effects: RunEffect[] = [],
+  runs: Run[], deps: TeardownDeps, effects: RunEffect[] = [],
 ): Promise<Task[]> {
   const completed: Task[] = []
 
@@ -42,29 +71,49 @@ export async function runTeardown(
     for (const task of run.tasks) {
       // Idempotent: teardown emits worktree.removed, which is one of our own hooks.
       if (task.phase !== 'teardown') continue
+      completed.push(task)
 
-      if (task.keep_worktree || task.workspace_id === null) {
+      if (task.keep_worktree) {
         enterTaskPhase(run, task, 'done', 'worktree kept by request')
-        completed.push(task)
         continue
       }
 
       const workspaceId = task.workspace_id
-      const removal = await removeWorktree(workspaceId)
-      if (removal === 'removed') {
-        markTornDown(run, task.task_id, workspaceId)
-        effects.push((fresh) => markTornDown(fresh, task.task_id, workspaceId))
-      } else if (removal === 'gone' && (task.checkout_path === null || !existsSync(task.checkout_path))) {
+      if (workspaceId !== null) {
+        const removal = await deps.removeWorktree(workspaceId)
+        if (removal === 'removed') {
+          const holdsWorkspace = (t: Task) => t.workspace_id === workspaceId
+          markTornDown(run, task.task_id, holdsWorkspace)
+          effects.push((fresh) => markTornDown(fresh, task.task_id, holdsWorkspace))
+          continue
+        }
+        if (removal === 'failed') {
+          enterTaskPhase(run, task, 'orphaned', 'worktree removal failed')
+          continue
+        }
+      }
+
+      const checkoutPath = task.checkout_path
+      if (checkoutPath === null || !existsSync(checkoutPath)) {
         // A second teardown of a worktree already removed — after a save that lost
         // to a CLI command, or a supervisor crash before its save. `orphaned` is
         // terminal-bad and would fail every dependent into `blocked-on-failure`.
-        enterTaskPhase(run, task, 'done', 'worktree already removed')
-      } else {
-        enterTaskPhase(run, task, 'orphaned', removal === 'gone'
-          ? `workspace gone but checkout left at ${task.checkout_path}`
-          : 'worktree removal failed')
+        enterTaskPhase(run, task, 'done', checkoutPath === null && workspaceId === null
+          ? 'no worktree was recorded'
+          : 'worktree already removed')
+        continue
       }
-      completed.push(task)
+
+      // A workspace closed under a task in `merge` or `close` leaves its checkout
+      // behind; ending there `orphaned` called a merged task a dead end and left
+      // the worktree on disk. Measured on a live run.
+      if (await deps.removeCheckout(run.repo_root, checkoutPath, task.branch)) {
+        const holdsCheckout = (t: Task) => t.checkout_path === checkoutPath
+        markTornDown(run, task.task_id, holdsCheckout)
+        effects.push((fresh) => markTornDown(fresh, task.task_id, holdsCheckout))
+      } else {
+        enterTaskPhase(run, task, 'orphaned', `workspace gone and removing the checkout at ${checkoutPath} failed`)
+      }
     }
   }
 

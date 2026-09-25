@@ -234,7 +234,9 @@ for `pane close`, including a workspace's last pane (measured over the socket, #
 `plugin log list` should show a `pane.closed` hook run; if it does not, the plugin hook is not being
 dispatched and the supervisor's `pane list` reconciliation failed the task within two ticks instead.
 `herdr workspace close` sends only `workspace.closed`, never `pane.closed`, so reconciliation is the
-only path there. `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
+only path there. Closing a workspace's last pane, or moving it out, closes the workspace too: `hpipe show`
+must then read `workspace: none` within two ticks (the `workspace.closed` hook, or the supervisor's
+`workspace list` reconciliation), never the dead id (#116). `hpipe rewind <run> research --task <id>` then brings the task back as unstarted,
 not as bound to the dead pane. If its workspace went too (`workspace: none`), `hpipe status` lists it under
 `waiting on you:` at once as `YOUR move: no worktree and no agent — herdr worktree open --cwd … --branch …`
 (its checkout survived, so `open`, with `create` only on `worktree_not_found`), ending in `dispatch --task`, and
@@ -248,7 +250,10 @@ herdr renames it (`w3:p2` → `w5:p2`) and keeps its terminal. The task must sta
 `hpipe show` must name the new pane id, never `failed` (#86).
 
 Close a worker's pane while its task is in `merge` or `close`: the task keeps its phase, its pane is
-released (`pane: none (last: …)`), and a dependent is not `blocked-on-failure` (#86).
+released (`pane: none (last: …)`), and a dependent is not `blocked-on-failure` (#86). Do it once with
+`pane close` and once with `workspace close`, then merge both PRs: each must end `teardown→done worktree
+removed`, never `orphaned`, its checkout directory must be gone (`git worktree list` no longer shows it),
+and `hpipe status` must not call it a dead end (#116). Its local branch goes only if `git branch -d` accepts it.
 
 ---
 

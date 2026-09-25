@@ -32,10 +32,10 @@ import {
 } from './stall'
 import {
   applyEvents, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
-  saveEventedRuns,
+  saveEventedRuns, WorkspaceAbsence,
 } from './tick'
 import { ciTransitions } from './ci'
-import { worktreeRemovalFrom } from './teardown'
+import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers } from './tasks'
 import { isFresh, isSettled, parseVerdict } from '../lib/predicates'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
@@ -189,6 +189,7 @@ async function main(): Promise<void> {
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
   const paneAbsence = new PaneAbsence()
+  const workspaceAbsence = new WorkspaceAbsence()
   let lastCiPollMs = 0
 
   for (;;) {
@@ -206,7 +207,14 @@ async function main(): Promise<void> {
       const livePanes = new Set(listed.map((p) => p.pane_id))
       gate.beginTick(livePanes)
       for (const pane of readyPanes(drained)) gate.wake(pane)
-      const events = [...drained, ...paneAbsence.reconcile(tickRuns, listed, session, Date.now())]
+      const workspaces = await herdr.workspaceList()
+      // Ahead of the drained batch, so a `worktree.opened` drained in the same
+      // tick finds the task whose workspace it replaces already unbound.
+      const events = [
+        ...workspaceAbsence.reconcile(tickRuns, workspaces, session, Date.now()),
+        ...drained,
+        ...paneAbsence.reconcile(tickRuns, listed, session, Date.now()),
+      ]
 
       const wakeOn = new Set(config.WAKE_ON)
       const applied = applyEvents(tickRuns, events, session, panes, wakeOn)
@@ -308,6 +316,7 @@ async function main(): Promise<void> {
               return parseVerdict(absolute)
             },
             removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
+            removeCheckout: removeCheckoutWithGit,
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
             ambiguityLog,
             effects,

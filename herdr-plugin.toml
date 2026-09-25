@@ -40,6 +40,10 @@ command = ["bun", "run", "src/hooks/pane-closed.ts"]
 on = "pane.moved"
 command = ["bun", "run", "src/hooks/pane-moved.ts"]
 
+[[events]]
+on = "workspace.closed"
+command = ["bun", "run", "src/hooks/workspace-closed.ts"]
+
 [[actions]]
 id = "status"
 title = "Pipeline status"

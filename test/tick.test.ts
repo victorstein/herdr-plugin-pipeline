@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   applyEvents, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
-  pickOneAdvance, saveEventedRuns, type WakeLine, workerStillNeeded,
+  pickOneAdvance, saveEventedRuns, type WakeLine, WorkspaceAbsence, workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
-import type { PaneInfo } from '../src/lib/herdr'
+import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
 import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
@@ -185,6 +185,43 @@ test('worktree.opened on an already-bound task does not rebind it — #94', () =
   }]
   expect(applyEvents([run], events, 'personal', new Set()).changed).toBe(false)
   expect(run.tasks.map((t) => t.workspace_id)).toEqual(['w5', null])
+})
+
+test('workspace.closed clears the workspace and keeps the checkout — #116', () => {
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'merge', workspace_id: 'w5', pane_id: null }),
+    mkTask({ task_id: 't2', phase: 'implement', workspace_id: 'w6', pane_id: 'w6:p1' }),
+  ])
+  const events: QueuedEvent[] = [{ kind: 'workspace.closed', session: 'personal', at: 1, workspace_id: 'w5' }]
+  expect(applyEvents([run], events, 'personal', new Set()).changed).toBe(true)
+  expect(run.tasks.map((t) => t.workspace_id)).toEqual([null, 'w6'])
+  expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
+  expect(run.tasks[0]?.phase).toBe('merge')
+})
+
+test('workspace.closed leaves a done task\'s record alone — #116', () => {
+  const run = mkRun([mkTask({ phase: 'done', workspace_id: 'w5' })])
+  const events: QueuedEvent[] = [{ kind: 'workspace.closed', session: 'personal', at: 1, workspace_id: 'w5' }]
+  expect(applyEvents([run], events, 'personal', new Set()).changed).toBe(false)
+  expect(run.tasks[0]?.workspace_id).toBe('w5')
+})
+
+test('a task whose workspace closed is rebound by the next worktree.opened — #116', () => {
+  const run = mkRun([mkTask({ phase: 'research', workspace_id: 'w5', pane_id: null })])
+  applyEvents([run], [
+    { kind: 'workspace.closed', session: 'personal', at: 1, workspace_id: 'w5' },
+    { kind: 'worktree.opened', session: 'personal', at: 2, workspace_id: 'w7', branch: 'feat/x' },
+  ], 'personal', new Set())
+  expect(run.tasks[0]?.workspace_id).toBe('w7')
+  expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
+})
+
+test('a rebind keeps the recorded checkout when the event carries none — #116', () => {
+  const run = mkRun([mkTask({ phase: 'research', workspace_id: null, pane_id: null })])
+  applyEvents([run], [
+    { kind: 'worktree.opened', session: 'personal', at: 2, workspace_id: 'w7', branch: 'feat/x' },
+  ], 'personal', new Set())
+  expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
 })
 
 test('a run without schema_version 2 is never advanced', () => {
@@ -1036,4 +1073,39 @@ test('a moved pane still rebinds when herdr\'s own pane.moved was applied first 
   applyEvents([run], [drained, ...absence.reconcile([run], afterMove, 'personal', 2)], 'personal', new Set())
   expect(run.tasks[0]?.pane_id).toBe('w5:p2')
   expect(run.tasks[0]?.phase).toBe('research')
+})
+
+const workspaces = (...ids: string[]): WorkspaceInfo[] =>
+  ids.map((workspace_id) => ({ workspace_id, label: workspace_id }))
+
+test('a bound workspace is reported closed only once two lists in a row lack it — #116', () => {
+  const run = mkRun([mkTask({ phase: 'merge', workspace_id: 'w5' })])
+  const absence = new WorkspaceAbsence()
+  expect(absence.reconcile([run], workspaces('w1'), 'personal', 5)).toEqual([])
+  expect(absence.reconcile([run], workspaces('w1'), 'personal', 6)).toEqual([
+    { kind: 'workspace.closed', session: 'personal', at: 6, workspace_id: 'w5' },
+  ])
+})
+
+test('a workspace seen again, or a failed list, does not confirm an absence — #116', () => {
+  const run = mkRun([mkTask({ phase: 'merge', workspace_id: 'w5' })])
+  const absence = new WorkspaceAbsence()
+  absence.reconcile([run], workspaces('w1'), 'personal', 1)
+  absence.reconcile([run], workspaces('w1', 'w5'), 'personal', 2)
+  expect(absence.reconcile([run], workspaces('w1'), 'personal', 3)).toEqual([])
+  expect(absence.reconcile([run], [], 'personal', 4)).toEqual([])
+  expect(absence.reconcile([run], workspaces('w1'), 'personal', 5)).toHaveLength(1)
+})
+
+test('a failed task\'s workspace is reconciled, a done task\'s is not — #116', () => {
+  // The live t3: a pane close failed it, and its rewind advice then named the dead workspace.
+  const run = mkRun([
+    mkTask({ task_id: 't1', phase: 'failed', workspace_id: 'w5', pane_id: null }),
+    mkTask({ task_id: 't2', phase: 'done', workspace_id: 'w6', pane_id: null }),
+  ])
+  const absence = new WorkspaceAbsence()
+  absence.reconcile([run], workspaces('w1'), 'personal', 1)
+  applyEvents([run], absence.reconcile([run], workspaces('w1'), 'personal', 2), 'personal', new Set())
+  expect(run.tasks.map((t) => t.workspace_id)).toEqual([null, 'w6'])
+  expect(absence.reconcile([run], workspaces('w1'), 'personal', 3)).toEqual([])
 })

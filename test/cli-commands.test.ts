@@ -496,6 +496,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
     issueView: async () => null,
     verdictFor: async () => null,
     removeWorktree: async () => 'removed' as const,
+    removeCheckout: async () => true,
     ciDetail: async () => '',
     ambiguityLog: new Set<string>(),
     uncommittedPaths: async () => [],
