@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.8](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.7...v1.5.8) (2026-09-25)
+
+
+### Bug Fixes
+
+* name what every move line waits for, and stop flagging unbriefed workers as idle ([#105](https://github.com/victorstein/herdr-plugin-pipeline/issues/105)) ([493cf85](https://github.com/victorstein/herdr-plugin-pipeline/commit/493cf85980c3f8b1a5a9f1fa4c8de0f8e06653bf)), closes [#89](https://github.com/victorstein/herdr-plugin-pipeline/issues/89) [#95](https://github.com/victorstein/herdr-plugin-pipeline/issues/95) [#93](https://github.com/victorstein/herdr-plugin-pipeline/issues/93)
+
 ## [1.5.7](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.6...v1.5.7) (2026-09-25)
 
 
