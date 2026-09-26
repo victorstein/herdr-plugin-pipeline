@@ -422,12 +422,16 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
  * the head, so a send-back recorded null, any head counted as moved, and a worker
  * that went idle without pushing sent the unfixed PR back to review. Found by
  * tracing a tick, not measured. A failed read skips the tick: recording null
- * would disarm the guard just the same.
+ * would disarm the guard just the same. The last allowed pass escalates rather
+ * than return to `implement`, so it must not wait on gh.
  */
 async function withSendBackHead<S extends { headSha: string | null }>(
   signals: S, task: Task, deps: TaskDeps,
 ): Promise<S | null> {
-  if (task.pr === null || taskRow(task.phase).onBlocker !== 'implement') return signals
+  const row = taskRow(task.phase)
+  if (row.onBlocker !== 'implement') return signals
+  if (row.counter !== undefined && counterFor(task, row.counter) + 1 >= deps.maxPasses) return signals
+  if (task.pr === null) return signals
   const view = await deps.prView(task.pr)
   if (view === null) return null
   return { ...signals, headSha: view.headSha }

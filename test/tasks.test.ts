@@ -1235,3 +1235,16 @@ test('implement holds while its prompt is undelivered, so a lagging head read ca
   await advanceTasks(run, deps({ prView }))
   expect(task.phase).toBe('pr-review-intent')
 })
+
+test('a send-back on the last allowed pass escalates without waiting on the PR head', async () => {
+  for (const task of [
+    mkTask({ phase: 'pr-review-quality', tier: 'heavy', pr: 42, passes: { 'pr-review-quality': 1 } }),
+    mkTask({ phase: 'ci', tier: 'heavy', pr: 42, ci: 'fail', passes: { ci: 1 } }),
+  ]) {
+    const { reads, prView } = headReads(() => null)
+    await advanceTasks(mkRun([task]), deps({ verdictFor: async () => blocker, prView }))
+    expect(task.phase).toBe('escalated')
+    expect(task.head_sha_at_entry).toBeNull()
+    expect(reads.count).toBe(0)
+  }
+})
