@@ -334,7 +334,7 @@ checks, verbatim), one ranked findings list, one trailer, and `{{light_review_no
 
 ### `prompts/worker-brief.md`
 
-- The numbered loop (`:24-31`) becomes `{{phase_loop}}`.
+- The numbered loop (`:24-30`) becomes `{{phase_loop}}`.
 - The paragraph at `:37` that names `plan-review` becomes tier-neutral: "Before `implement` you may
   wait — …". Its re-read rule stays, rephrased: the subagent re-reads before editing, and the worker
   re-reads to triage findings and to brief it.
