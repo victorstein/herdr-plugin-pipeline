@@ -57,7 +57,7 @@ export function tierPromptVars(task: Task): Record<string, string> {
     plan_status: planReviewed
       ? 'cleared review'
       : 'was not reviewed — read it critically, and fix it first if it is wrong',
-    review_count: reviewRan(task, 'pr-review-intent') ? 'Both review stages cleared' : 'Review cleared',
+    review_count: reviewRan(task, 'pr-review-quality') ? 'Both review stages cleared' : 'Review cleared',
     plan_review_note: planReviewed ? '' : 'No plan review ran; judge the plan\'s soundness from the diff as well.',
   }
 }

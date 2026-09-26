@@ -273,7 +273,7 @@ in TypeScript** and passed as a variable. One helper, `tierPromptVars(task)` in
 | `implement_model` | `IMPLEMENT_MODEL` |
 | `phase_loop` | the brief's numbered loop, built by walking `nextPhase` for the tier, with the artifact paths **embedded as literal text** (`render()` is single-pass, so a `{{research_path}}` inside a variable's value is never substituted) |
 | `plan_status` | "cleared review" when the task has a `plan-review` verdict (`verdict_seq['plan-review'] > 0`); otherwise "was not reviewed — read it critically, and fix it first if it is wrong" |
-| `review_count` | "Both review stages cleared" when the task has a `pr-review-intent` verdict; otherwise "Review cleared" (for `merge.md`) |
+| `review_count` | "Both review stages cleared" when the task has a `pr-review-quality` verdict; otherwise "Review cleared" (for `merge.md`) |
 | `plan_review_note` | when the task has no `plan-review` verdict: "No plan review ran; judge the plan's soundness from the diff as well." Else `''` |
 
 The last three follow **which reviews actually ran**, read from `verdict_seq`, not the current tier:

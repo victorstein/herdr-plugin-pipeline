@@ -90,9 +90,11 @@ test('the plan wording follows whether a plan review ran, not the current tier',
   expect(loweredAfterReview.plan_review_note).toBe('')
 })
 
-test('review_count says both stages only when pr-review-intent ran', () => {
+test('review_count says both stages only when pr-review-quality ran', () => {
   expect(tierPromptVars(mkTask({ verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } })).review_count)
     .toBe('Both review stages cleared')
+  expect(tierPromptVars(mkTask({ tier: 'light', verdict_seq: { 'pr-review-intent': 1 } })).review_count)
+    .toBe('Review cleared')
   expect(tierPromptVars(mkTask({ tier: 'light', verdict_seq: { 'pr-review': 1 } })).review_count)
     .toBe('Review cleared')
 })
