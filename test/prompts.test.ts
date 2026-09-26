@@ -410,7 +410,7 @@ test('implement calls the plan reviewed only when a plan review ran', async () =
 
 test('an answer that resumes implement keeps the coding with a fresh subagent', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
-  expect(text).toContain('dispatch a fresh one with this answer in its brief')
+  expect(prose(text)).toContain('dispatch a fresh one with this answer in its brief')
 })
 
 test('the brief lists only the phases its tier runs, with the paths written in', async () => {
@@ -528,4 +528,39 @@ test('the skill teaches tiers, hpipe tier, the model requirement and the restart
   ]) {
     expect(skill, needle).toContain(needle)
   }
+})
+
+function prose(text: string): string {
+  return text.replace(/\s+/g, ' ')
+}
+
+test('a returned question ends the turn without pushing the subagent\'s unverified work', async () => {
+  for (const text of [
+    await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'),
+    await renderPhase('implement', { tier: 'standard' }, 'ci'),
+  ]) {
+    expect(prose(text)).toContain('as your brief describes, and end your turn without pushing')
+    expect(prose(text)).toContain('Push only work you have verified')
+  }
+  expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('unless you are ending it on a decision')
+})
+
+test('failed verification goes back to a fresh subagent, never to the worker\'s own hands', async () => {
+  for (const text of [
+    await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'),
+    await renderPhase('implement', { tier: 'standard' }, 'ci'),
+  ]) {
+    expect(prose(text)).toContain('If either is red, dispatch a fresh subagent with the failing output')
+    expect(prose(text)).toContain('do not fix it yourself')
+  }
+})
+
+test('the implementer writes conventional-commit messages', async () => {
+  const brief = implementersBrief(await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'))
+  expect(prose(brief)).toContain('with a conventional-commit message')
+})
+
+test('an answer that resumes implement points at whichever prompt the worker received', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
+  expect(prose(text)).toContain('as the implement or CI-red prompt you received describes')
 })

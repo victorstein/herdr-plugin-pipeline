@@ -14,5 +14,5 @@ If you had already written this phase's artifact or review verdict before asking
 you go idle: rewrite it if this answer changes it, and leave it as it is if it does not.
 
 If the phase you are resuming is `implement`, the coding still goes to an implement subagent as the
-`implement` prompt describes — dispatch a fresh one with this answer in its brief, starting at the
-first unfinished step.
+implement or CI-red prompt you received describes — dispatch a fresh one with this answer in its
+brief, starting at the first unfinished step.
