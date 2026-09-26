@@ -78,7 +78,7 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
       if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
       if (s.landedTaskCount === 1) return enterRunPhase(run, 'done', 'one task landed; branch-review skipped')
-      return enterRunPhase(run, 'escalated', 'every task finished without one reaching done')
+      return enterRunPhase(run, 'escalated', 'every task finished without one landing')
     }
 
     case 'branch-review': {
