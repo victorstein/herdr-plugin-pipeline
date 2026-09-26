@@ -78,3 +78,17 @@ test('issueCreate passes gh\'s stderr through on failure, and fails on output wi
   const urlless = await makeFakeBin(dir, { 'issue create': 'Creating issue in o/r\n' })
   expect(await new Gh(urlless, dir).issueCreate('t', '/b')).toMatchObject({ error: expect.any(String) })
 })
+
+test('issueLabels reads the label names of an existing issue', async () => {
+  const bin = await makeFakeBin(dir, {
+    'issue view': { labels: [{ name: 'bug' }, { name: 'pipeline:tier-light' }] },
+  })
+  expect(await new Gh(bin, dir).issueLabels(12)).toEqual(['bug', 'pipeline:tier-light'])
+  expect(await Bun.file(join(dir, 'calls.log')).text()).toBe('issue view 12 --json labels\n')
+})
+
+test('issueLabels passes gh\'s stderr through on failure', async () => {
+  const bin = await makeFakeBin(dir, { 'issue view': { error: { message: 'Could not resolve to an issue' } } })
+  expect(await new Gh(bin, dir).issueLabels(12))
+    .toEqual({ error: JSON.stringify({ error: { message: 'Could not resolve to an issue' } }) })
+})
