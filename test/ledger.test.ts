@@ -6,6 +6,7 @@ import {
   listRuns, loadRun, newRun, readOrchestrator,
   resolveRun, retryOnStaleRun, runById, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
 } from '../src/lib/ledger'
+import { tierOf } from '../src/lib/phases'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ledger-')) })
@@ -306,4 +307,14 @@ test('runById reaches a run in any phase, including one in no row', async () => 
   expect((await runById(dir, 'personal', done))?.run_id).toBe(done)
   expect((await runById(dir, 'personal', broken))?.run_id).toBe(broken)
   expect(await runById(dir, 'personal', 'nope')).toBeNull()
+})
+
+test('a task saved without a tier loads without one, and reading its tier writes nothing back', async () => {
+  const runId = await seedRun({ taskIds: ['t1'] })
+  const loaded = (await loadRun(dir, 'personal', runId))!
+  expect(tierOf(loaded.tasks[0]!)).toBe('heavy')
+
+  await saveRun(dir, loaded)
+  const raw = await Bun.file(join(dir, 'runs', 'personal', `${runId}.json`)).text()
+  expect(raw).not.toContain('"tier"')
 })

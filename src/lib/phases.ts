@@ -7,6 +7,24 @@ export type Signal =
   | 'artifact' | 'verdict' | 'pr' | 'ci' | 'merged' | 'closed'
   | 'worktree' | 'registration' | 'gate' | 'files' | 'manual'
 
+/** Ordered lightest first: `isLowering` reads the order. */
+export type Tier = 'light' | 'standard' | 'heavy'
+
+export const TIERS: readonly Tier[] = ['light', 'standard', 'heavy']
+
+export function isTier(value: string): value is Tier {
+  return (TIERS as readonly string[]).includes(value)
+}
+
+/**
+ * Structural, like `stallWhen`, to keep this module free of a types.ts import. A
+ * task from a ledger written before tiers existed ran every review, and keeps
+ * doing so across an upgrade; the default is never written back.
+ */
+export function tierOf(task: { tier?: Tier }): Tier {
+  return task.tier ?? 'heavy'
+}
+
 export interface PhaseRow<P extends string> {
   phase: P
   /** Whose pane produces this phase's completion signal. Absent = nobody's. */

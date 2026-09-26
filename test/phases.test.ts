@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { RUN_ROWS, runRow, TASK_ROWS, taskRow } from '../src/lib/phases'
+import { isTier, RUN_ROWS, runRow, TASK_ROWS, taskRow, TIERS, tierOf } from '../src/lib/phases'
 
 test('every run phase has exactly one row', () => {
   const seen = new Set(RUN_ROWS.map((r) => r.phase))
@@ -72,4 +72,18 @@ test('the actorless and human-owned stallable rows name a probe target', () => {
   }
   expect(taskRow('merge').probeTarget).toBeUndefined()
   expect(taskRow('close').probeTarget).toBeUndefined()
+})
+
+test('the tiers are ordered lightest first', () => {
+  expect(TIERS).toEqual(['light', 'standard', 'heavy'])
+})
+
+test('isTier accepts exactly the three tiers', () => {
+  for (const tier of TIERS) expect(isTier(tier)).toBe(true)
+  for (const other of ['', 'huge', 'Light', 'pipeline:tier-light']) expect(isTier(other)).toBe(false)
+})
+
+test('a task with no recorded tier reads as heavy, which is every review it ran before tiers', () => {
+  expect(tierOf({})).toBe('heavy')
+  expect(tierOf({ tier: 'light' })).toBe('light')
 })

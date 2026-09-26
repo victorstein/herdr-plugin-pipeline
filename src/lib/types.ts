@@ -1,10 +1,10 @@
-import type { RunPhase, TaskPhase } from './phases'
+import type { RunPhase, TaskPhase, Tier } from './phases'
 
 export type SessionKey = string
 
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done' | 'unknown'
 
-export type { RunPhase, TaskPhase } from './phases'
+export type { RunPhase, TaskPhase, Tier } from './phases'
 
 export type Verdict = 'CLEAR' | 'BLOCKER'
 
@@ -201,6 +201,10 @@ export interface Task {
    * before #89, which lacks it, reads as already briefed.
    */
   awaiting_brief?: true
+  /** Read it through `tierOf`. Optional: ledgers written before tiers lack it, and read as `heavy`. */
+  tier?: Tier
+  /** Every tier this task has had, registration first. */
+  tier_history?: TierChange[]
   notes: string
 }
 
@@ -242,6 +246,23 @@ export interface HistoryEntry {
   task_id?: string
   from: string
   to: string
+  why: string
+}
+
+/**
+ * Kept out of `run.history` on purpose: `enteredByRewind` reads a task's last
+ * history entry to tell a rewound task from one never dispatched, and a tier
+ * entry landing after a rewind would hide the rewind.
+ */
+export interface TierChange {
+  at: number
+  /** Null on the registration entry. */
+  from: Tier | null
+  to: Tier
+  source: 'label' | 'flag' | 'default' | 'hpipe-tier'
+  /** The caller's HERDR_PANE_ID; null when it was unset. */
+  pane: string | null
+  /** On a registration entry, the reason `hpipe task` printed on its `tier:` line. */
   why: string
 }
 
