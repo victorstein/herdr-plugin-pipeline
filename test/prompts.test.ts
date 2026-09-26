@@ -2,11 +2,12 @@ import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
-import { renderTaskPhasePrompt } from '../src/supervisor/tasks'
+import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
@@ -283,7 +284,7 @@ test('the dispatch prompt names every header line a dispatching task prints', as
   // Named rather than counted: `issue:` appears only when --title filed one, and
   // a count is how the convention drifted before.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  for (const line of ['task_id:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
+  for (const line of ['task_id:', 'tier:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
     expect(text).toContain(`\`${line}\``)
   }
   expect(text).not.toMatch(/(two|three|four|five) header/)
@@ -408,4 +409,65 @@ test('implement calls the plan reviewed only when a plan review ran', async () =
 test('an answer that resumes implement keeps the coding with a fresh subagent', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
   expect(text).toContain('dispatch a fresh one with this answer in its brief')
+})
+
+test('the brief lists only the phases its tier runs, with the paths written in', async () => {
+  const light = await renderBriefFor([briefTask({ tier: 'light' })], 0)
+  expect(light).toContain('1. `research` → `a.md`')
+  expect(light).toContain('4. `plan` → `c.md`')
+  expect(light).toContain('6. `pr-review` — one review of the PR, intent then quality')
+  expect(light).not.toContain('`plan-review`')
+
+  const heavy = await renderBriefFor([briefTask({ tier: 'heavy' })], 0)
+  expect(heavy).toContain('5. `plan-review` — you dispatch the reviewer again')
+  expect(heavy).toContain('8. `pr-review-quality`')
+  expect(heavy).not.toContain('`pr-review` —')
+})
+
+test('the brief names the tier, forbids lowering it, and says how to raise it', async () => {
+  const text = await renderBriefFor([briefTask({ tier: 'standard' })], 0)
+  expect(text).toContain('Your review tier is `standard`: it decides which of those reviews run. Never lower it.')
+  expect(text).toMatch(/ tier --task t1 <higher> --why "<what you found>"/)
+  const raw = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
+  expect(raw).toContain('{{phase_loop}}')
+  expect(raw).not.toContain('Between `plan-review` and `implement`')
+})
+
+test('research tells the worker to raise a tier that is too low before the spec is written', async () => {
+  const text = await renderPhase('research', { tier: 'light' })
+  expect(text).toContain('Your review tier is `light`.')
+  expect(text).toMatch(/ tier --task t1 <standard\|heavy> --why "<what you found>"/)
+})
+
+test('the decision prompt tells the orchestrator to raise the tier when an answer grows the task', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = 'w1:p1'
+  const task = briefTask({ phase: 'blocked-on-decision', decision_from: 'plan', tier: 'light', pane_id: 'w7:p1' })
+  openDecision(task, { question: 'q', recommendation: 'r' })
+  run.tasks = [task]
+  const sent: string[] = []
+  await announceDecisions(run, {
+    pluginRoot: ROOT, promptRetryMax: 5,
+    send: async (_pane, text) => { sent.push(text); return { ok: true } },
+    checkSubmission: async () => ({ state: 'submitted' }),
+  })
+  expect(sent[0]).toContain('`t1` runs the `light` review tier.')
+  expect(sent[0]).toMatch(/ tier --task t1 <standard\|heavy> --why "<what the answer adds>"/)
+  expect(sent[0]).toContain('Never lower a tier.')
+})
+
+test('merge counts the review stages that actually ran', async () => {
+  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } }))
+    .toContain('Both review stages cleared and CI is green on PR #7.')
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } }))
+    .toContain('Review cleared and CI is green on PR #7.')
+})
+
+test('intake explains the tiers and registers with --tier', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
+  expect(text).toContain('[--tier light|standard|heavy]')
+  expect(text).toContain('When unsure, pick the higher tier: under-review is the costly mistake.')
+  expect(text).toContain('`pipeline:tier-<name>`')
+  expect(text).toContain('Never lower a tier')
+  expect(text).toContain('then a `tier:` line')
 })

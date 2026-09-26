@@ -21,23 +21,21 @@ You are driven one phase at a time. Each phase's instructions arrive as a prompt
 that phase, commit, push, and stop. Do not run ahead — a phase completes when its file is on the
 branch, not when you feel finished.
 
-1. `research` → `{{research_path}}`
-2. `spec` → `{{spec_path}}`
-3. `spec-review` — you dispatch the reviewer
-4. `plan` → `{{plan_path}}`
-5. `plan-review` — again
-6. `implement` — the code, the tests, the PR
-7. `pr-review-intent`, then `pr-review-quality`
+{{phase_loop}}
 
 Those paths are relative to this worktree, which is your cwd. Write them exactly as given, stem and
 all — do not re-derive them from the conventions you see in `docs/`. The stem carries the issue
 number, and every later phase cites the path by name. An artifact written anywhere else
 does not satisfy this phase's contract.
 
-Between `plan-review` and `implement` you may wait — a sibling task holding files you need has to
-land first. **When `implement` starts, re-read every file you are about to touch.** A sibling may
-have rewritten them while you waited, and a plan written against the old text will conflict or
-silently undo their work.
+Your review tier is `{{tier}}`: it decides which of those reviews run. Never lower it. If research
+shows the task is bigger than its tier — another surface, a contract, a migration — raise it:
+`{{hpipe}} tier --task {{task_id}} <higher> --why "<what you found>"`.
+
+Before `implement` you may wait — a sibling task holding files you need has to land first. When
+`implement` starts, the subagent that writes the code re-reads every file before it edits it, and you
+re-read them too: to triage review findings, and to brief it. A sibling may have rewritten them while
+you waited, and a plan written against the old text will conflict or silently undo their work.
 
 ## Decisions
 
