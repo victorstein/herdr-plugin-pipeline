@@ -1,9 +1,18 @@
-import { expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
 import { IMPLEMENT_MODEL } from '../src/lib/models'
 import { TIERS } from '../src/lib/phases'
 import { phaseLoop, taskTiers, tierPromptVars } from '../src/lib/tier-prompt'
-import type { Task } from '../src/lib/types'
+import type { Run, Task, TaskPhase } from '../src/lib/types'
+import { renderWorkerPrompt } from '../src/lib/worker-prompt'
+import { renderRunPhasePrompt } from '../src/supervisor/deliver'
+import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
+import { cleanupFixtures, tempDir } from './helpers/git-worktree'
+
+afterEach(cleanupFixtures)
 
 function mkTask(over: Partial<Task> = {}): Task {
   return {
@@ -93,4 +102,64 @@ test('taskTiers names every task with its tier', () => {
   expect(taskTiers(run)).toBe('none')
   run.tasks = [mkTask({ task_id: 't1', tier: 'light' }), mkTask({ task_id: 't2' })]
   expect(taskTiers(run)).toBe('t1 light, t2 heavy')
+})
+
+const TIER_TOKENS =
+  '{{tier}}|{{task_id}}|{{agent_file}}|{{implement_model}}|{{plan_status}}|{{review_count}}|' +
+  '{{plan_review_note}}|{{phase_loop}}'
+
+const COMMON_PROMPTS = [
+  'research', 'spec', 'spec-review', 'plan', 'plan-review', 'implement', 'ci-red', 'pr-review',
+  'pr-review-intent', 'pr-review-quality', 'merge', 'close',
+]
+
+function probeRoot(): string {
+  const root = tempDir('hpipe-probe-')
+  mkdirSync(join(root, 'prompts'))
+  for (const name of [...COMMON_PROMPTS, 'worker-brief', 'decision']) {
+    writeFileSync(join(root, 'prompts', `${name}.md`), TIER_TOKENS)
+  }
+  writeFileSync(join(root, 'prompts', 'branch-review.md'), '{{task_tiers}}')
+  return root
+}
+
+function runWithOne(task: Task): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = 'w1:p1'
+  run.tasks = [task]
+  return run
+}
+
+const PROBED = 'heavy|t1|.claude/agents/core-dev.md|sonnet|'
+
+test('every task render site carries the tier variables', async () => {
+  const root = probeRoot()
+  const deps = { pluginRoot: root, ciDetail: async () => '' }
+  const phases: TaskPhase[] = [
+    'research', 'spec', 'spec-review', 'plan', 'plan-review', 'implement', 'pr-review',
+    'pr-review-intent', 'pr-review-quality', 'merge', 'close',
+  ]
+  for (const phase of phases) {
+    const task = mkTask({ phase })
+    expect(await renderTaskPhasePrompt(runWithOne(task), task, deps, phase), phase).toContain(PROBED)
+  }
+  const fromCi = mkTask({ phase: 'implement' })
+  expect(await renderTaskPhasePrompt(runWithOne(fromCi), fromCi, deps, 'ci')).toContain(PROBED)
+
+  const briefed = mkTask({ phase: 'research' })
+  expect(await renderWorkerPrompt(root, runWithOne(briefed), briefed)).toContain(PROBED)
+
+  const asking = mkTask({ phase: 'blocked-on-decision', decision_from: 'plan' })
+  openDecision(asking, { question: 'q', recommendation: 'r' })
+  const sent: string[] = []
+  await announceDecisions(runWithOne(asking), {
+    pluginRoot: root, promptRetryMax: 5,
+    send: async (_pane, text) => { sent.push(text); return { ok: true } },
+    checkSubmission: async () => ({ state: 'submitted' }),
+  })
+  expect(sent[0]).toContain(PROBED)
+
+  const finished = runWithOne(mkTask({ task_id: 't1', tier: 'light' }))
+  finished.phase = 'branch-review'
+  expect(await renderRunPhasePrompt(finished, root)).toBe('t1 light')
 })

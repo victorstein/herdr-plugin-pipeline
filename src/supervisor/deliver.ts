@@ -7,6 +7,7 @@ import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
+import { taskTiers } from '../lib/tier-prompt'
 import {
   artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
   verdictPrefix,
@@ -416,6 +417,7 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
     pass: String(counterFor(run, run.phase)),
     verdict_path: verdictPath,
     repo_root: run.repo_root,
+    task_tiers: taskTiers(run),
   }
 
   switch (run.phase) {

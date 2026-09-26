@@ -1,7 +1,7 @@
-import { join } from 'node:path'
 import { briefNote, repoBootstrap } from './bootstrap'
 import { taskRow } from './phases'
 import { renderPrompt } from './render'
+import { tierPromptVars } from './tier-prompt'
 import type { Run, Task } from './types'
 
 /**
@@ -17,12 +17,11 @@ export async function renderWorkerPrompt(
   pluginRoot: string, run: Run, task: Task,
 ): Promise<string> {
   const vars = {
-    task_id: task.task_id,
+    ...tierPromptVars(task),
     run_id: run.run_id,
     branch: task.branch,
     issue: String(task.issue),
     surface: task.surface,
-    agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
     batch_context: batchContext(task.notes),
     research_path: task.artifacts.research ?? '',
     spec_path: task.artifacts.spec ?? '',

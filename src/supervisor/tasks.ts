@@ -14,6 +14,7 @@ import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
+import { tierPromptVars } from '../lib/tier-prompt'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -105,6 +106,7 @@ export async function renderTaskPhasePrompt(
   run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
 ): Promise<string> {
   const common = {
+    ...tierPromptVars(task),
     run_id: run.run_id,
     branch: task.branch,
     issue: String(task.issue),
@@ -544,7 +546,8 @@ export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<voi
     if (!decision || decision.prompted_at !== null) continue
 
     const text = await renderPrompt(deps.pluginRoot, 'decision', {
-      task_id: task.task_id, decision_id: decision.id,
+      ...tierPromptVars(task),
+      decision_id: decision.id,
       phase: task.decision_from ?? '', question: decision.question,
       recommendation: decision.recommendation,
       branch: task.branch, issue: String(task.issue),
