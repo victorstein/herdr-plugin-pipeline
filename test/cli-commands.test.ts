@@ -1827,3 +1827,21 @@ test('tier on a task from before tiers starts from heavy', async () => {
   expect(result.text).toContain('t1: heavy → standard')
   expect((await savedRun(run.run_id)).tasks[0]?.tier_history?.[0]?.from).toBe('heavy')
 })
+
+test('a rewind onto a row the tier skips is allowed, and warns how the task will leave it', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'implement', tier: 'light' }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('warning: plan-review is not in tier light; the task will leave it by the light route')
+  expect((await savedRun(run.run_id)).tasks[0]?.phase).toBe('plan-review')
+})
+
+test('a rewind onto a row the tier runs carries no warning', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'implement', tier: 'standard' }])
+  await saveRun(dir, run)
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
+  expect(result.text).not.toContain('warning:')
+})

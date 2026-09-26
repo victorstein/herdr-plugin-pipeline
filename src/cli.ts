@@ -692,6 +692,7 @@ async function rewind(ctx: Ctx, input: {
   // is handed the previous one's filename, which is this issue.
   let reserved: string | null = null
   let rewoundTask: Task | null = null
+  let tierWarning = ''
 
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
@@ -724,6 +725,11 @@ async function rewind(ctx: Ctx, input: {
     }
 
     task.phase = input.phase as TaskPhase
+    const excludedBy = taskRow(task.phase).tiers
+    if (excludedBy !== undefined && !excludedBy.includes(tierOf(task))) {
+      tierWarning = `\nwarning: ${task.phase} is not in tier ${tierOf(task)}; ` +
+        `the task will leave it by the ${tierOf(task)} route`
+    }
     task.passes = {}
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
@@ -771,7 +777,7 @@ async function rewind(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(
     `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
-    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed,
+    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed + tierWarning,
   )
 }
 export const cmdRewind = retryingOnStale(rewind)
