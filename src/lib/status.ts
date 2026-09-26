@@ -2,7 +2,7 @@ import { awaitedFor } from './awaiting'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { runIsDriven, wasAborted } from './ledger'
+import { hasLanded, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
@@ -345,7 +345,7 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
   if (task.phase === 'done' || task.phase === 'blocked-on-failure') return []
   // A manual rewind can put an unmerged task in `orphaned`, and calling its
   // worktree disposable would invite deleting the only copy of its work.
-  if (task.phase === 'orphaned' && task.merged_at_ms !== null) {
+  if (task.phase === 'orphaned' && hasLanded(task)) {
     const where = task.checkout_path !== null
       ? `at ${task.checkout_path}`
       : `in workspace ${task.workspace_id ?? 'unknown'}`

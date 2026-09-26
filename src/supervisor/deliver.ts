@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { mainlineBranch } from '../lib/dispatch-base'
+import { hasLanded } from '../lib/ledger'
 import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
@@ -295,10 +296,6 @@ export async function uncommittedPaths(checkoutPath: string): Promise<string[] |
 function awaitsWorktree(task: Task): boolean {
   if (task.phase === 'queued' || task.workspace_id !== null) return false
   return !taskRow(task.phase).terminal && task.phase !== 'escalated'
-}
-
-function hasLanded(task: Task): boolean {
-  return (task.phase === 'done' || task.phase === 'orphaned') && task.merged_at_ms !== null
 }
 
 export function taskSignalsFor(run: Run) {
