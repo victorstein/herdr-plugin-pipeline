@@ -110,6 +110,11 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   } else if (!leavesDecisionPending(task, phase)) {
     forgetDecisionRoundTrip(task)
   }
+  // The cached bucket is the last round's, and the machine reads it every tick
+  // while the poller only runs every CI_POLL_SECONDS: a second round failed on
+  // the first round's red before the new head was ever polled. Found by tracing
+  // a tick, not measured.
+  if (phase === 'ci') task.ci = null
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task

@@ -10,6 +10,7 @@ import { enqueue } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { ciTransitions } from '../src/supervisor/ci'
 import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
@@ -1195,4 +1196,21 @@ test('a cleared review or a green CI reads no PR head', async () => {
   await advanceTasks(green, deps({ prView }))
   expect(green.tasks[0]?.phase).toBe('merge')
   expect(reads.count).toBe(0)
+})
+
+test('a second CI round waits for a fresh poll instead of failing on the last round\'s result', async () => {
+  const task = mkTask({ phase: 'pr-review-quality', tier: 'heavy', pr: 42, ci: 'fail', passes: { ci: 1 } })
+  const run = mkRun([task])
+  await advanceTasks(run, deps({ verdictFor: async () => clear }))
+  expect(task.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+
+  await advanceTasks(run, deps())
+  expect(task.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+  expect(counterFor(task, 'ci')).toBe(1)
+
+  await ciTransitions([run], async () => 'pass')
+  await advanceTasks(run, deps())
+  expect(task.phase).toBe('merge')
 })
