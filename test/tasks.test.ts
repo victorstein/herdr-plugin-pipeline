@@ -325,6 +325,7 @@ test('a red CI yields the ci-red prompt carrying the failure detail', async () =
   const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail' })])
   const prompts = await advanceTasks(run, deps({
     ciDetail: async () => '- build (fail) https://example/run/1',
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'aaa' }),
   }))
   expect(run.tasks[0]?.phase).toBe('implement')
   expect(prompts.map((p) => p.text).join('\n')).toContain('CI is red')
@@ -1109,4 +1110,89 @@ test('a verdict left from before the phase was entered still does not count afte
 
   await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
   expect(run.tasks[0]?.phase).toBe('plan-review')
+})
+
+// ——— the head a send-back records, and the CI result a re-entry forgets ———
+//
+// Through a whole tick, not `advanceTask` alone: the machine tests hand it a
+// `headSha` directly, which is exactly the signal `gatherSignals` never gathered
+// on a review or ci row.
+
+const blocker = { verdict: 'BLOCKER' as const, blockers: 1, majors: 0 }
+const clear = { verdict: 'CLEAR' as const, blockers: 0, majors: 0 }
+const prAt = (headSha: string) => ({ merged: false, mergedAtMs: null, headSha })
+
+function headReads(head: () => string | null) {
+  const reads = { count: 0 }
+  const prView = async () => {
+    reads.count++
+    const sha = head()
+    return sha === null ? null : prAt(sha)
+  }
+  return { reads, prView }
+}
+
+for (const { phase, tier } of [
+  { phase: 'pr-review-intent', tier: 'heavy' },
+  { phase: 'pr-review', tier: 'light' },
+] as const) {
+  test(`a ${phase} BLOCKER holds implement until the worker pushes past the rejected head`, async () => {
+    let head = 'aaa'
+    const { prView } = headReads(() => head)
+    const run = mkRun([mkTask({ phase, tier, pr: 42 })])
+    await advanceTasks(run, deps({ verdictFor: async () => blocker, prView, prForBranch: async () => 42 }))
+    const task = run.tasks[0]!
+    expect(task.phase).toBe('implement')
+    expect(task.head_sha_at_entry).toBe('aaa')
+
+    await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
+    expect(task.phase).toBe('implement')
+
+    head = 'bbb'
+    await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
+    expect(task.phase).toBe(phase)
+  })
+}
+
+test('a red CI holds implement until the worker pushes past the red head', async () => {
+  let head = 'aaa'
+  const { prView } = headReads(() => head)
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail', tier: 'standard' })])
+  await advanceTasks(run, deps({ prView }))
+  const task = run.tasks[0]!
+  expect(task.phase).toBe('implement')
+  expect(task.head_sha_at_entry).toBe('aaa')
+
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('implement')
+
+  head = 'bbb'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('pr-review')
+})
+
+test('a send-back whose PR head cannot be read waits a tick instead of disarming the guard', async () => {
+  for (const task of [
+    mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 }),
+    mkTask({ phase: 'ci', pr: 42, ci: 'fail', tier: 'heavy' }),
+  ]) {
+    const sentBackFrom = task.phase
+    const run = mkRun([task])
+    const prompts = await advanceTasks(run, deps({ verdictFor: async () => blocker, prView: async () => null }))
+    expect(task.phase).toBe(sentBackFrom)
+    expect(counterFor(task, sentBackFrom)).toBe(0)
+    expect(prompts).toHaveLength(0)
+  }
+})
+
+test('a cleared review or a green CI reads no PR head', async () => {
+  const { reads, prView } = headReads(() => 'aaa')
+  const review = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  await advanceTasks(review, deps({ verdictFor: async () => clear, prView }))
+  expect(review.tasks[0]?.phase).toBe('pr-review-quality')
+
+  const green = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass', tier: 'heavy' })])
+  await advanceTasks(green, deps({ prView }))
+  expect(green.tasks[0]?.phase).toBe('merge')
+  expect(reads.count).toBe(0)
 })

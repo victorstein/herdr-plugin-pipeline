@@ -372,7 +372,9 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'pr-review-intent':
     case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)
-      return { ...base, artifactFresh: verdict !== null, verdict }
+      const signals = { ...base, artifactFresh: verdict !== null, verdict }
+      const sendsBack = actorIdle && verdict !== null && verdict.verdict !== 'CLEAR'
+      return sendsBack ? withSendBackHead(signals, task, deps) : signals
     }
     case 'merge': {
       if (task.pr === null) return base
@@ -403,10 +405,27 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),
       }
     case 'ci':
-      return base
+      return task.ci === 'fail' ? withSendBackHead(base, task, deps) : base
     default:
       return null
   }
+}
+
+/**
+ * `implement` clears only on a head past `head_sha_at_entry`, which the machine
+ * records from the signals of the row it is leaving. Only `implement` used to read
+ * the head, so a send-back recorded null, any head counted as moved, and a worker
+ * that went idle without pushing sent the unfixed PR back to review. Found by
+ * tracing a tick, not measured. A failed read skips the tick: recording null
+ * would disarm the guard just the same.
+ */
+async function withSendBackHead<S extends { headSha: string | null }>(
+  signals: S, task: Task, deps: TaskDeps,
+): Promise<S | null> {
+  if (task.pr === null || taskRow(task.phase).onBlocker !== 'implement') return signals
+  const view = await deps.prView(task.pr)
+  if (view === null) return null
+  return { ...signals, headSha: view.headSha }
 }
 
 /** The review verdict at the task's reserved path, if one newer than its baseline has settled. */
