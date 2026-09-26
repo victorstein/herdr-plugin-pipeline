@@ -508,3 +508,24 @@ test('every prompt renders for every tier on every path with no placeholder left
     for (const [what, text] of rendered) expect(text, `${tier}: ${what}`).not.toContain('{{')
   }
 })
+
+test('the README documents tiers, their labels, hpipe tier, the model split and the restart', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  for (const needle of [
+    '## Review tiers', '--tier light|standard|heavy', 'pipeline:tier-light', 'hpipe tier --task',
+    'Run Claude with Opus as the default model', 'Restart the supervisor after upgrading',
+    'skips the final `branch-review`',
+  ]) {
+    expect(readme, needle).toContain(needle)
+  }
+})
+
+test('the skill teaches tiers, hpipe tier, the model requirement and the restart', async () => {
+  const skill = await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text()
+  for (const needle of [
+    'hpipe tier --task', 'pipeline:tier-<name>', '--tier light|standard|heavy',
+    'Run Claude with Opus as the default model', 'Restart the supervisor after upgrading',
+  ]) {
+    expect(skill, needle).toContain(needle)
+  }
+})

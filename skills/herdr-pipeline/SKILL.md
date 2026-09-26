@@ -1,6 +1,6 @@
 ---
 name: herdr-pipeline
-description: Use when running, orchestrating, checking on or unsticking a batch of GitHub issues through the herdr pipeline plugin (stein.pipeline) — the `hpipe` CLI (start, task, dispatch, status, show, decide, answer, rewind, release, forget), worker agents in herdr worktrees, escalated or stalled tasks, "stuck input", "waiting on you", or a dead orchestrator/supervisor pane.
+description: Use when running, orchestrating, checking on or unsticking a batch of GitHub issues through the herdr pipeline plugin (stein.pipeline) — the `hpipe` CLI (start, task, tier, dispatch, status, show, decide, answer, rewind, release, forget), review tiers, worker agents in herdr worktrees, escalated or stalled tasks, "stuck input", "waiting on you", or a dead orchestrator/supervisor pane.
 ---
 
 # herdr pipeline (`hpipe`)
@@ -27,6 +27,8 @@ behaviour; this skill does.
 - Never type into a worker's pane, and never use `pane send-text`/`send-keys` to hand over prompts.
 - `--surface <s>` needs `<repo>/.claude/agents/<s>-dev.md`. A repo may declare an executable
   `.claude/pipeline-bootstrap` to set up fresh worktrees.
+- Run Claude with Opus as the default model. The orchestrator, the workers and every reviewer
+  inherit it; only `implement`'s coding subagent is pinned, to Sonnet.
 
 ## Running a batch
 
@@ -39,6 +41,13 @@ behaviour; this skill does.
    whose prefixes overlap never implement at the same time (the second waits in `blocked-on-files`),
    so to keep a task off t3's files, declare prefixes overlapping t3's. Plans can widen them later.
    `--title` prints `issue: #<n> (filed)`.
+   Pick a tier with `--tier light|standard|heavy` (default `standard`). **light**: one surface, a
+   handful of files, the issue pins the exact change. **heavy**: a contract another surface
+   consumes, a data migration, security/auth, concurrency or state-machine code — or you are
+   unsure. **standard**: the rest. When unsure, go higher. A `pipeline:tier-<name>` issue label
+   overrides `--tier`; two tier labels are refused. The `tier:` line under `task_id:` says what was
+   recorded and why. light skips `plan-review`; light and standard get one combined `pr-review`;
+   heavy runs `pr-review-intent` then `pr-review-quality`.
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
    `Dispatch tN` prompt carrying the same block — run it then) or a brief with a
    **`dispatch, in order:`** block. **Run that block exactly
@@ -60,6 +69,7 @@ The supervisor nudges a silent task with a stall probe (workers every 45 min, th
 | A worker's decision you can settle from the repo | `hpipe answer --task <id> --decision <d> --answer "…" --by orchestrator` |
 | A decision only the owner can make (product, licence, scope) | Relay question + worker's recommendation to the user; record their reply with `--by human` |
 | "Ready to merge — PR #n" | Check for conflicts with anything merged since (rebase + re-run bootstrap if needed), then merge. Merging is yours; nothing merges automatically |
+| A task turns out bigger than its tier (research or a decision finds a contract, a migration, another surface) | `hpipe tier --task <id> <higher> --why "…"`. The current phase completes; only the next step changes. Never lower a tier: it is refused from pipeline panes, so the user runs it from their own. `hpipe show --task <id>` prints `tier:`, `tier log:` and `visited:` |
 | Anything else | `hpipe status` (fleet, "waiting on you", held deliveries); `hpipe show --task <id>` for one task |
 
 ## Recovery
@@ -73,6 +83,7 @@ The supervisor nudges a silent task with a stall probe (workers every 45 min, th
 | Supervisor dead | `herdr plugin action invoke supervisor --plugin stein.pipeline` |
 | Task blocked behind a failed sibling's `--files` | `hpipe release --task <id>` |
 | Stop / restart a whole run | `hpipe abort <run>` / `hpipe resume <run>` |
+| Plugin upgraded | Restart the supervisor after upgrading: close the `Pipeline supervisor` pane, then `herdr plugin action invoke supervisor --plugin stein.pipeline` (or restart the session). An old supervisor beside a new CLI routes tasks by the old table |
 
 `hpipe brief --task <id>` reprints a task's brief (read-only). `forget <workspace>` only unbinds a workspace. `drain` just flushes the plugin's event queue — you
 never need it in normal use.
