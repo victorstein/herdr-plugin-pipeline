@@ -13,6 +13,7 @@ import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
 import { openDecisionFor } from '../src/lib/decisions'
+import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -486,6 +487,8 @@ test('a task resumed into implement with its PR still open waits for a new push'
 
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+  expect(saved.outbox?.map((entry) => entry.to)).toEqual(['worker'])
+  settleOutbox(saved, saved.outbox!.map((entry) => ({ id: entry.id, ok: true })), Date.now())
 
   let head = 'H'
   const deps = {

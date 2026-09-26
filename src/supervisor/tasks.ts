@@ -307,6 +307,11 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
 
   switch (task.phase) {
     case 'implement': {
+      // GitHub's PR head lags a push, so a send-back can record the head from
+      // before the reviewer's verdict commit, and that commit then reads as the
+      // worker's push. Until the prompt lands the worker has pushed nothing, so
+      // no head read can mean work. Found by tracing a tick, not measured.
+      if (task.awaiting_brief === true || queuedWorkerPrompt(run, task) !== null) return base
       const pr = task.pr ?? (await deps.prForBranch(task.branch))
       if (pr === null) return base
       // Persist on discovery, not on the phase transition: otherwise every tick

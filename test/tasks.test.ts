@@ -6,7 +6,7 @@ import { answerDecision, openDecision } from '../src/lib/decisions'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
-import { enqueue } from '../src/lib/outbox'
+import { enqueue, settleOutbox } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
@@ -1213,4 +1213,25 @@ test('a second CI round waits for a fresh poll instead of failing on the last ro
   await ciTransitions([run], async () => 'pass')
   await advanceTasks(run, deps())
   expect(task.phase).toBe('merge')
+})
+
+// GitHub's headRefOid lags a push: the send-back can read the head from before
+// the reviewer's verdict commit, and the verdict commit then reads as a move.
+test('implement holds while its prompt is undelivered, so a lagging head read cannot clear it', async () => {
+  let head = 'X'
+  const { prView } = headReads(() => head)
+  const run = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  await advanceTasks(run, deps({ verdictFor: async () => blocker, prView }))
+  const task = run.tasks[0]!
+  expect(task.head_sha_at_entry).toBe('X')
+  const prompt = enqueue(run, { to: 'worker', taskId: 't1', text: 'fix the blocker' }, Date.now())
+
+  head = 'V'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('implement')
+
+  settleOutbox(run, [{ id: prompt.id, ok: true }], Date.now())
+  head = 'F'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('pr-review-intent')
 })
