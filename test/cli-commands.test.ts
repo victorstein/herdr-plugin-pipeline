@@ -1723,6 +1723,16 @@ test('an unknown --tier files no issue', async () => {
   expect(filed).toBe(0)
 })
 
+test('an unknown --tier is refused before the label read', async () => {
+  await seedInRepo()
+  let reads = 0
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'huge' }, undefined, fetchedBase,
+    async () => { reads++; return [] })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
+  expect(reads).toBe(0)
+})
+
 test('a filed issue has no labels to read, so --title skips the read', async () => {
   const bodyFile = await seedInRepoWithBrief()
   let reads = 0

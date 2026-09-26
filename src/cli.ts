@@ -318,8 +318,9 @@ async function registerTask(
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
   // Before filing, so a refused tier files nothing. A filed issue is brand new and
-  // has no labels to read.
-  const labels: LabelRead = filing ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
+  // has no labels to read, and a typo'd --tier is refused without a gh round-trip.
+  const flagRefused = input.tier !== undefined && !isTier(input.tier)
+  const labels: LabelRead = filing || flagRefused ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
   const tier = registrationTier(input.tier, labels)
   if (!tier.ok) return fail(tier.error)
 
@@ -725,10 +726,10 @@ async function rewind(ctx: Ctx, input: {
     }
 
     task.phase = input.phase as TaskPhase
-    const excludedBy = taskRow(task.phase).tiers
-    if (excludedBy !== undefined && !excludedBy.includes(tierOf(task))) {
-      tierWarning = `\nwarning: ${task.phase} is not in tier ${tierOf(task)}; ` +
-        `the task will leave it by the ${tierOf(task)} route`
+    const rowTiers = taskRow(task.phase).tiers
+    const tier = tierOf(task)
+    if (rowTiers !== undefined && !rowTiers.includes(tier)) {
+      tierWarning = `\nwarning: ${task.phase} is not in tier ${tier}; the task will leave it by the ${tier} route`
     }
     task.passes = {}
     task.delivery_attempts = 0
