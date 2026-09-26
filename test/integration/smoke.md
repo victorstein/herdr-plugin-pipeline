@@ -733,6 +733,9 @@ clears to `done`.
 
 - The PR body ends with a real `Closes #<n>` keyword. `close` waits on `gh issue view --json
   closed`, and "Implements #n" does not auto-close.
+- After a review BLOCKER, the task's `head_sha_at_entry` in `$STATE/runs/$SMOKE/<run_id>.json` is the
+  PR head at the send-back (`hpipe show` does not print it), and `.history` shows no `implement` exit
+  before the worker's fix push appears on the PR.
 - If CI goes red and the task returns to `ci`, `hpipe show` reads `ci: none` until the new head is
   polled; a failure, `ci` pass count bump or escalation within 30s of re-entry is the stale result.
 - `teardown` removes the worktree unless the task was registered `--keep-worktree`.

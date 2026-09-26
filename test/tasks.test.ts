@@ -1248,3 +1248,27 @@ test('a send-back on the last allowed pass escalates without waiting on the PR h
     expect(reads.count).toBe(0)
   }
 })
+
+test('a send-back finds and keeps the PR the task has not recorded yet', async () => {
+  const { prView } = headReads(() => 'aaa')
+  const run = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: null })])
+  await advanceTasks(run, deps({ verdictFor: async () => blocker, prView, prForBranch: async () => 42 }))
+  expect(run.tasks[0]?.phase).toBe('implement')
+  expect(run.tasks[0]?.pr).toBe(42)
+  expect(run.tasks[0]?.head_sha_at_entry).toBe('aaa')
+})
+
+test('a send-back with no PR found, or no head on it, waits a tick rather than record no head', async () => {
+  const noPr = mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: null })
+  await advanceTasks(mkRun([noPr]), deps({
+    verdictFor: async () => blocker, prForBranch: async () => null, prView: async () => prAt('aaa'),
+  }))
+  expect(noPr.phase).toBe('pr-review-intent')
+
+  const noHead = mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })
+  await advanceTasks(mkRun([noHead]), deps({
+    verdictFor: async () => blocker, prView: async () => ({ merged: false, mergedAtMs: null, headSha: null }),
+  }))
+  expect(noHead.phase).toBe('pr-review-intent')
+  expect(counterFor(noHead, 'pr-review-intent')).toBe(0)
+})
