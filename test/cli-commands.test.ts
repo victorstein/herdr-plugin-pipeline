@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask as cmdTaskReadingRealLabels,
-  recordWorkerPane,
+  cmdTier, recordWorkerPane,
 } from '../src/cli'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
@@ -1744,4 +1744,86 @@ test('a registration that loses its save reads the labels once', async () => {
   expect(result.ok).toBe(true)
   expect(reads).toBe(1)
   expect((await registered()).map((t) => t.tier)).toEqual(['heavy'])
+})
+
+// ——— hpipe tier ———
+
+async function seedTiered(over: Partial<Task> = {}): Promise<Run> {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'implement', tier: 'light', pane_id: 'w7:p1', last_pane_id: 'w3:p1', ...over,
+  }])
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+  return run
+}
+
+const tierInput = (over: Partial<Parameters<typeof cmdTier>[1]> = {}): Parameters<typeof cmdTier>[1] => ({
+  taskId: 't1', tier: 'heavy', why: 'research found a contract change', callerPane: 'w7:p1',
+  repoKey: 'k', runId: null, ...over,
+})
+
+test('tier raises from any pane, logs the change, and writes nothing to run.history', async () => {
+  const run = await seedTiered()
+  const historyBefore = (await savedRun(run.run_id)).history.length
+
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('t1: light → heavy')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved.tasks[0]?.tier).toBe('heavy')
+  expect(saved.tasks[0]?.tier_history).toEqual([{
+    at: expect.any(Number), from: 'light', to: 'heavy', source: 'hpipe-tier', pane: 'w7:p1',
+    why: 'research found a contract change',
+  }])
+  expect(saved.history).toHaveLength(historyBefore)
+  expect(saved.tasks[0]?.phase).toBe('implement')
+})
+
+test('tier refuses to lower from the orchestrator pane or any worker pane, live or last', async () => {
+  for (const pane of ['w1:p1', 'w7:p1', 'w3:p1']) {
+    const run = await seedTiered({ tier: 'heavy' })
+    const result = await cmdTier(ctx(), tierInput({ tier: 'light', callerPane: pane, runId: run.run_id }))
+    expect(result.ok, pane).toBe(false)
+    expect(result.text).toBe('lowering a tier needs a human; run this from your own pane')
+    expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('heavy')
+  }
+})
+
+test('tier lowers from a pane the pipeline does not own, or from outside herdr', async () => {
+  for (const pane of ['w42:p9', null]) {
+    const run = await seedTiered({ tier: 'heavy' })
+    const result = await cmdTier(ctx(), tierInput({ tier: 'light', callerPane: pane, runId: run.run_id }))
+    expect(result.ok, String(pane)).toBe(true)
+    expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('light')
+  }
+})
+
+test('tier to the tier a task already has is a no-op that records nothing', async () => {
+  const run = await seedTiered()
+  const result = await cmdTier(ctx(), tierInput({ tier: 'light' }))
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('already light')
+  expect((await savedRun(run.run_id)).tasks[0]?.tier_history).toBeUndefined()
+})
+
+test('tier refuses a finished task', async () => {
+  await seedTiered({ phase: 'done' })
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('is finished (phase: done)')
+})
+
+test('tier needs --why and a real tier', async () => {
+  await seedTiered()
+  expect((await cmdTier(ctx(), tierInput({ why: '  ' }))).text).toContain('--why is required')
+  expect((await cmdTier(ctx(), tierInput({ tier: 'huge' }))).text)
+    .toBe('the tier must be one of light, standard, heavy, got: huge')
+})
+
+test('tier on a task from before tiers starts from heavy', async () => {
+  const run = await seedTiered({ tier: undefined })
+  const result = await cmdTier(ctx(), tierInput({ tier: 'standard', callerPane: 'w42:p9' }))
+  expect(result.text).toContain('t1: heavy → standard')
+  expect((await savedRun(run.run_id)).tasks[0]?.tier_history?.[0]?.from).toBe('heavy')
 })

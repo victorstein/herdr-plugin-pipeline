@@ -16,14 +16,14 @@ import {
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { enqueue } from './lib/outbox'
-import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
+import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { registrationTier, type LabelRead } from './lib/tiers'
+import { isLowering, pipelinePanes, registrationTier, type LabelRead } from './lib/tiers'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -877,6 +877,41 @@ async function answer(ctx: Ctx, input: {
 }
 export const cmdAnswer = retryingOnStale(answer)
 
+async function tier(ctx: Ctx, input: {
+  taskId: string; tier: string; why: string; callerPane: string | null
+  repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  const to = input.tier
+  if (!isTier(to)) return fail(`the tier must be one of ${TIERS.join(', ')}, got: ${to || '(missing)'}`)
+  if (input.why.trim().length === 0) {
+    return fail('--why is required: the tier log records why every change was made')
+  }
+
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    reach: 'unfinished', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  if (taskPhaseIsTerminal(task.phase)) {
+    return fail(`task ${task.task_id} is finished (phase: ${task.phase}) — its tier routes nothing now`)
+  }
+  const from = tierOf(task)
+  if (from === to) return ok(`${task.task_id} is already ${to}; nothing changed`)
+  if (isLowering(from, to) && input.callerPane !== null && pipelinePanes(run).has(input.callerPane)) {
+    return fail('lowering a tier needs a human; run this from your own pane')
+  }
+
+  task.tier = to
+  task.tier_history = [...(task.tier_history ?? []), {
+    at: Date.now(), from, to, source: 'hpipe-tier', pane: input.callerPane, why: input.why,
+  }]
+  await saveRun(ctx.stateDir, run)
+  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}.`)
+}
+export const cmdTier = retryingOnStale(tier)
+
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
@@ -968,6 +1003,16 @@ export function listFlag(argv: string[], name: string): string[] {
   return entries
 }
 
+function positionals(argv: string[]): string[] {
+  const found: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string
+    if (!arg.startsWith('--')) found.push(arg)
+    else if (!VALUELESS_FLAGS.has(arg)) i++
+  }
+  return found
+}
+
 const USAGE: Record<string, string[]> = {
   start: ['hpipe start <title>'],
   task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
@@ -985,6 +1030,7 @@ const USAGE: Record<string, string[]> = {
   release: ['hpipe release --task <id> [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
   answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
+  tier: ['hpipe tier --task <id> <light|standard|heavy> --why <text> [--run <run-id>]'],
   resume: ['hpipe resume <run-id>'],
   abort: ['hpipe abort <run-id>'],
   forget: ['hpipe forget <workspace-id>'],
@@ -1000,7 +1046,7 @@ const HELP_FLAGS = new Set(['--help', '-h'])
 const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
-const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title'])
+const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
 // cmdTask names this one's argv accident more precisely than a usage line can.
 const SELF_VALIDATING_FLAGS = new Set(['--files'])
 
@@ -1165,6 +1211,17 @@ async function dispatch(argv: string[]): Promise<number> {
         decision: flag(rest, 'decision') ?? '',
         answer: flag(rest, 'answer') ?? '',
         by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'tier':
+      out = await cmdTier(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        tier: positionals(rest)[0] ?? '',
+        why: flag(rest, 'why') ?? '',
+        callerPane: process.env.HERDR_PANE_ID || null,
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })

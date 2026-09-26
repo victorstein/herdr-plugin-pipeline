@@ -200,7 +200,7 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
 
 const SUBCOMMANDS = [
   'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
-  'decide', 'answer', 'resume', 'abort', 'forget',
+  'decide', 'answer', 'tier', 'resume', 'abort', 'forget',
 ]
 
 test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
@@ -408,4 +408,22 @@ test('task --tier with its value missing is a usage error', () => {
   const r = hpipe([...TASK, '--tier', '--files', 'src/'], started())
   expect(r.code).toBe(1)
   expect(r.out).toContain('--tier needs a value')
+})
+
+test('tier reads its positional tier and --why, and the caller pane from HERDR_PANE_ID', async () => {
+  const f = fixture()
+  f.env.HERDR_PANE_ID = 'w1:p1'
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue view': { labels: [] } })
+  expect(hpipe(['start', 'argv fixture'], f).code).toBe(0)
+  expect(hpipe([...TASK], f).out).toContain('tier: standard (default)')
+
+  const raised = hpipe(['tier', '--task', 't1', 'heavy', '--why', 'touches the ledger schema'], f)
+  expect(raised.code).toBe(0)
+  expect(raised.out).toContain('t1: standard → heavy')
+
+  // `start` made this pane the orchestrator's, so lowering from it is refused.
+  const lowered = hpipe(['tier', '--task', 't1', 'light', '--why', 'smaller than it looked'], f)
+  expect(lowered.code).toBe(1)
+  expect(lowered.out).toContain('lowering a tier needs a human; run this from your own pane')
 })
