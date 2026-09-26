@@ -444,7 +444,14 @@ test('a heavy task lowered to light finishes pr-review-intent, then skips pr-rev
 
 test('a light task raised to heavy finishes pr-review, then runs both heavy stages', () => {
   const { run, task } = tiered('pr-review', 'heavy')
-  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review-intent')
+  const route: TaskPhase[] = []
+  for (let lap = 0; lap < 3; lap++) route.push(advanceTask(run, task, clearedSignals)!.phase)
+  expect(route).toEqual(['pr-review-intent', 'pr-review-quality', 'ci'])
+})
+
+test('a green ci goes to merge on light', () => {
+  const { run, task } = tiered('ci', 'light')
+  expect(advanceTask(run, task, { ...clearedSignals, verdict: null, ciBucket: 'pass' })?.phase).toBe('merge')
 })
 
 test('a BLOCKER on pr-review sends the task back to implement', () => {

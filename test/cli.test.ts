@@ -3,25 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newRun, resolveRun, saveRun } from '../src/lib/ledger'
-import { cmdRewind, cmdStart, cmdTask as cmdTaskReadingRealLabels, listFlag } from '../src/cli'
+import { cmdRewind, cmdStart, listFlag } from '../src/cli'
+import { cmdTask } from './helpers/cmd-task'
 
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
-
-type CmdTaskArgs = Parameters<typeof cmdTaskReadingRealLabels>
-
-/**
- * Registration reads an issue's labels through `gh`; a call here with no fifth
- * argument defaults that read to an empty list instead of the real `cmdTask`
- * default, which would shell out to `gh` in a temp dir that is not a GitHub repo.
- */
-function cmdTask(
-  ctx: CmdTaskArgs[0], input: CmdTaskArgs[1], fileIssue?: CmdTaskArgs[2], dispatchBase?: CmdTaskArgs[3],
-  readLabels: CmdTaskArgs[4] = async () => [],
-): ReturnType<typeof cmdTaskReadingRealLabels> {
-  return cmdTaskReadingRealLabels(ctx, input, fileIssue, dispatchBase, readLabels)
-}
 
 async function liveRun() {
   const resolved = await resolveRun(dir, 'personal', {

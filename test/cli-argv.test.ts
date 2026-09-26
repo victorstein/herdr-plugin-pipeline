@@ -14,15 +14,16 @@ interface Fixture { repo: string; stateDir: string; env: Record<string, string> 
 /**
  * Registering with `--issue` reads the issue's labels through `gh`, and this bin
  * stands in so the suite never shells out to the real `gh` on the machine
- * running it. Every stub answers `issue view` with no labels; a test exercising
- * the label read replaces `f.env.GH_BIN` with its own fake bin.
+ * running it. It answers only the label read, with no labels, so any other gh
+ * call a change adds fails loudly; a test exercising the label read replaces
+ * `f.env.GH_BIN` with its own fake bin.
  */
 function defaultGhBin(): string {
   const dir = tempDir('hpipe-argv-gh-default-')
   const path = join(dir, 'fake-gh')
   writeFileSync(path, `#!/usr/bin/env bun
 const argv = process.argv.slice(2).join(' ')
-if (argv.startsWith('issue view')) { console.log(JSON.stringify({ labels: [] })); process.exit(0) }
+if (/^issue view \\d+ --json labels$/.test(argv)) { console.log(JSON.stringify({ labels: [] })); process.exit(0) }
 console.error('unstubbed: ' + argv)
 process.exit(1)
 `)
@@ -402,6 +403,14 @@ test('task --tier reaches registration, and a pipeline:tier label read through g
   expect(flagged.code).toBe(0)
   expect(flagged.out).toContain('tier: heavy (--tier)')
   expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain('issue view 1 --json labels')
+})
+
+test('task records the caller pane from HERDR_PANE_ID in its first tier change', () => {
+  const f = started()
+  f.env.HERDR_PANE_ID = 'w4:p2'
+  expect(hpipe(TASK, f).code).toBe(0)
+  const [task] = registeredTasks(f) as Array<{ tier_history: Array<{ pane: string | null }> }>
+  expect(task!.tier_history[0]!.pane).toBe('w4:p2')
 })
 
 test('task --tier with its value missing is a usage error', () => {

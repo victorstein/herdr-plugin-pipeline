@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask as cmdTaskReadingRealLabels,
+  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
+import { cmdTask } from './helpers/cmd-task'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
@@ -19,21 +20,6 @@ import type { Run, Task } from '../src/lib/types'
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
-
-type CmdTaskArgs = Parameters<typeof cmdTaskReadingRealLabels>
-
-/**
- * Registration reads an issue's labels through `gh`; a call here with no fifth
- * argument defaults that read to an empty list instead of the real `cmdTask`
- * default, which would shell out to `gh` in a temp dir that is not a GitHub
- * repo. Only the tests that exercise the label read pass their own.
- */
-function cmdTask(
-  ctx: CmdTaskArgs[0], input: CmdTaskArgs[1], fileIssue?: CmdTaskArgs[2], dispatchBase?: CmdTaskArgs[3],
-  readLabels: CmdTaskArgs[4] = async () => [],
-): ReturnType<typeof cmdTaskReadingRealLabels> {
-  return cmdTaskReadingRealLabels(ctx, input, fileIssue, dispatchBase, readLabels)
-}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'clicmd-'))
@@ -1822,6 +1808,13 @@ test('tier refuses a finished task', async () => {
   const result = await cmdTier(ctx(), tierInput())
   expect(result.ok).toBe(false)
   expect(result.text).toContain('is finished (phase: done)')
+})
+
+test('tier changes an escalated task: escalation is not finished', async () => {
+  const run = await seedTiered({ phase: 'escalated', escalated_from: 'implement' })
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(true)
+  expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('heavy')
 })
 
 test('tier needs --why and a real tier', async () => {
