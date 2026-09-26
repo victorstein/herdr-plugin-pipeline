@@ -4,8 +4,10 @@ import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
+import { TASK_ROWS, TIERS } from '../src/lib/phases'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
 
@@ -470,4 +472,39 @@ test('intake explains the tiers and registers with --tier', async () => {
   expect(text).toContain('`pipeline:tier-<name>`')
   expect(text).toContain('Never lower a tier')
   expect(text).toContain('then a `tier:` line')
+})
+
+test('every prompt renders for every tier on every path with no placeholder left', async () => {
+  for (const tier of TIERS) {
+    const rendered: Array<[string, string]> = []
+
+    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined)) {
+      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' })])
+    }
+    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files')])
+    rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
+
+    const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+    run.orchestrator_pane = 'w1:p1'
+    const task = briefTask({ tier })
+    run.tasks = [task]
+    rendered.push(['brief and research', await renderWorkerPrompt(ROOT, run, task)])
+
+    const asking = briefTask({ phase: 'blocked-on-decision', decision_from: 'implement', tier, pane_id: 'w7:p1' })
+    openDecision(asking, { question: 'q', recommendation: 'r' })
+    run.tasks = [asking]
+    const sent: string[] = []
+    await announceDecisions(run, {
+      pluginRoot: ROOT, promptRetryMax: 5,
+      send: async (_pane, text) => { sent.push(text); return { ok: true } },
+      checkSubmission: async () => ({ state: 'submitted' }),
+    })
+    rendered.push(['decision', sent[0] ?? '(not sent)'])
+
+    run.phase = 'branch-review'
+    run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier })]
+    rendered.push(['branch-review', await renderRunPhasePrompt(run, ROOT)])
+
+    for (const [what, text] of rendered) expect(text, `${tier}: ${what}`).not.toContain('{{')
+  }
 })
