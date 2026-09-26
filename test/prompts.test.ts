@@ -360,3 +360,52 @@ test('a light task raised to heavy after skipping plan-review is told its plan w
   expect(await renderPhase('pr-review-intent', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
     .toContain('No plan review ran')
 })
+
+function implementersBrief(text: string): string {
+  const start = text.indexOf("## The implementer's brief")
+  if (start === -1) throw new Error("no implementer's brief")
+  return text.slice(start)
+}
+
+test('implement and ci-red hand the coding to a sonnet subagent carrying one scoping brief', async () => {
+  const implement = await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files')
+  const ciRed = await renderPhase('implement', { tier: 'standard' }, 'ci')
+  expect(ciRed).toContain('# CI is red')
+  for (const text of [implement, ciRed]) {
+    expect(text).toContain('`model: sonnet`')
+    expect(text).toContain('wait for it within this turn')
+    expect(text).toContain('Read `.claude/agents/core-dev.md` before your first edit')
+  }
+  expect(implementersBrief(ciRed)).toBe(implementersBrief(implement))
+})
+
+test('the implementer commits but never pushes, re-reads before editing, and returns questions', async () => {
+  const brief = implementersBrief(await Bun.file(join(ROOT, 'prompts', 'implement.md')).text())
+  expect(brief).toContain('Re-read every file you are about to touch before you edit it.')
+  expect(brief).toContain('Commit, but do not push')
+  expect(brief).toContain('return the question')
+  expect(brief).toContain('Never commit to or push the default branch.')
+})
+
+test('ci-red addresses the worker it is delivered to', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'ci-red.md')).text()
+  expect(text).not.toContain('Send the worker back')
+  expect(text).toContain('gh run view --log-failed')
+})
+
+test('implement calls the plan reviewed only when a plan review ran', async () => {
+  const reviewed = await renderPhase('implement', { tier: 'standard', verdict_seq: { 'plan-review': 1 } })
+  expect(reviewed).toContain('The plan at `/r/c.md` cleared review.')
+  for (const unreviewed of [
+    await renderPhase('implement', { tier: 'light' }),
+    await renderPhase('implement', { tier: 'standard' }),
+  ]) {
+    expect(unreviewed).toContain('was not reviewed — read it critically, and fix it first if it is wrong.')
+    expect(unreviewed).not.toContain('cleared review')
+  }
+})
+
+test('an answer that resumes implement keeps the coding with a fresh subagent', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
+  expect(text).toContain('dispatch a fresh one with this answer in its brief')
+})
