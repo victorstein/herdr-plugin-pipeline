@@ -124,6 +124,8 @@ export async function renderTaskPhasePrompt(
     case 'plan':
     case 'plan-review':
       return renderPrompt(deps.pluginRoot, taskRow(task.phase).prompt as string, common)
+    case 'pr-review':
+      return renderPrompt(deps.pluginRoot, 'pr-review', common)
     case 'pr-review-intent':
       return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
     case 'pr-review-quality':
@@ -364,6 +366,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     }
     case 'spec-review':
     case 'plan-review':
+    case 'pr-review':
     case 'pr-review-intent':
     case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)

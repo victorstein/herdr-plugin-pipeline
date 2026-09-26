@@ -1,7 +1,7 @@
 import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
-import { taskRow } from '../lib/phases'
+import { nextPhase, taskRow, tierOf } from '../lib/phases'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
@@ -146,7 +146,7 @@ export function workerStillNeeded(task: Task): boolean {
     seen.add(phase)
     const row = taskRow(phase)
     if (row.actor === 'worker') return true
-    if (row.onClear) reachable.push(row.onClear)
+    if (row.onClear) reachable.push(nextPhase(tierOf(task), row))
     if (row.onBlocker) reachable.push(row.onBlocker)
     if (row.returnsTo !== undefined) {
       const returnsTo = task[row.returnsTo]

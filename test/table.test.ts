@@ -3,6 +3,9 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import { nextPhase, RUN_ROWS, TASK_ROWS, taskRow, TIERS, type PhaseRow, type Tier } from '../src/lib/phases'
 import type { TaskPhase } from '../src/lib/types'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task } from '../src/lib/types'
+import { advanceTasks, renderTaskPhasePrompt, type TaskDeps } from '../src/supervisor/tasks'
 
 const ALL: readonly PhaseRow<string>[] = [...RUN_ROWS, ...TASK_ROWS]
 
@@ -111,6 +114,74 @@ test('every row a tier reaches that has an actor has a prompt', () => {
     for (const phase of walkFromQueued(tier)) {
       const row = taskRow(phase)
       if (row.actor !== undefined) expect(row.prompt, `${tier}: ${phase}`).toBeDefined()
+    }
+  }
+})
+
+const ROOT = join(import.meta.dir, '..')
+
+function taskIn(phase: TaskPhase, tier: Tier): Task {
+  return {
+    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    depends_on: [], files: [], keep_worktree: false,
+    workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
+    phase, phase_entered_at: 0, escalated_from: null,
+    head_sha_at_entry: null, pr: 42, ci: null,
+    checkout_path: '/r/.worktrees/feat-x', registered_at: 0, adopted_at: 0,
+    artifacts: { research: 'r.md', spec: 's.md', plan: 'p.md', verdicts: {} },
+    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+    tier,
+  }
+}
+
+function runWith(task: Task): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'execute'
+  run.orchestrator_pane = 'w1:p1'
+  run.tasks = [task]
+  return run
+}
+
+const clearingTick = (): TaskDeps => ({
+  pluginRoot: ROOT,
+  liveIdle: async () => true,
+  maxPasses: 2,
+  fileSettleMs: 0,
+  prForBranch: async () => 42,
+  prView: async () => null,
+  issueView: async () => null,
+  verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  removeWorktree: async () => 'removed',
+  removeCheckout: async () => ({ removed: true }),
+  ciDetail: async () => '',
+  ambiguityLog: new Set<string>(),
+  uncommittedPaths: async () => [],
+  freshDispatchBase: async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null }),
+})
+
+// Through a whole tick rather than `advanceTask` alone: a verdict row missing from
+// `gatherSignals` returns no signals and never reaches the machine at all.
+test('a tick advances every verdict row, in every tier, to where nextPhase says', async () => {
+  for (const tier of TIERS) {
+    for (const row of TASK_ROWS.filter((r) => r.signal === 'verdict')) {
+      const task = taskIn(row.phase, tier)
+      await advanceTasks(runWith(task), clearingTick())
+      expect(task.phase, `${tier}: ${row.phase}`).toBe(nextPhase(tier, row))
+    }
+  }
+})
+
+// Non-empty, not merely "does not throw": a phase missing from the switch falls to
+// `default` and renders '', which a throw check would pass.
+test('every worker row renders a non-empty prompt in every tier', async () => {
+  for (const tier of TIERS) {
+    for (const row of TASK_ROWS.filter((r) => r.actor === 'worker' && r.prompt !== undefined)) {
+      const task = taskIn(row.phase, tier)
+      const text = await renderTaskPhasePrompt(
+        runWith(task), task, { pluginRoot: ROOT, ciDetail: async () => '' }, row.phase,
+      )
+      expect(text.length, `${tier}: ${row.phase}`).toBeGreaterThan(0)
     }
   }
 })
