@@ -18,6 +18,8 @@ is lost at teardown and invisible to every later review that has to read what wa
 
 ## The reviewer's brief
 
+Open the review with the line `Tier: {{tier}}`.
+
 Review `{{plan_path}}` adversarially against `{{spec_path}}`.
 
 Check specifically: does every spec requirement map to a step? Do types, function names and

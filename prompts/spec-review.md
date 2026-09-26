@@ -18,6 +18,8 @@ is lost at teardown and invisible to every later review that has to read what wa
 
 ## The reviewer's brief
 
+Open the review with the line `Tier: {{tier}}`.
+
 Review `{{spec_path}}` adversarially against issue #{{issue}} (`gh issue view {{issue}}`) and the
 research note at `{{research_path}}`.
 

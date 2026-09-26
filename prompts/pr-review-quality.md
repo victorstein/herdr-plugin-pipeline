@@ -22,6 +22,8 @@ with no remediation done.
 
 ## The reviewer's brief
 
+Open the review with the line `Tier: {{tier}}`.
+
 Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) for **code quality**.
 
 Check: the change mirrors an existing pattern rather than introducing a second way to do the same

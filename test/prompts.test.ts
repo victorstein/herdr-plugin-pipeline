@@ -2,8 +2,11 @@ import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Run, Task } from '../src/lib/types'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { renderRunPhasePrompt } from '../src/supervisor/deliver'
+import { renderTaskPhasePrompt } from '../src/supervisor/tasks'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
@@ -310,4 +313,50 @@ test('pr-review carries the intent checks, then the quality checks, word for wor
   expect(combined).toContain(`### Quality\n\n${quality}`)
   expect(combined.indexOf('### Intent')).toBeLessThan(combined.indexOf('### Quality'))
   expect(combined.split('VERDICT: CLEAR')).toHaveLength(2)
+})
+
+async function renderPhase(
+  phase: TaskPhase, over: Partial<Task> = {}, cameFrom: TaskPhase = phase,
+): Promise<string> {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const task = briefTask({ phase, pr: 7, ...over })
+  run.tasks = [task]
+  return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
+}
+
+test('every task reviewer brief opens its review with the task\'s tier', async () => {
+  for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+    expect(await renderPhase(phase, { tier: 'light' }), phase)
+      .toContain('Open the review with the line `Tier: light`.')
+  }
+})
+
+test('the branch review opens with every task\'s tier', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'branch-review'
+  run.tasks = [
+    briefTask({ task_id: 't1', phase: 'done', tier: 'light' }),
+    briefTask({ task_id: 't2', phase: 'done' }),
+  ]
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('Open the review with the line `Tiers: t1 light, t2 heavy`.')
+})
+
+test('no review prompt pins a model: every reviewer inherits the worker\'s', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    expect(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text(), name).not.toContain('model:')
+  }
+})
+
+test('both reviews that judge the plan are told when no plan review ran', async () => {
+  for (const phase of ['pr-review', 'pr-review-intent'] as const) {
+    expect(await renderPhase(phase, { tier: 'light' }), phase)
+      .toContain('the PR does not explain. No plan review ran; judge the plan\'s soundness from the diff as well.')
+    expect(await renderPhase(phase, { tier: 'standard', verdict_seq: { 'plan-review': 1 } }), phase)
+      .not.toContain('No plan review ran')
+  }
+})
+
+test('a light task raised to heavy after skipping plan-review is told its plan went unreviewed', async () => {
+  expect(await renderPhase('pr-review-intent', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
+    .toContain('No plan review ran')
 })
