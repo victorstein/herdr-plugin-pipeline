@@ -321,8 +321,8 @@ async function registerTask(
   // has no labels to read, and a typo'd --tier is refused without a gh round-trip.
   const flagRefused = input.tier !== undefined && !isTier(input.tier)
   const labels: LabelRead = filing || flagRefused ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
-  const tier = registrationTier(input.tier, labels)
-  if (!tier.ok) return fail(tier.error)
+  const chosen = registrationTier(input.tier, labels)
+  if (!chosen.ok) return fail(chosen.error)
 
   // Last, after every check: an issue filed for a registration that then fails
   // is public, and nothing in the pipeline would ever close it.
@@ -352,10 +352,10 @@ async function registerTask(
     },
     merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
-    tier: tier.tier,
+    tier: chosen.tier,
     tier_history: [{
-      at: Date.now(), from: null, to: tier.tier, source: tier.source,
-      pane: input.callerPane ?? null, why: tier.why,
+      at: Date.now(), from: null, to: chosen.tier, source: chosen.source,
+      pane: input.callerPane ?? null, why: chosen.why,
     }],
   }
 
@@ -388,7 +388,7 @@ async function registerTask(
   const bootLine = bootstrapLine(bootstrap)
 
   const header = [
-    `task_id: ${task.task_id}`, `tier: ${tier.tier} (${tier.why})`,
+    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`,
     ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine,
   ].join('\n')
 
@@ -727,9 +727,9 @@ async function rewind(ctx: Ctx, input: {
 
     task.phase = input.phase as TaskPhase
     const rowTiers = taskRow(task.phase).tiers
-    const tier = tierOf(task)
-    if (rowTiers !== undefined && !rowTiers.includes(tier)) {
-      tierWarning = `\nwarning: ${task.phase} is not in tier ${tier}; the task will leave it by the ${tier} route`
+    const taskTier = tierOf(task)
+    if (rowTiers !== undefined && !rowTiers.includes(taskTier)) {
+      tierWarning = `\nwarning: ${task.phase} is not in tier ${taskTier}; the task will leave it by the ${taskTier} route`
     }
     task.passes = {}
     task.delivery_attempts = 0
