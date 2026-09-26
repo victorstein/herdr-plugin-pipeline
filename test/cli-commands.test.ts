@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask, recordWorkerPane,
+  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask as cmdTaskReadingRealLabels,
+  recordWorkerPane,
 } from '../src/cli'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
@@ -18,6 +19,21 @@ import type { Run, Task } from '../src/lib/types'
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
+
+type CmdTaskArgs = Parameters<typeof cmdTaskReadingRealLabels>
+
+/**
+ * Registration reads an issue's labels through `gh`; a call here with no fifth
+ * argument defaults that read to an empty list instead of the real `cmdTask`
+ * default, which would shell out to `gh` in a temp dir that is not a GitHub
+ * repo. Only the tests that exercise the label read pass their own.
+ */
+function cmdTask(
+  ctx: CmdTaskArgs[0], input: CmdTaskArgs[1], fileIssue?: CmdTaskArgs[2], dispatchBase?: CmdTaskArgs[3],
+  readLabels: CmdTaskArgs[4] = async () => [],
+): ReturnType<typeof cmdTaskReadingRealLabels> {
+  return cmdTaskReadingRealLabels(ctx, input, fileIssue, dispatchBase, readLabels)
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'clicmd-'))
@@ -1037,18 +1053,19 @@ test('the dispatched return keeps every header line above the one blank line', a
   const result = await cmdTask(ctx(), {
     branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase)
+  }, undefined, fetchedBase, async () => [])
 
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 4)).toEqual([
+  expect(lines.slice(0, 5)).toEqual([
     'task_id: t1',
+    'tier: standard (default)',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
-  expect(lines.slice(4)).toEqual([
+  expect(lines.slice(5)).toEqual([
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
@@ -1080,14 +1097,15 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   const result = await cmdTask(ctx(), {
     branch: 'feat/quiet', issue: 2, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase)
+  }, undefined, fetchedBase, async () => [])
 
   // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 4)).toEqual([
-    'task_id: t1', 'files: none', 'bootstrap: none', 'base: 1fb8a43 (origin/main as just fetched)',
+  expect(lines.slice(0, 5)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'files: none', 'bootstrap: none',
+    'base: 1fb8a43 (origin/main as just fetched)',
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
   expect(lines.join('\n')).toContain('-- --dangerously-skip-permissions')
@@ -1623,4 +1641,107 @@ test('a run rewind into a phase with no prompt owes nothing', async () => {
   const run = await seed()
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'execute', taskId: null })).ok).toBe(true)
   expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
+})
+
+// ——— registration tier ———
+
+async function seedInRepo(): Promise<void> {
+  await saveRun(dir, newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' }))
+}
+
+const existingIssue = {
+  branch: 'feat/tiered', issue: 12, surface: 'core', notes: '',
+  dependsOn: [] as string[], files: [] as string[], keepWorktree: false,
+  repoKey: 'k', runId: null,
+}
+
+const headLines = (text: string): string[] => text.split('\n\n')[0]!.split('\n')
+
+test('a pipeline:tier label beats --tier, and the tier line says what --tier said', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'standard', callerPane: 'w1:p1' },
+    undefined, fetchedBase, async () => ['bug', 'pipeline:tier-light'])
+
+  expect(result.ok).toBe(true)
+  expect(headLines(result.text).slice(0, 2)).toEqual([
+    'task_id: t1', 'tier: light (label pipeline:tier-light; --tier said standard)',
+  ])
+  const task = (await registered())[0]!
+  expect(task.tier).toBe('light')
+  expect(task.tier_history).toEqual([{
+    at: expect.any(Number), from: null, to: 'light', source: 'label', pane: 'w1:p1',
+    why: 'label pipeline:tier-light; --tier said standard',
+  }])
+})
+
+test('--tier with no tier label is recorded as the flag', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase, async () => ['bug'])
+  expect(headLines(result.text)).toContain('tier: heavy (--tier)')
+  expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
+})
+
+test('with neither a label nor --tier the task is standard', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => [])
+  expect(headLines(result.text)).toContain('tier: standard (default)')
+  expect((await registered())[0]!.tier).toBe('standard')
+})
+
+test('unreadable labels fall back to --tier and still register', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase,
+    async () => ({ error: 'HTTP 401: Bad credentials' }))
+  expect(result.ok).toBe(true)
+  expect(headLines(result.text)).toContain('tier: heavy (--tier; labels unreadable: HTTP 401: Bad credentials)')
+})
+
+test('two tier labels refuse the registration and record nothing', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase,
+    async () => ['pipeline:tier-light', 'pipeline:tier-heavy'])
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('pipeline:tier-light, pipeline:tier-heavy')
+  expect(await registered()).toEqual([])
+})
+
+test('an unknown tier label refuses the registration', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => ['pipeline:tier-huge'])
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('unknown tier label pipeline:tier-huge')
+  expect(await registered()).toEqual([])
+})
+
+test('an unknown --tier files no issue', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile, tier: 'huge' },
+    async () => { filed++; return issue318 })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
+  expect(filed).toBe(0)
+})
+
+test('a filed issue has no labels to read, so --title skips the read', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let reads = 0
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
+    async () => issue318, fetchedBase, async () => { reads++; return ['pipeline:tier-heavy'] })
+  expect(result.ok).toBe(true)
+  expect(reads).toBe(0)
+  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'issue: #318 (filed)'])
+})
+
+test('a registration that loses its save reads the labels once', async () => {
+  await seedInRepo()
+  let reads = 0
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => {
+    reads++
+    await supervisorWrites((run) => { run.intake_closed = true })
+    return ['pipeline:tier-heavy']
+  })
+  expect(result.ok).toBe(true)
+  expect(reads).toBe(1)
+  expect((await registered()).map((t) => t.tier)).toEqual(['heavy'])
 })

@@ -23,6 +23,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { registrationTier, type LabelRead } from './lib/tiers'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -210,20 +211,27 @@ type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<
 /** What one `hpipe task` call carries across the stale-run retries of its registration. */
 interface RegistrationAttempt {
   fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
+  readLabelsOnce: (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
   landed: (taskId: string) => void
   dispatchBase: DispatchBaseFor
 }
 
 type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 
+type ReadLabels = (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
+
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
+
+const readLabelsWithGh: ReadLabels = (repoRoot, issue) => new Gh(undefined, repoRoot).issueLabels(issue)
 
 interface TaskInput {
   branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
   repoKey: string | null; runId: string | null
   title?: string; bodyFile?: string
+  tier?: string
+  callerPane?: string | null
 }
 
 async function registerTask(
@@ -309,6 +317,12 @@ async function registerTask(
   const cycle = detectCycle([...run.tasks, { task_id: taskId, depends_on: input.dependsOn }])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
+  // Before filing, so a refused tier files nothing. A filed issue is brand new and
+  // has no labels to read.
+  const labels: LabelRead = filing ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
+  const tier = registrationTier(input.tier, labels)
+  if (!tier.ok) return fail(tier.error)
+
   // Last, after every check: an issue filed for a registration that then fails
   // is public, and nothing in the pipeline would ever close it.
   const filed = filing ? await attempt.fileIssueOnce(run.repo_root) : null
@@ -337,6 +351,11 @@ async function registerTask(
     },
     merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
+    tier: tier.tier,
+    tier_history: [{
+      at: Date.now(), from: null, to: tier.tier, source: tier.source,
+      pane: input.callerPane ?? null, why: tier.why,
+    }],
   }
 
   run.tasks.push(task)
@@ -367,8 +386,10 @@ async function registerTask(
   const bootstrap = repoBootstrap(run.repo_root)
   const bootLine = bootstrapLine(bootstrap)
 
-  const header = [`task_id: ${task.task_id}`, ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine]
-    .join('\n')
+  const header = [
+    `task_id: ${task.task_id}`, `tier: ${tier.tier} (${tier.why})`,
+    ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine,
+  ].join('\n')
 
   if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
 
@@ -382,16 +403,20 @@ async function registerTask(
 
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
-  dispatchBase: DispatchBaseFor = freshDispatchBase,
+  dispatchBase: DispatchBaseFor = freshDispatchBase, readLabels: ReadLabels = readLabelsWithGh,
 ): Promise<CmdResult> {
-  // The retry re-runs registerTask from a fresh read, so the gh call is memoized
-  // out here: a second attempt reuses the issue the first one filed, never files another.
-  const outcome: { filing: Promise<FiledIssue | GhFailure> | null; registeredAs: string | null } = {
-    filing: null, registeredAs: null,
-  }
+  // The retry re-runs registerTask from a fresh read, so the gh calls are memoized
+  // out here: a second attempt reuses the issue the first one filed and the labels
+  // it read, and never files another.
+  const outcome: {
+    filing: Promise<FiledIssue | GhFailure> | null
+    labels: Promise<string[] | GhFailure> | null
+    registeredAs: string | null
+  } = { filing: null, labels: null, registeredAs: null }
   const attempt: RegistrationAttempt = {
     fileIssueOnce: (repoRoot) =>
       (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
+    readLabelsOnce: (repoRoot, issue) => (outcome.labels ??= readLabels(repoRoot, issue)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
   }
@@ -946,7 +971,8 @@ export function listFlag(argv: string[], name: string): string[] {
 const USAGE: Record<string, string[]> = {
   start: ['hpipe start <title>'],
   task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
-    '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
+    '[--tier light|standard|heavy] [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] ' +
+    '[--keep-worktree] [--run <run-id>]'],
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
   dispatch: [
@@ -1073,6 +1099,8 @@ async function dispatch(argv: string[]): Promise<number> {
         runId: flag(rest, 'run'),
         title: flag(rest, 'title') ?? undefined,
         bodyFile: flag(rest, 'body-file') ?? undefined,
+        tier: flag(rest, 'tier') ?? undefined,
+        callerPane: process.env.HERDR_PANE_ID || null,
       })
       break
 

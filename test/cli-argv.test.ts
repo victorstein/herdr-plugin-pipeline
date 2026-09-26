@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
@@ -10,6 +10,25 @@ const PLUGIN_ROOT = join(import.meta.dir, '..')
 afterEach(cleanupFixtures)
 
 interface Fixture { repo: string; stateDir: string; env: Record<string, string> }
+
+/**
+ * Registering with `--issue` reads the issue's labels through `gh`, and this bin
+ * stands in so the suite never shells out to the real `gh` on the machine
+ * running it. Every stub answers `issue view` with no labels; a test exercising
+ * the label read replaces `f.env.GH_BIN` with its own fake bin.
+ */
+function defaultGhBin(): string {
+  const dir = tempDir('hpipe-argv-gh-default-')
+  const path = join(dir, 'fake-gh')
+  writeFileSync(path, `#!/usr/bin/env bun
+const argv = process.argv.slice(2).join(' ')
+if (argv.startsWith('issue view')) { console.log(JSON.stringify({ labels: [] })); process.exit(0) }
+console.error('unstubbed: ' + argv)
+process.exit(1)
+`)
+  chmodSync(path, 0o755)
+  return path
+}
 
 /**
  * A real git repo and a scratch ledger. `cmdTask` needs `git rev-parse
@@ -31,6 +50,7 @@ function fixture(): Fixture {
     HERDR_PLUGIN_ROOT: PLUGIN_ROOT,
     HERDR_SESSION: 'argv-fixture',
     HERDR_SOCKET_PATH: '',
+    GH_BIN: defaultGhBin(),
   }
   return { repo, stateDir, env }
 }
@@ -364,4 +384,28 @@ test('dispatch needs exactly one of --task and --done', async () => {
     intake_closed: boolean
   }
   expect(run.intake_closed).toBe(false)
+})
+
+test('task --tier reaches registration, and a pipeline:tier label read through gh overrides it', async () => {
+  const f = started()
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, {
+    'issue view 1': { labels: [{ name: 'pipeline:tier-light' }] },
+    'issue view 2': { labels: [] },
+  })
+
+  const labelled = hpipe([...TASK, '--tier', 'heavy'], f)
+  expect(labelled.code).toBe(0)
+  expect(labelled.out).toContain('tier: light (label pipeline:tier-light; --tier said heavy)')
+
+  const flagged = hpipe(['task', '--branch', 'smoke/two', '--issue', '2', '--surface', 'core', '--tier', 'heavy'], f)
+  expect(flagged.code).toBe(0)
+  expect(flagged.out).toContain('tier: heavy (--tier)')
+  expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain('issue view 1 --json labels')
+})
+
+test('task --tier with its value missing is a usage error', () => {
+  const r = hpipe([...TASK, '--tier', '--files', 'src/'], started())
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--tier needs a value')
 })
