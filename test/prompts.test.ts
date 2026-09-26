@@ -564,3 +564,10 @@ test('an answer that resumes implement points at whichever prompt the worker rec
   const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
   expect(prose(text)).toContain('as the implement or CI-red prompt you received describes')
 })
+
+test('ci-red re-runs an environmental failure with an empty commit, since only the PR head is watched', async () => {
+  const text = prose(await renderPhase('implement', { tier: 'standard' }, 'ci'))
+  expect(text).toContain('git commit --allow-empty -m "ci: re-run <check>"')
+  expect(text).toContain('say so in the PR')
+  expect(text).not.toContain('re-run the check instead of editing code')
+})

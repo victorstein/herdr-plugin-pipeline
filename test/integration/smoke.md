@@ -733,6 +733,8 @@ clears to `done`.
 
 - The PR body ends with a real `Closes #<n>` keyword. `close` waits on `gh issue view --json
   closed`, and "Implements #n" does not auto-close.
+- If CI goes red and the task returns to `ci`, `hpipe show` reads `ci: none` until the new head is
+  polled; a failure, `ci` pass count bump or escalation within 30s of re-entry is the stale result.
 - `teardown` removes the worktree unless the task was registered `--keep-worktree`.
 - No plugin commands were dropped:
 

@@ -7,8 +7,10 @@ CI failed on PR #{{pr}}. The failing checks:
 This is your PR to fix. Read the actual failure output before deciding what is wrong —
 `gh run view --log-failed` — rather than guessing from the check name.
 
-If the failure is environmental rather than a defect in this branch, say so in the PR and re-run the
-check instead of editing code.
+If the failure is environmental rather than a defect in this branch, say so in the PR, then
+`git commit --allow-empty -m "ci: re-run <check>"` and push instead of editing code. The supervisor
+sees only the PR head: a re-run from the Actions UI or `gh run rerun` moves nothing and leaves this
+task waiting.
 
 If it is a defect, you keep the judgment and one subagent writes the fix. Dispatch it with
 `model: {{implement_model}}`, and **wait for it within this turn**: a backgrounded subagent leaves this
