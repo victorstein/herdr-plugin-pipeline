@@ -1,4 +1,4 @@
-import { type PhaseRow, taskRow } from './phases'
+import { nextPhase, type PhaseRow, taskRow, tierOf } from './phases'
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
@@ -165,7 +165,7 @@ function advanceLoopingRow(
   maxPasses: number, headSha: string | null,
 ): Task | null {
   if (cleared) {
-    return enterTaskPhase(run, task, row.onClear as TaskPhase, 'cleared')
+    return enterTaskPhase(run, task, nextPhase(tierOf(task), row), 'cleared')
   }
   const count = bumpCounter(task, row.phase)
   if (count >= maxPasses) {
@@ -183,7 +183,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'plan': {
       if (!s.actorIdle || !s.artifactFresh) return null
       return enterTaskPhase(
-        run, task, taskRow(task.phase).onClear as TaskPhase, 'actor idle + artifact fresh',
+        run, task, nextPhase(tierOf(task), taskRow(task.phase)), 'actor idle + artifact fresh',
       )
     }
 
@@ -191,11 +191,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
       if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
-      return enterTaskPhase(run, task, 'pr-review-intent', `PR #${s.prNumber} at ${s.headSha}`)
+      return enterTaskPhase(
+        run, task, nextPhase(tierOf(task), taskRow('implement')), `PR #${s.prNumber} at ${s.headSha}`,
+      )
     }
 
     case 'spec-review':
     case 'plan-review':
+    case 'pr-review':
     case 'pr-review-intent':
     case 'pr-review-quality': {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
