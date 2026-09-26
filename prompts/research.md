@@ -11,7 +11,7 @@ the nearest existing example of this kind of change looks like. Cite `file:line`
 command and its output.
 
 Assert nothing from memory. Unverified claims are the single most common blocker this pipeline's
-reviews find, and every later phase — the spec, both reviews, the orchestrator triaging a decision —
+reviews find, and every later phase — the spec, its reviews, the orchestrator triaging a decision —
 reads this note as established fact.
 
 It may be short. It may not be empty, and it may not simply restate the issue.
