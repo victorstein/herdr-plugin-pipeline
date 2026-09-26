@@ -38,6 +38,8 @@ export function phaseLoop(task: Task): string {
   return steps.join('\n')
 }
 
+// `verdict_seq` counts reservations, not finished reviews: a rewind onto the row
+// reserves one, so after a rewind away before the review ran this over-claims.
 const reviewRan = (task: Task, phase: TaskPhase): boolean => (task.verdict_seq?.[phase] ?? 0) > 0
 
 /**
