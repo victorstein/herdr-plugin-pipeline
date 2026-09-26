@@ -39,7 +39,11 @@ export interface RunSignals {
   newestRegisteredAt: number | null
   dispatchComplete: boolean
   tasksAllTerminal: boolean
-  anyTaskDone: boolean
+  /**
+   * Tasks in `done` or `orphaned` whose merge was recorded. `orphaned` is
+   * normally post-merge, but a manual rewind can put an unmerged task there.
+   */
+  landedTaskCount: number
 }
 
 export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
@@ -68,11 +72,13 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
       return enterRunPhase(run, 'execute', 'every dispatched task has a worktree')
     }
 
+    // A final review of one task's work repeats the reviews that task already
+    // passed: nothing else landed for it to have a seam with.
     case 'execute': {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
-      return s.anyTaskDone
-        ? enterRunPhase(run, 'branch-review', 'every task finished')
-        : enterRunPhase(run, 'escalated', 'every task finished without one reaching done')
+      if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
+      if (s.landedTaskCount === 1) return enterRunPhase(run, 'done', 'one task landed; branch-review skipped')
+      return enterRunPhase(run, 'escalated', 'every task finished without one reaching done')
     }
 
     case 'branch-review': {

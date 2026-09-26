@@ -12,7 +12,7 @@ function fixture(phase: RunPhase): Run {
 const signals = (over: Partial<RunSignals> = {}): RunSignals => ({
   actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
   newestRegisteredAt: null, dispatchComplete: false,
-  tasksAllTerminal: false, anyTaskDone: false,
+  tasksAllTerminal: false, landedTaskCount: 0,
   ...over,
 })
 
@@ -54,20 +54,27 @@ test('dispatch does not wait on the orchestrator going idle', () => {
 test('execute waits for intake_closed even when every task is terminal', () => {
   const run = fixture('execute')
   run.intake_closed = false
-  expect(advanceRun(run, signals({ tasksAllTerminal: true, anyTaskDone: true }))).toBeNull()
+  expect(advanceRun(run, signals({ tasksAllTerminal: true, landedTaskCount: 2 }))).toBeNull()
 })
 
-test('execute goes to branch-review when intake is closed and a task is done', () => {
+test('execute goes to branch-review when intake is closed and two tasks landed', () => {
   const run = fixture('execute')
   run.intake_closed = true
-  expect(advanceRun(run, signals({ tasksAllTerminal: true, anyTaskDone: true }))?.phase)
+  expect(advanceRun(run, signals({ tasksAllTerminal: true, landedTaskCount: 2 }))?.phase)
     .toBe('branch-review')
 })
 
-test('execute escalates when no task reached done', () => {
+test('execute finishes the run without a branch review when exactly one task landed', () => {
   const run = fixture('execute')
   run.intake_closed = true
-  expect(advanceRun(run, signals({ tasksAllTerminal: true, anyTaskDone: false }))?.phase)
+  expect(advanceRun(run, signals({ tasksAllTerminal: true, landedTaskCount: 1 }))?.phase).toBe('done')
+  expect(run.history.at(-1)?.why).toBe('one task landed; branch-review skipped')
+})
+
+test('execute escalates when no task landed', () => {
+  const run = fixture('execute')
+  run.intake_closed = true
+  expect(advanceRun(run, signals({ tasksAllTerminal: true, landedTaskCount: 0 }))?.phase)
     .toBe('escalated')
 })
 

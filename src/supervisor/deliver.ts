@@ -296,6 +296,10 @@ function awaitsWorktree(task: Task): boolean {
   return !taskRow(task.phase).terminal && task.phase !== 'escalated'
 }
 
+function hasLanded(task: Task): boolean {
+  return (task.phase === 'done' || task.phase === 'orphaned') && task.merged_at_ms !== null
+}
+
 export function taskSignalsFor(run: Run) {
   return {
     newestRegisteredAt: run.tasks.length > 0
@@ -304,7 +308,7 @@ export function taskSignalsFor(run: Run) {
     dispatchComplete: run.tasks.some((t) => t.phase !== 'queued') &&
       !run.tasks.some(awaitsWorktree),
     tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => FINISHED.has(t.phase)),
-    anyTaskDone: run.tasks.some((t) => t.phase === 'done'),
+    landedTaskCount: run.tasks.filter(hasLanded).length,
   }
 }
 
