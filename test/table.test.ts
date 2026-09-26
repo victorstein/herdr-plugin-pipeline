@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { RUN_ROWS, TASK_ROWS, type PhaseRow } from '../src/lib/phases'
+import { nextPhase, RUN_ROWS, TASK_ROWS, taskRow, TIERS, type PhaseRow, type Tier } from '../src/lib/phases'
+import type { TaskPhase } from '../src/lib/types'
 
 const ALL: readonly PhaseRow<string>[] = [...RUN_ROWS, ...TASK_ROWS]
 
@@ -55,7 +56,7 @@ test('every resumePrompt names a resumeActor', () => {
 
 // Named one by one, not globbed: `prompts/*-review*.md` also matches
 // branch-review.md, which is orchestrator-owned and must carry neither.
-const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality']
+const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality']
 
 const promptText = (name: string) =>
   Bun.file(join(import.meta.dir, '..', 'prompts', `${name}.md`)).text()
@@ -81,4 +82,35 @@ test('no task row carries a stallWhen — taskStallCandidates never reads one', 
   // (:99-104), and its declared parameter is run-shaped (phases.ts:39). A task
   // row given one today would be silently ignored, so make that fail loudly.
   expect(TASK_ROWS.filter((r) => r.stallWhen).map((r) => r.phase)).toEqual([])
+})
+
+function walkFromQueued(tier: Tier): TaskPhase[] {
+  const walked: TaskPhase[] = ['queued']
+  while (walked.at(-1) !== 'ci') {
+    if (walked.length > TASK_ROWS.length) throw new Error(`${tier} walks in a circle`)
+    walked.push(nextPhase(tier, taskRow(walked.at(-1)!)))
+  }
+  return walked
+}
+
+test('every tier walks from queued to ci, through implement', () => {
+  for (const tier of TIERS) {
+    const walked = walkFromQueued(tier)
+    expect(walked.at(-1), tier).toBe('ci')
+    expect(walked, tier).toContain('implement')
+  }
+})
+
+test('no row that is any row\'s onBlocker carries tiers — blocker routing stays tier-blind', () => {
+  const targets = new Set(TASK_ROWS.flatMap((r) => (r.onBlocker === undefined ? [] : [r.onBlocker])))
+  for (const phase of targets) expect(taskRow(phase).tiers, phase).toBeUndefined()
+})
+
+test('every row a tier reaches that has an actor has a prompt', () => {
+  for (const tier of TIERS) {
+    for (const phase of walkFromQueued(tier)) {
+      const row = taskRow(phase)
+      if (row.actor !== undefined) expect(row.prompt, `${tier}: ${phase}`).toBeDefined()
+    }
+  }
 })

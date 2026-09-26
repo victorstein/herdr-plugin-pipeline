@@ -7,7 +7,7 @@ import { dispatchSequence } from '../src/lib/unstarted'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
-  'spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
+  'spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
 ]
 const ALL = [
   'spec', 'plan', 'dispatch', 'worker-brief', 'ci-red', 'merge', 'close',
@@ -297,4 +297,17 @@ test('this repo declares its own bootstrap, and it is executable', () => {
   const path = join(ROOT, '.claude', 'pipeline-bootstrap')
   expect(existsSync(path)).toBe(true)
   expect(statSync(path).mode & 0o111).toBeGreaterThan(0)
+})
+
+test('pr-review carries the intent checks, then the quality checks, word for word, under one trailer', async () => {
+  const read = (name: string) => Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+  const checks = (text: string) => /^Check: [\s\S]*?\n\n/m.exec(text)?.[0] ?? '(no Check: paragraph)'
+  const combined = await read('pr-review')
+  const intent = checks(await read('pr-review-intent'))
+  const quality = checks(await read('pr-review-quality'))
+
+  expect(combined).toContain(`### Intent\n\n${intent}`)
+  expect(combined).toContain(`### Quality\n\n${quality}`)
+  expect(combined.indexOf('### Intent')).toBeLessThan(combined.indexOf('### Quality'))
+  expect(combined.split('VERDICT: CLEAR')).toHaveLength(2)
 })
