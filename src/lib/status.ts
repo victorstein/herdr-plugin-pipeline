@@ -5,8 +5,8 @@ import { counterFor } from './machine'
 import { runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
-import { runRow, taskRow } from './phases'
-import type { MissingArtifact, Run, SessionKey, Task, UncommittedWork } from './types'
+import { runRow, taskRow, tierOf } from './phases'
+import type { MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
   remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
@@ -424,6 +424,7 @@ export function formatStatus(
         task.branch,
         `#${task.issue}`,
         `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
+        tierOf(task),
         task.agent_status,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
@@ -442,6 +443,31 @@ export function formatStatus(
   return lines.join('\n')
 }
 
+/**
+ * A skipped review shows here by its absence. Tier changes are not read from
+ * `run.history` because they are never written there; see `TierChange`.
+ */
+export function visitedPhases(run: Run, task: Task): string[] {
+  const visited: string[] = []
+  let previous: string | undefined
+  for (const entry of run.history) {
+    if (entry.task_id !== task.task_id) continue
+    // A rewind onto the phase the task is already in is still a rewind worth showing.
+    if (entry.from !== 'rewind' && entry.to === previous) continue
+    previous = entry.to
+    visited.push(entry.from === 'rewind' ? `↺${entry.to}` : entry.to)
+  }
+  return visited
+}
+
+function tierLogEntry(change: TierChange): string {
+  const when = `${new Date(change.at).toISOString().slice(0, 16).replace('T', ' ')}Z`
+  const move = `${change.from ?? '—'} → ${change.to}`
+  return change.from === null
+    ? `${when} ${move} (${change.why})`
+    : `${when} ${move} (${change.source}, pane ${change.pane ?? 'unknown'}): ${change.why}`
+}
+
 const orNone = (value: string | number | null | undefined): string =>
   value === null || value === undefined || value === '' ? 'none' : String(value)
 
@@ -451,6 +477,8 @@ const listOrNone = (values: readonly string[]): string =>
 export function formatTaskDetail(run: Run, task: Task, now: number = Date.now()): string {
   const verdicts = Object.entries(task.artifacts.verdicts)
   const open = openDecisionFor(task)
+  const tierLog = (task.tier_history ?? []).map(tierLogEntry)
+  const visited = visitedPhases(run, task)
   return [
     `task:       ${task.task_id}`,
     `run:        ${run.run_id}`,
@@ -460,6 +488,9 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `files:      ${listOrNone(task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,
     `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
+    `tier:       ${tierOf(task)}`,
+    `tier log:   ${tierLog.length > 0 ? tierLog.join(' · ') : 'none'}`,
+    `visited:    ${visited.length > 0 ? visited.join(' → ') : 'none'}`,
     `agent:      ${task.agent_status}`,
     `workspace:  ${orNone(task.workspace_id)}`,
     `pane:       ${orNone(task.pane_id)}` +

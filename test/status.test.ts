@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { actionFor, formatStatus, formatTaskDetail, waitsOnYou } from '../src/lib/status'
+import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -260,8 +260,8 @@ test('every task line carries how long it has sat in its phase', () => {
     mkTask({ task_id: 't2', phase: 'implement', phase_entered_at: now - 2 * 60_000 }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
-  expect(text).toContain('  t1 feat/x #1 [research 780m] working')
-  expect(text).toContain('  t2 feat/x #1 [implement 2m] working')
+  expect(text).toContain('  t1 feat/x #1 [research 780m] heavy working')
+  expect(text).toContain('  t2 feat/x #1 [implement 2m] heavy working')
 })
 
 test('a PR parked in merge is named under waiting on you, not left among the rest', () => {
@@ -603,7 +603,7 @@ test('a dispatch inside its grace reads as under way on its task line — #135',
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
-  expect(taskLine).toEndWith(`[research 0m] unknown — dispatch under way — see \`${HP} show --task t1\``)
+  expect(taskLine).toEndWith(`[research 0m] heavy unknown — dispatch under way — see \`${HP} show --task t1\``)
   expect(text).not.toContain('waiting on you:')
 })
 
@@ -681,4 +681,66 @@ test('a phase prompt still in flight is nobody\'s move yet — #136', () => {
   expect(text).not.toContain('with nothing at')
   expect(text).not.toContain('waiting on you:')
   expect(text).toContain('nothing for you — its spec prompt is queued for w3:p1')
+})
+
+test('the status task line carries the tier right after the phase bracket', () => {
+  const now = 100_000_000
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't2', phase: 'implement', tier: 'light', phase_entered_at: now - 5 * 60_000 })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now))
+    .toContain('  t2 feat/x #1 [implement 5m] light working')
+})
+
+test('visitedPhases lists every phase entered, drops repeats and marks rewinds', () => {
+  const run = mkRun()
+  const task = mkTask({ task_id: 't1' })
+  run.history = [
+    { at: 1, task_id: 't1', from: 'queued', to: 'research', why: 'gate opened' },
+    { at: 2, task_id: 't2', from: 'queued', to: 'research', why: 'gate opened' },
+    { at: 3, task_id: 't1', from: 'research', to: 'spec', why: 'actor idle + artifact fresh' },
+    { at: 4, task_id: 't1', from: 'spec', to: 'blocked-on-decision', why: 'worker surfaced a decision' },
+    { at: 5, task_id: 't1', from: 'blocked-on-decision', to: 'spec', why: 'decision d1 answered' },
+    { at: 6, task_id: 't1', from: 'spec', to: 'spec', why: 'answer to d2 discarded, undelivered' },
+    { at: 7, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' },
+    { at: 8, from: 'execute', to: 'branch-review', why: 'every task finished' },
+    { at: 9, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' },
+  ]
+  expect(visitedPhases(run, task))
+    .toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research', '↺research'])
+})
+
+test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {
+  const run = mkRun()
+  const task = mkTask({
+    task_id: 't1', phase: 'spec', tier: 'standard',
+    tier_history: [
+      { at: Date.UTC(2026, 8, 25, 10, 4), from: null, to: 'light', source: 'label', pane: 'w1:p1',
+        why: 'label pipeline:tier-light' },
+      { at: Date.UTC(2026, 8, 25, 11, 30), from: 'light', to: 'standard', source: 'hpipe-tier', pane: 'w3:p1',
+        why: 'research found a contract change' },
+    ],
+  })
+  run.tasks = [task]
+  run.history = [
+    { at: 1, task_id: 't1', from: 'queued', to: 'research', why: 'gate opened' },
+    { at: 2, task_id: 't1', from: 'research', to: 'spec', why: 'actor idle + artifact fresh' },
+  ]
+  const lines = formatTaskDetail(run, task).split('\n')
+  const phaseAt = lines.findIndex((line) => line.startsWith('phase:'))
+  expect(lines.slice(phaseAt + 1, phaseAt + 4)).toEqual([
+    'tier:       standard',
+    'tier log:   2026-09-25 10:04Z — → light (label pipeline:tier-light) · ' +
+      '2026-09-25 11:30Z light → standard (hpipe-tier, pane w3:p1): research found a contract change',
+    'visited:    research → spec',
+  ])
+})
+
+test('hpipe show on a task from before tiers reads heavy, with no log, and nothing visited yet', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'queued' })
+  run.tasks = [task]
+  const text = formatTaskDetail(run, task)
+  expect(text).toContain('tier:       heavy')
+  expect(text).toContain('tier log:   none')
+  expect(text).toContain('visited:    none')
 })
