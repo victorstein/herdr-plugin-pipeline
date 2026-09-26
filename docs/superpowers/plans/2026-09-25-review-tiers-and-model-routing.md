@@ -1940,8 +1940,10 @@ test('visitedPhases lists every phase entered, drops repeats and marks rewinds',
     { at: 6, task_id: 't1', from: 'spec', to: 'spec', why: 'answer to d2 discarded, undelivered' },
     { at: 7, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' },
     { at: 8, from: 'execute', to: 'branch-review', why: 'every task finished' },
+    { at: 9, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' },
   ]
-  expect(visitedPhases(run, task)).toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research'])
+  expect(visitedPhases(run, task))
+    .toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research', '↺research'])
 })
 
 test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {
@@ -2024,7 +2026,9 @@ export function visitedPhases(run: Run, task: Task): string[] {
   const visited: string[] = []
   let previous: string | undefined
   for (const entry of run.history) {
-    if (entry.task_id !== task.task_id || entry.to === previous) continue
+    if (entry.task_id !== task.task_id) continue
+    // A rewind onto the phase the task is already in is still a rewind worth showing.
+    if (entry.from !== 'rewind' && entry.to === previous) continue
     previous = entry.to
     visited.push(entry.from === 'rewind' ? `↺${entry.to}` : entry.to)
   }
