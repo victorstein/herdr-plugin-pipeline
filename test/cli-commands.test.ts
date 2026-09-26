@@ -1848,3 +1848,15 @@ test('a rewind onto a row the tier runs carries no warning', async () => {
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
   expect(result.text).not.toContain('warning:')
 })
+
+test('rewind onto ci forgets the last CI result, so the next round waits for a fresh poll', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', pr: 5, ci: 'fail', passes: { ci: 2 } }])
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'ci', taskId: 't1' })).ok).toBe(true)
+
+  const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+  expect(task?.phase).toBe('ci')
+  expect(task?.pr).toBe(5)
+  expect(task?.ci).toBeNull()
+})

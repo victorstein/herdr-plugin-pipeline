@@ -759,6 +759,9 @@ async function rewind(ctx: Ctx, input: {
       task.merge_commit = null
       task.issue_closed_at_entry = false
     }
+    // The same stale bucket `enterTaskPhase` forgets on entry: kept, it fails the
+    // rewound round on the next tick, before the poller has read the PR again.
+    if (task.phase === 'ci') task.ci = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (taskRow(task.phase).signal === 'verdict') {
       reserved = reserveVerdict(run, task, task.phase)
