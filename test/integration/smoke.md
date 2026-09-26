@@ -123,12 +123,17 @@ Now the two real registrations, which the orchestrator runs. The second files it
 body file written like any issue body:
 
 ```bash
-hpipe task --branch smoke/one --issue <n1> --surface <surface> --files src/lib
+hpipe task --branch smoke/one --issue <n1> --surface <surface> --files src/lib --tier heavy
 hpipe task --branch smoke/two --title "<title>" --body-file <brief.md> --surface <surface> \
-           --files src/lib/config.ts
+           --files src/lib/config.ts --tier heavy
 ```
 
-**Observe on the second:** a line `issue: #<n2> (filed)` right after `task_id: t2`, a real issue
+Both are pinned to `--tier heavy`, the tier that runs every review row, so §3–§6 exercise the same
+route every task took before tiers existed. The lighter tiers have their own section, §7. `<n1>` must
+carry no `pipeline:tier-*` label: a tier label on the issue overrides `--tier`.
+
+**Observe on the second:** a line `issue: #<n2> (filed)` right after `task_id: t2` and its `tier:`
+line, a real issue
 `#<n2>` in the target repo (`gh issue view <n2>` shows the body file's text), exactly one such issue
 (a retried registration must never file twice), and a brief headed `smoke/two — issue #<n2>`. If gh
 fails — no auth, or a fork with several remotes and no `gh repo set-default` — the command must exit 1
@@ -139,8 +144,9 @@ the output must name the filed issue and say `register it with --issue <n2>`; do
 prefix-overlapping pair works; do not use `--depends-on` here, which would serialize the tasks for
 a different reason and hide the collision you are here to see.
 
-**Observe:** each `hpipe task` prints `task_id: t1` / `task_id: t2`, then a `files:` line echoing what
-it recorded — `files: src/lib` and `files: src/lib/config.ts` — and then the rendered worker brief.
+**Observe:** each `hpipe task` prints `task_id: t1` / `task_id: t2`, then `tier: heavy (--tier)`, then
+a `files:` line echoing what it recorded — `files: src/lib` and `files: src/lib/config.ts` — and then
+the rendered worker brief.
 Both should print a brief, not `queued: waiting on …` — with no `--depends-on` the dependency gate is
 open for both, and the file collision is resolved much later, at `blocked-on-files`, not at
 registration. The two tasks must come out as `t1` and `t2`; §3 names those ids literally.
@@ -268,7 +274,7 @@ Repeat once with an untracked file left in the closed task's checkout. The task 
 
 **This is the assertion no unit test can make.** A single supervisor tick can produce prompts for
 several panes at once. The previous design returned one delivery per tick and dropped the rest,
-which was only safe because every prompt-producing row had the same recipient. With eight
+which was only safe because every prompt-producing row had the same recipient. With nine
 worker-owned rows that is no longer true, and the failure mode is not a crash: it is one pane
 receiving *both* prompts concatenated while the other silently receives nothing and stalls until
 `TASK_STALL_MINUTES` (45) later.
@@ -356,9 +362,10 @@ herdr --session "$SMOKE" pane read <worker_two_pane> --source visible --lines 30
 
 ## 3. The `blocked-on-files` collision
 
-Both tasks share a file prefix, so after `plan-review` clears, each enters `blocked-on-files` —
-that is `plan-review`'s `onClear`, unconditionally, for every task. `releasableFromFiles` then
-makes **one pass in `task_id` order and releases at most one task per overlapping group per tick**.
+Both tasks share a file prefix, so after `plan-review` clears, each enters `blocked-on-files`. Every
+tier passes through it on the way to `implement`: a heavy or standard task enters it from
+`plan-review`, and a light task, which skips `plan-review`, enters it straight from `plan`.
+`releasableFromFiles` then makes **one pass in `task_id` order and releases at most one task per overlapping group per tick**.
 
 **Assert:**
 
@@ -375,8 +382,9 @@ makes **one pass in `task_id` order and releases at most one task per overlappin
    moving, so only a release clears it` instead, and then `t2` also appears under `waiting on
    you:` carrying the rendered `<hpipe> release --task t1` — once, not on both lines.
 
-   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review-intent`,
-   `pr-review-quality`, `ci`, `merge`, `close`, `teardown` all hold files.
+   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (light and
+   standard), `pr-review-intent` and `pr-review-quality` (heavy), `ci`, `merge`, `close`, `teardown`
+   all hold files. Pinned heavy, `t1` passes through the heavy pair.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.
@@ -515,8 +523,8 @@ bug.
 A phase that goes quiet is probed every `TASK_STALL_MINUTES` (45) for a task, `STALL_MINUTES` (15)
 for a run, measured from the **last probe** rather than from phase entry — so a supervisor restart
 produces one probe per stalled record, not a burst. After `STALL_PROBE_MAX` (3) unanswered probes a
-row whose signal the probed actor produces itself (`research`, `spec`, `plan`, the four review
-rows, `implement`, and the run's `branch-review` — nine in all) is moved to `escalated` and reported
+row whose signal the probed actor produces itself (`research`, `spec`, `plan`, the five review
+rows, `implement`, and the run's `branch-review` — ten in all) is moved to `escalated` and reported
 by `hpipe status`.
 
 Nine rows are probed but **never** escalated: `blocked-on-files`, `blocked-on-decision`, the last
@@ -590,10 +598,11 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
 
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 
-**The question.** During `spec-review`, `plan-review`, `pr-review-intent` and `pr-review-quality`,
-the worker dispatches a *review subagent* and is told to wait for it within its own turn. The
-supervisor gates every artifact-and-verdict row on the worker pane reading `idle` or `done` (via
-`herdr agent get`, double-checked after `ACTOR_SETTLE_MS`). Three adversarial rounds could not
+**The question.** During `spec-review`, `plan-review`, `pr-review`, `pr-review-intent` and
+`pr-review-quality`, the worker dispatches a *review subagent*, and during `implement` the Sonnet
+subagent that writes the code; either way it is told to wait for it within its own turn. The
+supervisor gates every artifact-and-verdict row, and `implement`, on the worker pane reading `idle`
+or `done` (via `herdr agent get`, double-checked after `ACTOR_SETTLE_MS`). Three adversarial rounds could not
 settle statically whether a Claude Code subagent running inside a pane perturbs that pane's
 reported `agent_status` — herdr's authority for it is the screen manifest, and unmatched prompts
 fall back to `idle`.
@@ -713,8 +722,10 @@ worker would block once. Not a plugin bug, but it will stall a first run.
 
 ## 6. Finish the run
 
-Let `t1` go all the way: `implement` → PR → `pr-review-intent` → `pr-review-quality` → `ci` →
-`merge` → `close` → `teardown` → `done`. Then `t2` releases and follows. When both are `done` and
+Let `t1` go all the way. The route after `implement` follows the tier: pinned heavy, it is
+`implement` → PR → `pr-review-intent` → `pr-review-quality` → `ci` → `merge` → `close` → `teardown` →
+`done`; a task on the `standard` default goes `implement` → PR → `pr-review` → `ci` → … instead. Then
+`t2` releases and follows. When both are `done` and
 intake is closed, the run advances to `branch-review`, whose prompt goes to the orchestrator; it
 clears to `done`.
 
@@ -747,6 +758,134 @@ clears to `done`.
   tail, and
   `pane list --workspace <pipeline workspace>` shows exactly one "Pipeline supervisor" pane (#97).
   Invoking the action again while it runs prints `already running` and opens nothing.
+
+---
+
+## 7. Review tiers — two batches
+
+Every task carries a tier, `light`, `standard` (the default) or `heavy`, and the tier decides which
+review rows it visits:
+
+| Tier | After `plan` | After `implement` |
+| --- | --- | --- |
+| `light` | `blocked-on-files` — no `plan-review` | `pr-review` → `ci` |
+| `standard` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
+| `heavy` | `plan-review` → `blocked-on-files` | `pr-review-intent` → `pr-review-quality` → `ci` |
+
+§1–§6 pin both tasks heavy, so none of that routing is exercised there. These two batches are its only
+live check. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
+`export SMOKE=pipesmoke<N>` and the next unused `N`, so neither batch's ledger mixes with another's.
+
+**Upgrade first.** The supervisor is long-lived and keeps the code it started with. If any session
+that will drive these batches was up before this build was installed or linked, close its `Pipeline
+supervisor` pane and run the plugin's `supervisor` action (or restart the session), then check that
+`hpipe status` reads `supervisor: live (pid N)` with a new pid. A supervisor still on the old phase
+table routes every task as heavy while the CLI briefs it for its tier: a `light` or `standard` task
+reaching `pr-review-intent` is that, not a routing bug.
+
+### 7a. Batch A — one task per tier
+
+Three throwaway issues, with **disjoint** `--files` and no `--depends-on`, so no collision or gate
+staggers them. File the light one with a tier label; it is the only live check of the label read:
+
+```bash
+gh label create pipeline:tier-light 2>/dev/null   # once per repo
+gh issue create --title "smoke tier light" --body "…" --label pipeline:tier-light   # <a1>
+hpipe task --branch smoke/tier-light    --issue <a1> --surface <surface> --files <p1> --tier standard --keep-worktree
+hpipe task --branch smoke/tier-standard --issue <a2> --surface <surface> --files <p2> --keep-worktree
+hpipe task --branch smoke/tier-heavy    --issue <a3> --surface <surface> --files <p3> --tier heavy --keep-worktree
+```
+
+`--keep-worktree` is there because each task's verdict files live in its checkout, which `teardown`
+otherwise removes before you can read them.
+
+**Observe at registration:** the line after `task_id:` reads, in order,
+`tier: light (label pipeline:tier-light; --tier said standard)`, `tier: standard (default)` and
+`tier: heavy (--tier)`. Every `hpipe status` task line carries the tier after its phase box —
+`[research 2m] light …`.
+
+**Assert, for each task once it reaches `done`:**
+
+1. `hpipe show --task <id>` prints `tier:` with the task's tier, a `tier log:` holding only its
+   registration entry (`<time> — → light (label pipeline:tier-light; --tier said standard)`), and a
+   `visited:` line that walks the table above:
+
+   ```
+   light     research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
+   standard  research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
+   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review-intent → pr-review-quality → ci → merge → close → teardown → done
+   ```
+
+   A returned review shows as a repeat (`… → spec-review → spec → spec-review → …`) and a decision as
+   `blocked-on-decision` between two entries of the same phase; both are fine. A row the tier skips
+   appearing, or one it runs missing, is a finding.
+2. **The implement subagent ran on Sonnet.** While a task is in `implement`, read its pane
+   (`herdr --session "$SMOKE" pane read <worker_pane> --source visible --lines 60`) and record the
+   subagent dispatch. Then confirm from the transcripts, which name the model on every message:
+
+   ```bash
+   grep -rhoE '"model":"[^"]+"' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*<worktree dir name>*/ | sort | uniq -c
+   ```
+
+   **Expect:** the worker's own default model (Opus) and a Sonnet model, with Sonnet only in a
+   subagent started during `implement` (or `ci` red, which delegates the same way) — never in a
+   review subagent, whose prompts pin no model. A PR body saying the model was rejected and the
+   subagent ran unpinned is the prompt's fallback; record it as a finding. So is a worker writing the
+   code itself with no subagent at all.
+3. **`Tier:` atop each verdict.** For every path under `verdicts:` in `hpipe show --task <id>`,
+   `head -1 <checkout>/<path>` reads `Tier: <the task's tier>`.
+4. **`branch-review` runs.** Three tasks landed, so once the last is `done` the run goes `execute →
+   branch-review`, the orchestrator's pane gets the final-review prompt, and its verdict opens
+   `Tiers: t1 light, t2 standard, t3 heavy`. It clears to `done`.
+
+**Record:** each task's `visited:` line, the transcript counts from 2, and the wall-clock time each
+task spent from `implement` to `ci`.
+
+### 7b. Batch B — a raise mid-run, and one task landing
+
+One throwaway issue, registered light:
+
+```bash
+hpipe task --branch smoke/tier-raise --issue <b1> --surface <surface> --files <p1> --tier light
+```
+
+Once `research` has cleared and the task reads `[spec …]`, raise it from your own pane, inside the
+smoke session and the repo — the same move `prompts/research.md` tells a worker to make when research
+shows the task is bigger than its tier:
+
+```bash
+hpipe tier --task t1 standard --why "smoke: research found it touches a contract"
+```
+
+**Expect:** `t1: light → standard. spec completes as it is; the next step follows standard.`
+
+**Assert:**
+
+1. `hpipe show --task t1` reads `tier:       standard`, and its `tier log:` records both entries —
+   `<time> — → light (--tier) · <time> light → standard (hpipe-tier, pane <your pane>): smoke: research
+   found it touches a contract`. The raise must not appear in the ledger's `run.history`; tier changes
+   are kept out of it on purpose.
+2. Once `done`, `visited:` includes `plan-review` after `plan`, which the light route skips, and still
+   runs one `pr-review`, never the heavy pair:
+   `research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done`.
+3. **`branch-review` is skipped.** One task landed, so the run goes straight from `execute` to `done`:
+   the orchestrator never receives a final-review prompt, and the ledger's last run entry reads
+   `execute → done` with why `one task landed; branch-review skipped`:
+
+   ```bash
+   jq '.history | map(select(.task_id == null)) | last' "$STATE/runs/$SMOKE/<run_id>.json"
+   ```
+
+4. **Record whether the orchestrator heard that the run ended.** An open question: nothing is known to
+   prompt the orchestrator on `execute → done`, so it may be silent. Read the orchestrator's pane
+   (`pane read … --lines 40`) a tick or two after the run reads `done` and write down the last thing
+   the pipeline sent it — a digest naming the run's end, the task's `teardown → done` line alone, or
+   nothing — and whether `hpipe status` then shows the run as ended. A silent end is data for that
+   question, not a failure of this step.
+
+`hpipe tier` never lowers from a pipeline pane: `lowering a tier needs a human; run this from your own
+pane`. If you want the live check of that guard, have the orchestrator run `hpipe tier --task t1 light
+--why test` from its pane before `plan` clears; it must exit 1 and add nothing to `tier log:`.
 
 ---
 
