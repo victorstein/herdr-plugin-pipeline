@@ -1,8 +1,9 @@
 # Review tiers and model routing — design
 
-Pass 2. Written against `main` at `338e09a`. Pass 1 was reviewed adversarially in
-`docs/superpowers/reviews/2026-09-25-review-tiers-design-adversarial-1.md` (BLOCKER, 1/5/9); every
-finding is resolved below, and the table at the end maps each to where it landed.
+Pass 3. Written against `main` at `338e09a`. Pass 1 was reviewed adversarially in
+`docs/superpowers/reviews/2026-09-25-review-tiers-design-adversarial-1.md` (BLOCKER, 1/5/9), pass 2
+in `…-adversarial-2.md` (CLEAR, 0/1/7). Every finding of both is resolved below; the tables at the
+end map each to where it landed.
 
 Two changes, specified together because both are per-phase properties of the task table and both
 land in the same rendered prompts:
@@ -49,7 +50,7 @@ tasks may be missing; no cost data per stage.
 | Default | `standard` for new registrations; `heavy` (today's behaviour) for tasks in ledgers written before this change |
 | What each tier runs | table below |
 | `branch-review` | skipped when at most one task merged |
-| Models | orchestrator, worker session, every reviewer: Opus. The `implement` subagent: Sonnet |
+| Models | orchestrator, worker session, every reviewer: Opus (inherited). The `implement` subagent: Sonnet (pinned) |
 | How `implement` gets Sonnet | the Opus worker dispatches the coding to a subagent with `model: sonnet`; the pane's model is never switched |
 | Where model choices live | code constants in `src/lib/models.ts`, not `config.env` |
 | Worker pane model | inherited from the user's default, not pinned with `--model` |
@@ -75,6 +76,10 @@ Rejected:
   PR in one pane. Leaving the flag off keeps today's start line unchanged and keeps the worker on the
   user's Opus default. README and the skill state the requirement: run Claude with Opus as the
   default model.
+- **Pinning reviewers with `model: opus`.** Same risk: the Agent tool's `model` takes a bare alias,
+  which may select a smaller-context variant than the worker's own. A reviewer subagent with no
+  `model` inherits the worker's — Opus, at the worker's context size — so the review prompts stay as
+  they are on model. Only `implement` is pinned, because only it moves off Opus.
 
 ## 1. Data model and routing
 
@@ -118,9 +123,9 @@ unstarted-worker probe.
 ### Models (`src/lib/models.ts`, new)
 
     export const IMPLEMENT_MODEL = 'sonnet'
-    export const REVIEW_MODEL = 'opus'
 
-Pure constants, importable from `src/lib/` by both the CLI and the supervisor.
+A pure constant, importable from `src/lib/` by both the CLI and the supervisor. There is no review
+model constant: reviewers inherit (Decisions).
 
 ### Routing
 
@@ -240,14 +245,17 @@ tier.
 - `hpipe status` task line (`src/lib/status.ts:421-431`) gains the tier as the bit after the phase
   bracket: `  t2 <branch> #<n> [implement 5m] light idle …`. `describeWake`, `parkedFooter` and
   `catchUpDigest` (`src/supervisor/tick.ts:60,88,103`) are unchanged.
-- `hpipe show --task` (`formatTaskDetail`, `src/lib/status.ts:455-478`) gains, after `phase:`:
+- `hpipe show --task` (`formatTaskDetail`, `src/lib/status.ts:451`) gains, after `phase:`:
 
       tier:       light
       tier log:   <time> — → standard (default) · <time> standard → heavy (hpipe-tier, pane p_3): <why>
-      visited:    research → spec → spec-review → plan → implement → pr-review → ci
+      visited:    research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci
 
-  `visited` is the task's phases in order, read from `run.history` entries with its `task_id`. This
-  is the view §5's smoke run reads.
+  `visited` is built by one pure function, `visitedPhases(run, task)`: take the `to` of every
+  `run.history` entry whose `task_id` is the task's, in order; drop an entry whose `to` equals the
+  previous kept one (duplicates); mark an entry whose `from` is `'rewind'` as `↺<phase>`. Every phase
+  entered appears, including `blocked-on-files`, `blocked-on-decision` and `escalated`. It is the view
+  §5's smoke run reads.
 
 ## 3. Prompts
 
@@ -261,24 +269,30 @@ in TypeScript** and passed as a variable. One helper, `tierPromptVars(task)` in
 |---|---|
 | `tier` | `tierOf(task)` |
 | `task_id` | `task.task_id` |
+| `agent_file` | `join('.claude', 'agents', `${task.surface}-dev.md`)` — moved here from `renderWorkerPrompt`'s bag (`src/lib/worker-prompt.ts:25`) so `implement.md` and `ci-red.md` get it |
 | `implement_model` | `IMPLEMENT_MODEL` |
-| `review_model` | `REVIEW_MODEL` |
-| `phase_loop` | the brief's numbered loop, built by walking `nextPhase` for the tier |
-| `plan_status` | "cleared review" / "was not reviewed (tier `light`) — read it critically, and fix it first if it is wrong" |
-| `review_count` | "Review cleared" / "Both review stages cleared" (for `merge.md`) |
-| `light_review_note` | on light: "No plan review ran; judge the plan's soundness from the diff as well." Else `''` |
+| `phase_loop` | the brief's numbered loop, built by walking `nextPhase` for the tier, with the artifact paths **embedded as literal text** (`render()` is single-pass, so a `{{research_path}}` inside a variable's value is never substituted) |
+| `plan_status` | "cleared review" when the task has a `plan-review` verdict (`verdict_seq['plan-review'] > 0`); otherwise "was not reviewed — read it critically, and fix it first if it is wrong" |
+| `review_count` | "Both review stages cleared" when the task has a `pr-review-intent` verdict; otherwise "Review cleared" (for `merge.md`) |
+| `plan_review_note` | when the task has no `plan-review` verdict: "No plan review ran; judge the plan's soundness from the diff as well." Else `''` |
 
-It is spread into the variables at **all three task render sites**, so no path can render a prompt
+The last three follow **which reviews actually ran**, read from `verdict_seq`, not the current tier:
+a light task raised to standard after skipping `plan-review` has an unreviewed plan and must be told
+so.
+
+It is spread into the variables at **every task render site**, so no path can render a prompt
 missing a token:
 
 - `renderTaskPhasePrompt`'s `common` (`src/supervisor/tasks.ts:107-118`) — the supervisor's
-  deliveries **and** `hpipe rewind`'s render (`src/cli.ts:630`), which goes through it. This also
-  gives `research.md` the `task_id` it now references; without it `hpipe rewind … research` would
-  throw.
+  deliveries (including `blocked-on-files → implement` and CI-red re-entry) **and** `hpipe rewind`'s
+  render (`src/cli.ts:630`), which goes through it. This also gives `research.md` the `task_id` it
+  now references; without it `hpipe rewind … research` would throw.
 - `renderWorkerPrompt`'s `vars` (`src/lib/worker-prompt.ts:19-31`) — the brief and the research
   prompt shipped with it, for `hpipe task`, `hpipe brief` and `dispatch --task`.
-- `renderRunPhasePrompt`'s `common` (`src/supervisor/deliver.ts:410-415`) gets `review_model` and
-  `task_tiers` (`t1 light, t2 heavy, …`) for `branch-review`.
+- `announceDecisions`'s bag for `decision.md` (`src/supervisor/tasks.ts:543-548`) — already holds
+  `task_id`, which the new raise hint needs; spreading the helper keeps it from drifting.
+- `renderRunPhasePrompt`'s `common` (`src/supervisor/deliver.ts:410-415`) gets `task_tiers`
+  (`t1 light, t2 heavy, …`) for `branch-review`.
 
 ### `prompts/implement.md` — the worker delegates the coding
 
@@ -295,22 +309,33 @@ The Opus worker keeps judgment; one Sonnet subagent writes the code.
    - work only in this worktree, only on `{{branch}}`; never commit to or push the default branch;
    - **re-read every file before editing it** (moved here from the worker: the subagent is the one
      editing; a sibling task may have landed changes while this one waited);
-   - the TDD and one-commit-per-step rules the prompt carries today;
+   - the TDD and one-commit-per-step rules the prompt carries today; it commits, it does **not**
+     push — pushing is the worker's, after verification;
    - it cannot ask decisions: on a choice it should not make alone, stop and return the question to
      the worker, which raises it with `{{hpipe}} decide` as the brief already describes.
 3. **Continue (worker).** If the subagent returns with steps unfinished, dispatch a fresh one starting
    at the first unfinished step. If it returned a question, raise the decision and end the turn.
-4. **Verify and ship (worker).** Run tests and typecheck, read their output, open the PR
-   (`Closes #n`), push.
+4. **Verify and ship (worker).** Run tests and typecheck, read their output, push, open the PR
+   (`Closes #n`).
 5. **Fallback.** If a dispatch is rejected for its model, dispatch without it and say so in the PR
    body.
 
 The prompt's first line uses `{{plan_status}}`.
 
+### `prompts/answer.md` — resuming `implement` after a decision
+
+A decision answered from `implement` resumes with `answer.md` only; no row prompt is rendered
+(`src/supervisor/tasks.ts:448-457`, deliberately). `answer.md` gains one static paragraph: *if the
+phase you are resuming is `implement`, the coding still goes to an implement subagent as
+`implement.md` describes — dispatch a fresh one with this answer in its brief, starting at the first
+unfinished step.* Static text, so no new variable reaches `answer.md`'s render.
+
 ### `prompts/ci-red.md` — same delegation
 
 A task re-entering `implement` from `ci` gets `ci-red.md`, not `implement.md`
-(`src/supervisor/tasks.ts:139-143`). It gains the same dispatch step: the worker reads the failure
+(`src/supervisor/tasks.ts:139-143`). Its wording addresses the orchestrator today ("Send the worker
+back to fix it") although it is delivered to the worker; it is rewritten to address the worker
+directly. It gains the same dispatch step: the worker reads the failure
 (`gh run view --log-failed`, as today), decides whether it is environmental (re-run the check, no
 code) or a defect, and for a defect dispatches the Sonnet subagent with the failing output and the
 same scoping brief as above. The scoping block is identical text in both prompts; §5 tests that both
@@ -318,10 +343,9 @@ carry it.
 
 ### Review prompts
 
-`spec-review`, `plan-review`, `pr-review-intent`, `pr-review-quality`, `pr-review` and
-`branch-review` add `model: {{review_model}}` to their existing "dispatch the reviewer as a subagent"
-step, with the same fallback: if rejected for its model, dispatch without it and note it at the top of
-the review. Each reviewer brief asks the reviewer to open its file with `Tier: {{tier}}`
+No model is added to any review prompt: reviewers inherit the worker's Opus (Decisions). Each
+reviewer brief in `spec-review`, `plan-review`, `pr-review-intent`, `pr-review-quality`, `pr-review`
+and `branch-review` asks the reviewer to open its file with `Tier: {{tier}}`
 (`branch-review`: `Tiers: {{task_tiers}}`), so the next BLOCKER-rate tally can split by tier. Trailer
 rules are unchanged; the `Tier:` line is at the top and cannot be mistaken for the trailer.
 
@@ -330,7 +354,9 @@ rules are unchanged; the `Tier:` line is at the top and cannot be mistaken for t
 Same frame as `pr-review-intent.md`: fresh-context subagent, the reserved verdict path, wait within
 the turn, commit and push the verdict, the head-sha rule. The brief has two mandatory sections,
 **Intent** (the `pr-review-intent` checks, verbatim) then **Quality** (the `pr-review-quality`
-checks, verbatim), one ranked findings list, one trailer, and `{{light_review_note}}`.
+checks, verbatim), one ranked findings list, one trailer, and `{{plan_review_note}}`.
+`pr-review-intent.md` carries `{{plan_review_note}}` too, since a heavy task raised from light can
+reach it with an unreviewed plan.
 
 ### `prompts/worker-brief.md`
 
@@ -352,8 +378,9 @@ README and `skills/herdr-pipeline`: the tier table, `--tier`, labels, `hpipe tie
 ## 4. `branch-review` skip
 
 `advanceRun`, case `execute` (`src/lib/machine.ts:71-76`). `RunSignals.anyTaskDone` becomes
-`landedTaskCount`: tasks in `done` **or `orphaned`** — both are reachable only after merge
-(`src/lib/phases.ts` comment above `failed`), so both put code on the branch.
+`landedTaskCount`: tasks in `done` or `orphaned` **with `merged_at_ms !== null`**. `orphaned` is
+normally post-merge, but a manual rewind can put an unmerged task there (`src/lib/status.ts:344-347`
+guards the same case), so the phase alone is not proof that code landed.
 
 - ≥ 2 landed → `branch-review` (as today).
 - exactly 1 → run `done`, `why: 'one task landed; branch-review skipped'`.
@@ -368,9 +395,15 @@ Table invariants (`test/table.test.ts`), for each tier:
 - the `nextPhase` walk from `queued` reaches `ci`, passing through `implement`;
 - no row that is any row's `onBlocker` has `tiers`;
 - every row the tier reaches that has an `actor` has a `prompt`;
-- **every verdict row is advanced**: for each row with `signal: 'verdict'`, `advanceTask` with an
-  idle actor, fresh artifact and a `CLEAR` verdict returns a task in `nextPhase(tier, row)` — this
-  catches a review case missing from `machine.ts:197-200`.
+- **every verdict row is advanced end to end**: for each task row with `signal: 'verdict'`, drive
+  one supervisor tick through `src/supervisor/tasks.ts` with fake deps — a task in that phase, an
+  idle actor, and `verdictFor` returning `CLEAR` — and assert the task lands in
+  `nextPhase(tier, row)`. Going through the tick exercises `gatherSignals`'s review case
+  (`tasks.ts:365-369`) and `advanceTask`'s (`machine.ts:197-200`) together; testing `advanceTask`
+  alone would miss the first.
+- **every worker row has a prompt that renders**: for each row with `actor: 'worker'` and a
+  `prompt`, `renderTaskPhasePrompt` returns a **non-empty** string — a phase missing from its switch
+  falls to `default` and returns `''`, which a "does not throw" check would pass.
 
 Unit:
 
@@ -383,14 +416,21 @@ Unit:
   `run.history` entry;
 - registration: label beats `--tier`; two tier labels refused; unknown suffix refused; `gh` failure
   falls back; each printed `tier:` line; `readLabels` called once across a stale-save retry;
-- `branch-review` skip at 0, 1 and 2 landed, with 1 = one `done`, and 1 = one `orphaned`;
-- `formatTaskDetail` prints `tier`, `tier log`, `visited`; the status task line carries the tier;
+- `branch-review` skip at 0, 1 and 2 landed, with 1 = one `done`, 1 = one merged `orphaned`, and
+  an unmerged `orphaned` counting as 0;
+- `formatTaskDetail` prints `tier`, `tier log`, `visited`; `visitedPhases` collapses duplicates and
+  marks rewinds; the status task line carries the tier;
 - **render coverage**: for a fixture task in each tier, render every task-phase prompt through
-  `renderTaskPhasePrompt` (the rewind path), the brief and research through `renderWorkerPrompt`, and
-  `branch-review` through `renderRunPhasePrompt`; none throws and none contains a `{{`;
-- rendered content: the brief's loop per tier (no `plan-review` on light); `plan_status` and
-  `review_count` wording per tier; `model:` in `implement.md`, `ci-red.md` and every review prompt;
-  the scoping block in both `implement.md` and `ci-red.md`; `Tier:` in each reviewer brief;
+  `renderTaskPhasePrompt` (the supervisor and rewind path) — including `implement` entered from
+  `blocked-on-files` and from `ci` — the brief and research through `renderWorkerPrompt`,
+  `decision.md` through `announceDecisions`, and `branch-review` through `renderRunPhasePrompt`; none
+  throws and none contains a `{{`;
+- rendered content: the brief's loop per tier (no `plan-review` on light) with literal paths;
+  `plan_status`, `review_count` and `plan_review_note` following which verdicts exist, including a
+  light task raised to standard after skipping `plan-review`; `model: sonnet` in `implement.md` and
+  `ci-red.md`, and **no** `model:` in any review prompt; the scoping block and `{{agent_file}}`'s
+  value in both `implement.md` and `ci-red.md`; the implement paragraph in `answer.md`; `Tier:` in
+  each reviewer brief;
 - `pr-review` in `REVIEW_PROMPTS`/`ALL` and `WORKER_REVIEW_PROMPTS`, so the existing trailer and
   "wait within this turn" contract tests cover it.
 
@@ -419,7 +459,7 @@ supervisor on the new build:
 | MAJOR 1 — typechecker claim false; `advanceTask` list missing | claim removed; explicit site table (§1); verdict-row advance invariant (§5) |
 | MAJOR 2 — CI fixes bypass the subagent | `ci-red.md` gains the delegation step (§3) |
 | MAJOR 3 — subagent lacks scoping rules | scoping block in the subagent brief; re-read rule moved to it (§3) |
-| MAJOR 4 — no render-site plan; rewind throws | `tierPromptVars` spread at all three render sites; render-coverage test (§3, §5) |
+| MAJOR 4 — no render-site plan; rewind throws | `tierPromptVars` spread at every task render site; render-coverage test (§3, §5) |
 | MAJOR 5 — no `hpipe show` timeline; `run.history` breaks `enteredByRewind` | `visited:` and `tier log:` in `hpipe show`; tier changes kept out of `run.history` (§1, §2) |
 | MINOR 1 — `orphaned` not counted | counted as landed (§4) |
 | MINOR 2 — moved/rebound panes pass the guard | stated as a known, accepted gap (§2) |
@@ -429,4 +469,17 @@ supervisor on the new build:
 | MINOR 6 — status format clash | exact format given (§2) |
 | MINOR 7 — hand-maintained test lists | in the site table and tests (§1, §5) |
 | MINOR 8 — on-disk format change unstated | stated at the top; restart in docs |
-| MINOR 9 — review fallback; citation | fallback stated for reviews (§3); `tasks.ts:120-130` |
+| MINOR 9 — review fallback; citation | superseded by pass 2's MINOR 5: reviewers are not pinned, so there is no fallback to state; `tasks.ts:120-130` |
+
+## Pass-2 findings
+
+| Finding | Resolution |
+|---|---|
+| MAJOR 1 — `{{agent_file}}` in no task-phase render bag; `decision.md` not a listed site | `agent_file` in `tierPromptVars`; `announceDecisions` listed as a render site; render coverage includes both `implement` entries and `decision.md` (§3, §5) |
+| MINOR 1 — resuming `implement` after a decision loses the delegation; who pushes | static paragraph in `answer.md`; subagent commits, worker pushes (§3) |
+| MINOR 2 — advance test misses `gatherSignals`; empty render passes | end-to-end tick test; non-empty render test (§5) |
+| MINOR 3 — `orphaned` can be unmerged | landed = `done`/`orphaned` with `merged_at_ms !== null` (§4) |
+| MINOR 4 — `visited:` under-specified | `visitedPhases` defined; example includes `blocked-on-files` (§2) |
+| MINOR 5 — `model: opus` on reviewers re-imports the context risk | reviewers unpinned, inherit the worker (Decisions, §3) |
+| MINOR 6 — tier-wording follows tier, not reviews run | `plan_status`/`review_count`/`plan_review_note` read `verdict_seq` (§3) |
+| MINOR 7 — single-pass render; `ci-red.md` wording; citation | literal paths in `phase_loop`; `ci-red.md` addresses the worker; `status.ts:451` (§2, §3) |
