@@ -168,7 +168,8 @@ phase the task is in always completes; only the next step follows the new tier, 
 back for a review already skipped (`hpipe rewind` does). `hpipe show --task <id>` prints the tier, its
 log, and every phase the task visited.
 
-A run in which at most one task landed skips the final `branch-review` and finishes.
+A run in which at most one task landed skips the final `branch-review` and finishes. Either way,
+the orchestrator is sent a short notice when its run reaches `done`, saying where each task ended.
 
 ## Models
 

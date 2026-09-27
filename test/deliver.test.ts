@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
-  isRetryable, mergeAddedDocsArgs, promptForRunPhase, taskSignalsFor, uncommittedPaths,
+  isRetryable, mergeAddedDocsArgs, promptForRunPhase, renderRunPhasePrompt, taskSignalsFor, uncommittedPaths,
 } from '../src/supervisor/deliver'
 import type { Config } from '../src/lib/config'
 import {
@@ -228,6 +228,15 @@ function closedExecuteRun(tasks: Task[]): Run {
   run.tasks = tasks
   return run
 }
+
+test('a run that ends without branch-review tells the orchestrator it is done — #147', async () => {
+  const run = closedExecuteRun([mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 2_000 })])
+  expect(executeAdvance(run)?.phase).toBe('done')
+  expect(await renderRunPhasePrompt(run, join(import.meta.dir, '..'))).toBe(
+    `Run ${run.run_id} is done — one task landed; branch-review skipped. Nothing more is sent for it.\n` +
+    '- t1 feat/x (#1): done',
+  )
+})
 
 test('an escalated task holds the run in execute rather than starting the final review', () => {
   const run = closedExecuteRun([

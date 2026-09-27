@@ -432,8 +432,22 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
         abandon: '',
       })
     }
+    case 'done': return runDoneNotice(run)
     default: return ''
   }
+}
+
+/**
+ * `done` has no prompt of its own, and since #143 a run reaches it straight from
+ * `execute` when at most one task landed, so the orchestrator was told nothing
+ * when its run ended. Measured on a live run.
+ */
+function runDoneNotice(run: Run): string {
+  const why = run.history.findLast((h) => h.task_id === undefined && h.to === 'done')?.why
+  return [
+    `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
+    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (#${t.issue}): ${t.phase}`),
+  ].join('\n')
 }
 
 export async function refreshBadges(run: Run, herdr: Herdr, pluginId: string): Promise<void> {

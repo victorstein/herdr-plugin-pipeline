@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { CallResult } from '../src/lib/herdr'
 import { newRun } from '../src/lib/ledger'
+import { enterRunPhase } from '../src/lib/machine'
 import { enqueue } from '../src/lib/outbox'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
@@ -390,9 +391,18 @@ test('a stale entry, a paneless recipient and a finished run yield nothing to se
   expect(outboxPending(moved)).toEqual([])
 
   const done = mkRun()
+  done.phase_entered_at = 500
   enqueue(done, { to: 'orchestrator', taskId: null, text: 'a' }, 0)
-  done.phase = 'done'
+  enqueue(done, { to: 'worker', taskId: 't1', text: 'b' }, 0)
+  enterRunPhase(done, 'done', 'review cleared')
   expect(outboxPending(done)).toEqual([])
+})
+
+test('a finished run still delivers the notice it queued on entering done — #147', () => {
+  const run = mkRun()
+  enterRunPhase(run, 'done', 'one task landed; branch-review skipped')
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'run done' }, 0)
+  expect(outboxPending(run).map((p) => [p.paneId, p.text])).toEqual([['w1:p1', 'run done']])
 })
 
 test('an escalated run still delivers what it owes the orchestrator', () => {

@@ -644,13 +644,15 @@ export function queuePending(run: Run, pending: readonly PendingPrompt[], now: n
 }
 
 /**
- * The outbox as this tick's pending prompts. A finished run is not delivered for;
- * an `escalated` one is, since the escalation is exactly what it still owes.
+ * The outbox as this tick's pending prompts. A finished run is delivered for only
+ * the notice it queued on entering `done`; an `escalated` one is delivered for in
+ * full, since the escalation is exactly what it still owes.
  */
 export function outboxPending(run: Run, footer?: string): PendingPrompt[] {
-  if (runRow(run.phase).terminal === true) return []
+  const finished = runRow(run.phase).terminal === true
   return (run.outbox ?? []).flatMap((entry) => {
     if (!isCurrent(run, entry)) return []
+    if (finished && entry.task_id !== null) return []
     const paneId = recipientPane(run, entry)
     if (paneId === null) return []
     const isOrchestrator = entry.to === 'orchestrator'
