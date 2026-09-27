@@ -3,7 +3,7 @@ import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { nextPhase, taskRow, tierOf } from '../lib/phases'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
-import { bindWorkerPane } from '../lib/unstarted'
+import { bindWorkerPane, releaseWorkerPane } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
 import { FINISHED } from './teardown'
@@ -112,20 +112,6 @@ export function catchUpDigest(run: Run, now: number, hpipe: string, holds: PaneH
 export interface ApplyResult {
   changed: boolean
   wake: WakeLine[]
-}
-
-/**
- * A pane with no agent left in it is not the worker's pane. Kept, it would make a
- * task rewound out of `failed` look bound, so the unstarted-worker check skipped
- * it and every probe went to a pane that cannot answer.
- */
-function releaseWorkerPane(task: Task): void {
-  if (task.pane_id !== null) task.last_pane_id = task.pane_id
-  task.pane_id = null
-  // Nothing reports a status for a pane that is gone, so the last one would be
-  // shown for good: t3 read `working` for 50 minutes after its pane was closed.
-  // Measured on a live run.
-  task.agent_status = 'unknown'
 }
 
 /**
