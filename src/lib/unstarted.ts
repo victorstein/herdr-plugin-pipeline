@@ -182,6 +182,20 @@ export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number
 }
 
 /**
+ * A pane with no agent left in it is not the worker's pane. Kept, it would make a
+ * task rewound out of `failed` look bound, so the unstarted-worker check skipped
+ * it and every probe went to a pane that cannot answer.
+ */
+export function releaseWorkerPane(task: Task): void {
+  if (task.pane_id !== null) task.last_pane_id = task.pane_id
+  task.pane_id = null
+  // Nothing reports a status for a pane that is gone, so the last one would be
+  // shown for good: t3 read `working` for 50 minutes after its pane was closed.
+  // Measured on a live run.
+  task.agent_status = 'unknown'
+}
+
+/**
  * Looks before it starts anything: hooks are at-most-once, so a lost
  * `pane.agent_detected` leaves a running agent's task looking exactly like this.
  * The pane is not named because the ledger never learns it: `worktree.created`

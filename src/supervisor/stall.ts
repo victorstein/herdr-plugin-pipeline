@@ -330,7 +330,7 @@ export function stallAwaiting(
     // never true and machine.ts:165-171 never fires.
     if (task.pr === null) return missingPr(task, 'so no merge is ever seen.')
     // Not "the PR is unmerged": this row is evaluated only while the orchestrator
-    // is idle, so a merged PR can sit here as long as the orchestrator stays busy.
+    // is idle or has no agent, so a merged PR can sit here as long as it stays busy.
     return {
       short: awaitedFor(task),
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +

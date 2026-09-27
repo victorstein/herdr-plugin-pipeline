@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
-import { Herdr } from '../lib/herdr'
+import { Herdr, liveAgentIn } from '../lib/herdr'
 import {
   claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
 } from '../lib/pidfile'
@@ -31,7 +31,7 @@ import {
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
-  applyEvents, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
+  applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
   saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
 import { ciTransitions } from './ci'
@@ -185,6 +185,7 @@ async function main(): Promise<void> {
   const checkSubmission = makeSubmissionCheck(gate, herdr, config.PROMPT_CONFIRM_MS)
   const sendProbe = boundedProbeSend(send)
   const catchUps = new CatchUps()
+  const briefHolds = new BriefHolds()
   let healthRevision = -1
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
@@ -219,7 +220,7 @@ async function main(): Promise<void> {
       // that tick's prompt, not the state transition, and the orchestrator can
       // recover with `hpipe status`. Events themselves are at-most-once —
       // drain() unlinks as it reads.
-      const { runs, wake } = applied.changed
+      const { runs, wake: appliedWake } = applied.changed
         ? await saveEventedRuns(tickRuns, applied.wake, {
           save: (run) => saveRun(stateDir, run),
           reload: (run) => loadRun(stateDir, session, run.run_id),
@@ -228,6 +229,7 @@ async function main(): Promise<void> {
         })
         : { runs: tickRuns, wake: applied.wake }
       knownRuns = [...allRuns, ...runs]
+      const wake = briefHolds.sift(appliedWake, runs, Date.now())
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -299,6 +301,7 @@ async function main(): Promise<void> {
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
             liveIdle,
+            hasLiveAgent: liveAgentIn(listed),
             maxPasses: config.MAX_PASSES,
             fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),
@@ -338,7 +341,7 @@ async function main(): Promise<void> {
             : await promptForRunPhase(run, config)
 
           await refreshBadges(run, herdr, pluginId)
-          const covered = new Set<string>()
+          const covered = briefHolds.heldTasks(run)
           const lines = wake
             .filter((w) => w.run.run_id === run.run_id)
             .map((w) => {

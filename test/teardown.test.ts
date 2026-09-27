@@ -52,12 +52,31 @@ test('removes the worktree and marks the task done', async () => {
   expect(run.tasks[0]?.phase).toBe('done')
 })
 
+test('a worktree teardown removed leaves no workspace or pane bound to the task — #146', async () => {
+  const run = mkRun([mkTask({})])
+  const effects: RunEffect[] = []
+  await runTeardown([run], removingBy(async () => 'removed' as const), effects)
+  expect(run.tasks[0]).toMatchObject({
+    phase: 'done', workspace_id: null, pane_id: null, last_pane_id: 'w7:p1', agent_status: 'unknown',
+  })
+
+  const fresh = mkRun([mkTask({})])
+  for (const effect of effects) effect(fresh)
+  expect(fresh.tasks[0]).toMatchObject({ phase: 'done', workspace_id: null, pane_id: null, last_pane_id: 'w7:p1' })
+})
+
+test('a workspace herdr no longer knows is unbound too, once its checkout is found gone — #146', async () => {
+  const run = mkRun([mkTask({ checkout_path: '/nonexistent/hpipe-teardown' })])
+  await runTeardown([run], removingBy(async () => 'gone' as const))
+  expect(run.tasks[0]).toMatchObject({ phase: 'done', workspace_id: null, pane_id: null, last_pane_id: 'w7:p1' })
+})
+
 test('keep_worktree skips removal but still completes the task', async () => {
   const run = mkRun([mkTask({ keep_worktree: true })])
   const removed: string[] = []
   await runTeardown([run], removingBy(async (ws) => { removed.push(ws); return 'removed' as const }))
   expect(removed).toEqual([])
-  expect(run.tasks[0]?.phase).toBe('done')
+  expect(run.tasks[0]).toMatchObject({ phase: 'done', workspace_id: 'w7', pane_id: 'w7:p1' })
 })
 
 test('a failed removal marks the task orphaned rather than done', async () => {

@@ -4,6 +4,7 @@ import type { RunEffect } from '../lib/ledger'
 import { enterTaskPhase } from '../lib/machine'
 import { TASK_ROWS } from '../lib/phases'
 import type { Run, Task, TaskPhase } from '../lib/types'
+import { releaseWorkerPane } from '../lib/unstarted'
 
 /**
  * "Will this task never move again", which is NOT "has it stopped moving".
@@ -42,6 +43,18 @@ function markTornDown(run: Run, taskId: string, stillHolds: (task: Task) => bool
   const task = run.tasks.find((t) => t.task_id === taskId)
   if (task?.phase !== 'teardown' || !stillHolds(task)) return
   enterTaskPhase(run, task, 'done', 'worktree removed')
+  unbindGoneWorkspace(task)
+}
+
+/**
+ * Every teardown that ends `done` but `keep_worktree` leaves herdr not knowing the
+ * workspace. herdr reuses workspace ids, so a finished task still naming its
+ * removed `w3` appeared to own the next `w3`. The close paths already unbind
+ * (#116). Measured on a live run.
+ */
+function unbindGoneWorkspace(task: Task): void {
+  task.workspace_id = null
+  releaseWorkerPane(task)
 }
 
 async function git(repoRoot: string, args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
@@ -183,6 +196,7 @@ export async function runTeardown(
         enterTaskPhase(run, task, 'done', checkoutPath === null && workspaceId === null
           ? 'no worktree was recorded'
           : 'worktree already removed')
+        unbindGoneWorkspace(task)
         continue
       }
 
@@ -196,6 +210,7 @@ export async function runTeardown(
         effects.push((fresh) => markTornDown(fresh, task.task_id, holdsCheckout))
       } else {
         enterTaskPhase(run, task, 'done', `worktree kept: ${checkoutPath} (${removal.kept})`)
+        unbindGoneWorkspace(task)
       }
     }
   }

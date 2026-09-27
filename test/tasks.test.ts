@@ -40,6 +40,7 @@ function mkRun(tasks: Task[]): Run {
 const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   pluginRoot: process.cwd(),
   liveIdle: async () => true,
+  hasLiveAgent: () => true,
   maxPasses: 2,
   fileSettleMs: 0,
   prForBranch: async () => null,
@@ -248,6 +249,18 @@ test('orchestrator-owned task phases are not evaluated while the orchestrator is
     prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
   }))
   expect(run.tasks[0]?.phase).toBe('merge')
+})
+
+test('a PR merged while the orchestrator pane has no agent is noticed (#144)', async () => {
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+  const prompts = await advanceTasks(run, deps({
+    liveIdle: async () => false,
+    hasLiveAgent: (pane: string) => pane !== 'w1:p1',
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+    issueView: async () => ({ closed: false, closedAtMs: null }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('close')
+  expect(prompts.find((p) => p.taskId === 't1')?.paneId).toBe('w1:p1')
 })
 
 test('a merged PR advances to close, and a closed issue to teardown', async () => {

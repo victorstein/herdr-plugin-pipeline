@@ -31,6 +31,12 @@ export interface TaskDeps extends TeardownDeps {
    * wake cache and can be stale by a whole turn.
    */
   liveIdle: (paneId: string) => Promise<boolean>
+  /**
+   * Whether herdr lists the pane with an agent in it. A pane with none never
+   * reads idle, so without this an orchestrator-owned row is never evaluated
+   * while the orchestrator is down.
+   */
+  hasLiveAgent: (paneId: string) => boolean
   maxPasses: number
   fileSettleMs: number
   prForBranch: (branch: string) => Promise<number | null>
@@ -229,8 +235,11 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     const actorIdle = pane === null ? false : await deps.liveIdle(pane)
 
     // Phases whose signal comes from the orchestrator must not be evaluated
-    // while it is mid-turn, exactly as run phases are gated.
-    if (row.actor === 'orchestrator' && !actorIdle) continue
+    // while it is mid-turn, exactly as run phases are gated. Their signals are
+    // GitHub's, so with no orchestrator there is no turn to wait out: a PR merged
+    // by hand while it was `/exit`ed sat in `merge` for 10½ minutes until it came
+    // back. Measured on a live run.
+    if (row.actor === 'orchestrator' && !actorIdle && pane !== null && deps.hasLiveAgent(pane)) continue
 
     await noteUncommittedWork(run, task, actorIdle, deps)
     const signals = await gatherSignals(run, task, deps, actorIdle)

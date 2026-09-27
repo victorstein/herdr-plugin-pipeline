@@ -27,6 +27,18 @@ export function paneHasNoAgent(pane: PaneInfo): boolean {
     (pane.agent_status === undefined || pane.agent_status === 'unknown')
 }
 
+/**
+ * Whether a pane holds a live agent, by one pane list. A pane missing from the
+ * list has none. An empty list reads as every pane having one: `paneList` returns
+ * it for a failed call too, and reading that as "no agent anywhere" would lift the
+ * orchestrator's mid-turn gate on a herdr hiccup.
+ */
+export function liveAgentIn(listed: readonly PaneInfo[]): (paneId: string) => boolean {
+  if (listed.length === 0) return () => true
+  const withAgent = new Set(listed.filter((pane) => !paneHasNoAgent(pane)).map((pane) => pane.pane_id))
+  return (paneId) => withAgent.has(paneId)
+}
+
 export interface WorkspaceInfo {
   workspace_id: string
   label: string

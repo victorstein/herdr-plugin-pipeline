@@ -494,6 +494,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
   const deps = {
     pluginRoot: join(import.meta.dir, '..'),
     liveIdle: async () => true,
+    hasLiveAgent: () => true,
     maxPasses: 2,
     fileSettleMs: 0,
     prForBranch: async () => 5,
