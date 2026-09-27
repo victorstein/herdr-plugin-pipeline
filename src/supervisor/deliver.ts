@@ -298,6 +298,17 @@ function awaitsWorktree(task: Task): boolean {
   return !taskRow(task.phase).terminal && task.phase !== 'escalated'
 }
 
+/**
+ * #152. `intake → dispatch` waits for the orchestrator to go idle, and `hpipe task`
+ * dispatches at registration, so the orchestrator usually registers, dispatches
+ * and closes intake in the turn that gate waits out. The prompt then arrived
+ * asking it to keep registering and to run `dispatch --done`, both already done,
+ * and it spent a turn on it. Measured on a live run.
+ */
+function owedDispatch(task: Task): boolean {
+  return task.phase === 'queued' || awaitsWorktree(task) || task.awaiting_brief === true
+}
+
 export function taskSignalsFor(run: Run) {
   return {
     newestRegisteredAt: run.tasks.length > 0
@@ -419,7 +430,12 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
 
   switch (run.phase) {
     case 'intake': return renderPrompt(pluginRoot, 'intake', common)
-    case 'dispatch': return renderPrompt(pluginRoot, 'dispatch', common)
+    case 'dispatch': {
+      if (run.intake_closed && !run.tasks.some(owedDispatch)) return ''
+      const registering = run.intake_closed ? '' : await renderPrompt(pluginRoot, 'dispatch-registering', common)
+      const text = await renderPrompt(pluginRoot, 'dispatch', { ...common, registering })
+      return text.replace(/\n{3,}/g, '\n\n')
+    }
     case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', {
       ...common, task_outcomes: taskOutcomesFor(run),
     })

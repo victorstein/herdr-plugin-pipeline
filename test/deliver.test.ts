@@ -229,10 +229,47 @@ function closedExecuteRun(tasks: Task[]): Run {
   return run
 }
 
+function enteringDispatch(intakeClosed: boolean, tasks: Task[]): Run {
+  const run = mkRun()
+  run.phase = 'dispatch'
+  run.intake_closed = intakeClosed
+  run.tasks = tasks
+  return run
+}
+
+const ROOT = join(import.meta.dir, '..')
+const dispatched = (over: Partial<Task> = {}) => mkTask({ phase: 'research', ...over })
+
+test('a dispatch with nothing left to do sends no prompt — #152', async () => {
+  const run = enteringDispatch(true, [dispatched(), dispatched({ task_id: 't2', phase: 'done' })])
+  expect(await renderRunPhasePrompt(run, ROOT)).toBe('')
+})
+
+test('a dispatch still owed work keeps its prompt, but stops asking for registrations once intake closed — #152', async () => {
+  for (const [what, task] of [
+    ['a queued task', mkTask({ task_id: 't2', phase: 'queued', workspace_id: null, pane_id: null })],
+    ['a task with no worktree', mkTask({ task_id: 't2', phase: 'research', workspace_id: null, pane_id: null })],
+    ['a worker not yet briefed', mkTask({ task_id: 't2', phase: 'research', awaiting_brief: true })],
+  ] as const) {
+    const text = await renderRunPhasePrompt(enteringDispatch(true, [dispatched(), task]), ROOT)
+    expect(text, what).toContain('# Dispatch')
+    expect(text, what).not.toContain('Still registering?')
+    expect(text, what).not.toContain('dispatch --done')
+    expect(text, what).not.toMatch(/\n{3,}/)
+  }
+})
+
+test('a dispatch entered with intake still open asks for the rest of the batch — #152', async () => {
+  const text = await renderRunPhasePrompt(enteringDispatch(false, [dispatched()]), ROOT)
+  expect(text).toContain('Still registering?')
+  expect(text).toContain('dispatch --done')
+  expect(text).not.toContain('{{')
+})
+
 test('a run that ends without branch-review tells the orchestrator it is done — #147', async () => {
   const run = closedExecuteRun([mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 2_000 })])
   expect(executeAdvance(run)?.phase).toBe('done')
-  expect(await renderRunPhasePrompt(run, join(import.meta.dir, '..'))).toBe(
+  expect(await renderRunPhasePrompt(run, ROOT)).toBe(
     `Run ${run.run_id} is done — one task landed; branch-review skipped. Nothing more is sent for it.\n` +
     '- t1 feat/x (#1): done',
   )
