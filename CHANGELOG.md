@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.6.0...v1.7.0) (2026-09-27)
+
+
+### Features
+
+* close the live smoke run 4 findings ([#150](https://github.com/victorstein/herdr-plugin-pipeline/issues/150)) ([25a0aba](https://github.com/victorstein/herdr-plugin-pipeline/commit/25a0aba04a9a12652b90500e4846b1133c4a0d5c)), closes [#144](https://github.com/victorstein/herdr-plugin-pipeline/issues/144) [#145](https://github.com/victorstein/herdr-plugin-pipeline/issues/145) [#146](https://github.com/victorstein/herdr-plugin-pipeline/issues/146) [#147](https://github.com/victorstein/herdr-plugin-pipeline/issues/147) [#148](https://github.com/victorstein/herdr-plugin-pipeline/issues/148)
+
 ## [1.6.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.22...v1.6.0) (2026-09-27)
 
 
