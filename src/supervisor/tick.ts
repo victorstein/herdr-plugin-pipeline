@@ -3,7 +3,7 @@ import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { nextPhase, taskRow, tierOf } from '../lib/phases'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
-import { bindWorkerPane, releaseWorkerPane } from '../lib/unstarted'
+import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
 import { FINISHED } from './teardown'
@@ -63,6 +63,58 @@ export function describeWake(
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
   return `${head}\n${indented}`
+}
+
+/** Long enough to cover the orchestrator's next shell call after `agent start`. */
+export const BRIEF_HOLD_MS = 30_000
+
+function awaitsBriefInPane(run: Run, task: Task): boolean {
+  return (unbriefedWorker(run, task)?.paneId ?? null) !== null
+}
+
+/**
+ * A new worker's first `idle` lands between `agent start` and `dispatch --task`,
+ * so a line saying it "has not been handed the brief" was true when composed and
+ * stale by the time the orchestrator read it, after its own `dispatch --task`.
+ * Both orchestrators of the run spent a turn doubting it. Measured on a live run.
+ * Such a line is held for BRIEF_HOLD_MS, dropped if the brief lands meanwhile, and
+ * sent against the fresh record if it is still true. In memory: a restarted
+ * supervisor loses a held line, which the stall ladder still covers.
+ */
+export class BriefHolds {
+  private readonly held = new Map<string, { line: WakeLine; since: number }>()
+
+  sift(wake: readonly WakeLine[], runs: readonly Run[], now: number): WakeLine[] {
+    const send: WakeLine[] = []
+    for (const line of wake) {
+      if (line.task === null || !awaitsBriefInPane(line.run, line.task)) {
+        send.push(line)
+        continue
+      }
+      const key = `${line.run.run_id}:${line.task.task_id}`
+      this.held.set(key, { line, since: this.held.get(key)?.since ?? now })
+    }
+
+    for (const [key, { line, since }] of this.held) {
+      const run = runs.find((r) => r.run_id === line.run.run_id)
+      const task = run?.tasks.find((t) => t.task_id === line.task?.task_id)
+      if (run === undefined || task === undefined || !awaitsBriefInPane(run, task)) {
+        this.held.delete(key)
+        continue
+      }
+      if (now - since < BRIEF_HOLD_MS) continue
+      this.held.delete(key)
+      send.push({ ...line, run, task })
+    }
+    return send
+  }
+
+  /** So the parked footer does not make the claim a held line is holding back. */
+  heldTasks(run: Run): Set<string> {
+    return new Set([...this.held.values()]
+      .filter(({ line }) => line.run.run_id === run.run_id && line.task !== null)
+      .map(({ line }) => (line.task as Task).task_id))
+  }
 }
 
 /**

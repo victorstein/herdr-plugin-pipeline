@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
+  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
   pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence, workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
@@ -1154,4 +1154,57 @@ test('the worker is still needed from every worker row in every tier, and past m
     }
     expect(workerStillNeeded(mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
   }
+})
+
+// ——— a digest must not claim an unbriefed worker the tick its brief is in flight — #148 ———
+
+function unbriefedRun(awaitingBrief: boolean): Run {
+  const run = mkRun([mkTask({ phase: 'research', agent_status: 'idle', awaiting_brief: awaitingBrief || undefined })])
+  run.run_id = 'r1'
+  return run
+}
+
+const idleLine = (run: Run): WakeLine =>
+  ({ run, task: run.tasks[0] as Task, event: 'agent:idle', phaseAtEvent: 'research' })
+
+test('a line about a worker not yet handed its brief is held, and dropped once the brief lands — #148', () => {
+  const holds = new BriefHolds()
+  const before = unbriefedRun(true)
+  expect(holds.sift([idleLine(before)], [before], 0)).toEqual([])
+  expect(holds.heldTasks(before)).toEqual(new Set(['t1']))
+
+  const briefed = unbriefedRun(false)
+  expect(holds.sift([], [briefed], BRIEF_HOLD_MS)).toEqual([])
+  expect(holds.heldTasks(briefed)).toEqual(new Set())
+})
+
+test('a held line still true when its hold runs out is sent, against the fresh record — #148', () => {
+  const holds = new BriefHolds()
+  const before = unbriefedRun(true)
+  holds.sift([idleLine(before)], [before], 0)
+  const still = unbriefedRun(true)
+  expect(holds.sift([], [still], BRIEF_HOLD_MS - 1)).toEqual([])
+
+  const [released, ...rest] = holds.sift([], [still], BRIEF_HOLD_MS)
+  expect(rest).toEqual([])
+  expect(released?.run).toBe(still)
+  expect(released?.task).toBe(still.tasks[0] as Task)
+  expect(describeWake(released as WakeLine, BRIEF_HOLD_MS, 'hp'))
+    .toContain('YOUR move: its agent in w7:p1 has not been handed the brief')
+  expect(holds.heldTasks(still)).toEqual(new Set())
+})
+
+test('a later line keeps the first one\'s hold rather than restarting it — #148', () => {
+  const holds = new BriefHolds()
+  const run = unbriefedRun(true)
+  holds.sift([idleLine(run)], [run], 0)
+  expect(holds.sift([idleLine(run)], [run], BRIEF_HOLD_MS / 2)).toEqual([])
+  expect(holds.sift([], [run], BRIEF_HOLD_MS)).toHaveLength(1)
+})
+
+test('a line about a briefed worker is not held — #148', () => {
+  const holds = new BriefHolds()
+  const run = unbriefedRun(false)
+  const line = idleLine(run)
+  expect(holds.sift([line], [run], 0)).toEqual([line])
 })
