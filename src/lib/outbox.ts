@@ -242,6 +242,7 @@ export function deliveryWarnings(
       'or run the plugin\'s "claim" action from the pane that should drive this run')
   }
 
+  const named = new Set<string>()
   for (const { label, pane, owed } of owedByRecipient(run)) {
     const hold = pane === null ? undefined : holds[pane]
     const unreachable = pane === null || isGone(pane) || agentless.has(pane) || hold !== undefined
@@ -253,6 +254,7 @@ export function deliveryWarnings(
     const latest = held.reduce((a, b) => ((b.lastAttemptAt ?? 0) > (a.lastAttemptAt ?? 0) ? b : a))
     const count = countOf(held)
     if (pane !== null && (hold?.code === 'stuck_input' || latest.lastCode === 'stuck_input')) {
+      named.add(pane)
       lines.push(`  ⚠ stuck input in ${pane}: ${count} for ${label} held ` +
         `${ageMinutes(oldest, now)}m because its input box holds text the supervisor did not ` +
         'send — submit or clear that text and delivery resumes')
@@ -280,5 +282,28 @@ export function deliveryWarnings(
     lines.push(`  ⚠ ${count} for ${label} undelivered for ` +
       `${ageMinutes(oldest, now)}m (${why.join('; ')}) — held, and sent as soon as it answers again`)
   }
+
+  // A hold with nothing owed behind it is holding digests, which are kept nowhere
+  // but the supervisor's memory. The supervisor logged "`hpipe status` lists it"
+  // for one while status printed nothing for four minutes. Measured on a live run.
+  for (const { pane, label } of runPanes(run)) {
+    const hold = holds[pane]
+    if (hold?.code !== 'stuck_input' || named.has(pane)) continue
+    named.add(pane)
+    lines.push(`  ⚠ stuck input in ${pane}: nothing has been sent to ${label} for ` +
+      `${ageMinutes(hold.since, now)}m because its input box holds text the supervisor did not ` +
+      'send — submit or clear that text and delivery resumes')
+  }
   return lines
+}
+
+function runPanes(run: Run): { pane: string; label: string }[] {
+  const orchestrator = run.orchestrator_pane === null
+    ? []
+    : [{ pane: run.orchestrator_pane, label: 'the orchestrator' }]
+  const workers = run.tasks.flatMap((task) =>
+    task.pane_id === null || task.pane_id === run.orchestrator_pane
+      ? []
+      : [{ pane: task.pane_id, label: `${task.task_id}'s worker` }])
+  return [...orchestrator, ...workers]
 }

@@ -111,6 +111,30 @@ test('status says a pane is stuck on someone else\'s input, and how to free it',
   expect(line).toContain('submit or clear that text')
 })
 
+test('a pane stuck on someone else\'s input is named even when only digests are held for it — #145', () => {
+  const run = mkRun()
+  const holds = {
+    'w1:p1': { since: MINUTE, failures: 0, code: 'stuck_input' },
+    'w7:p1': { since: 2 * MINUTE, failures: 0, code: 'stuck_input' },
+    'w9:p1': { since: MINUTE, failures: 0, code: 'stuck_input' },
+  }
+  expect(deliveryWarnings(run, new Set(['w1:p1', 'w7:p1', 'w9:p1']), 4 * MINUTE, { holds })).toEqual([
+    '  ⚠ stuck input in w1:p1: nothing has been sent to the orchestrator for 3m because its ' +
+      'input box holds text the supervisor did not send — submit or clear that text and delivery resumes',
+    "  ⚠ stuck input in w7:p1: nothing has been sent to t1's worker for 2m because its " +
+      'input box holds text the supervisor did not send — submit or clear that text and delivery resumes',
+  ])
+})
+
+test('a stuck pane that is also owed something is named once — #145', () => {
+  const run = mkRun()
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'x' }, 0)
+  const holds = { 'w1:p1': { since: MINUTE, failures: 0, code: 'stuck_input' } }
+  const lines = deliveryWarnings(run, new Set(['w1:p1', 'w7:p1']), 3 * MINUTE, { holds })
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('stuck input in w1:p1: 1 prompt for the orchestrator held 3m')
+})
+
 test('status names a gone pane even before any attempt, since nothing is being tried', () => {
   const run = mkRun()
   enqueue(run, { to: 'worker', taskId: 't1', text: 'a' }, 0)
