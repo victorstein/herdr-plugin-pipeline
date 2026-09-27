@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.22...v1.6.0) (2026-09-27)
+
+
+### Features
+
+* add review tiers and route implementation to a sonnet subagent ([#143](https://github.com/victorstein/herdr-plugin-pipeline/issues/143)) ([8bf4d95](https://github.com/victorstein/herdr-plugin-pipeline/commit/8bf4d95689a155031822b698e874c1de9498f57c))
+
 ## [1.5.22](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.5.21...v1.5.22) (2026-09-25)
 
 
