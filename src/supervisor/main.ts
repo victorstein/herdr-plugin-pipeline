@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
-import { Herdr } from '../lib/herdr'
+import { Herdr, liveAgentIn } from '../lib/herdr'
 import {
   claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
 } from '../lib/pidfile'
@@ -299,6 +299,7 @@ async function main(): Promise<void> {
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
             liveIdle,
+            hasLiveAgent: liveAgentIn(listed),
             maxPasses: config.MAX_PASSES,
             fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),

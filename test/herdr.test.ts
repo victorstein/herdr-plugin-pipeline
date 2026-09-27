@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
-import { Herdr } from '../src/lib/herdr'
+import { Herdr, liveAgentIn } from '../src/lib/herdr'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'herdr-')) })
@@ -100,4 +100,15 @@ test('fake-bin requires a token boundary after the matched prefix', async () => 
   await proc.exited
   const parsed = JSON.parse(text) as { error?: { code: string } }
   expect(parsed.error?.code).toBe('unstubbed')
+})
+
+test('liveAgentIn: an agentless or missing pane has no live agent, and an empty list reads as every pane having one', () => {
+  const live = liveAgentIn([
+    { pane_id: 'w1:p1', agent: 'claude', agent_status: 'working' },
+    { pane_id: 'w1:p2', agent: null, agent_status: 'unknown' },
+  ])
+  expect(live('w1:p1')).toBe(true)
+  expect(live('w1:p2')).toBe(false)
+  expect(live('w9:p9')).toBe(false)
+  expect(liveAgentIn([])('w1:p1')).toBe(true)
 })

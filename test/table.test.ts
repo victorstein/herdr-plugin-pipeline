@@ -146,6 +146,7 @@ function runWith(task: Task): Run {
 const clearingTick = (): TaskDeps => ({
   pluginRoot: ROOT,
   liveIdle: async () => true,
+  hasLiveAgent: () => true,
   maxPasses: 2,
   fileSettleMs: 0,
   prForBranch: async () => 42,
