@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.7.0...v1.7.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* skip the dispatch prompt when nothing is left to dispatch ([#153](https://github.com/victorstein/herdr-plugin-pipeline/issues/153)) ([31e6b2d](https://github.com/victorstein/herdr-plugin-pipeline/commit/31e6b2db359b10722e14f8d0177fe08bd806c83f)), closes [#152](https://github.com/victorstein/herdr-plugin-pipeline/issues/152)
+
 ## [1.7.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.6.0...v1.7.0) (2026-09-27)
 
 
