@@ -116,6 +116,18 @@ export class Gh {
     return { closed: view.closed, closedAtMs: view.closedAt ? Date.parse(view.closedAt) : null }
   }
 
+  /** The failure is returned rather than swallowed: `hpipe task` prints why the labels were unreadable. */
+  async issueLabels(issue: number): Promise<string[] | GhFailure> {
+    const { code, text, stderr } = await this.run(['issue', 'view', String(issue), '--json', 'labels'])
+    if (code !== 0) return { error: stderr.trim() || text.trim() || `gh exited ${code}` }
+    try {
+      const view = JSON.parse(text) as { labels?: { name: string }[] }
+      return (view.labels ?? []).map((label) => label.name)
+    } catch {
+      return { error: `gh printed no JSON: ${text.trim()}` }
+    }
+  }
+
   /** `gh issue create` has no `--json`; the new issue's URL on stdout is the only handle on it. */
   async issueCreate(title: string, bodyFile: string): Promise<FiledIssue | GhFailure> {
     const { code, text, stderr } = await this.run(['issue', 'create', '--title', title, '--body-file', bodyFile])

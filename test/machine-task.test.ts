@@ -3,7 +3,7 @@ import {
   advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, noteWorkingAfterAnswer,
 } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
-import type { Run, Task, TaskPhase } from '../src/lib/types'
+import type { Run, Task, TaskPhase, Tier } from '../src/lib/types'
 
 function fixture(phase: TaskPhase): { run: Run; task: Task } {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
@@ -399,4 +399,74 @@ test('any transition other than the resume drops the round trip\'s record', () =
 test('a task that never asked a decision is judged against its phase entry', () => {
   const { task } = fixture('research')
   expect(artifactFreshAfter(task)).toBe(task.phase_entered_at)
+})
+
+const clearedSignals = {
+  actorIdle: true, artifactFresh: true,
+  verdict: { verdict: 'CLEAR' as const, blockers: 0, majors: 0 },
+  prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
+  ciBucket: null, filesClear: false, maxPasses: 2,
+}
+
+function tiered(phase: TaskPhase, tier: Tier): { run: Run; task: Task } {
+  const fixed = fixture(phase)
+  fixed.task.tier = tier
+  return fixed
+}
+
+test('implement opens the combined pr-review on light and standard, and pr-review-intent on heavy', () => {
+  const expected: Record<Tier, TaskPhase> = { light: 'pr-review', standard: 'pr-review', heavy: 'pr-review-intent' }
+  for (const [tier, phase] of Object.entries(expected) as [Tier, TaskPhase][]) {
+    const { run, task } = tiered('implement', tier)
+    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe(phase)
+  }
+})
+
+test('a finished plan skips plan-review on light only', () => {
+  const expected: Record<Tier, TaskPhase> = { light: 'blocked-on-files', standard: 'plan-review', heavy: 'plan-review' }
+  for (const [tier, phase] of Object.entries(expected) as [Tier, TaskPhase][]) {
+    const { run, task } = tiered('plan', tier)
+    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe(phase)
+  }
+})
+
+test('a cleared pr-review goes to ci on light and standard', () => {
+  for (const tier of ['light', 'standard'] as const) {
+    const { run, task } = tiered('pr-review', tier)
+    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe('ci')
+  }
+})
+
+test('a heavy task lowered to light finishes pr-review-intent, then skips pr-review-quality', () => {
+  const { run, task } = tiered('pr-review-intent', 'light')
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('ci')
+})
+
+test('a light task raised to heavy finishes pr-review, then runs both heavy stages', () => {
+  const { run, task } = tiered('pr-review', 'heavy')
+  const route: TaskPhase[] = []
+  for (let lap = 0; lap < 3; lap++) route.push(advanceTask(run, task, clearedSignals)!.phase)
+  expect(route).toEqual(['pr-review-intent', 'pr-review-quality', 'ci'])
+})
+
+test('a green ci goes to merge on light', () => {
+  const { run, task } = tiered('ci', 'light')
+  expect(advanceTask(run, task, { ...clearedSignals, verdict: null, ciBucket: 'pass' })?.phase).toBe('merge')
+})
+
+test('a BLOCKER on pr-review sends the task back to implement', () => {
+  const { run, task } = tiered('pr-review', 'light')
+  const next = advanceTask(run, task, {
+    ...clearedSignals, verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 }, headSha: 'ccc',
+  })
+  expect(next?.phase).toBe('implement')
+  expect(task.passes['pr-review']).toBe(1)
+  expect(task.head_sha_at_entry).toBe('ccc')
+})
+
+test('a task from a ledger without a tier routes as heavy and is not written back', () => {
+  const { run, task } = fixture('implement')
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review-intent')
+  expect('tier' in task).toBe(false)
+  expect(task.tier_history).toBeUndefined()
 })

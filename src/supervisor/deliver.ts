@@ -2,11 +2,13 @@ import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { mainlineBranch } from '../lib/dispatch-base'
+import { hasLanded } from '../lib/ledger'
 import { advanceRun, counterFor } from '../lib/machine'
 import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
+import { taskTiers } from '../lib/tier-prompt'
 import {
   artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
   verdictPrefix,
@@ -304,7 +306,7 @@ export function taskSignalsFor(run: Run) {
     dispatchComplete: run.tasks.some((t) => t.phase !== 'queued') &&
       !run.tasks.some(awaitsWorktree),
     tasksAllTerminal: run.tasks.length > 0 && run.tasks.every((t) => FINISHED.has(t.phase)),
-    anyTaskDone: run.tasks.some((t) => t.phase === 'done'),
+    landedTaskCount: run.tasks.filter(hasLanded).length,
   }
 }
 
@@ -412,6 +414,7 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
     pass: String(counterFor(run, run.phase)),
     verdict_path: verdictPath,
     repo_root: run.repo_root,
+    task_tiers: taskTiers(run),
   }
 
   switch (run.phase) {

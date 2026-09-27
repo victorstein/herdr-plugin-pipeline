@@ -1,7 +1,8 @@
-# `pr-review-intent` — stage 1 on PR #{{pr}}, {{branch}} (#{{issue}}), pass {{pass}}
+# `pr-review` — PR #{{pr}}, {{branch}} (#{{issue}}), pass {{pass}}
 
-PR #{{pr}} is open. Stage 1 asks one question: does it do what was asked, completely, and nothing it
-was not asked to do? Code quality is stage 2 and is not this reviewer's concern.
+PR #{{pr}} is open. This one review asks both questions the heavy tier splits across two stages:
+does the PR do what was asked, completely, and nothing it was not asked to do — and is it written the
+way this codebase is already written?
 
 You do not review it yourself. Hand the brief below to a subagent with a fresh context, verbatim, and
 route its output — the plugin owns every word of review instruction; you only carry it.
@@ -17,22 +18,33 @@ being written, and the supervisor then treats a healthy worker as a stalled one.
 
 Commit and push the verdict file before ending your turn. This ordering is load-bearing: if the
 verdict were pushed at the start of your next `implement` turn, that push alone would move the PR's
-head off the sha recorded when `implement` began, and an unfixed PR would advance to the next review
+head off the sha recorded when `implement` began, and an unfixed PR would advance past its own review
 with no remediation done.
 
 ## The reviewer's brief
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) for **intent** against two documents: issue
-#{{issue}} (`gh issue view {{issue}}`) and the spec the PR itself carries at `{{spec_path}}`.
+Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) against issue #{{issue}}
+(`gh issue view {{issue}}`) and the spec the PR itself carries at `{{spec_path}}`. The review has two
+mandatory sections, in this order.
+
+### Intent
 
 Check: every acceptance criterion in the issue met; every spec requirement implemented, not just the
 easy half; no silent scope reduction; no scope expansion beyond what was asked; tests that exercise
 the behaviour rather than restating the implementation; and no divergence from `{{plan_path}}` that
 the PR does not explain. {{plan_review_note}}
 
-Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**, most severe first.
+### Quality
+
+Check: the change mirrors an existing pattern rather than introducing a second way to do the same
+thing; naming and structure are consistent with its siblings; no dead code, no commented-out code, no
+comments that restate what the next line does; error handling matches the established shape; tests
+are well designed rather than merely present; nothing was duplicated that already exists in this repo.
+
+After both sections, one list of findings across them: evidence-first, `file:line` citations, ranked
+**BLOCKER** / **MAJOR** / **MINOR**, most severe first.
 
 Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
 agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —

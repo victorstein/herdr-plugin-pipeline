@@ -12,7 +12,7 @@ import { actionFor, ageMinutes } from '../src/lib/status'
 import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
-import { TASK_ROWS } from '../src/lib/phases'
+import { TASK_ROWS, TIERS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 
@@ -1141,4 +1141,17 @@ test('a failed task\'s workspace is reconciled, a done task\'s is not — #116',
   applyEvents([run], absence.reconcile([run], workspaces('w1'), 'personal', 2), 'personal', new Set())
   expect(run.tasks.map((t) => t.workspace_id)).toEqual([null, 'w6'])
   expect(absence.reconcile([run], workspaces('w1'), 'personal', 3)).toEqual([])
+})
+
+test('the worker is still needed from every worker row in every tier, and past merge in none', () => {
+  const workerRows = [
+    'research', 'plan', 'plan-review', 'implement', 'pr-review', 'pr-review-intent',
+    'pr-review-quality', 'ci',
+  ] as const
+  for (const tier of TIERS) {
+    for (const phase of workerRows) {
+      expect(workerStillNeeded(mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
+    }
+    expect(workerStillNeeded(mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
+  }
 })

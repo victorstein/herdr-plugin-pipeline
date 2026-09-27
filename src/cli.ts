@@ -16,13 +16,14 @@ import {
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { enqueue } from './lib/outbox'
-import { RUN_ROWS, TASK_ROWS, runRow, taskRow } from './lib/phases'
+import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { isLowering, pipelinePanes, registrationTier, type LabelRead } from './lib/tiers'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -210,20 +211,27 @@ type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<
 /** What one `hpipe task` call carries across the stale-run retries of its registration. */
 interface RegistrationAttempt {
   fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
+  readLabelsOnce: (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
   landed: (taskId: string) => void
   dispatchBase: DispatchBaseFor
 }
 
 type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 
+type ReadLabels = (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
+
 const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
   new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
+
+const readLabelsWithGh: ReadLabels = (repoRoot, issue) => new Gh(undefined, repoRoot).issueLabels(issue)
 
 interface TaskInput {
   branch: string; issue: number; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
   repoKey: string | null; runId: string | null
   title?: string; bodyFile?: string
+  tier?: string
+  callerPane?: string | null
 }
 
 async function registerTask(
@@ -309,6 +317,13 @@ async function registerTask(
   const cycle = detectCycle([...run.tasks, { task_id: taskId, depends_on: input.dependsOn }])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
+  // Before filing, so a refused tier files nothing. A filed issue is brand new and
+  // has no labels to read, and a typo'd --tier is refused without a gh round-trip.
+  const flagRefused = input.tier !== undefined && !isTier(input.tier)
+  const labels: LabelRead = filing || flagRefused ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
+  const chosen = registrationTier(input.tier, labels)
+  if (!chosen.ok) return fail(chosen.error)
+
   // Last, after every check: an issue filed for a registration that then fails
   // is public, and nothing in the pipeline would ever close it.
   const filed = filing ? await attempt.fileIssueOnce(run.repo_root) : null
@@ -337,6 +352,11 @@ async function registerTask(
     },
     merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
+    tier: chosen.tier,
+    tier_history: [{
+      at: Date.now(), from: null, to: chosen.tier, source: chosen.source,
+      pane: input.callerPane ?? null, why: chosen.why,
+    }],
   }
 
   run.tasks.push(task)
@@ -367,8 +387,10 @@ async function registerTask(
   const bootstrap = repoBootstrap(run.repo_root)
   const bootLine = bootstrapLine(bootstrap)
 
-  const header = [`task_id: ${task.task_id}`, ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine]
-    .join('\n')
+  const header = [
+    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`,
+    ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine,
+  ].join('\n')
 
   if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
 
@@ -382,16 +404,20 @@ async function registerTask(
 
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
-  dispatchBase: DispatchBaseFor = freshDispatchBase,
+  dispatchBase: DispatchBaseFor = freshDispatchBase, readLabels: ReadLabels = readLabelsWithGh,
 ): Promise<CmdResult> {
-  // The retry re-runs registerTask from a fresh read, so the gh call is memoized
-  // out here: a second attempt reuses the issue the first one filed, never files another.
-  const outcome: { filing: Promise<FiledIssue | GhFailure> | null; registeredAs: string | null } = {
-    filing: null, registeredAs: null,
-  }
+  // The retry re-runs registerTask from a fresh read, so the gh calls are memoized
+  // out here: a second attempt reuses the issue the first one filed and the labels
+  // it read, and never files another.
+  const outcome: {
+    filing: Promise<FiledIssue | GhFailure> | null
+    labels: Promise<string[] | GhFailure> | null
+    registeredAs: string | null
+  } = { filing: null, labels: null, registeredAs: null }
   const attempt: RegistrationAttempt = {
     fileIssueOnce: (repoRoot) =>
       (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
+    readLabelsOnce: (repoRoot, issue) => (outcome.labels ??= readLabels(repoRoot, issue)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
   }
@@ -667,6 +693,7 @@ async function rewind(ctx: Ctx, input: {
   // is handed the previous one's filename, which is this issue.
   let reserved: string | null = null
   let rewoundTask: Task | null = null
+  let tierWarning = ''
 
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
@@ -699,6 +726,11 @@ async function rewind(ctx: Ctx, input: {
     }
 
     task.phase = input.phase as TaskPhase
+    const rowTiers = taskRow(task.phase).tiers
+    const taskTier = tierOf(task)
+    if (rowTiers !== undefined && !rowTiers.includes(taskTier)) {
+      tierWarning = `\nwarning: ${task.phase} is not in tier ${taskTier}; the task will leave it by the ${taskTier} route`
+    }
     task.passes = {}
     task.delivery_attempts = 0
     task.phase_entered_at = Date.now()
@@ -727,6 +759,9 @@ async function rewind(ctx: Ctx, input: {
       task.merge_commit = null
       task.issue_closed_at_entry = false
     }
+    // The same stale bucket `enterTaskPhase` forgets on entry: kept, it fails the
+    // rewound round on the next tick, before the poller has read the PR again.
+    if (task.phase === 'ci') task.ci = null
     run.history.push({ at: Date.now(), task_id: task.task_id, from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (taskRow(task.phase).signal === 'verdict') {
       reserved = reserveVerdict(run, task, task.phase)
@@ -746,7 +781,7 @@ async function rewind(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(
     `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
-    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed,
+    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed + tierWarning,
   )
 }
 export const cmdRewind = retryingOnStale(rewind)
@@ -852,6 +887,41 @@ async function answer(ctx: Ctx, input: {
 }
 export const cmdAnswer = retryingOnStale(answer)
 
+async function tier(ctx: Ctx, input: {
+  taskId: string; tier: string; why: string; callerPane: string | null
+  repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  const to = input.tier
+  if (!isTier(to)) return fail(`the tier must be one of ${TIERS.join(', ')}, got: ${to || '(missing)'}`)
+  if (input.why.trim().length === 0) {
+    return fail('--why is required: the tier log records why every change was made')
+  }
+
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    reach: 'unfinished', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  if (taskPhaseIsTerminal(task.phase)) {
+    return fail(`task ${task.task_id} is finished (phase: ${task.phase}) — its tier routes nothing now`)
+  }
+  const from = tierOf(task)
+  if (from === to) return ok(`${task.task_id} is already ${to}; nothing changed`)
+  if (isLowering(from, to) && input.callerPane !== null && pipelinePanes(run).has(input.callerPane)) {
+    return fail('lowering a tier needs a human; run this from your own pane')
+  }
+
+  task.tier = to
+  task.tier_history = [...(task.tier_history ?? []), {
+    at: Date.now(), from, to, source: 'hpipe-tier', pane: input.callerPane, why: input.why,
+  }]
+  await saveRun(ctx.stateDir, run)
+  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}.`)
+}
+export const cmdTier = retryingOnStale(tier)
+
 export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
@@ -943,10 +1013,21 @@ export function listFlag(argv: string[], name: string): string[] {
   return entries
 }
 
+function positionals(argv: string[]): string[] {
+  const found: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string
+    if (!arg.startsWith('--')) found.push(arg)
+    else if (!VALUELESS_FLAGS.has(arg)) i++
+  }
+  return found
+}
+
 const USAGE: Record<string, string[]> = {
   start: ['hpipe start <title>'],
   task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
-    '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
+    '[--tier light|standard|heavy] [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] ' +
+    '[--keep-worktree] [--run <run-id>]'],
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
   dispatch: [
@@ -959,6 +1040,7 @@ const USAGE: Record<string, string[]> = {
   release: ['hpipe release --task <id> [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
   answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
+  tier: ['hpipe tier --task <id> <light|standard|heavy> --why <text> [--run <run-id>]'],
   resume: ['hpipe resume <run-id>'],
   abort: ['hpipe abort <run-id>'],
   forget: ['hpipe forget <workspace-id>'],
@@ -974,7 +1056,7 @@ const HELP_FLAGS = new Set(['--help', '-h'])
 const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
-const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title'])
+const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
 // cmdTask names this one's argv accident more precisely than a usage line can.
 const SELF_VALIDATING_FLAGS = new Set(['--files'])
 
@@ -1073,6 +1155,8 @@ async function dispatch(argv: string[]): Promise<number> {
         runId: flag(rest, 'run'),
         title: flag(rest, 'title') ?? undefined,
         bodyFile: flag(rest, 'body-file') ?? undefined,
+        tier: flag(rest, 'tier') ?? undefined,
+        callerPane: process.env.HERDR_PANE_ID || null,
       })
       break
 
@@ -1137,6 +1221,17 @@ async function dispatch(argv: string[]): Promise<number> {
         decision: flag(rest, 'decision') ?? '',
         answer: flag(rest, 'answer') ?? '',
         by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'tier':
+      out = await cmdTier(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        tier: positionals(rest)[0] ?? '',
+        why: flag(rest, 'why') ?? '',
+        callerPane: process.env.HERDR_PANE_ID || null,
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })

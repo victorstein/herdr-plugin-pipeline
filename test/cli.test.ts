@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newRun, resolveRun, saveRun } from '../src/lib/ledger'
-import { cmdRewind, cmdStart, cmdTask, listFlag } from '../src/cli'
+import { cmdRewind, cmdStart, listFlag } from '../src/cli'
+import { cmdTask } from './helpers/cmd-task'
 
 let dir: string
 let repoDir: string

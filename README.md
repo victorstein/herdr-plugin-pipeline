@@ -4,9 +4,9 @@ Drives a software pipeline across herdr worktrees, with the design work pushed d
 has actually read the code.
 
 One **worker** agent owns each GitHub issue end to end: research → spec → adversarial review → plan →
-adversarial review → implement → two PR reviews → CI → merge → close → teardown. The **orchestrator**
-keeps intake (research the problem, file the issue, dispatch), decision triage, merge, close, and the
-whole-branch review at the end.
+adversarial review → implement → PR review → CI → merge → close → teardown, with the reviews a task
+runs set by its **tier** (below). The **orchestrator** keeps intake (research the problem, file the
+issue, dispatch), decision triage, merge, close, and the whole-branch review at the end.
 
 Workers surface **decisions, not drafts**. When one hits a choice it should not make alone, it calls
 `hpipe decide` with a question *and a recommendation*; the orchestrator answers what it can from the
@@ -119,6 +119,7 @@ The orchestrator is then prompted to research the work, open one GitHub issue pe
 body is the brief** — and register each with:
 
     hpipe task --branch <branch> --issue <n> --surface <surface> \
+               [--tier light|standard|heavy] \
                [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>] \
                [--run <run-id>]
 
@@ -146,6 +147,46 @@ instruction as each phase completes.
 
 Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
+## Review tiers
+
+Every task carries a tier that decides which reviews it runs:
+
+| Tier | `spec-review` | `plan-review` | PR review |
+|---|---|---|---|
+| `light` | ✓ | – | one combined `pr-review` |
+| `standard` | ✓ | ✓ | one combined `pr-review` |
+| `heavy` | ✓ | ✓ | `pr-review-intent`, then `pr-review-quality` |
+
+The orchestrator sets it at registration with `--tier light|standard|heavy`; a new task defaults to
+`standard`. An issue labelled `pipeline:tier-light`, `pipeline:tier-standard` or `pipeline:tier-heavy`
+overrides `--tier`, and an issue carrying two tier labels is refused. Labels are read once, at
+registration, and `hpipe task` prints the result as `tier: <tier> (<why>)`.
+
+Mid-run, `hpipe tier --task <id> <tier> --why "<reason>"` changes it. Raising works from any pane;
+lowering is refused from the orchestrator's and the workers' panes, so run it from your own. The
+phase the task is in always completes; only the next step follows the new tier, and a raise never goes
+back for a review already skipped (`hpipe rewind` does). `hpipe show --task <id>` prints the tier, its
+log, and every phase the task visited.
+
+A run in which at most one task landed skips the final `branch-review` and finishes.
+
+## Models
+
+Judgment stays on Opus: the orchestrator, every worker session and every reviewer subagent inherit
+your default model, and only `implement`'s code-writing is handed to a subagent pinned to Sonnet.
+Run Claude with Opus as the default model. Nothing pins the worker panes, so a Sonnet default would
+put the judgment on Sonnet too.
+
+## Upgrading
+
+Restart the supervisor after upgrading the plugin, in every session with a run in flight: close its
+`Pipeline supervisor` pane and run the plugin's `supervisor` action, or restart the session. A
+supervisor still running the old code beside a new CLI routes a task by the old phase table while the
+CLI briefs it on the new one. The review-tiers release also changes the on-disk format: a ledger
+holding a task in `pr-review` cannot be read by an earlier version, so finish or abort those runs
+before rolling back. Tasks registered before tiers existed carry none and run as `heavy` — every
+review, as before.
+
 ## Answering a decision
 
     hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
@@ -161,6 +202,8 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 | Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters and any undelivered answer. Rewinding a task to `implement` or earlier also forgets its recorded PR and CI state, which `implement` rediscovers from the branch's open PR. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
 | Two live runs in one session | `task`, `brief`, `show`, `dispatch`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is escalated | `hpipe rewind <run> <phase> --task <id>` resumes it; `hpipe rewind <run> failed --task <id>` abandons it. The run stays in `execute`, and the task's dependents stay queued, until you do one |
+| A task was rewound to `done` without merging | It does not count as landed. If it is the run's only task, the run escalates instead of finishing — `hpipe rewind <run> done` finishes it |
+| A task needs more (or less) review than its tier | `hpipe tier --task <id> <tier> --why "<reason>"`. Lowering is refused from pipeline panes; run it from your own |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |

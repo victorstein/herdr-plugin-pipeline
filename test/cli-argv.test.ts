@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
@@ -10,6 +10,26 @@ const PLUGIN_ROOT = join(import.meta.dir, '..')
 afterEach(cleanupFixtures)
 
 interface Fixture { repo: string; stateDir: string; env: Record<string, string> }
+
+/**
+ * Registering with `--issue` reads the issue's labels through `gh`, and this bin
+ * stands in so the suite never shells out to the real `gh` on the machine
+ * running it. It answers only the label read, with no labels, so any other gh
+ * call a change adds fails loudly; a test exercising the label read replaces
+ * `f.env.GH_BIN` with its own fake bin.
+ */
+function defaultGhBin(): string {
+  const dir = tempDir('hpipe-argv-gh-default-')
+  const path = join(dir, 'fake-gh')
+  writeFileSync(path, `#!/usr/bin/env bun
+const argv = process.argv.slice(2).join(' ')
+if (/^issue view \\d+ --json labels$/.test(argv)) { console.log(JSON.stringify({ labels: [] })); process.exit(0) }
+console.error('unstubbed: ' + argv)
+process.exit(1)
+`)
+  chmodSync(path, 0o755)
+  return path
+}
 
 /**
  * A real git repo and a scratch ledger. `cmdTask` needs `git rev-parse
@@ -31,6 +51,7 @@ function fixture(): Fixture {
     HERDR_PLUGIN_ROOT: PLUGIN_ROOT,
     HERDR_SESSION: 'argv-fixture',
     HERDR_SOCKET_PATH: '',
+    GH_BIN: defaultGhBin(),
   }
   return { repo, stateDir, env }
 }
@@ -180,7 +201,7 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
 
 const SUBCOMMANDS = [
   'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
-  'decide', 'answer', 'resume', 'abort', 'forget',
+  'decide', 'answer', 'tier', 'resume', 'abort', 'forget',
 ]
 
 test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
@@ -364,4 +385,54 @@ test('dispatch needs exactly one of --task and --done', async () => {
     intake_closed: boolean
   }
   expect(run.intake_closed).toBe(false)
+})
+
+test('task --tier reaches registration, and a pipeline:tier label read through gh overrides it', async () => {
+  const f = started()
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, {
+    'issue view 1': { labels: [{ name: 'pipeline:tier-light' }] },
+    'issue view 2': { labels: [] },
+  })
+
+  const labelled = hpipe([...TASK, '--tier', 'heavy'], f)
+  expect(labelled.code).toBe(0)
+  expect(labelled.out).toContain('tier: light (label pipeline:tier-light; --tier said heavy)')
+
+  const flagged = hpipe(['task', '--branch', 'smoke/two', '--issue', '2', '--surface', 'core', '--tier', 'heavy'], f)
+  expect(flagged.code).toBe(0)
+  expect(flagged.out).toContain('tier: heavy (--tier)')
+  expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain('issue view 1 --json labels')
+})
+
+test('task records the caller pane from HERDR_PANE_ID in its first tier change', () => {
+  const f = started()
+  f.env.HERDR_PANE_ID = 'w4:p2'
+  expect(hpipe(TASK, f).code).toBe(0)
+  const [task] = registeredTasks(f) as Array<{ tier_history: Array<{ pane: string | null }> }>
+  expect(task!.tier_history[0]!.pane).toBe('w4:p2')
+})
+
+test('task --tier with its value missing is a usage error', () => {
+  const r = hpipe([...TASK, '--tier', '--files', 'src/'], started())
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--tier needs a value')
+})
+
+test('tier reads its positional tier and --why, and the caller pane from HERDR_PANE_ID', async () => {
+  const f = fixture()
+  f.env.HERDR_PANE_ID = 'w1:p1'
+  const binDir = tempDir('hpipe-argv-gh-')
+  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue view': { labels: [] } })
+  expect(hpipe(['start', 'argv fixture'], f).code).toBe(0)
+  expect(hpipe([...TASK], f).out).toContain('tier: standard (default)')
+
+  const raised = hpipe(['tier', '--task', 't1', 'heavy', '--why', 'touches the ledger schema'], f)
+  expect(raised.code).toBe(0)
+  expect(raised.out).toContain('t1: standard → heavy')
+
+  // `start` made this pane the orchestrator's, so lowering from it is refused.
+  const lowered = hpipe(['tier', '--task', 't1', 'light', '--why', 'smaller than it looked'], f)
+  expect(lowered.code).toBe(1)
+  expect(lowered.out).toContain('lowering a tier needs a human; run this from your own pane')
 })

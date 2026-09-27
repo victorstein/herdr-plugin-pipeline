@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { TASK_ROWS, runRow } from './phases'
 import { LockTimeoutError, readJson, writeJson, writeJsonIf } from './store'
-import type { Orchestrator, Run, RunPhase, SessionKey } from './types'
+import type { Orchestrator, Run, RunPhase, SessionKey, Task } from './types'
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
 const runPath = (stateDir: string, session: SessionKey, runId: string) =>
@@ -293,6 +293,9 @@ const withinReach = (run: Run, reach: RunReach): boolean =>
 
 export const taskPhaseIsTerminal = (phase: string): boolean =>
   TASK_ROWS.some((r) => r.phase === phase && r.terminal === true)
+
+export const hasLanded = (task: Task): boolean =>
+  (task.phase === 'done' || task.phase === 'orphaned') && task.merged_at_ms !== null
 
 export async function resolveRun(
   stateDir: string, session: SessionKey, query: RunQuery,

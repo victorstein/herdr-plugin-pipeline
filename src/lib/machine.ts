@@ -1,4 +1,4 @@
-import { type PhaseRow, taskRow } from './phases'
+import { nextPhase, type PhaseRow, taskRow, tierOf } from './phases'
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
@@ -39,7 +39,11 @@ export interface RunSignals {
   newestRegisteredAt: number | null
   dispatchComplete: boolean
   tasksAllTerminal: boolean
-  anyTaskDone: boolean
+  /**
+   * Tasks in `done` or `orphaned` whose merge was recorded. `orphaned` is
+   * normally post-merge, but a manual rewind can put an unmerged task there.
+   */
+  landedTaskCount: number
 }
 
 export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
@@ -68,11 +72,13 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
       return enterRunPhase(run, 'execute', 'every dispatched task has a worktree')
     }
 
+    // A final review of one task's work repeats the reviews that task already
+    // passed: nothing else landed for it to have a seam with.
     case 'execute': {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
-      return s.anyTaskDone
-        ? enterRunPhase(run, 'branch-review', 'every task finished')
-        : enterRunPhase(run, 'escalated', 'every task finished without one reaching done')
+      if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
+      if (s.landedTaskCount === 1) return enterRunPhase(run, 'done', 'one task landed; branch-review skipped')
+      return enterRunPhase(run, 'escalated', 'every task finished without one landing')
     }
 
     case 'branch-review': {
@@ -104,6 +110,11 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   } else if (!leavesDecisionPending(task, phase)) {
     forgetDecisionRoundTrip(task)
   }
+  // The cached bucket is the last round's, and the machine reads it every tick
+  // while the poller only runs every CI_POLL_SECONDS: a second round failed on
+  // the first round's red before the new head was ever polled. Found by tracing
+  // a tick, not measured.
+  if (phase === 'ci') task.ci = null
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
@@ -165,7 +176,7 @@ function advanceLoopingRow(
   maxPasses: number, headSha: string | null,
 ): Task | null {
   if (cleared) {
-    return enterTaskPhase(run, task, row.onClear as TaskPhase, 'cleared')
+    return enterTaskPhase(run, task, nextPhase(tierOf(task), row), 'cleared')
   }
   const count = bumpCounter(task, row.phase)
   if (count >= maxPasses) {
@@ -183,7 +194,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'plan': {
       if (!s.actorIdle || !s.artifactFresh) return null
       return enterTaskPhase(
-        run, task, taskRow(task.phase).onClear as TaskPhase, 'actor idle + artifact fresh',
+        run, task, nextPhase(tierOf(task), taskRow(task.phase)), 'actor idle + artifact fresh',
       )
     }
 
@@ -191,11 +202,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
       if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
-      return enterTaskPhase(run, task, 'pr-review-intent', `PR #${s.prNumber} at ${s.headSha}`)
+      return enterTaskPhase(
+        run, task, nextPhase(tierOf(task), taskRow('implement')), `PR #${s.prNumber} at ${s.headSha}`,
+      )
     }
 
     case 'spec-review':
     case 'plan-review':
+    case 'pr-review':
     case 'pr-review-intent':
     case 'pr-review-quality': {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null

@@ -23,6 +23,17 @@ Give them, in a few lines: the question, the worker's recommendation, your own r
 option you recommend, named. Never hand over a bare question: forming the recommendation is the work,
 and passing it up unformed is exactly the cost this pipeline exists to remove.
 
+## If the answer grows the task, raise its tier
+
+`{{task_id}}` runs the `{{tier}}` review tier. A decision is often where scope grows: if your answer
+takes the task onto another surface, into a contract or into a migration, raise its tier before you
+record the answer:
+
+    {{hpipe}} tier --task {{task_id}} <standard|heavy> --why "<what the answer adds>"
+
+Never lower a tier. The phase the worker is in still completes; the step after it follows the new
+tier.
+
 ## Either way, record the answer
 
     {{hpipe}} answer --task {{task_id}} --decision {{decision_id}} \

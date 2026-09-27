@@ -2,12 +2,18 @@ import { existsSync, statSync } from 'node:fs'
 import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Run, Task } from '../src/lib/types'
+import { openDecision } from '../src/lib/decisions'
+import { newRun } from '../src/lib/ledger'
+import { TASK_ROWS, TIERS } from '../src/lib/phases'
+import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { renderWorkerPrompt } from '../src/lib/worker-prompt'
+import { renderRunPhasePrompt } from '../src/supervisor/deliver'
+import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
-  'spec-review', 'plan-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
+  'spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
 ]
 const ALL = [
   'spec', 'plan', 'dispatch', 'worker-brief', 'ci-red', 'merge', 'close',
@@ -280,7 +286,7 @@ test('the dispatch prompt names every header line a dispatching task prints', as
   // Named rather than counted: `issue:` appears only when --title filed one, and
   // a count is how the convention drifted before.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  for (const line of ['task_id:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
+  for (const line of ['task_id:', 'tier:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
     expect(text).toContain(`\`${line}\``)
   }
   expect(text).not.toMatch(/(two|three|four|five) header/)
@@ -297,4 +303,271 @@ test('this repo declares its own bootstrap, and it is executable', () => {
   const path = join(ROOT, '.claude', 'pipeline-bootstrap')
   expect(existsSync(path)).toBe(true)
   expect(statSync(path).mode & 0o111).toBeGreaterThan(0)
+})
+
+test('pr-review carries the intent checks, then the quality checks, word for word, under one trailer', async () => {
+  const read = (name: string) => Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+  const checks = (text: string) => /^Check: [\s\S]*?\n\n/m.exec(text)?.[0] ?? '(no Check: paragraph)'
+  const combined = await read('pr-review')
+  const intent = checks(await read('pr-review-intent'))
+  const quality = checks(await read('pr-review-quality'))
+
+  expect(combined).toContain(`### Intent\n\n${intent}`)
+  expect(combined).toContain(`### Quality\n\n${quality}`)
+  expect(combined.indexOf('### Intent')).toBeLessThan(combined.indexOf('### Quality'))
+  expect(combined.split('VERDICT: CLEAR')).toHaveLength(2)
+})
+
+async function renderPhase(
+  phase: TaskPhase, over: Partial<Task> = {}, cameFrom: TaskPhase = phase,
+): Promise<string> {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const task = briefTask({ phase, pr: 7, ...over })
+  run.tasks = [task]
+  return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
+}
+
+test('every task reviewer brief opens its review with the task\'s tier', async () => {
+  for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+    expect(await renderPhase(phase, { tier: 'light' }), phase)
+      .toContain('Open the review with the line `Tier: light`.')
+  }
+})
+
+test('the branch review opens with every task\'s tier', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'branch-review'
+  run.tasks = [
+    briefTask({ task_id: 't1', phase: 'done', tier: 'light' }),
+    briefTask({ task_id: 't2', phase: 'done' }),
+  ]
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('Open the review with the line `Tiers: t1 light, t2 heavy`.')
+})
+
+test('no review prompt pins a model: every reviewer inherits the worker\'s', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    expect(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text(), name).not.toContain('model:')
+  }
+})
+
+test('both reviews that judge the plan are told when no plan review ran', async () => {
+  for (const phase of ['pr-review', 'pr-review-intent'] as const) {
+    expect(await renderPhase(phase, { tier: 'light' }), phase)
+      .toContain('the PR does not explain. No plan review ran; judge the plan\'s soundness from the diff as well.')
+    expect(await renderPhase(phase, { tier: 'standard', verdict_seq: { 'plan-review': 1 } }), phase)
+      .not.toContain('No plan review ran')
+  }
+})
+
+test('a light task raised to heavy after skipping plan-review is told its plan went unreviewed', async () => {
+  expect(await renderPhase('pr-review-intent', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
+    .toContain('No plan review ran')
+})
+
+function implementersBrief(text: string): string {
+  const start = text.indexOf("## The implementer's brief")
+  if (start === -1) throw new Error("no implementer's brief")
+  return text.slice(start)
+}
+
+test('implement and ci-red hand the coding to a sonnet subagent carrying one scoping brief', async () => {
+  const implement = await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files')
+  const ciRed = await renderPhase('implement', { tier: 'standard' }, 'ci')
+  expect(ciRed).toContain('# CI is red')
+  for (const text of [implement, ciRed]) {
+    expect(text).toContain('`model: sonnet`')
+    expect(text).toContain('wait for it within this turn')
+    expect(text).toContain('Read `.claude/agents/core-dev.md` before your first edit')
+  }
+  expect(implementersBrief(ciRed)).toBe(implementersBrief(implement))
+})
+
+test('the implementer commits but never pushes, re-reads before editing, and returns questions', async () => {
+  const brief = implementersBrief(await Bun.file(join(ROOT, 'prompts', 'implement.md')).text())
+  expect(brief).toContain('Re-read every file you are about to touch before you edit it.')
+  expect(brief).toContain('Commit, but do not push')
+  expect(brief).toContain('return the question')
+  expect(brief).toContain('Never commit to or push the default branch.')
+})
+
+test('ci-red addresses the worker it is delivered to', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'ci-red.md')).text()
+  expect(text).not.toContain('Send the worker back')
+  expect(text).toContain('gh run view --log-failed')
+})
+
+test('implement calls the plan reviewed only when a plan review ran', async () => {
+  const reviewed = await renderPhase('implement', { tier: 'standard', verdict_seq: { 'plan-review': 1 } })
+  expect(reviewed).toContain('The plan at `/r/c.md` cleared review.')
+  for (const unreviewed of [
+    await renderPhase('implement', { tier: 'light' }),
+    await renderPhase('implement', { tier: 'standard' }),
+  ]) {
+    expect(unreviewed).toContain('was not reviewed — read it critically, and fix it first if it is wrong.')
+    expect(unreviewed).not.toContain('cleared review')
+  }
+})
+
+test('an answer that resumes implement keeps the coding with a fresh subagent', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
+  expect(prose(text)).toContain('dispatch a fresh one with this answer in its brief')
+})
+
+test('the brief lists only the phases its tier runs, with the paths written in', async () => {
+  const light = await renderBriefFor([briefTask({ tier: 'light' })], 0)
+  expect(light).toContain('1. `research` → `a.md`')
+  expect(light).toContain('4. `plan` → `c.md`')
+  expect(light).toContain('6. `pr-review` — one review of the PR, intent then quality')
+  expect(light).not.toContain('`plan-review`')
+
+  const heavy = await renderBriefFor([briefTask({ tier: 'heavy' })], 0)
+  expect(heavy).toContain('5. `plan-review` — you dispatch the reviewer again')
+  expect(heavy).toContain('8. `pr-review-quality`')
+  expect(heavy).not.toContain('`pr-review` —')
+})
+
+test('the brief names the tier, forbids lowering it, and says how to raise it', async () => {
+  const text = await renderBriefFor([briefTask({ tier: 'standard' })], 0)
+  expect(text).toContain('Your review tier is `standard`: it decides which of those reviews run. Never lower it.')
+  expect(text).toMatch(/ tier --task t1 <higher> --why "<what you found>"/)
+  const raw = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
+  expect(raw).toContain('{{phase_loop}}')
+  expect(raw).not.toContain('Between `plan-review` and `implement`')
+})
+
+test('research tells the worker to raise a tier that is too low before the spec is written', async () => {
+  const text = await renderPhase('research', { tier: 'light' })
+  expect(text).toContain('Your review tier is `light`.')
+  expect(text).toMatch(/ tier --task t1 <standard\|heavy> --why "<what you found>"/)
+})
+
+test('the decision prompt tells the orchestrator to raise the tier when an answer grows the task', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.orchestrator_pane = 'w1:p1'
+  const task = briefTask({ phase: 'blocked-on-decision', decision_from: 'plan', tier: 'light', pane_id: 'w7:p1' })
+  openDecision(task, { question: 'q', recommendation: 'r' })
+  run.tasks = [task]
+  const sent: string[] = []
+  await announceDecisions(run, {
+    pluginRoot: ROOT, promptRetryMax: 5,
+    send: async (_pane, text) => { sent.push(text); return { ok: true } },
+    checkSubmission: async () => ({ state: 'submitted' }),
+  })
+  expect(sent[0]).toContain('`t1` runs the `light` review tier.')
+  expect(sent[0]).toMatch(/ tier --task t1 <standard\|heavy> --why "<what the answer adds>"/)
+  expect(sent[0]).toContain('Never lower a tier.')
+})
+
+test('merge counts the review stages that actually ran', async () => {
+  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } }))
+    .toContain('Both review stages cleared and CI is green on PR #7.')
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } }))
+    .toContain('Review cleared and CI is green on PR #7.')
+})
+
+test('intake explains the tiers and registers with --tier', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
+  expect(text).toContain('[--tier light|standard|heavy]')
+  expect(text).toContain('When unsure, pick the higher tier: under-review is the costly mistake.')
+  expect(text).toContain('`pipeline:tier-<name>`')
+  expect(text).toContain('Never lower a tier')
+  expect(text).toContain('then a `tier:` line')
+})
+
+test('every prompt renders for every tier on every path with no placeholder left', async () => {
+  for (const tier of TIERS) {
+    const rendered: Array<[string, string]> = []
+
+    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined)) {
+      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' })])
+    }
+    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files')])
+    rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
+
+    const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+    run.orchestrator_pane = 'w1:p1'
+    const task = briefTask({ tier })
+    run.tasks = [task]
+    rendered.push(['brief and research', await renderWorkerPrompt(ROOT, run, task)])
+
+    const asking = briefTask({ phase: 'blocked-on-decision', decision_from: 'implement', tier, pane_id: 'w7:p1' })
+    openDecision(asking, { question: 'q', recommendation: 'r' })
+    run.tasks = [asking]
+    const sent: string[] = []
+    await announceDecisions(run, {
+      pluginRoot: ROOT, promptRetryMax: 5,
+      send: async (_pane, text) => { sent.push(text); return { ok: true } },
+      checkSubmission: async () => ({ state: 'submitted' }),
+    })
+    rendered.push(['decision', sent[0] ?? '(not sent)'])
+
+    run.phase = 'branch-review'
+    run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier })]
+    rendered.push(['branch-review', await renderRunPhasePrompt(run, ROOT)])
+
+    for (const [what, text] of rendered) expect(text, `${tier}: ${what}`).not.toContain('{{')
+  }
+})
+
+test('the README documents tiers, their labels, hpipe tier, the model split and the restart', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  for (const needle of [
+    '## Review tiers', '--tier light|standard|heavy', 'pipeline:tier-light', 'hpipe tier --task',
+    'Run Claude with Opus as the default model', 'Restart the supervisor after upgrading',
+    'skips the final `branch-review`',
+  ]) {
+    expect(readme, needle).toContain(needle)
+  }
+})
+
+test('the skill teaches tiers, hpipe tier, the model requirement and the restart', async () => {
+  const skill = await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text()
+  for (const needle of [
+    'hpipe tier --task', 'pipeline:tier-<name>', '--tier light|standard|heavy',
+    'Run Claude with Opus as the default model', 'Restart the supervisor after upgrading',
+  ]) {
+    expect(skill, needle).toContain(needle)
+  }
+})
+
+function prose(text: string): string {
+  return text.replace(/\s+/g, ' ')
+}
+
+test('a returned question ends the turn without pushing the subagent\'s unverified work', async () => {
+  for (const text of [
+    await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'),
+    await renderPhase('implement', { tier: 'standard' }, 'ci'),
+  ]) {
+    expect(prose(text)).toContain('as your brief describes, and end your turn without pushing')
+    expect(prose(text)).toContain('Push only work you have verified')
+  }
+  expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('unless you are ending it on a decision')
+})
+
+test('failed verification goes back to a fresh subagent, never to the worker\'s own hands', async () => {
+  for (const text of [
+    await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'),
+    await renderPhase('implement', { tier: 'standard' }, 'ci'),
+  ]) {
+    expect(prose(text)).toContain('If either is red, dispatch a fresh subagent with the failing output')
+    expect(prose(text)).toContain('do not fix it yourself')
+  }
+})
+
+test('the implementer writes conventional-commit messages', async () => {
+  const brief = implementersBrief(await renderPhase('implement', { tier: 'standard' }, 'blocked-on-files'))
+  expect(prose(brief)).toContain('with a conventional-commit message')
+})
+
+test('an answer that resumes implement points at whichever prompt the worker received', async () => {
+  const text = await Bun.file(join(ROOT, 'prompts', 'answer.md')).text()
+  expect(prose(text)).toContain('as the implement or CI-red prompt you received describes')
+})
+
+test('ci-red re-runs an environmental failure with an empty commit, since only the PR head is watched', async () => {
+  const text = prose(await renderPhase('implement', { tier: 'standard' }, 'ci'))
+  expect(text).toContain('git commit --allow-empty -m "ci: re-run <check>"')
+  expect(text).toContain('say so in the PR')
+  expect(text).not.toContain('re-run the check instead of editing code')
 })

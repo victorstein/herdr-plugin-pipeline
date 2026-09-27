@@ -14,6 +14,7 @@ import { taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
+import { tierPromptVars } from '../lib/tier-prompt'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { renderWorkerPrompt } from '../lib/worker-prompt'
@@ -105,6 +106,7 @@ export async function renderTaskPhasePrompt(
   run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
 ): Promise<string> {
   const common = {
+    ...tierPromptVars(task),
     run_id: run.run_id,
     branch: task.branch,
     issue: String(task.issue),
@@ -124,6 +126,8 @@ export async function renderTaskPhasePrompt(
     case 'plan':
     case 'plan-review':
       return renderPrompt(deps.pluginRoot, taskRow(task.phase).prompt as string, common)
+    case 'pr-review':
+      return renderPrompt(deps.pluginRoot, 'pr-review', common)
     case 'pr-review-intent':
       return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
     case 'pr-review-quality':
@@ -303,6 +307,11 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
 
   switch (task.phase) {
     case 'implement': {
+      // GitHub's PR head lags a push, so a send-back can record the head from
+      // before the reviewer's verdict commit, and that commit then reads as the
+      // worker's push. Until the prompt lands the worker has pushed nothing, so
+      // no head read can mean work. Found by tracing a tick, not measured.
+      if (task.awaiting_brief === true || queuedWorkerPrompt(run, task) !== null) return base
       const pr = task.pr ?? (await deps.prForBranch(task.branch))
       if (pr === null) return base
       // Persist on discovery, not on the phase transition: otherwise every tick
@@ -364,10 +373,13 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     }
     case 'spec-review':
     case 'plan-review':
+    case 'pr-review':
     case 'pr-review-intent':
     case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)
-      return { ...base, artifactFresh: verdict !== null, verdict }
+      const signals = { ...base, artifactFresh: verdict !== null, verdict }
+      const sendsBack = actorIdle && verdict !== null && verdict.verdict !== 'CLEAR'
+      return sendsBack ? withSendBackHead(signals, task, deps) : signals
     }
     case 'merge': {
       if (task.pr === null) return base
@@ -398,10 +410,35 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),
       }
     case 'ci':
-      return base
+      return task.ci === 'fail' ? withSendBackHead(base, task, deps) : base
     default:
       return null
   }
+}
+
+/**
+ * `implement` clears only on a head past `head_sha_at_entry`, which the machine
+ * records from the signals of the row it is leaving. Only `implement` used to read
+ * the head, so a send-back recorded null, any head counted as moved, and a worker
+ * that went idle without pushing sent the unfixed PR back to review. Found by
+ * tracing a tick, not measured. A failed read skips the tick: recording null
+ * would disarm the guard just the same. CI can fail on a head the PR has
+ * already moved past; recording the newer head costs a stall if the worker
+ * does not push past it, never a false advance. The last allowed pass escalates rather
+ * than return to `implement`, so it must not wait on gh.
+ */
+async function withSendBackHead<S extends { headSha: string | null; prNumber: number | null }>(
+  signals: S, task: Task, deps: TaskDeps,
+): Promise<S | null> {
+  const row = taskRow(task.phase)
+  if (row.onBlocker !== 'implement') return signals
+  if (row.counter !== undefined && counterFor(task, row.counter) + 1 >= deps.maxPasses) return signals
+  const pr = task.pr ?? (await deps.prForBranch(task.branch))
+  if (pr === null) return null
+  task.pr = pr
+  const view = await deps.prView(pr)
+  if (view?.headSha == null) return null
+  return { ...signals, prNumber: pr, headSha: view.headSha }
 }
 
 /** The review verdict at the task's reserved path, if one newer than its baseline has settled. */
@@ -541,7 +578,8 @@ export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<voi
     if (!decision || decision.prompted_at !== null) continue
 
     const text = await renderPrompt(deps.pluginRoot, 'decision', {
-      task_id: task.task_id, decision_id: decision.id,
+      ...tierPromptVars(task),
+      decision_id: decision.id,
       phase: task.decision_from ?? '', question: decision.question,
       recommendation: decision.recommendation,
       branch: task.branch, issue: String(task.issue),

@@ -22,6 +22,7 @@ plans its own issue.
 4. **Register each one:**
 
        {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
+                  [--tier light|standard|heavy] \
                   [--depends-on <id,id>] [--files <prefix,prefix>] \
                   [--notes "<batch context that does not belong in a public issue>"]
 
@@ -29,18 +30,32 @@ plans its own issue.
    with that body and registers it in one step, and prints `issue: #<n> (filed)`. The body file is
    the same brief step 3 asks for — write it just as carefully.
 
+   `--tier` decides which reviews the task runs. `light` skips `plan-review` and gets one combined
+   PR review; `standard` keeps `plan-review` and the combined PR review; `heavy` runs every review,
+   with the PR reviewed in two separate stages. Pick it from the issue:
+
+   - **light** — one surface, a handful of files, and the issue already pins down the exact change:
+     no API, contract or schema decision left open.
+   - **heavy** — changes a contract another surface consumes, migrates data, touches security or
+     auth, concurrency, or state-machine code; or you are not sure.
+   - **standard** — everything else.
+
+   When unsure, pick the higher tier: under-review is the costly mistake. With no `--tier` a task is
+   `standard`, and an issue labelled `pipeline:tier-<name>` overrides `--tier`. Never lower a tier
+   once the task is running; a worker or a decision that finds it too low raises it.
+
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
    exists. `--files` and `--depends-on` are **comma-separated**: a value containing whitespace is
    rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the
-   task id, then a `files:` line echoing exactly what it recorded (or `files: none`) — check it says
-   what you meant — and then either the worker brief to dispatch or `queued: waiting on …`, which is
-   correct, and you will be told when that task is ready. A brief to dispatch comes with a
-   `base: <commit> (…)` line: cut that task's worktree from that commit
-   (`herdr worktree create … --base <commit>`), never from your local `main`, which is only as new
-   as your last pull. Under it, `dispatch, in order:` lists the whole dispatch with that commit
-   already filled in — worktree, bootstrap, `agent start … -- --dangerously-skip-permissions`,
-   `dispatch --task` — so run it as printed, filling in the pane and path the create response
-   returns.
+   task id, then a `tier:` line naming the tier it recorded and why, then a `files:` line echoing
+   exactly what it recorded (or `files: none`) — check both say what you meant — and then either the
+   worker brief to dispatch or `queued: waiting on …`, which is correct, and you will be told when
+   that task is ready. A brief to dispatch comes with a `base: <commit> (…)` line: cut that task's
+   worktree from that commit (`herdr worktree create … --base <commit>`), never from your local
+   `main`, which is only as new as your last pull. Under it, `dispatch, in order:` lists the whole
+   dispatch with that commit already filled in — worktree, bootstrap,
+   `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so run it as printed,
+   filling in the pane and path the create response returns.
 
 5. **When the last task is registered, close intake:**
 

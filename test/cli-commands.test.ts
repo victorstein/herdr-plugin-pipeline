@@ -4,13 +4,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus, cmdTask, recordWorkerPane,
+  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
+  cmdTier, recordWorkerPane,
 } from '../src/cli'
+import { cmdTask } from './helpers/cmd-task'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
 import { openDecisionFor } from '../src/lib/decisions'
+import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -484,6 +487,8 @@ test('a task resumed into implement with its PR still open waits for a new push'
 
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })).ok).toBe(true)
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
+  expect(saved.outbox?.map((entry) => entry.to)).toEqual(['worker'])
+  settleOutbox(saved, saved.outbox!.map((entry) => ({ id: entry.id, ok: true })), Date.now())
 
   let head = 'H'
   const deps = {
@@ -1037,18 +1042,19 @@ test('the dispatched return keeps every header line above the one blank line', a
   const result = await cmdTask(ctx(), {
     branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase)
+  }, undefined, fetchedBase, async () => [])
 
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 4)).toEqual([
+  expect(lines.slice(0, 5)).toEqual([
     'task_id: t1',
+    'tier: standard (default)',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
-  expect(lines.slice(4)).toEqual([
+  expect(lines.slice(5)).toEqual([
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
@@ -1080,14 +1086,15 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   const result = await cmdTask(ctx(), {
     branch: 'feat/quiet', issue: 2, surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase)
+  }, undefined, fetchedBase, async () => [])
 
   // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 4)).toEqual([
-    'task_id: t1', 'files: none', 'bootstrap: none', 'base: 1fb8a43 (origin/main as just fetched)',
+  expect(lines.slice(0, 5)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'files: none', 'bootstrap: none',
+    'base: 1fb8a43 (origin/main as just fetched)',
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
   expect(lines.join('\n')).toContain('-- --dangerously-skip-permissions')
@@ -1623,4 +1630,236 @@ test('a run rewind into a phase with no prompt owes nothing', async () => {
   const run = await seed()
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'execute', taskId: null })).ok).toBe(true)
   expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
+})
+
+// ——— registration tier ———
+
+async function seedInRepo(): Promise<void> {
+  await saveRun(dir, newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' }))
+}
+
+const existingIssue = {
+  branch: 'feat/tiered', issue: 12, surface: 'core', notes: '',
+  dependsOn: [] as string[], files: [] as string[], keepWorktree: false,
+  repoKey: 'k', runId: null,
+}
+
+const headLines = (text: string): string[] => text.split('\n\n')[0]!.split('\n')
+
+test('a pipeline:tier label beats --tier, and the tier line says what --tier said', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'standard', callerPane: 'w1:p1' },
+    undefined, fetchedBase, async () => ['bug', 'pipeline:tier-light'])
+
+  expect(result.ok).toBe(true)
+  expect(headLines(result.text).slice(0, 2)).toEqual([
+    'task_id: t1', 'tier: light (label pipeline:tier-light; --tier said standard)',
+  ])
+  const task = (await registered())[0]!
+  expect(task.tier).toBe('light')
+  expect(task.tier_history).toEqual([{
+    at: expect.any(Number), from: null, to: 'light', source: 'label', pane: 'w1:p1',
+    why: 'label pipeline:tier-light; --tier said standard',
+  }])
+})
+
+test('--tier with no tier label is recorded as the flag', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase, async () => ['bug'])
+  expect(headLines(result.text)).toContain('tier: heavy (--tier)')
+  expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
+})
+
+test('with neither a label nor --tier the task is standard', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => [])
+  expect(headLines(result.text)).toContain('tier: standard (default)')
+  expect((await registered())[0]!.tier).toBe('standard')
+})
+
+test('unreadable labels fall back to --tier and still register', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase,
+    async () => ({ error: 'HTTP 401: Bad credentials' }))
+  expect(result.ok).toBe(true)
+  expect(headLines(result.text)).toContain('tier: heavy (--tier; labels unreadable: HTTP 401: Bad credentials)')
+})
+
+test('two tier labels refuse the registration and record nothing', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase,
+    async () => ['pipeline:tier-light', 'pipeline:tier-heavy'])
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('pipeline:tier-light, pipeline:tier-heavy')
+  expect(await registered()).toEqual([])
+})
+
+test('an unknown tier label refuses the registration', async () => {
+  await seedInRepo()
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => ['pipeline:tier-huge'])
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('unknown tier label pipeline:tier-huge')
+  expect(await registered()).toEqual([])
+})
+
+test('an unknown --tier files no issue', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let filed = 0
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile, tier: 'huge' },
+    async () => { filed++; return issue318 })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
+  expect(filed).toBe(0)
+})
+
+test('an unknown --tier is refused before the label read', async () => {
+  await seedInRepo()
+  let reads = 0
+  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'huge' }, undefined, fetchedBase,
+    async () => { reads++; return [] })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
+  expect(reads).toBe(0)
+})
+
+test('a filed issue has no labels to read, so --title skips the read', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  let reads = 0
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
+    async () => issue318, fetchedBase, async () => { reads++; return ['pipeline:tier-heavy'] })
+  expect(result.ok).toBe(true)
+  expect(reads).toBe(0)
+  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'issue: #318 (filed)'])
+})
+
+test('a registration that loses its save reads the labels once', async () => {
+  await seedInRepo()
+  let reads = 0
+  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => {
+    reads++
+    await supervisorWrites((run) => { run.intake_closed = true })
+    return ['pipeline:tier-heavy']
+  })
+  expect(result.ok).toBe(true)
+  expect(reads).toBe(1)
+  expect((await registered()).map((t) => t.tier)).toEqual(['heavy'])
+})
+
+// ——— hpipe tier ———
+
+async function seedTiered(over: Partial<Task> = {}): Promise<Run> {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'implement', tier: 'light', pane_id: 'w7:p1', last_pane_id: 'w3:p1', ...over,
+  }])
+  run.orchestrator_pane = 'w1:p1'
+  await saveRun(dir, run)
+  return run
+}
+
+const tierInput = (over: Partial<Parameters<typeof cmdTier>[1]> = {}): Parameters<typeof cmdTier>[1] => ({
+  taskId: 't1', tier: 'heavy', why: 'research found a contract change', callerPane: 'w7:p1',
+  repoKey: 'k', runId: null, ...over,
+})
+
+test('tier raises from any pane, logs the change, and writes nothing to run.history', async () => {
+  const run = await seedTiered()
+  const historyBefore = (await savedRun(run.run_id)).history.length
+
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('t1: light → heavy')
+
+  const saved = await savedRun(run.run_id)
+  expect(saved.tasks[0]?.tier).toBe('heavy')
+  expect(saved.tasks[0]?.tier_history).toEqual([{
+    at: expect.any(Number), from: 'light', to: 'heavy', source: 'hpipe-tier', pane: 'w7:p1',
+    why: 'research found a contract change',
+  }])
+  expect(saved.history).toHaveLength(historyBefore)
+  expect(saved.tasks[0]?.phase).toBe('implement')
+})
+
+test('tier refuses to lower from the orchestrator pane or any worker pane, live or last', async () => {
+  for (const pane of ['w1:p1', 'w7:p1', 'w3:p1']) {
+    const run = await seedTiered({ tier: 'heavy' })
+    const result = await cmdTier(ctx(), tierInput({ tier: 'light', callerPane: pane, runId: run.run_id }))
+    expect(result.ok, pane).toBe(false)
+    expect(result.text).toBe('lowering a tier needs a human; run this from your own pane')
+    expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('heavy')
+  }
+})
+
+test('tier lowers from a pane the pipeline does not own, or from outside herdr', async () => {
+  for (const pane of ['w42:p9', null]) {
+    const run = await seedTiered({ tier: 'heavy' })
+    const result = await cmdTier(ctx(), tierInput({ tier: 'light', callerPane: pane, runId: run.run_id }))
+    expect(result.ok, String(pane)).toBe(true)
+    expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('light')
+  }
+})
+
+test('tier to the tier a task already has is a no-op that records nothing', async () => {
+  const run = await seedTiered()
+  const result = await cmdTier(ctx(), tierInput({ tier: 'light' }))
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('already light')
+  expect((await savedRun(run.run_id)).tasks[0]?.tier_history).toBeUndefined()
+})
+
+test('tier refuses a finished task', async () => {
+  await seedTiered({ phase: 'done' })
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('is finished (phase: done)')
+})
+
+test('tier changes an escalated task: escalation is not finished', async () => {
+  const run = await seedTiered({ phase: 'escalated', escalated_from: 'implement' })
+  const result = await cmdTier(ctx(), tierInput())
+  expect(result.ok).toBe(true)
+  expect((await savedRun(run.run_id)).tasks[0]?.tier).toBe('heavy')
+})
+
+test('tier needs --why and a real tier', async () => {
+  await seedTiered()
+  expect((await cmdTier(ctx(), tierInput({ why: '  ' }))).text).toContain('--why is required')
+  expect((await cmdTier(ctx(), tierInput({ tier: 'huge' }))).text)
+    .toBe('the tier must be one of light, standard, heavy, got: huge')
+})
+
+test('tier on a task from before tiers starts from heavy', async () => {
+  const run = await seedTiered({ tier: undefined })
+  const result = await cmdTier(ctx(), tierInput({ tier: 'standard', callerPane: 'w42:p9' }))
+  expect(result.text).toContain('t1: heavy → standard')
+  expect((await savedRun(run.run_id)).tasks[0]?.tier_history?.[0]?.from).toBe('heavy')
+})
+
+test('a rewind onto a row the tier skips is allowed, and warns how the task will leave it', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'implement', tier: 'light' }])
+  await saveRun(dir, run)
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('warning: plan-review is not in tier light; the task will leave it by the light route')
+  expect((await savedRun(run.run_id)).tasks[0]?.phase).toBe('plan-review')
+})
+
+test('a rewind onto a row the tier runs carries no warning', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', escalated_from: 'implement', tier: 'standard' }])
+  await saveRun(dir, run)
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'plan-review', taskId: 't1' })
+  expect(result.text).not.toContain('warning:')
+})
+
+test('rewind onto ci forgets the last CI result, so the next round waits for a fresh poll', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'escalated', pr: 5, ci: 'fail', passes: { ci: 2 } }])
+  await saveRun(dir, run)
+
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'ci', taskId: 't1' })).ok).toBe(true)
+
+  const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
+  expect(task?.phase).toBe('ci')
+  expect(task?.pr).toBe(5)
+  expect(task?.ci).toBeNull()
 })

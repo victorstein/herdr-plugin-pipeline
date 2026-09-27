@@ -6,10 +6,11 @@ import { answerDecision, openDecision } from '../src/lib/decisions'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
-import { enqueue } from '../src/lib/outbox'
+import { enqueue, settleOutbox } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
+import { ciTransitions } from '../src/supervisor/ci'
 import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 
@@ -325,6 +326,7 @@ test('a red CI yields the ci-red prompt carrying the failure detail', async () =
   const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail' })])
   const prompts = await advanceTasks(run, deps({
     ciDetail: async () => '- build (fail) https://example/run/1',
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'aaa' }),
   }))
   expect(run.tasks[0]?.phase).toBe('implement')
   expect(prompts.map((p) => p.text).join('\n')).toContain('CI is red')
@@ -1109,4 +1111,164 @@ test('a verdict left from before the phase was entered still does not count afte
 
   await advanceTasks(run, deps({ verdictFor: (r, t) => freshVerdict(r, t, 0) }))
   expect(run.tasks[0]?.phase).toBe('plan-review')
+})
+
+// ——— the head a send-back records, and the CI result a re-entry forgets ———
+//
+// Through a whole tick, not `advanceTask` alone: the machine tests hand it a
+// `headSha` directly, which is exactly the signal `gatherSignals` never gathered
+// on a review or ci row.
+
+const blocker = { verdict: 'BLOCKER' as const, blockers: 1, majors: 0 }
+const clear = { verdict: 'CLEAR' as const, blockers: 0, majors: 0 }
+const prAt = (headSha: string) => ({ merged: false, mergedAtMs: null, headSha })
+
+function headReads(head: () => string | null) {
+  const reads = { count: 0 }
+  const prView = async () => {
+    reads.count++
+    const sha = head()
+    return sha === null ? null : prAt(sha)
+  }
+  return { reads, prView }
+}
+
+for (const { phase, tier } of [
+  { phase: 'pr-review-intent', tier: 'heavy' },
+  { phase: 'pr-review', tier: 'light' },
+] as const) {
+  test(`a ${phase} BLOCKER holds implement until the worker pushes past the rejected head`, async () => {
+    let head = 'aaa'
+    const { prView } = headReads(() => head)
+    const run = mkRun([mkTask({ phase, tier, pr: 42 })])
+    await advanceTasks(run, deps({ verdictFor: async () => blocker, prView, prForBranch: async () => 42 }))
+    const task = run.tasks[0]!
+    expect(task.phase).toBe('implement')
+    expect(task.head_sha_at_entry).toBe('aaa')
+
+    await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
+    expect(task.phase).toBe('implement')
+
+    head = 'bbb'
+    await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
+    expect(task.phase).toBe(phase)
+  })
+}
+
+test('a red CI holds implement until the worker pushes past the red head', async () => {
+  let head = 'aaa'
+  const { prView } = headReads(() => head)
+  const run = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'fail', tier: 'standard' })])
+  await advanceTasks(run, deps({ prView }))
+  const task = run.tasks[0]!
+  expect(task.phase).toBe('implement')
+  expect(task.head_sha_at_entry).toBe('aaa')
+
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('implement')
+
+  head = 'bbb'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('pr-review')
+})
+
+test('a send-back whose PR head cannot be read waits a tick instead of disarming the guard', async () => {
+  for (const task of [
+    mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 }),
+    mkTask({ phase: 'ci', pr: 42, ci: 'fail', tier: 'heavy' }),
+  ]) {
+    const sentBackFrom = task.phase
+    const run = mkRun([task])
+    const prompts = await advanceTasks(run, deps({ verdictFor: async () => blocker, prView: async () => null }))
+    expect(task.phase).toBe(sentBackFrom)
+    expect(counterFor(task, sentBackFrom)).toBe(0)
+    expect(prompts).toHaveLength(0)
+  }
+})
+
+test('a cleared review or a green CI reads no PR head', async () => {
+  const { reads, prView } = headReads(() => 'aaa')
+  const review = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  await advanceTasks(review, deps({ verdictFor: async () => clear, prView }))
+  expect(review.tasks[0]?.phase).toBe('pr-review-quality')
+
+  const green = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass', tier: 'heavy' })])
+  await advanceTasks(green, deps({ prView }))
+  expect(green.tasks[0]?.phase).toBe('merge')
+  expect(reads.count).toBe(0)
+})
+
+test('a second CI round waits for a fresh poll instead of failing on the last round\'s result', async () => {
+  const task = mkTask({ phase: 'pr-review-quality', tier: 'heavy', pr: 42, ci: 'fail', passes: { ci: 1 } })
+  const run = mkRun([task])
+  await advanceTasks(run, deps({ verdictFor: async () => clear }))
+  expect(task.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+
+  await advanceTasks(run, deps())
+  expect(task.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+  expect(counterFor(task, 'ci')).toBe(1)
+
+  await ciTransitions([run], async () => 'pass')
+  await advanceTasks(run, deps())
+  expect(task.phase).toBe('merge')
+})
+
+// GitHub's headRefOid lags a push: the send-back can read the head from before
+// the reviewer's verdict commit, and the verdict commit then reads as a move.
+test('implement holds while its prompt is undelivered, so a lagging head read cannot clear it', async () => {
+  let head = 'X'
+  const { prView } = headReads(() => head)
+  const run = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  await advanceTasks(run, deps({ verdictFor: async () => blocker, prView }))
+  const task = run.tasks[0]!
+  expect(task.head_sha_at_entry).toBe('X')
+  const prompt = enqueue(run, { to: 'worker', taskId: 't1', text: 'fix the blocker' }, Date.now())
+
+  head = 'V'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('implement')
+
+  settleOutbox(run, [{ id: prompt.id, ok: true }], Date.now())
+  head = 'F'
+  await advanceTasks(run, deps({ prView }))
+  expect(task.phase).toBe('pr-review-intent')
+})
+
+test('a send-back on the last allowed pass escalates without waiting on the PR head', async () => {
+  for (const task of [
+    mkTask({ phase: 'pr-review-quality', tier: 'heavy', pr: 42, passes: { 'pr-review-quality': 1 } }),
+    mkTask({ phase: 'ci', tier: 'heavy', pr: 42, ci: 'fail', passes: { ci: 1 } }),
+  ]) {
+    const { reads, prView } = headReads(() => null)
+    await advanceTasks(mkRun([task]), deps({ verdictFor: async () => blocker, prView }))
+    expect(task.phase).toBe('escalated')
+    expect(task.head_sha_at_entry).toBeNull()
+    expect(reads.count).toBe(0)
+  }
+})
+
+test('a send-back finds and keeps the PR the task has not recorded yet', async () => {
+  const { prView } = headReads(() => 'aaa')
+  const run = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: null })])
+  await advanceTasks(run, deps({ verdictFor: async () => blocker, prView, prForBranch: async () => 42 }))
+  expect(run.tasks[0]?.phase).toBe('implement')
+  expect(run.tasks[0]?.pr).toBe(42)
+  expect(run.tasks[0]?.head_sha_at_entry).toBe('aaa')
+})
+
+test('a send-back with no PR found, or no head on it, waits a tick rather than record no head', async () => {
+  const noPr = mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: null })
+  await advanceTasks(mkRun([noPr]), deps({
+    verdictFor: async () => blocker, prForBranch: async () => null, prView: async () => prAt('aaa'),
+  }))
+  expect(noPr.phase).toBe('pr-review-intent')
+
+  const noHead = mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })
+  await advanceTasks(mkRun([noHead]), deps({
+    verdictFor: async () => blocker, prView: async () => ({ merged: false, mergedAtMs: null, headSha: null }),
+  }))
+  expect(noHead.phase).toBe('pr-review-intent')
+  expect(counterFor(noHead, 'pr-review-intent')).toBe(0)
 })

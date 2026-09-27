@@ -13,6 +13,8 @@ Check specifically what per-task review cannot see: seams between tasks, duplica
 introduced independently by two workers, contradictions between what the first task assumed and what
 the last one built, and requirements that every individual PR passed but no PR actually implemented.
 
+Open the review with the line `Tiers: {{task_tiers}}`.
+
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**.
 
 Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be

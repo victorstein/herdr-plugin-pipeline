@@ -249,7 +249,7 @@ test('a run whose every task is escalated waits in execute instead of escalating
 test('rewinding the escalated task and finishing it lets the run leave execute', () => {
   const run = closedExecuteRun([
     mkTask({ task_id: 't1', phase: 'escalated', escalated_from: 'implement' }),
-    mkTask({ task_id: 't2', phase: 'done' }),
+    mkTask({ task_id: 't2', phase: 'done', merged_at_ms: 2_000 }),
   ])
   expect(executeAdvance(run)).toBeNull()
 
@@ -259,14 +259,16 @@ test('rewinding the escalated task and finishing it lets the run leave execute',
   expect(executeAdvance(run)).toBeNull()
 
   t1.phase = 'done'
+  t1.merged_at_ms = 3_000
   expect(executeAdvance(run)?.phase).toBe('branch-review')
 })
 
-test('a terminal task that did not land still lets the run reach branch review', () => {
+test('a terminal task that did not land still lets two landed siblings reach branch review', () => {
   for (const phase of ['failed', 'orphaned', 'blocked-on-failure'] as const) {
     const run = closedExecuteRun([
       mkTask({ task_id: 't1', phase }),
-      mkTask({ task_id: 't2', phase: 'done' }),
+      mkTask({ task_id: 't2', phase: 'done', merged_at_ms: 2_000 }),
+      mkTask({ task_id: 't3', phase: 'done', merged_at_ms: 3_000 }),
     ])
     expect(executeAdvance(run)?.phase).toBe('branch-review')
   }
@@ -412,6 +414,29 @@ test('each artifact row reads its own slot, not a verdict path', () => {
     const task = mkTask({ phase, checkout_path: '/w', artifacts: { ...seeded, verdicts: {} } })
     expect(absoluteArtifactPath(run, task)).toBe(`/w/${seeded[phase]}`)
   }
+})
+
+test('a landed task is done or orphaned with its merge recorded', () => {
+  const landed = (task: Task) => taskSignalsFor(closedExecuteRun([task])).landedTaskCount
+  expect(landed(mkTask({ phase: 'done', merged_at_ms: 1 }))).toBe(1)
+  expect(landed(mkTask({ phase: 'orphaned', merged_at_ms: 1 }))).toBe(1)
+  expect(landed(mkTask({ phase: 'orphaned', merged_at_ms: null }))).toBe(0)
+  expect(landed(mkTask({ phase: 'done', merged_at_ms: null }))).toBe(0)
+  expect(landed(mkTask({ phase: 'failed', merged_at_ms: 1 }))).toBe(0)
+})
+
+test('one landed task finishes the run with no branch review, and none escalates it', () => {
+  const oneDone = closedExecuteRun([
+    mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 1 }),
+    mkTask({ task_id: 't2', phase: 'orphaned', merged_at_ms: null }),
+  ])
+  expect(executeAdvance(oneDone)?.phase).toBe('done')
+
+  const oneMergedOrphan = closedExecuteRun([mkTask({ task_id: 't1', phase: 'orphaned', merged_at_ms: 1 })])
+  expect(executeAdvance(oneMergedOrphan)?.phase).toBe('done')
+
+  const onlyUnmergedOrphan = closedExecuteRun([mkTask({ task_id: 't1', phase: 'orphaned', merged_at_ms: null })])
+  expect(executeAdvance(onlyUnmergedOrphan)?.phase).toBe('escalated')
 })
 
 test('a task with no checkout path falls back to repo_root', () => {

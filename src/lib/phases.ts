@@ -7,6 +7,24 @@ export type Signal =
   | 'artifact' | 'verdict' | 'pr' | 'ci' | 'merged' | 'closed'
   | 'worktree' | 'registration' | 'gate' | 'files' | 'manual'
 
+/** Ordered lightest first: `isLowering` reads the order. */
+export type Tier = 'light' | 'standard' | 'heavy'
+
+export const TIERS: readonly Tier[] = ['light', 'standard', 'heavy']
+
+export function isTier(value: string): value is Tier {
+  return (TIERS as readonly string[]).includes(value)
+}
+
+/**
+ * Structural, like `stallWhen`, to keep this module free of a types.ts import. A
+ * task from a ledger written before tiers existed ran every review, and keeps
+ * doing so across an upgrade; the default is never written back.
+ */
+export function tierOf(task: { tier?: Tier }): Tier {
+  return task.tier ?? 'heavy'
+}
+
 export interface PhaseRow<P extends string> {
   phase: P
   /** Whose pane produces this phase's completion signal. Absent = nobody's. */
@@ -42,6 +60,12 @@ export interface PhaseRow<P extends string> {
   holdsFiles?: boolean | 'inherit'
   terminal?: boolean
   releasesPane?: boolean
+  /**
+   * The tiers that run this row; absent means every tier. Never set on a row
+   * that is any row's `onBlocker`, so blocker routing stays tier-blind — asserted
+   * by table.test.ts.
+   */
+  tiers?: readonly Tier[]
 }
 
 const TERMINAL_OR_SETTLED: ReadonlySet<string> = new Set([
@@ -82,7 +106,7 @@ export function runRow(phase: RunPhase): PhaseRow<RunPhase> {
 
 export type TaskPhase =
   | 'queued' | 'research' | 'spec' | 'spec-review' | 'plan' | 'plan-review'
-  | 'blocked-on-files' | 'implement' | 'pr-review-intent' | 'pr-review-quality'
+  | 'blocked-on-files' | 'implement' | 'pr-review' | 'pr-review-intent' | 'pr-review-quality'
   | 'ci' | 'merge' | 'close' | 'teardown' | 'blocked-on-decision'
   | 'escalated' | 'failed' | 'orphaned' | 'blocked-on-failure' | 'done'
 
@@ -100,20 +124,26 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
     onClear: 'plan-review', prompt: 'plan', stallable: true, holdsFiles: false },
   { phase: 'plan-review', actor: 'worker', signal: 'verdict',
     onClear: 'blocked-on-files', onBlocker: 'plan', counter: 'plan-review',
-    prompt: 'plan-review', stallable: true, holdsFiles: false },
+    prompt: 'plan-review', stallable: true, holdsFiles: false, tiers: ['standard', 'heavy'] },
 
   { phase: 'blocked-on-files', signal: 'files', onClear: 'implement',
     stallable: true, probeTarget: 'orchestrator', holdsFiles: false },
 
   // A worker whose pane hangs without emitting `pane.exited` goes unnoticed otherwise.
   { phase: 'implement', actor: 'worker', signal: 'pr',
-    onClear: 'pr-review-intent', prompt: 'implement', stallable: true, holdsFiles: true },
+    onClear: 'pr-review', prompt: 'implement', stallable: true, holdsFiles: true },
+  // One review where heavy runs two: across the 18 tasks tallied before tiers,
+  // neither PR stage ever returned a BLOCKER, and two passes over one diff was
+  // the clearest redundancy in the pipeline.
+  { phase: 'pr-review', actor: 'worker', signal: 'verdict',
+    onClear: 'pr-review-intent', onBlocker: 'implement', counter: 'pr-review',
+    prompt: 'pr-review', stallable: true, holdsFiles: true, tiers: ['light', 'standard'] },
   { phase: 'pr-review-intent', actor: 'worker', signal: 'verdict',
     onClear: 'pr-review-quality', onBlocker: 'implement', counter: 'pr-review-intent',
-    prompt: 'pr-review-intent', stallable: true, holdsFiles: true },
+    prompt: 'pr-review-intent', stallable: true, holdsFiles: true, tiers: ['heavy'] },
   { phase: 'pr-review-quality', actor: 'worker', signal: 'verdict',
     onClear: 'ci', onBlocker: 'implement', counter: 'pr-review-quality',
-    prompt: 'pr-review-quality', stallable: true, holdsFiles: true },
+    prompt: 'pr-review-quality', stallable: true, holdsFiles: true, tiers: ['heavy'] },
 
   // #19. Each waits on something outside the pipeline — GitHub, or a person — and
   // none of their signals is escalatable, so each is nudged forever and can never
@@ -157,4 +187,17 @@ export function taskRow(phase: TaskPhase): PhaseRow<TaskPhase> {
   const row = TASK_BY_PHASE.get(phase)
   if (!row) throw new Error(`no task row for phase: ${phase}`)
   return row
+}
+
+/**
+ * Where a cleared row goes for this tier: along `onClear`, past every row the
+ * tier skips. Every forward step past `research` reads it, so a tier change needs
+ * no special case — the next step simply reads the current tier.
+ */
+export function nextPhase(tier: Tier, from: PhaseRow<TaskPhase>): TaskPhase {
+  for (let phase = from.onClear; phase !== undefined; phase = taskRow(phase).onClear) {
+    const tiers = taskRow(phase).tiers
+    if (tiers === undefined || tiers.includes(tier)) return phase
+  }
+  throw new Error(`no ${tier} row after ${from.phase}: the table runs out`)
 }
