@@ -30,9 +30,10 @@ export function defaultPrefix(repoKey: string): string {
   return repoName(repoKey).slice(0, PREFIX_MAX_CHARS).replace(/-+$/, '')
 }
 
+/** A leading letter keeps the durability scan from matching dates: `2026` would match every dated artifact. */
 export function normalisePrefix(raw: string): string | null {
   const prefix = raw.trim().toLowerCase().replace(/-+$/, '')
-  return /^[a-z0-9][a-z0-9-]*$/.test(prefix) ? prefix : null
+  return /^[a-z][a-z0-9-]*$/.test(prefix) ? prefix : null
 }
 
 export const beadsRoot = (stateDir: string): string => join(stateDir, 'beads')
@@ -84,8 +85,15 @@ function escapeRegExp(text: string): string {
 export function prefixCollisions(repoRoot: string, prefix: string): string[] {
   const root = join(repoRoot, 'docs', 'superpowers')
   if (!existsSync(root)) return []
-  const named = new RegExp(`(^|[^a-z0-9])${escapeRegExp(prefix)}-\\d+($|[^0-9])`)
-  return (readdirSync(root, { recursive: true }) as string[])
+  const named = new RegExp(`(^|[^a-z0-9])${escapeRegExp(prefix)}-\\d+($|[^0-9])`, 'i')
+  let paths: string[]
+  try {
+    paths = readdirSync(root, { recursive: true }) as string[]
+  } catch {
+    // A tree setup cannot read is no proof of a collision, and refusing on it would block setup for good.
+    return []
+  }
+  return paths
     .filter((path) => named.test(basename(path)))
     .map((path) => join('docs', 'superpowers', path))
     .sort()

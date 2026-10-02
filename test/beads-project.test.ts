@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -32,6 +32,12 @@ test('a prefix is lowercased and trimmed, and anything but letters, digits and d
   expect(normalisePrefix('bad prefix')).toBeNull()
   expect(normalisePrefix('-x')).toBeNull()
   expect(normalisePrefix('')).toBeNull()
+})
+
+test('a prefix must start with a letter, since an all-digit one would match every dated artifact', () => {
+  expect(normalisePrefix('2026')).toBeNull()
+  expect(normalisePrefix('9web')).toBeNull()
+  expect(normalisePrefix('w2026')).toBe('w2026')
 })
 
 test('store paths live under $STATE/beads/<slug>, and every spawn gets BEADS_DIR and the git ceiling', () => {
@@ -72,4 +78,32 @@ test('the durability scan finds <prefix>-<n> names under docs/superpowers and no
   ])
   expect(prefixCollisions(repo, 'web')).toEqual([])
   expect(prefixCollisions(join(dir, 'no-docs'), 'hp')).toEqual([])
+})
+
+test('the durability scan ignores case in artifact names', () => {
+  const repo = join(dir, 'repo')
+  mkdirSync(join(repo, 'docs', 'superpowers', 'specs'), { recursive: true })
+  writeFileSync(join(repo, 'docs/superpowers/specs/2026-10-02-HP-3-design.md'), '')
+  expect(prefixCollisions(repo, 'hp')).toEqual(['docs/superpowers/specs/2026-10-02-HP-3-design.md'])
+})
+
+test('a docs/superpowers that cannot be read as a directory is treated as holding no collisions', () => {
+  const repo = join(dir, 'repo')
+  mkdirSync(join(repo, 'docs'), { recursive: true })
+  writeFileSync(join(repo, 'docs', 'superpowers'), 'hp-1')
+  expect(prefixCollisions(repo, 'hp')).toEqual([])
+})
+
+test('an unreadable docs/superpowers is treated as holding no collisions', () => {
+  if (process.getuid?.() === 0) return
+  const repo = join(dir, 'repo')
+  const root = join(repo, 'docs', 'superpowers')
+  mkdirSync(join(root, 'specs'), { recursive: true })
+  writeFileSync(join(root, 'specs', 'hp-1-design.md'), '')
+  chmodSync(root, 0o000)
+  try {
+    expect(prefixCollisions(repo, 'hp')).toEqual([])
+  } finally {
+    chmodSync(root, 0o755)
+  }
 })
