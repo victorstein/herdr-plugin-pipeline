@@ -6,7 +6,8 @@ has actually read the code.
 One **worker** agent owns each GitHub issue end to end: research → spec → adversarial review → plan →
 adversarial review → implement → PR review → CI → merge → close → teardown, with the reviews a task
 runs set by its **tier** (below). The **orchestrator** keeps intake (research the problem, file the
-issue, dispatch), decision triage, merge, close, and the whole-branch review at the end.
+issue, dispatch), decision triage, merge, and the whole-branch review at the end; the supervisor closes the
+bead once the merge is recorded.
 
 Workers surface **decisions, not drafts**. When one hits a choice it should not make alone, it calls
 `hpipe decide` with a question *and a recommendation*; the orchestrator answers what it can from the

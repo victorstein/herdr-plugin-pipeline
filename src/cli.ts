@@ -941,6 +941,9 @@ export async function cmdClose(ctx: Ctx, input: {
   if (!found.ok) return found.result
   const { run, task } = found.value
 
+  if (task.bead_closed_at_ms !== null) {
+    return ok(`${task.bead} is already closed; the next supervisor pass tears ${task.task_id} down`)
+  }
   if (task.merged_at_ms === null) {
     return fail(`no merge is recorded for ${task.task_id}, so its bead must not close yet — ` +
       `\`${hpipeCommand(ctx.pluginRoot)} rewind ${run.run_id} merge --task ${task.task_id}\` records it`)

@@ -303,6 +303,53 @@ test('a repo with no Beads store is skipped', async () => {
   expect(store.calls).toEqual([])
 })
 
+test('a merged task waiting on its close in a repo with no store counts a failure, logged once; others are untouched', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const working = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const logged: string[] = []
+  const d = deps(fakeStore([]), { hasStore: async () => false, log: (message) => { logged.push(message) } })
+  const run = runWith(waiting, working)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(waiting.bead_sync).toMatchObject({
+    failures: 2, last_error: 'no Beads store for /code/repo; run the setup action or `hpipe close`',
+  })
+  expect(working.bead_sync.failures).toBe(0)
+  expect(logged).toHaveLength(1)
+  expect(d.persisted).toHaveLength(2)
+})
+
+test('a merged task waiting on a bead another task drives counts a failure naming the driver', async () => {
+  const holder = mkTask({ phase: 'implement', registered_at: 2 })
+  const merged = mkTask({ phase: 'close', merged_at_ms: 5, registered_at: 1 })
+  const olderRun = runWith(merged)
+  olderRun.run_id = 'r0'
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', labels: ['hpipe:run=r1', 'phase:implement'] })])
+
+  await syncBeads([runWith(holder), olderRun], deps(store))
+
+  expect(merged.bead_sync.failures).toBe(1)
+  expect(merged.bead_sync.last_error).toContain('driven by t1 of run r1 (session p)')
+  expect(merged.bead_closed_at_ms).toBeNull()
+  expect(store.calls).toEqual([])
+})
+
+test('a merged task waiting on a bead another task drives records the close once the bead is closed', async () => {
+  const holder = mkTask({ phase: 'close', merged_at_ms: 9, bead_closed_at_ms: 9, registered_at: 2 })
+  const merged = mkTask({ phase: 'close', merged_at_ms: 5, registered_at: 1 })
+  const olderRun = runWith(merged)
+  olderRun.run_id = 'r0'
+  const store = fakeStore([bead('hp-1', { status: 'closed', assignee: 'hpipe', labels: ['hpipe:run=r1'] })])
+
+  await syncBeads([runWith(holder), olderRun], deps(store))
+
+  expect(merged.bead_closed_at_ms).toBe(1_000)
+  expect(merged.bead_sync.failures).toBe(0)
+  expect(store.calls).toEqual([])
+})
+
 test('a lock that could not be taken for want of ps also ends the pass without a failure', async () => {
   const task = mkTask({ phase: 'implement' })
   const store = fakeStore([bead('hp-1')], () => ({ reason: 'unavailable', error: 'could not read this process\'s start time' }))

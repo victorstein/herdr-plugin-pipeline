@@ -136,6 +136,8 @@ function beadDrivers(localRuns: readonly Run[], elsewhere: readonly BeadClaimant
 const isDriver = (driver: Driver | undefined, run: Run, task: Task): boolean =>
   driver?.session === run.session && driver.run_id === run.run_id && driver.task_id === task.task_id
 
+const waitsOnClose = (task: Task): boolean => task.merged_at_ms !== null && task.bead_closed_at_ms === null
+
 function groupBySlug(runs: readonly Run[]): Map<string, Run[]> {
   const bySlug = new Map<string, Run[]>()
   for (const run of runs) {
@@ -163,10 +165,37 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     deps.lockNotices.set(slug, failure.error)
   }
 
+  const failureOf = (slug: string, effects: RunEffect[]) => (task: Task, error: string): void => {
+    effects.push(recordSyncFailure(task.task_id, error))
+    if (task.bead_sync.last_error !== error) deps.log(`beads ${slug}: ${task.task_id} (${task.bead}) did not sync: ${error}`)
+  }
+  const save = async (slug: string, run: Run, effects: RunEffect[]): Promise<void> => {
+    if (effects.length === 0) return
+    const combined: RunEffect = (target) => { for (const apply of effects) apply(target) }
+    combined(run)
+    try {
+      await deps.persist(run, combined)
+    } catch (error) {
+      deps.log(`beads ${slug}: run ${run.run_id}: sync state not saved (${error}); it is recomputed next tick`)
+    }
+  }
+
   let stopped = false
   for (const [slug, slugRuns] of groupBySlug(runs)) {
     if (stopped) break
-    if (!(await deps.hasStore(slug))) continue
+    if (!(await deps.hasStore(slug))) {
+      // Every other bead write can wait for a store, but a merged task's close
+      // cannot clear without one, and the close stall must not call that waiting.
+      for (const run of slugRuns) {
+        const effects: RunEffect[] = []
+        const fail = failureOf(slug, effects)
+        for (const task of run.tasks.filter(waitsOnClose)) {
+          fail(task, `no Beads store for ${run.repo_key}; run the setup action or \`hpipe close\``)
+        }
+        await save(slug, run, effects)
+      }
+      continue
+    }
     const bd = deps.bdFor(slug)
     // A write whose export failed, or a crash before the export, leaves the file
     // stale; diffing against it would post the same comment twice.
@@ -187,19 +216,24 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     for (const run of slugRuns) {
       if (stopped) break
       const effects: RunEffect[] = []
-      const fail = (task: Task, error: string): void => {
-        effects.push(recordSyncFailure(task.task_id, error))
-        if (task.bead_sync.last_error !== error) deps.log(`beads ${slug}: ${task.task_id} (${task.bead}) did not sync: ${error}`)
-      }
+      const fail = failureOf(slug, effects)
       for (const task of run.tasks) {
-        if (!isDriver(drivers.get(driverKey(slug, task.bead)), run, task)) continue
         const current = actual.get(task.bead)
+        const driver = drivers.get(driverKey(slug, task.bead))
+        if (!isDriver(driver, run, task)) {
+          if (!waitsOnClose(task)) continue
+          if (current?.status === 'closed') effects.push(recordBeadClosed(task.task_id, deps.now()))
+          else {
+            fail(task, `bead ${task.bead} is driven by ${driver?.task_id} of run ${driver?.run_id} ` +
+              `(session ${driver?.session}), not by this task, so the supervisor will not close it for this one`)
+          }
+          continue
+        }
         if (current === undefined) {
           fail(task, `bead ${task.bead} is not in the Beads export`)
           continue
         }
-        const closeUnrecorded = task.merged_at_ms !== null && task.bead_closed_at_ms === null
-        if (current.status === 'closed' && closeUnrecorded) effects.push(recordBeadClosed(task.task_id, deps.now()))
+        if (current.status === 'closed' && waitsOnClose(task)) effects.push(recordBeadClosed(task.task_id, deps.now()))
 
         const calls = callsFor(desiredBead(task, run), current, closeReason(task))
         if (calls.length === 0) continue
@@ -223,14 +257,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         else if (!stopped) effects.push(recordSyncOk(task.task_id, deps.now()))
         if (stopped) break
       }
-      if (effects.length === 0) continue
-      const combined: RunEffect = (target) => { for (const apply of effects) apply(target) }
-      combined(run)
-      try {
-        await deps.persist(run, combined)
-      } catch (error) {
-        deps.log(`beads ${slug}: run ${run.run_id}: sync state not saved (${error}); it is recomputed next tick`)
-      }
+      await save(slug, run, effects)
     }
 
     if (wrote) {

@@ -2097,3 +2097,14 @@ test('close refuses a task with no merge recorded, and names the rewind that rec
   expect(result.text).toContain(`rewind ${run.run_id} merge --task t1`)
   expect(calls).toBe(0)
 })
+
+test('close of a bead whose close is already recorded calls nothing and says so', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1', phase: 'close', pr: 7, merged_at_ms: 9_000, bead_closed_at_ms: 9_500 }]))
+  let calls = 0
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async () => { calls++; return { ok: true } })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('already closed')
+  expect(result.text).not.toContain('--force')
+  expect(calls).toBe(0)
+})

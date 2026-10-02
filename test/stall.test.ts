@@ -998,6 +998,7 @@ test('a close row past five failures quotes bd verbatim and names hpipe close an
   })
   const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
   expect(a.clause).toContain(refusal)
+  expect(a.clause).toContain('5 of the supervisor\'s Beads calls for hp-1 have failed so far')
   expect(a.clause).toContain('`hp close --task t1`')
   expect(a.clause).toContain('`--force`')
 })
