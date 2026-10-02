@@ -314,6 +314,13 @@ export async function resolveRun(
   return resolveAmong(await listRuns(stateDir, session), query)
 }
 
+/** `resolveRun` blind to runs of another schema: what a command that writes v3 fields resolves against. */
+export async function resolveCurrentSchemaRun(
+  stateDir: string, session: SessionKey, query: RunQuery,
+): Promise<RunResolution> {
+  return resolveAmong((await listRuns(stateDir, session)).filter(isCurrentSchemaRun), query)
+}
+
 function resolveAmong(runs: Run[], query: RunQuery): RunResolution {
   if (query.runId !== null) {
     const named = runs.find((r) => r.run_id === query.runId)

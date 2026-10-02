@@ -396,11 +396,13 @@ export function formatStatus(
       lines.push(`    "claim" action from the pane that should drive this run`)
     }
 
+    // Its tasks predate `bead`, so no task line can be drawn for them.
     if (!isCurrentSchemaRun(run)) {
       lines.push(
-        `  ⚠ run ${run.run_id} was started by an earlier plugin version and cannot be ` +
-        `advanced — ${hpipe} abort ${run.run_id} to release the repo.`,
+        `  ⚠ run ${run.run_id} was started by an earlier plugin version and is ignored here: ` +
+        'nothing advances it and it does not hold the repo. Finish it on the release that started it.',
       )
+      continue
     }
 
     // `phase === 'escalated'`, never `escalated_from !== null`: cmdAbort sets
@@ -430,15 +432,13 @@ export function formatStatus(
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' ') + (isCurrentSchemaRun(run) ? taskLineMove(run, task, hpipe, now, holds) : ''))
+      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds))
     }
 
-    if (isCurrentSchemaRun(run)) {
-      lines.push(...intakeWarning(run, hpipe))
-      lines.push(...waitingOnYou(run, hpipe, now, holds))
-      lines.push(...taskWarnings(run, hpipe, now))
-      lines.push(...deliveryWarnings(run, livePanes, now, panes))
-    }
+    lines.push(...intakeWarning(run, hpipe))
+    lines.push(...waitingOnYou(run, hpipe, now, holds))
+    lines.push(...taskWarnings(run, hpipe, now))
+    lines.push(...deliveryWarnings(run, livePanes, now, panes))
   }
 
   return lines.join('\n')

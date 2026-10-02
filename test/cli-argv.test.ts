@@ -13,7 +13,7 @@ interface Fixture { repo: string; stateDir: string; env: Record<string, string> 
 
 /**
  * Nothing in the CLI calls gh any more; this bin stands in so a change that
- * starts to never shells out to the real `gh` on the machine running the suite.
+ * starts calling gh never reaches the real `gh` on the machine running the suite.
  * It answers nothing, so such a call fails loudly.
  */
 function defaultGhBin(): string {

@@ -241,8 +241,8 @@ one predicate (`src/lib/held.ts`).
   `fileIssueOnce` is today. The acceptance file is read and passed as a string. The brief is the
   create's own input.
 - `--bead` path (replaces `--issue`): `Bd.show`, memoised the same way. Refuses a bead that is
-  closed, assigned, held, has an open `blocks` dependency, or has any open dependents (an epic or a
-  human-made parent would trip the open-children close guard). The brief comes from that show.
+  closed, assigned, held, has an open `blocks` dependency, or has open child beads (parent-child
+  dependents — an epic or a human-made parent would trip the open-children close guard). The brief comes from that show.
 - Nothing else in `cmdTask` touches Beads: the run label and the `blocks` edges for `--depends-on`
   are desired state the reconciler applies (§5).
 
@@ -370,7 +370,7 @@ the bead closed in the export while `merged_at_ms !== null`, it sets `bead_close
 
 Why the guards do not fire:
 - **Assignee:** claim and close both run as `hpipe`.
-- **Open children:** hpipe creates no child beads (§6); adoption refuses beads with open dependents
+- **Open children:** hpipe creates no child beads (§6); adoption refuses beads with open child beads
   (§4); discovered beads link with non-blocking `discovered-from`.
 - **Open blockers:** adoption refuses beads with open blockers, and a dependent is only dispatched
   once every dependency is `done` (`gating.ts:137-153`), by which point its bead is closed.
@@ -479,7 +479,7 @@ Step 1 of the plan. Each confirms the design or changes the named section.
   merge and cleared by rewind.
 - `test/held.test.ts`: the held predicate across sessions and terminal phases.
 - `test/cli-commands.test.ts`, `test/cli-argv.test.ts`: `--title` / `--bead` (memoised; adoption
-  refusals incl. open dependents and another session's live run), dispatch claim and refusal,
+  refusals incl. open child beads and another session's live run), dispatch claim and refusal,
   `escalate`, `answer` both ways, `abort` / `resume`, `rewind` after merge and to `failed`,
   `discover` / `discoveries --file` (no double filing), `close [--force]`, `bead show`, `--prefix`.
 - `test/tasks.test.ts`, `test/table.test.ts`: close row has `probeTarget` and no actor or prompt;
@@ -511,7 +511,7 @@ each user can judge whether it applies to them. No bv code is vendored or forked
 
 | Finding | Resolution |
 |---|---|
-| BLOCKER 1 close guards | Decision 5 (one actor), §6 (no child beads), §4 (adoption refuses open dependents and blockers), §8 (why guards don't fire; `--force` only in `hpipe close`), §11.1, §12 |
+| BLOCKER 1 close guards | Decision 5 (one actor), §6 (no child beads), §4 (adoption refuses open child beads and blockers), §8 (why guards don't fire; `--force` only in `hpipe close`), §11.1, §12 |
 | MAJOR 1 escalation path | §6 `hpipe escalate`; shown on the task bead via desired state |
 | MAJOR 2 brief / prompt list | §3 `{{brief}}`/`{{bead}}`; §4 every template incl. `dispatch.md`; prompts render test |
 | MAJOR 3 agent `bd show` | Decision 7, `hpipe bead show`, §10 outside-process row |
@@ -545,7 +545,7 @@ each user can judge whether it applies to them. No bv code is vendored or forked
 | MINOR 2 rewind into `close` / stale close | §8 stall variants; desired state flips on rewind, no pending close exists |
 | MINOR 3 `reopen` leaves assignee | §5 desired `in_progress`+`hpipe` after reopen; §11.1 checks reopen→claim |
 | MINOR 4 un-block paths | §6: any end of "escalated, unanswered" un-blocks |
-| MINOR 5 adopted parents | §4 `--include-dependents`, refuse open dependents |
+| MINOR 5 adopted parents | §4 `--include-dependents`, refuse open child beads |
 | MINOR 6 `dispatch.md` | §4 Prompts |
 | MINOR 7 board lifecycle | §9 exact-`Board` exemption, pid-based ghost rule, `${SHELL:-/bin/sh}`, `bv` as a child |
 | MINOR 8 ceiling scope | §1 Git isolation: every spawn; guard runs without it |

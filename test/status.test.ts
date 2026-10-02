@@ -176,14 +176,16 @@ test('a healthy run produces none of the four new warning lines', () => {
   expect(text).not.toContain('dispatch --done')
 })
 
-test('status tells the human to abort a run from an earlier plugin version', () => {
+test('a run from an earlier plugin version is listed as ignored, with no task lines', () => {
   const run = mkRun()
-  ;(run as { schema_version?: number }).schema_version = undefined
+  run.schema_version = 2
+  run.tasks = [{ task_id: 't1', branch: 'feat/old', issue: 7, phase: 'implement' } as unknown as Task]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
-  expect(text).toContain(
-    `run ${run.run_id} was started by an earlier plugin version and cannot be advanced ` +
-    `— ${HP} abort ${run.run_id} to release the repo.`,
-  )
+  expect(text).toContain(`run ${run.run_id} was started by an earlier plugin version and is ignored here`)
+  expect(text).toContain('Finish it on the release that started it.')
+  expect(text).not.toContain('abort')
+  expect(text).not.toContain('feat/old')
+  expect(text).not.toContain('undefined')
 })
 
 test('a healthy holder is reported as finishing, not as needing release', () => {

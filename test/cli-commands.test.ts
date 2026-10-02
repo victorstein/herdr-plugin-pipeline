@@ -481,7 +481,7 @@ test('--bead refuses a closed, assigned, blocked or parent bead, and registers n
     [{ assignee: 'alice' }, 'bead hp-12 is assigned to alice'],
     [{ dependencies: [{ id: 'hp-2', title: 'x', status: 'open', dependency_type: 'blocks' }] }, 'is blocked by open hp-2'],
     [{ dependents: [{ id: 'hp-9', title: 'child', status: 'in_progress', dependency_type: 'parent-child' }] },
-      'has open dependents (hp-9)'],
+      'has open child beads (hp-9)'],
   ]
   for (const [over, expected] of cases) {
     const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
@@ -514,6 +514,58 @@ test('--bead refuses a bead another session\'s live run holds', async () => {
   expect(result.text).toContain('bead hp-12 is already held by t4 (implement)')
   expect(result.text).toContain('session work')
   expect(await registered()).toEqual([])
+})
+
+test('--bead adopts a bead that blocks others or was discovered from it: only children refuse', async () => {
+  await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => openBead(id, {
+      dependents: [
+        { id: 'hp-20', title: 'next', status: 'open', dependency_type: 'blocks' },
+        { id: 'hp-21', title: 'found', status: 'open', dependency_type: 'discovered-from' },
+      ],
+    }),
+  }))
+  expect(result.ok).toBe(true)
+  expect((await registered()).map((t) => t.bead)).toEqual(['hp-12'])
+})
+
+test('--bead refuses a bead with an open child', async () => {
+  await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => openBead(id, {
+      dependents: [{ id: 'hp-30', title: 'child', status: 'open', dependency_type: 'parent-child' }],
+    }),
+  }))
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('bead hp-12 has open child beads (hp-30)')
+  expect(await registered()).toEqual([])
+})
+
+test('a leftover run of another schema neither takes a registration nor makes it ambiguous', async () => {
+  const old = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'old' })
+  old.schema_version = 2
+  await saveRun(dir, old)
+  const current = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'new' })
+  await saveRun(dir, current)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' })
+
+  expect(result.ok).toBe(true)
+  const runs = await listRuns(dir, 'personal')
+  expect(runs.find((r) => r.run_id === current.run_id)?.tasks.map((t) => t.bead)).toEqual(['hp-12'])
+  expect(runs.find((r) => r.run_id === old.run_id)?.tasks).toEqual([])
+})
+
+test('a leftover run of another schema alone is no run to register into', async () => {
+  const old = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'old' })
+  old.schema_version = 2
+  await saveRun(dir, old)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' })
+
+  expect(result.ok).toBe(false)
+  expect((await listRuns(dir, 'personal'))[0]?.tasks).toEqual([])
 })
 
 test('with neither --bead nor --title the error names both ways in', async () => {

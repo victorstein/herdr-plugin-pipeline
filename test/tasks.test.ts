@@ -251,7 +251,7 @@ test('orchestrator-owned task phases are not evaluated while the orchestrator is
   expect(run.tasks[0]?.phase).toBe('merge')
 })
 
-test('a PR merged while the orchestrator pane has no agent is noticed (hp-144)', async () => {
+test('a PR merged while the orchestrator pane has no agent is noticed (#144)', async () => {
   const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
   const prompts = await advanceTasks(run, deps({
     liveIdle: async () => false,

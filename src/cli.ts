@@ -14,7 +14,7 @@ import { detectCycle, gateStatus } from './lib/gating'
 import { heldBy } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForRepo,
+  isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, resolveRun, retryOnStaleRun, runById, runForRepo,
   runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
   wasAborted, writeOrchestrator,
 } from './lib/ledger'
@@ -144,12 +144,12 @@ type Resolved<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
  * or null when it has no way in.
  */
 async function resolveFor(
-  ctx: Ctx, query: RunQuery, escape: string | null,
+  ctx: Ctx, query: RunQuery, escape: string | null, resolveAmongRuns = resolveRun,
 ): Promise<Resolved<Run>> {
   if (query.runId !== null && query.runId.trim().length === 0) {
     return { ok: false, result: fail('--run needs a run id') }
   }
-  const resolved = await resolveRun(ctx.stateDir, ctx.session, query)
+  const resolved = await resolveAmongRuns(ctx.stateDir, ctx.session, query)
   return resolved.ok
     ? { ok: true, value: resolved.run }
     : { ok: false, result: resolveFailure(ctx, query, escape, resolved) }
@@ -304,9 +304,12 @@ async function adoptionRefusal(stateDir: string, bead: BeadDetail): Promise<stri
   if (blockers.length > 0) {
     return `bead ${bead.id} is blocked by open ${blockers.map((d) => d.id).join(', ')} — finish or adopt those first`
   }
-  const dependents = (bead.dependents ?? []).filter((d) => d.status !== 'closed')
-  if (dependents.length > 0) {
-    return `bead ${bead.id} has open dependents (${dependents.map((d) => d.id).join(', ')}) — an epic or ` +
+  // Only children: an open `blocks` or `discovered-from` dependent trips no close
+  // guard, and those are the beads `hpipe next` ranks highest.
+  const children = (bead.dependents ?? [])
+    .filter((d) => d.dependency_type === 'parent-child' && d.status !== 'closed')
+  if (children.length > 0) {
+    return `bead ${bead.id} has open child beads (${children.map((d) => d.id).join(', ')}) — an epic or ` +
       'parent bead cannot be adopted; adopt its children instead'
   }
   return null
@@ -328,7 +331,9 @@ async function registerTask(
     runId: input.runId, repoKey: input.repoKey,
     phases: REGISTRABLE, taskId: null, reach: 'unfinished',
   }
-  const found = await resolveFor(ctx, query, null)
+  // A v2 run's tasks carry no bead, so it must neither take this task nor make
+  // the resolution ambiguous.
+  const found = await resolveFor(ctx, query, null, resolveCurrentSchemaRun)
   if (!found.ok) return found.result
   const run = found.value
 

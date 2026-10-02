@@ -34,7 +34,7 @@ test('a verdict filename is repo-relative and carries prefix, phase and ordinal'
     .toBe('docs/superpowers/reviews/hp-26-spec-review-2.md')
 })
 
-test('the prefix is the issue for a task and the run id for a run', () => {
+test('the prefix is the bead id for a task and the run id for a run', () => {
   const run = mkRun()
   expect(verdictPrefix(run, mkTask({ bead: 'hp-26' }))).toBe('hp-26')
   expect(verdictPrefix(run, null)).toBe(run.run_id)
