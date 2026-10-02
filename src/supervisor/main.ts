@@ -1,4 +1,6 @@
 import { join } from 'node:path'
+import { Bd } from '../lib/bd'
+import { readBeadsProject } from '../lib/beads-project'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
@@ -35,6 +37,7 @@ import {
   applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
   saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
+import { SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
@@ -410,6 +413,23 @@ async function main(): Promise<void> {
           console.error(`[pipeline] run ${run.run_id}: delivery outcomes not saved ` +
             `(${error.message}); what landed may be sent again next tick`)
         }
+      }
+
+      // Its own read, because the runs above may have been saved since this tick read them.
+      try {
+        const syncRuns = (await listRuns(stateDir, session))
+          .filter(isCurrentSchemaRun)
+          .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key))
+        await syncBeads(syncRuns, {
+          bdFor: (slug) => new Bd({ stateDir, slug, lockWaitMs: 0, exportAfterWrites: false }),
+          hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
+          now: Date.now,
+          budgetMs: SYNC_BUDGET_MS,
+          persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
+          log: (message) => console.error(`[pipeline] ${message}`),
+        })
+      } catch (error) {
+        console.error('[pipeline] beads sync failed this tick:', error)
       }
 
       // One binding, so the cap the candidates are built with, the cap the

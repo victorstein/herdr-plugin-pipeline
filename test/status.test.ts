@@ -757,3 +757,10 @@ test('a tools problem is printed right under the supervisor line, and nothing wh
   expect(text.split('\n').slice(0, 3)).toEqual(['session: personal', 'supervisor: live (pid 1)', line])
   expect(formatStatus([], { state: 'live', pid: 1 }, 'personal', HP)).not.toContain('tools:')
 })
+
+test('a bead out of sync for five failed calls is flagged with bd\'s last error', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'implement', bead_sync: { failures: 5, last_error: 'Error: database is locked', last_ok_at_ms: null } })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP))
+    .toContain('⚠ t1 bead hp-1 is out of sync after 5 failed Beads calls: Error: database is locked')
+})

@@ -1,4 +1,5 @@
 import { awaitedFor } from './awaiting'
+import { beadOutOfSync } from './bead-desired'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
@@ -270,6 +271,11 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
   const lines: string[] = []
 
   for (const task of run.tasks) {
+    if (beadOutOfSync(task)) {
+      lines.push(`  ⚠ ${task.task_id} bead ${task.bead} is out of sync after ${task.bead_sync.failures} ` +
+        `failed Beads calls: ${task.bead_sync.last_error}`)
+    }
+
     const open = openDecisionFor(task)
     if (open) {
       lines.push(
