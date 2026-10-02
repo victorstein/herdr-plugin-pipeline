@@ -45,3 +45,13 @@ export function abandonDecisions(task: Task): void {
   }
   task.pending_answer = null
 }
+
+/**
+ * The question the human currently owns. A rewind out of `blocked-on-decision`
+ * ends it as surely as an answer does, so the phase is part of the test.
+ */
+export function escalatedUnanswered(task: Task): Decision | null {
+  if (task.phase !== 'blocked-on-decision') return null
+  const open = openDecisionFor(task)
+  return open !== null && open.escalated_at !== null ? open : null
+}
