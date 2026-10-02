@@ -92,7 +92,7 @@ function normaliseDeclared(entry: string, roots: string[]): string | null {
  * document that happens to live under the root is still a file this task edits.
  */
 export function separatePipelineArtifacts(
-  declared: string[], task: Pick<Task, 'issue' | 'artifacts'>,
+  declared: string[], task: Pick<Task, 'bead' | 'artifacts'>,
 ): { kept: string[]; ignored: string[] } {
   const { research, spec, plan, verdicts } = task.artifacts
   const ownFiles = [research, spec, plan].filter((p): p is string => p !== null)

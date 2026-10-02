@@ -5,16 +5,17 @@ import {
   UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
 import type { Decision, Run, Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const mkTask = (over: Partial<Task> = {}): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
   phase: 'spec', phase_entered_at: 1000, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null, checkout_path: '/r/wt',
   registered_at: 0, adopted_at: 0,
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -175,7 +176,8 @@ const LIVE = new Set(['w1:p1', 'w7:p1'])
 
 const mkDecision = (over: Partial<Decision> = {}): Decision => ({
   id: 'd2', asked_at: 0, from_phase: 'plan', question: 'which license?', recommendation: 'MIT',
-  answer: null, answered_by: null, answered_at: null, prompted_at: null, ...over,
+  answer: null, answered_by: null, answered_at: null, prompted_at: null,
+  escalated_at: null, orchestrator_recommendation: null, ...over,
 })
 
 function blockedOnDecision(over: Partial<Task> = {}): Run {

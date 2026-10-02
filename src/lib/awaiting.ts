@@ -18,13 +18,13 @@ export function awaitedFor(task: Task): string {
     case 'verdict':
       return 'its review verdict'
     case 'pr':
-      return `a pushed PR for ${task.branch} (#${task.issue})`
+      return `a pushed PR for ${task.branch} (${task.bead})`
     case 'ci':
       return task.pr === null ? UNRECORDED_PR : `CI on PR #${task.pr}`
     case 'merged':
       return task.pr === null ? UNRECORDED_PR : `PR #${task.pr} to be merged`
     case 'closed':
-      return `issue #${task.issue} to close`
+      return `bead ${task.bead} to be closed by the supervisor`
     case 'files':
       return 'the files another task holds'
     case 'manual':

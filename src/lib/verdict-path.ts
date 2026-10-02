@@ -16,8 +16,8 @@ export function verdictPrefix(run: Run, task: Task | null): string {
   return task ? taskVerdictPrefix(task) : run.run_id
 }
 
-export function taskVerdictPrefix(task: Pick<Task, 'issue'>): string {
-  return `issue-${task.issue}`
+export function taskVerdictPrefix(task: Pick<Task, 'bead'>): string {
+  return task.bead
 }
 
 /**

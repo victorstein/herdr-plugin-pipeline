@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   listRuns, loadRun, newRun, readOrchestrator,
-  resolveRun, retryOnStaleRun, runById, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
+  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
 } from '../src/lib/ledger'
 import { tierOf } from '../src/lib/phases'
+import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ledger-')) })
@@ -53,11 +54,22 @@ test('concurrent orchestrator claims for different repos in one session both per
   expect((await readOrchestrator(dir, 'personal', 'repo-b'))?.pane_id).toBe('w2:p1')
 })
 
-test('a new run carries schema_version 2 and an open intake', () => {
+test('a new run carries schema_version 3 and an open intake', () => {
   const run = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
-  expect(run.schema_version).toBe(2)
+  expect(run.schema_version).toBe(3)
   expect(run.intake_closed).toBe(false)
   expect(run.passes).toEqual({})
+})
+
+test('runForRepo ignores a run of another schema, so it never blocks hpipe start', async () => {
+  const old = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'old' })
+  old.schema_version = 2
+  await saveRun(dir, old)
+  expect((await runForRepo(dir, 'personal', 'k')).kind).toBe('free')
+
+  const current = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'new' })
+  await saveRun(dir, current)
+  expect(await runForRepo(dir, 'personal', 'k')).toMatchObject({ kind: 'one', run: { run_id: current.run_id } })
 })
 
 // ——— resolveRun ———
@@ -73,13 +85,13 @@ async function seedRun(over: {
   if (over.phase) run.phase = over.phase as typeof run.phase
   for (const id of over.taskIds ?? ['t1']) {
     run.tasks.push({
-      task_id: id, branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+      task_id: id, branch: 'b', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
       keep_worktree: false, workspace_id: null, pane_id: null,
       agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
       escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
       checkout_path: null, registered_at: 0, adopted_at: null,
       artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-      merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+      merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
       decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
     })
   }

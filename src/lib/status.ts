@@ -2,7 +2,7 @@ import { awaitedFor } from './awaiting'
 import { openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { hasLanded, runIsDriven, wasAborted } from './ledger'
+import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
@@ -256,7 +256,7 @@ function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): s
     const move = moveFor(run, task, hpipe, now, holds)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
-    return [`    ${task.task_id} ${task.branch} (#${task.issue}) [${task.phase} ${age}m] — ${move.clause}`]
+    return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
   })
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
 }
@@ -396,7 +396,7 @@ export function formatStatus(
       lines.push(`    "claim" action from the pane that should drive this run`)
     }
 
-    if (run.schema_version !== 2) {
+    if (!isCurrentSchemaRun(run)) {
       lines.push(
         `  ⚠ run ${run.run_id} was started by an earlier plugin version and cannot be ` +
         `advanced — ${hpipe} abort ${run.run_id} to release the repo.`,
@@ -423,17 +423,17 @@ export function formatStatus(
       const bits = [
         `  ${task.task_id}`,
         task.branch,
-        `#${task.issue}`,
+        task.bead,
         `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
         tierOf(task),
         task.agent_status,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' ') + (run.schema_version === 2 ? taskLineMove(run, task, hpipe, now, holds) : ''))
+      lines.push(bits.join(' ') + (isCurrentSchemaRun(run) ? taskLineMove(run, task, hpipe, now, holds) : ''))
     }
 
-    if (run.schema_version === 2) {
+    if (isCurrentSchemaRun(run)) {
       lines.push(...intakeWarning(run, hpipe))
       lines.push(...waitingOnYou(run, hpipe, now, holds))
       lines.push(...taskWarnings(run, hpipe, now))
@@ -484,7 +484,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `task:       ${task.task_id}`,
     `run:        ${run.run_id}`,
     `branch:     ${task.branch}`,
-    `issue:      #${task.issue}`,
+    `bead:       ${task.bead}`,
     `surface:    ${task.surface}`,
     `files:      ${listOrNone(task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,

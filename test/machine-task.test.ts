@@ -4,18 +4,19 @@ import {
 } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase, Tier } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 function fixture(phase: TaskPhase): { run: Run; task: Task } {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
   const task: Task = {
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
     depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
     phase, phase_entered_at: Date.now(), escalated_from: null,
     head_sha_at_entry: 'aaa', pr: 5, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
     artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }
   run.tasks.push(task)
@@ -26,8 +27,7 @@ test('implement advances when the worker is idle, a PR exists, and the head sha 
   const { run, task } = fixture('implement')
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
-    ciBucket: null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'bbb', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('pr-review-intent')
 })
@@ -36,8 +36,7 @@ test('implement does NOT advance when the head sha is unchanged', () => {
   const { run, task } = fixture('implement')
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next).toBeNull()
 })
@@ -47,8 +46,7 @@ test('stage 1 CLEAR moves to stage 2, not straight to ci', () => {
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: true,
     verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 },
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('pr-review-quality')
 })
@@ -59,8 +57,7 @@ test('a task escalates alone at MAX_PASSES', () => {
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: true,
     verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 },
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('escalated')
   expect(next?.escalated_from).toBe('pr-review-quality')
@@ -75,7 +72,7 @@ test('merge advances on a PR merged before the task entered merge', () => {
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs,
-    issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+    ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('close')
   expect(task.merged_at_ms).toBe(mergedAtMs)
@@ -86,14 +83,13 @@ test('merge waits while the PR is unmerged', () => {
   expect(advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'aaa', merged: false,
-    issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+    ciBucket: null, filesClear: false, maxPasses: 2,
   })).toBeNull()
 })
 
-test('a rewind into merge after the merge reaches teardown through close', () => {
+test('a rewind into merge after the merge reaches teardown through close once the bead close is recorded', () => {
   const { run, task } = fixture('close')
   const mergedAtMs = Date.now() - 60_000
-  const closedAtMs = mergedAtMs + 2_000
   task.merged_at_ms = null
   task.phase = 'merge'
   task.phase_entered_at = Date.now()
@@ -101,9 +97,11 @@ test('a rewind into merge after the merge reaches teardown through close', () =>
   const s = {
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs,
-    issueClosed: true, closedAtMs, ciBucket: null, filesClear: false, maxPasses: 2,
+    ciBucket: null, filesClear: false, maxPasses: 2,
   }
   expect(advanceTask(run, task, s)?.phase).toBe('close')
+  expect(advanceTask(run, task, s)).toBeNull()
+  task.bead_closed_at_ms = mergedAtMs + 2_000
   expect(advanceTask(run, task, s)?.phase).toBe('teardown')
 })
 
@@ -112,7 +110,7 @@ test('merge advances when mergedAt postdates phase entry', () => {
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'aaa', merged: true, mergedAtMs: task.phase_entered_at + 1_000,
-    issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+    ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('close')
 })
@@ -121,15 +119,13 @@ test('ci pass advances to merge; ci fail returns to implement', () => {
   const pass = fixture('ci')
   expect(advanceTask(pass.run, pass.task, {
     actorIdle: false, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: 'pass', filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: 'pass', filesClear: false, maxPasses: 2,
   })?.phase).toBe('merge')
 
   const fail = fixture('ci')
   expect(advanceTask(fail.run, fail.task, {
     actorIdle: false, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: 'fail', filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: 'fail', filesClear: false, maxPasses: 2,
   })?.phase).toBe('implement')
 })
 
@@ -138,8 +134,7 @@ test('a repeatedly red CI escalates instead of retrying forever', () => {
   task.passes.ci = 1
   const next = advanceTask(run, task, {
     actorIdle: false, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: 'fail', filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: 'fail', filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('escalated')
 })
@@ -148,8 +143,7 @@ test('a red CI below the cap increments the counter on the way back to implement
   const { run, task } = fixture('ci')
   const next = advanceTask(run, task, {
     actorIdle: false, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
-    ciBucket: 'fail', filesClear: false, maxPasses: 3,
+    prNumber: 5, headSha: 'bbb', merged: false, ciBucket: 'fail', filesClear: false, maxPasses: 3,
   })
   expect(next?.phase).toBe('implement')
   expect(counterFor(task, 'ci')).toBe(1)
@@ -159,8 +153,7 @@ test('a pending ci bucket advances nothing', () => {
   const { run, task } = fixture('ci')
   expect(advanceTask(run, task, {
     actorIdle: false, artifactFresh: false, verdict: null,
-    prNumber: 5, headSha: 'aaa', merged: false, issueClosed: false,
-    ciBucket: 'pending', filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'aaa', merged: false, ciBucket: 'pending', filesClear: false, maxPasses: 2,
   })).toBeNull()
 })
 
@@ -192,8 +185,7 @@ test('the implement -> reviews -> red ci lap terminates instead of resetting', (
   const clear = { verdict: 'CLEAR' as const, blockers: 0, majors: 0 }
   const signals = {
     actorIdle: true, artifactFresh: true, verdict: clear,
-    prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
-    ciBucket: null as null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'bbb', merged: false, ciBucket: null as null, filesClear: false, maxPasses: 2,
   }
 
   advanceTask(run, task, signals)
@@ -216,7 +208,7 @@ test('a review row escalates at MAX_PASSES on its own counter', () => {
   const blocker = { verdict: 'BLOCKER' as const, blockers: 1, majors: 0 }
   const s = {
     actorIdle: true, artifactFresh: true, verdict: blocker, prNumber: null,
-    headSha: null, merged: false, issueClosed: false, ciBucket: null,
+    headSha: null, merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
   advanceTask(run, task, s)
@@ -230,7 +222,7 @@ test('an artifact row advances on actor idle plus a fresh artifact', () => {
   const { run, task } = fixture('research')
   const s = {
     actorIdle: true, artifactFresh: true, verdict: null, prNumber: null,
-    headSha: null, merged: false, issueClosed: false, ciBucket: null,
+    headSha: null, merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
   expect(advanceTask(run, task, s)?.phase).toBe('spec')
@@ -240,7 +232,7 @@ test('an artifact row does not advance on a stale artifact', () => {
   const { run, task } = fixture('spec')
   const s = {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: null,
-    headSha: null, merged: false, issueClosed: false, ciBucket: null,
+    headSha: null, merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
   expect(advanceTask(run, task, s)).toBeNull()
@@ -250,7 +242,7 @@ test('implement advances only when the head sha moved, and goes to pr-review-int
   const { run, task } = fixture('implement')
   const s = {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5,
-    headSha: 'bbb', merged: false, issueClosed: false, ciBucket: null,
+    headSha: 'bbb', merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
   expect(advanceTask(run, task, s)?.phase).toBe('pr-review-intent')
@@ -263,57 +255,42 @@ test('re-entry to implement re-captures head_sha_at_entry', () => {
   advanceTask(run, task, {
     actorIdle: true, artifactFresh: true,
     verdict: { verdict: 'BLOCKER', blockers: 1, majors: 0 },
-    prNumber: 5, headSha: 'ccc', merged: false, issueClosed: false,
-    ciBucket: null, filesClear: false, maxPasses: 2,
+    prNumber: 5, headSha: 'ccc', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(task.phase).toBe('implement')
   expect(task.head_sha_at_entry).toBe('ccc')
 })
 
-test('merge records merged_at_ms, the merge commit, and whether the issue was already closed', () => {
+test('merge records merged_at_ms and the merge commit', () => {
   const { run, task } = fixture('merge')
   task.phase_entered_at = 1000
   advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
-    merged: true, mergedAtMs: 2000, mergeCommit: 'm3rg3', issueClosed: false, ciBucket: null,
+    merged: true, mergedAtMs: 2000, mergeCommit: 'm3rg3', ciBucket: null,
     filesClear: false, maxPasses: 2,
   })
   expect(task.phase).toBe('close')
   expect(task.merged_at_ms).toBe(2000)
   expect(task.merge_commit).toBe('m3rg3')
-  expect(task.issue_closed_at_entry).toBe(false)
 })
 
-test('close completes on an auto-closed issue, where closedAt predates phase entry', () => {
+test('close completes once a reconciler pass has recorded the bead closed', () => {
   const { run, task } = fixture('close')
   task.merged_at_ms = 2000
-  task.phase_entered_at = 3000
+  task.bead_closed_at_ms = 2500
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
-    merged: true, issueClosed: true, closedAtMs: 2001, ciBucket: null,
-    filesClear: false, maxPasses: 2,
+    merged: true, ciBucket: null, filesClear: false, maxPasses: 2,
   })
   expect(next?.phase).toBe('teardown')
 })
 
-test('close completes when the issue was already closed before the merge', () => {
-  const { run, task } = fixture('close')
-  task.merged_at_ms = 2000
-  task.issue_closed_at_entry = true
-  const next = advanceTask(run, task, {
-    actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
-    merged: true, issueClosed: true, closedAtMs: 500, ciBucket: null,
-    filesClear: false, maxPasses: 2,
-  })
-  expect(next?.phase).toBe('teardown')
-})
-
-test('close does not complete on an issue that is still open', () => {
+test('close waits while no bead close is recorded', () => {
   const { run, task } = fixture('close')
   task.merged_at_ms = 2000
   expect(advanceTask(run, task, {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5, headSha: 'a',
-    merged: true, issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+    merged: true, ciBucket: null, filesClear: false, maxPasses: 2,
   })).toBeNull()
 })
 
@@ -321,7 +298,7 @@ test('blocked-on-files advances only when no sibling holds overlapping files', (
   const { run, task } = fixture('blocked-on-files')
   const base = {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: null, headSha: null,
-    merged: false, issueClosed: false, ciBucket: null, filesClear: false, maxPasses: 2,
+    merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   }
   expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
   expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
@@ -404,8 +381,7 @@ test('a task that never asked a decision is judged against its phase entry', () 
 const clearedSignals = {
   actorIdle: true, artifactFresh: true,
   verdict: { verdict: 'CLEAR' as const, blockers: 0, majors: 0 },
-  prNumber: 5, headSha: 'bbb', merged: false, issueClosed: false,
-  ciBucket: null, filesClear: false, maxPasses: 2,
+  prNumber: 5, headSha: 'bbb', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
 }
 
 function tiered(phase: TaskPhase, tier: Tier): { run: Run; task: Task } {

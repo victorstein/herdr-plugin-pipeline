@@ -1,11 +1,14 @@
-# {{branch}} — issue #{{issue}}
+# {{branch}} — {{bead}}
 
-You own issue #{{issue}} end to end, alone, in this worktree. Your task id is `{{task_id}}` in run
+You own bead `{{bead}}` end to end, alone, in this worktree. Your task id is `{{task_id}}` in run
 `{{run_id}}` — if a command ever says it cannot tell which run you mean, that id is the answer.
 
-**The issue is your brief, not this file:**
+**This is your brief.** It was captured when the task was registered: later edits to the bead do not
+reach you, and `{{hpipe}} brief --task {{task_id}}` prints it again.
 
-    gh issue view {{issue}}
+{{brief}}
+
+Never run `bd` or `bv` yourself.
 
 Read `{{agent_file}}` before your first edit — it is the scoped guide for surface `{{surface}}`, and
 the repo's root `CLAUDE.md` outranks it where they conflict. Work only on this surface, only in this
@@ -24,8 +27,8 @@ branch, not when you feel finished.
 {{phase_loop}}
 
 Those paths are relative to this worktree, which is your cwd. Write them exactly as given, stem and
-all — do not re-derive them from the conventions you see in `docs/`. The stem carries the issue
-number, and every later phase cites the path by name. An artifact written anywhere else
+all — do not re-derive them from the conventions you see in `docs/`. The stem carries the bead id,
+and every later phase cites the path by name. An artifact written anywhere else
 does not satisfy this phase's contract.
 
 Your review tier is `{{tier}}`: it decides which of those reviews run. Never lower it. If research
@@ -51,7 +54,7 @@ security or data integrity — surface it as the **last action of your turn**:
 onto the orchestrator and then onto the human, which is the cost this pipeline exists to remove:
 decide what you would do, then ask whether to do it.
 
-Do not surface what the issue, `CLAUDE.md`, or an existing call site already answers — read those
+Do not surface what the brief, `CLAUDE.md`, or an existing call site already answers — read those
 first. One open decision at a time; ask the more consequential one first. The answer comes back to
 this pane and you resume where you stopped.
 
@@ -64,8 +67,8 @@ this pane and you resume where you stopped.
 - Commit and push before your turn ends, every phase, unless you are ending it on a decision with
   unverified work in the tree. Your branch starts with no upstream, so the first push is
   `git push -u origin HEAD`.
-- The PR body ends with a real closing keyword:
+- The PR body ends with the line:
 
-      Closes #{{issue}}
+      Refs {{bead}}
 
-  "Implements #{{issue}}" does **not** auto-close the issue and is treated as a failure.
+  There is no GitHub issue to close: the supervisor closes the bead itself once the PR merges.

@@ -1,13 +1,17 @@
 #!/usr/bin/env bun
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import {
+  Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead,
+} from './lib/bd'
+import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
-import { Gh, type FiledIssue, type GhFailure } from './lib/gh'
+import { heldBy } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
   isUnlandedSave, listRuns, newRun, resolveRun, retryOnStaleRun, runById, runForRepo,
@@ -24,14 +28,14 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { isLowering, pipelinePanes, registrationTier, type LabelRead } from './lib/tiers'
-import { bdProblem, bvProblem, checkTools, type Tools, toolsLine } from './lib/tools'
+import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
+import { bdProblem, bvProblem, checkBd, checkTools, type Tools, toolsLine } from './lib/tools'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
-import type { Run, RunPhase, Task, TaskPhase } from './lib/types'
+import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -229,32 +233,92 @@ const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
   'queued', 'research', 'spec', 'spec-review', 'plan', 'plan-review', 'blocked-on-files', 'implement',
 ])
 
-type FileIssue = (repoRoot: string, title: string, bodyFile: string) => Promise<FiledIssue | GhFailure>
+/** The store for this repo, or why the CLI cannot use one. */
+async function cliBd(stateDir: string, repoKey: string): Promise<Bd | BdFailure> {
+  const slug = beadsSlug(repoKey)
+  if ((await readBeadsProject(stateDir, slug)) === null) {
+    return {
+      reason: 'unavailable',
+      error: `no Beads store for ${repoKey} — \`hpipe start\` there sets one up, or run the "Set up Beads for this repo" action`,
+    }
+  }
+  const broken = bdProblem(await checkBd())
+  if (broken !== null) return { reason: 'unavailable', error: broken }
+  return new Bd({ stateDir, slug, lockWaitMs: CLI_LOCK_WAIT_MS })
+}
+
+async function withCliBd<T>(
+  stateDir: string, repoKey: string, use: (bd: Bd) => Promise<T | BdFailure>,
+): Promise<T | BdFailure> {
+  const bd = await cliBd(stateDir, repoKey)
+  return isBdFailure(bd) ? bd : use(bd)
+}
+
+export interface RegistrationBeads {
+  create: (repoKey: string, input: BeadCreateInput) => Promise<CreatedBead | BdFailure>
+  show: (repoKey: string, id: string) => Promise<BeadDetail | BdFailure>
+}
+
+const cliRegistrationBeads = (stateDir: string): RegistrationBeads => ({
+  create: (repoKey, input) => withCliBd(stateDir, repoKey, (bd) => bd.create(input)),
+  show: (repoKey, id) => withCliBd(stateDir, repoKey, (bd) => bd.show(id)),
+})
 
 /** What one `hpipe task` call carries across the stale-run retries of its registration. */
 interface RegistrationAttempt {
-  fileIssueOnce: (repoRoot: string) => Promise<FiledIssue | GhFailure>
-  readLabelsOnce: (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
+  fileBeadOnce: (repoKey: string, input: BeadCreateInput) => Promise<CreatedBead | BdFailure>
+  showBeadOnce: (repoKey: string, id: string) => Promise<BeadDetail | BdFailure>
   landed: (taskId: string) => void
   dispatchBase: DispatchBaseFor
 }
 
 type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
 
-type ReadLabels = (repoRoot: string, issue: number) => Promise<string[] | GhFailure>
-
-const fileIssueWithGh: FileIssue = (repoRoot, title, bodyFile) =>
-  new Gh(undefined, repoRoot).issueCreate(title, bodyFile)
-
-const readLabelsWithGh: ReadLabels = (repoRoot, issue) => new Gh(undefined, repoRoot).issueLabels(issue)
-
 interface TaskInput {
-  branch: string; issue: number; surface: string; notes: string
+  branch: string; bead?: string; surface: string; notes: string
   dependsOn: string[]; files: string[]; keepWorktree: boolean
   repoKey: string | null; runId: string | null
-  title?: string; bodyFile?: string
+  title?: string; bodyFile?: string; acceptanceFile?: string
   tier?: string
   callerPane?: string | null
+}
+
+const isReadableFile = (path: string): boolean => existsSync(path) && statSync(path).isFile()
+
+/**
+ * Why an existing bead cannot become a task, or null. Each refusal keeps one of
+ * bd's close guards from firing at merge: a foreign assignee, an open blocker,
+ * or an open child.
+ */
+async function adoptionRefusal(stateDir: string, bead: BeadDetail): Promise<string | null> {
+  if (bead.status === 'closed') return `bead ${bead.id} is closed — adopt an open bead, or file a new one with --title`
+  if ((bead.assignee ?? '') !== '') {
+    return `bead ${bead.id} is assigned to ${bead.assignee} — only an unassigned bead can be adopted`
+  }
+  const holder = await heldBy(stateDir, bead.id)
+  if (holder !== null) {
+    return `bead ${bead.id} is already held by ${holder.task_id} (${holder.phase}) in run ${holder.run_id}, ` +
+      `session ${holder.session}`
+  }
+  const blockers = (bead.dependencies ?? []).filter((d) => d.dependency_type === 'blocks' && d.status !== 'closed')
+  if (blockers.length > 0) {
+    return `bead ${bead.id} is blocked by open ${blockers.map((d) => d.id).join(', ')} — finish or adopt those first`
+  }
+  const dependents = (bead.dependents ?? []).filter((d) => d.status !== 'closed')
+  if (dependents.length > 0) {
+    return `bead ${bead.id} has open dependents (${dependents.map((d) => d.id).join(', ')}) — an epic or ` +
+      'parent bead cannot be adopted; adopt its children instead'
+  }
+  return null
+}
+
+function filingInput(input: TaskInput): BeadCreateInput {
+  return {
+    title: input.title!,
+    body: readFileSync(resolve(input.bodyFile!), 'utf8'),
+    acceptance: input.acceptanceFile === undefined ? undefined : readFileSync(resolve(input.acceptanceFile), 'utf8'),
+    labels: [],
+  }
 }
 
 async function registerTask(
@@ -268,36 +332,38 @@ async function registerTask(
   if (!found.ok) return found.result
   const run = found.value
 
-  // Work with no issue behind it used to fall outside the pipeline and be
-  // hand-rolled, which is where the mistakes were. Filing one here, rather than
-  // letting a task run issue-less, keeps the issue body as the one brief and
-  // `Closes #N` as the close phase's signal. Measured on a live run.
+  // Work with no bead behind it used to fall outside the pipeline and be
+  // hand-rolled, which is where the mistakes were. Filing one here keeps the
+  // brief captured at registration as the worker's one source. Measured on a live run.
   const filing = input.title !== undefined
+  const adopting = input.bead !== undefined
 
-  // The argv parser defaults a missing --issue to 0 and a missing --branch to
-  // "". Without these checks a mistyped command mints a ghost task into a live
-  // run, and there is no command that removes one. Measured on a live run.
-  if (filing && input.issue !== 0) {
-    return fail('--issue registers an existing issue and --title files a new one — pass one, not both')
+  // The argv parser leaves a missing --branch as "". Without these checks a
+  // mistyped command mints a ghost task into a live run, and there is no command
+  // that removes one. Measured on a live run.
+  if (filing && adopting) {
+    return fail('--bead adopts an existing bead and --title files a new one — pass one, not both')
   }
-  if (!filing && (!Number.isInteger(input.issue) || input.issue <= 0)) {
-    return fail(
-      `--issue must be a positive issue number, got: ${input.issue || '(missing)'}\n` +
-      '  → no issue yet? --title <title> --body-file <path> files one and registers it',
-    )
+  if (!filing && !adopting) {
+    return fail('a task needs a bead: --bead <id> adopts an existing one, ' +
+      '--title <title> --body-file <path> files a new one')
   }
+  if (adopting && input.bead!.trim().length === 0) return fail('--bead needs a bead id')
   if (filing) {
     if (input.title!.trim().length === 0) return fail('--title cannot be empty')
     // --title is free text, so the argv layer lets a missing value swallow the
-    // next flag — and the issue it files would be public under that flag's name.
+    // next flag — and the bead it files would carry that flag's name.
     if (input.title!.startsWith('--')) {
       return fail(`--title got a flag where the title belongs: "${input.title}" — the value after --title is missing`)
     }
-    if (input.bodyFile === undefined) return fail('--title needs --body-file: the issue body is the worker\'s brief')
+    if (input.bodyFile === undefined) return fail('--title needs --body-file: the body is the worker\'s brief')
     const bodyPath = resolve(input.bodyFile)
-    if (!existsSync(bodyPath) || !statSync(bodyPath).isFile()) return fail(`--body-file is not a file: ${bodyPath}`)
-  } else if (input.bodyFile !== undefined) {
-    return fail('--body-file only goes with --title; an existing issue already has its body')
+    if (!isReadableFile(bodyPath)) return fail(`--body-file is not a file: ${bodyPath}`)
+    if (input.acceptanceFile !== undefined && !isReadableFile(resolve(input.acceptanceFile))) {
+      return fail(`--acceptance-file is not a file: ${resolve(input.acceptanceFile)}`)
+    }
+  } else if (input.bodyFile !== undefined || input.acceptanceFile !== undefined) {
+    return fail('--body-file and --acceptance-file only go with --title; an existing bead already has its brief')
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
   if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
@@ -340,27 +406,51 @@ async function registerTask(
   const cycle = detectCycle([...run.tasks, { task_id: taskId, depends_on: input.dependsOn }])
   if (cycle) return fail(`--depends-on forms a cycle: ${cycle.join(' → ')}`)
 
-  // Before filing, so a refused tier files nothing. A filed issue is brand new and
-  // has no labels to read, and a typo'd --tier is refused without a gh round-trip.
+  // Before filing or reading, so a typo'd --tier files nothing and costs no bd round-trip.
   const flagRefused = input.tier !== undefined && !isTier(input.tier)
-  const labels: LabelRead = filing || flagRefused ? null : await attempt.readLabelsOnce(run.repo_root, input.issue)
-  const chosen = registrationTier(input.tier, labels)
+  let adopted: BeadDetail | null = null
+  if (adopting && !flagRefused) {
+    const id = input.bead!.trim()
+    const shown = await attempt.showBeadOnce(run.repo_key, id)
+    if (isBdFailure(shown)) return fail(`bd show ${id} failed; nothing was registered:\n  ${shown.error}`)
+    const refusal = await adoptionRefusal(ctx.stateDir, shown)
+    if (refusal !== null) return fail(refusal)
+    adopted = shown
+  }
+  const chosen = registrationTier(input.tier, adopted?.labels ?? null)
   if (!chosen.ok) return fail(chosen.error)
 
-  // Last, after every check: an issue filed for a registration that then fails
-  // is public, and nothing in the pipeline would ever close it.
-  const filed = filing ? await attempt.fileIssueOnce(run.repo_root) : null
-  if (filed !== null && 'error' in filed) {
-    return fail(`gh issue create failed in ${run.repo_root}; nothing was filed or registered:\n  ${filed.error}`)
+  // Last, after every check: a bead filed for a registration that then fails
+  // sits in the backlog with nothing in the pipeline behind it.
+  let bead: string
+  let brief: BeadBrief
+  let filed = false
+  if (adopted !== null) {
+    bead = adopted.id
+    brief = {
+      title: adopted.title, description: adopted.description ?? '', acceptance: adopted.acceptance_criteria ?? '',
+      labels: adopted.labels ?? [], captured_at_ms: Date.now(),
+    }
+  } else {
+    const createInput = filingInput(input)
+    const created = await attempt.fileBeadOnce(run.repo_key, createInput)
+    if (isBdFailure(created)) {
+      return fail(`bd create failed; nothing was filed or registered:\n  ${created.error}`)
+    }
+    bead = created.id
+    filed = true
+    brief = {
+      title: createInput.title, description: createInput.body, acceptance: createInput.acceptance ?? '',
+      labels: createInput.labels, captured_at_ms: Date.now(),
+    }
   }
-  const issue = filed?.number ?? input.issue
 
   const date = new Date().toISOString().slice(0, 10)
-  const stem = `${date}-issue-${issue}`
+  const stem = `${date}-${bead}`
 
   const task: Task = {
     task_id: taskId,
-    branch: input.branch, issue, surface: input.surface,
+    branch: input.branch, bead, brief, surface: input.surface,
     depends_on: input.dependsOn, files: input.files,
     keep_worktree: input.keepWorktree,
     workspace_id: null, pane_id: null, agent_status: 'unknown',
@@ -373,7 +463,9 @@ async function registerTask(
       plan: join(ARTIFACT_ROOT, 'plans', `${stem}-plan.md`),
       verdicts: {},
     },
-    merged_at_ms: null, merge_commit: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, merge_commit: null, bead_closed_at_ms: null,
+    bead_sync: { failures: 0, last_error: null, last_ok_at_ms: null },
+    discoveries: [], passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
     tier: chosen.tier,
     tier_history: [{
@@ -412,7 +504,7 @@ async function registerTask(
 
   const header = [
     `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`,
-    ...(filed ? [`issue: #${issue} (filed)`] : []), filesLine, bootLine,
+    ...(filed ? [`bead: ${bead} (filed)`] : []), filesLine, bootLine,
   ].join('\n')
 
   if (gate.state !== 'ready') return ok(`${header}\nqueued: waiting on ${gate.on.join(', ')}`)
@@ -426,27 +518,26 @@ async function registerTask(
 }
 
 export async function cmdTask(
-  ctx: Ctx, input: TaskInput, fileIssue: FileIssue = fileIssueWithGh,
-  dispatchBase: DispatchBaseFor = freshDispatchBase, readLabels: ReadLabels = readLabelsWithGh,
+  ctx: Ctx, input: TaskInput, beads: RegistrationBeads = cliRegistrationBeads(ctx.stateDir),
+  dispatchBase: DispatchBaseFor = freshDispatchBase,
 ): Promise<CmdResult> {
-  // The retry re-runs registerTask from a fresh read, so the gh calls are memoized
-  // out here: a second attempt reuses the issue the first one filed and the labels
-  // it read, and never files another.
+  // The retry re-runs registerTask from a fresh read, so the bd calls are memoised
+  // out here: a second attempt reuses the bead the first one filed and the bead it
+  // read, and never files another.
   const outcome: {
-    filing: Promise<FiledIssue | GhFailure> | null
-    labels: Promise<string[] | GhFailure> | null
+    filing: Promise<CreatedBead | BdFailure> | null
+    shown: Promise<BeadDetail | BdFailure> | null
     registeredAs: string | null
-  } = { filing: null, labels: null, registeredAs: null }
+  } = { filing: null, shown: null, registeredAs: null }
   const attempt: RegistrationAttempt = {
-    fileIssueOnce: (repoRoot) =>
-      (outcome.filing ??= fileIssue(repoRoot, input.title!, resolve(input.bodyFile!))),
-    readLabelsOnce: (repoRoot, issue) => (outcome.labels ??= readLabels(repoRoot, issue)),
+    fileBeadOnce: (repoKey, createInput) => (outcome.filing ??= beads.create(repoKey, createInput)),
+    showBeadOnce: (repoKey, id) => (outcome.shown ??= beads.show(repoKey, id)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
   }
-  const filedIssue = async (): Promise<FiledIssue | null> => {
+  const filedBead = async (): Promise<CreatedBead | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
-    return filed === null || 'error' in filed ? null : filed
+    return filed === null || isBdFailure(filed) ? null : filed
   }
 
   let reason: string
@@ -455,27 +546,27 @@ export async function cmdTask(
     if (result.ok) return result
     reason = result.text
   } catch (error) {
-    const filed = await filedIssue()
+    const filed = await filedBead()
     if (filed === null) {
       if (isUnlandedSave(error)) return fail(unlandedSaveMessage(error))
       throw error
     }
-    // Not unlandedSaveMessage: its "run it again" would file a second issue.
+    // Not unlandedSaveMessage: its "run it again" would file a second bead.
     reason = error instanceof Error ? error.message : String(error)
   }
 
-  const filed = await filedIssue()
+  const filed = await filedBead()
   if (filed === null) return fail(reason)
   if (outcome.registeredAs !== null) {
     return fail(
-      `task ${outcome.registeredAs} is registered with issue #${filed.number} (${filed.url}), but: ${reason}\n` +
+      `task ${outcome.registeredAs} is registered with bead ${filed.id}, but: ${reason}\n` +
       `  → hpipe brief --task ${outcome.registeredAs} prints its brief; do not register it again`,
     )
   }
   return fail(
-    `${reason}\nissue #${filed.number} was filed (${filed.url}) but no task was registered\n` +
-    `  → register it with --issue ${filed.number} in place of --title and --body-file; ` +
-    're-running with --title files a second issue',
+    `${reason}\nbead ${filed.id} was filed but no task was registered\n` +
+    `  → register it with --bead ${filed.id} in place of --title and --body-file; ` +
+    're-running with --title files a second bead',
   )
 }
 
@@ -780,7 +871,7 @@ async function rewind(ctx: Ctx, input: {
       task.ci = null
       task.merged_at_ms = null
       task.merge_commit = null
-      task.issue_closed_at_entry = false
+      task.bead_closed_at_ms = null
     }
     // The same stale bucket `enterTaskPhase` forgets on entry: kept, it fails the
     // rewound round on the next tick, before the poller has read the PR again.
@@ -1054,9 +1145,9 @@ function positionals(argv: string[]): string[] {
 
 const USAGE: Record<string, string[]> = {
   start: ['hpipe start <title> [--prefix <bead-prefix>]'],
-  task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
-    '[--tier light|standard|heavy] [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] ' +
-    '[--keep-worktree] [--run <run-id>]'],
+  task: ['hpipe task --branch <branch> (--bead <id> | --title <title> --body-file <path> ' +
+    '[--acceptance-file <path>]) --surface <surface> [--tier light|standard|heavy] ' +
+    '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
   dispatch: [
@@ -1181,7 +1272,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'task':
       out = await cmdTask(ctx, {
         branch: flag(rest, 'branch') ?? '',
-        issue: Number(flag(rest, 'issue') ?? '0'),
+        bead: flag(rest, 'bead') ?? undefined,
         surface: flag(rest, 'surface') ?? '',
         notes: flag(rest, 'notes') ?? '',
         dependsOn: listFlag(rest, 'depends-on'),
@@ -1191,6 +1282,7 @@ async function dispatch(argv: string[]): Promise<number> {
         runId: flag(rest, 'run'),
         title: flag(rest, 'title') ?? undefined,
         bodyFile: flag(rest, 'body-file') ?? undefined,
+        acceptanceFile: flag(rest, 'acceptance-file') ?? undefined,
         tier: flag(rest, 'tier') ?? undefined,
         callerPane: process.env.HERDR_PANE_ID || null,
       })

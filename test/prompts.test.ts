@@ -10,6 +10,7 @@ import { dispatchSequence } from '../src/lib/unstarted'
 import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const ROOT = join(import.meta.dir, '..')
 const REVIEW_PROMPTS = [
@@ -41,13 +42,31 @@ test('review prompts demand the trailer as the last line', async () => {
   }
 })
 
-test('the worker brief routes to the surface agent and demands a closing keyword', async () => {
+test('the worker brief inlines the captured brief and ends the PR body with Refs', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
   expect(text).toContain('{{agent_file}}')
-  expect(text).toContain('Closes #{{issue}}')
-  // The issue body is the brief now; `render()` throws on a placeholder no
-  // caller resolves, so an inherited {{task_text}} kills the first dispatch.
+  expect(text).toContain('{{brief}}')
+  expect(text).toContain('Refs {{bead}}')
+  expect(text).not.toContain('gh issue')
+  // `render()` throws on a placeholder no caller resolves, so an inherited
+  // {{task_text}} kills the first dispatch.
   expect(text).not.toContain('{{task_text}}')
+})
+
+test('no template reads an issue any more', async () => {
+  for (const name of ALL) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text, name).not.toContain('{{issue}}')
+    expect(text, name).not.toContain('gh issue view')
+  }
+})
+
+test('a rendered worker brief carries the brief captured at registration', async () => {
+  const text = await renderBriefFor([briefTask({})], 0)
+  expect(text).toContain('# feat/x — hp-1')
+  expect(text).toContain('**Relabel the tile**')
+  expect(text).toContain('The settings tile says Foo; it should say Bar.')
+  expect(text).toContain('The tile reads Bar.')
 })
 
 test('every review prompt forbids padding as well as softening', async () => {
@@ -190,7 +209,7 @@ test('a rendered probe leaves no placeholder behind', async () => {
   const { renderPrompt } = await import('../src/lib/render')
   const text = await renderPrompt(ROOT, 'stall-probe', {
     run_id: 'r1', phase: 'implement', minutes: '45',
-    awaiting: 'This phase is waiting for a pushed PR for fix/x (#1).',
+    awaiting: 'This phase is waiting for a pushed PR for fix/x (hp-1).',
     ladder: 'This is probe 1 of 3.',
   })
   expect(text).not.toContain('{{')
@@ -210,12 +229,12 @@ test('the worker brief carries the bootstrap note', async () => {
 
 function briefTask(overrides: Partial<Task>): Task {
   return {
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core', depends_on: [], files: [],
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
     keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown',
     phase: 'research', phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
     pr: null, ci: null, checkout_path: null, registered_at: 0, adopted_at: null,
     artifacts: { research: 'a.md', spec: 'b.md', plan: 'c.md', verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: 'n',
     ...overrides,
   }

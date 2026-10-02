@@ -1,4 +1,4 @@
-# CI is red — {{branch}} (#{{issue}}), PR #{{pr}}
+# CI is red — {{branch}} ({{bead}}), PR #{{pr}}
 
 CI failed on PR #{{pr}}. The failing checks:
 

@@ -11,19 +11,20 @@ import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
 import { cleanupFixtures, tempDir } from './helpers/git-worktree'
+import { beadTaskFields } from './helpers/bead-fields'
 
 afterEach(cleanupFixtures)
 
 function mkTask(over: Partial<Task> = {}): Task {
   return {
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
     depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
     phase: 'research', phase_entered_at: 0, escalated_from: null,
     head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: 0, adopted_at: 0,
     artifacts: { research: 'docs/r.md', spec: 'docs/s.md', plan: 'docs/p.md', verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
     ...over,
   }

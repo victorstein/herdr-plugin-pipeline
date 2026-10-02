@@ -1,4 +1,4 @@
-# `pr-review-quality` — stage 2 on PR #{{pr}}, {{branch}} (#{{issue}}), pass {{pass}}
+# `pr-review-quality` — stage 2 on PR #{{pr}}, {{branch}} ({{bead}}), pass {{pass}}
 
 Stage 1 confirmed PR #{{pr}} does what was asked. Stage 2 asks whether it is written the way this
 codebase is already written.

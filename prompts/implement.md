@@ -1,11 +1,11 @@
-# Implement — {{branch}} (#{{issue}})
+# Implement — {{branch}} ({{bead}})
 
 The plan at `{{plan_path}}` {{plan_status}}. The files you need are yours.
 
 You keep the judgment; one subagent writes the code. Do not write it yourself.
 
 1. **Triage.** If you are here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file
-   for this issue under `docs/superpowers/reviews/`. Decide which findings you accept. Every BLOCKER
+   for this bead under `docs/superpowers/reviews/`. Decide which findings you accept. Every BLOCKER
    and every MAJOR you accept goes to the subagent before anything else; answer the ones you reject
    in the PR body rather than silently ignoring them.
 2. **Dispatch.** Dispatch one subagent with `model: {{implement_model}}`, and
@@ -20,11 +20,11 @@ You keep the judgment; one subagent writes the code. Do not write it yourself.
    resumes it.
 4. **Verify and ship.** Run the tests and the typecheck yourself and read their output. If either is
    red, dispatch a fresh subagent with the failing output; do not fix it yourself. When both are
-   green, push, and open the PR. Its body ends with a real closing keyword:
+   green, push, and open the PR. Its body ends with the line:
 
-       Closes #{{issue}}
+       Refs {{bead}}
 
-   "Implements #{{issue}}" does **not** auto-close the issue and is treated as a failure.
+   There is no GitHub issue to close: the supervisor closes the bead itself once the PR merges.
 
 Push only work you have verified, and push it before your turn ends. The supervisor watches the
 branch and the PR head, not this pane.

@@ -1,4 +1,4 @@
-# Write the implementation plan — {{branch}} (#{{issue}})
+# Write the implementation plan — {{branch}} ({{bead}})
 
 The spec at `{{spec_path}}` cleared review. Turn it into an implementation plan.
 
@@ -28,7 +28,7 @@ sibling can edit at the same time. Leave out this task's own research, spec, pla
 `docs/superpowers/`: every task writes there, and the pipeline does not lock them.
 
 If you are back here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file for this
-issue under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept before
+bead under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept before
 rewriting anything else.
 
 Commit and push the plan, then stop.

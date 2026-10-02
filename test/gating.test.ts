@@ -4,16 +4,17 @@ import {
   releasableFromFiles, separatePipelineArtifacts, widenFiles,
 } from '../src/lib/gating'
 import type { Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const task = (over: Partial<Task>): Task => ({
-  task_id: 't', branch: 'b', issue: 1, surface: 'core',
+  task_id: 't', branch: 'b', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: null, pane_id: null, agent_status: 'unknown',
   phase: 'queued', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -170,22 +171,22 @@ test('widening adds only what the held prefixes do not already cover', () => {
 })
 
 const withArtifacts = (): Task => task({
-  issue: 96,
+  bead: 'hp-96',
   artifacts: {
-    research: 'docs/superpowers/research/2026-09-24-issue-96-research.md',
-    spec: 'docs/superpowers/specs/2026-09-24-issue-96-design.md',
-    plan: 'docs/superpowers/plans/2026-09-24-issue-96-plan.md',
-    verdicts: { 'plan-review-0': 'docs/superpowers/reviews/issue-96-plan-review-0.md' },
+    research: 'docs/superpowers/research/2026-09-24-hp-96-research.md',
+    spec: 'docs/superpowers/specs/2026-09-24-hp-96-design.md',
+    plan: 'docs/superpowers/plans/2026-09-24-hp-96-plan.md',
+    verdicts: { 'plan-review-0': 'docs/superpowers/reviews/hp-96-plan-review-0.md' },
   },
 })
 
 test('a plan naming the pipeline\'s own artifact locations locks none of them', () => {
   const declared = [
     'docs/superpowers/', 'docs/superpowers', 'docs/superpowers/plans/', 'docs/superpowers/reviews',
-    'docs/superpowers/specs/2026-09-24-issue-96-design.md',
-    'docs/superpowers/plans/2026-09-24-issue-96-plan.md',
-    'docs/superpowers/reviews/issue-96-plan-review-0.md',
-    'docs/superpowers/reviews/issue-96-pr-review-quality-3.md',
+    'docs/superpowers/specs/2026-09-24-hp-96-design.md',
+    'docs/superpowers/plans/2026-09-24-hp-96-plan.md',
+    'docs/superpowers/reviews/hp-96-plan-review-0.md',
+    'docs/superpowers/reviews/hp-96-pr-review-quality-3.md',
     'src/lib/gating.ts',
   ]
   expect(separatePipelineArtifacts(declared, withArtifacts())).toEqual({
@@ -198,8 +199,8 @@ test('real files beside the artifacts, and broader prefixes, stay locked', () =>
   const declared = [
     'docs/', 'docs/runbook.md', 'docs/superpowers-notes.md',
     'docs/superpowers/reviews/2026-09-24-live-smoke-run.md',
-    'docs/superpowers/plans/2026-09-20-issue-12-plan.md',
-    'docs/superpowers/reviews/issue-960-plan-review-0.md',
+    'docs/superpowers/plans/2026-09-20-hp-12-plan.md',
+    'docs/superpowers/reviews/hp-960-plan-review-0.md',
     '',
   ]
   expect(separatePipelineArtifacts(declared, withArtifacts())).toEqual({ kept: declared, ignored: [] })

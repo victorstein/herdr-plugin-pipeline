@@ -41,7 +41,7 @@ worker is working: it interrupts the turn. Measured on a live run.
 **`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
 *focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
 start. Omitting it creates the worktree in whatever repo happens to be focused and launches the
-worker there, reading `gh issue view` against a different repo's issues. Measured on a live run.
+worker there, reading a different repo. Measured on a live run.
 
 `agent start` adopts the **existing** root pane — it does not create one, and there is no orphan pane
 to close. It returns once the agent is ready for input, which is when the handoff can go. Do not pass

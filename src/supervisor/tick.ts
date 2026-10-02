@@ -57,7 +57,7 @@ export function describeWake(
   }
 
   const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
-  const head = `${task.task_id} ${task.branch} (#${task.issue}) [${box}] ` +
+  const head = `${task.task_id} ${task.branch} (${task.bead}) [${box}] ` +
     `${line.event} — ${actionFor(run, task, hpipe, now, holds)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
@@ -137,7 +137,7 @@ export function parkedFooter(
   if (parked.length === 0) return ''
 
   const lines = parked.map((task) =>
-    `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
+    `- ${task.task_id} ${task.branch} (${task.bead}) ` +
     `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
   return ['also waiting on you:', ...lines].join('\n')
 }
@@ -152,7 +152,7 @@ export function catchUpDigest(run: Run, now: number, hpipe: string, holds: PaneH
   const lines = [...run.tasks]
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
     .map((task) =>
-      `- ${task.task_id} ${task.branch} (#${task.issue}) ` +
+      `- ${task.task_id} ${task.branch} (${task.bead}) ` +
       `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
   return [
     `catch-up: digests for this run did not reach you, so here is where it stands now ` +

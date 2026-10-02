@@ -1,4 +1,4 @@
-# Adversarial review of your plan — {{branch}} (#{{issue}}), pass {{pass}}
+# Adversarial review of your plan — {{branch}} ({{bead}}), pass {{pass}}
 
 Your plan at `{{plan_path}}` is ready for review. You do not review it yourself. Hand the brief below
 to a subagent with a fresh context, verbatim, and route its output — the plugin owns every word of

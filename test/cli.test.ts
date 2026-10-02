@@ -74,7 +74,7 @@ test('a run excluded for being parked names the rewind that resumes it', async (
   await saveRun(dir, parked)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/core', issue: 1, surface: 'core', notes: '', dependsOn: [], files: [],
+    branch: 'feat/core', bead: 'hp-1', surface: 'core', notes: '', dependsOn: [], files: [],
     keepWorktree: false, repoKey: 'k', runId: null,
   })
   expect(result.ok).toBe(false)
@@ -100,8 +100,8 @@ test('task prints its id and withholds the prompt while gated', async () => {
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
-  const t1 = await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
-  const t2 = await cmdTask(c, { branch: 'feat/api', issue: 2, surface: 'api', notes: 'api work', dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const t1 = await cmdTask(c, { branch: 'feat/core', bead: 'hp-1', surface: 'core', notes: 'core work', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const t2 = await cmdTask(c, { branch: 'feat/api', bead: 'hp-2', surface: 'api', notes: 'api work', dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
 
   expect(t1.text).toContain('task_id: t1')
   expect(t1.text).toContain('feat/core')
@@ -117,7 +117,7 @@ test('a task dispatched at registration enters the design loop, not implement', 
   started!.phase = 'dispatch'
   await saveRun(dir, started!)
 
-  await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  await cmdTask(c, { branch: 'feat/core', bead: 'hp-1', surface: 'core', notes: 'core work', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
 
   const run = await liveRun()
   expect(run?.tasks[0]?.phase).toBe('research')
@@ -130,8 +130,8 @@ test('task rejects a dependency cycle', async () => {
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
-  await cmdTask(c, { branch: 'a', issue: 1, surface: 'core', notes: 'x', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
-  const bad = await cmdTask(c, { branch: 'b', issue: 2, surface: 'core', notes: 'y', dependsOn: ['t1', 't2'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  await cmdTask(c, { branch: 'a', bead: 'hp-1', surface: 'core', notes: 'x', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const bad = await cmdTask(c, { branch: 'b', bead: 'hp-2', surface: 'core', notes: 'y', dependsOn: ['t1', 't2'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('cycle')
 })
@@ -145,7 +145,7 @@ test('task rejects a surface with no agent definition', async () => {
 
   // A typo in --surface would otherwise render a plausible dead path into the
   // worker prompt and fail only once the worker went looking for it.
-  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'kore', notes: 'y', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const bad = await cmdTask(c, { branch: 'x', bead: 'hp-9', surface: 'kore', notes: 'y', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('kore-dev.md')
 })
@@ -154,7 +154,7 @@ test('task rejects a branch that starts with a dash and registers nothing', asyn
   const c = ctx()
   await cmdStart(c, { title: 'a', repoKey: 'k', repoRoot: repoDir, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1' })
 
-  const bad = await cmdTask(c, { branch: '-h', issue: 9, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const bad = await cmdTask(c, { branch: '-h', bead: 'hp-9', surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('--branch cannot start with "-"')
   expect((await liveRun())!.tasks).toEqual([])
@@ -167,7 +167,7 @@ test('task rejects a dependency id that names no task', async () => {
   run!.phase = 'dispatch'
   await saveRun(dir, run!)
 
-  const bad = await cmdTask(c, { branch: 'x', issue: 9, surface: 'core', notes: 'y', dependsOn: ['t7'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  const bad = await cmdTask(c, { branch: 'x', bead: 'hp-9', surface: 'core', notes: 'y', dependsOn: ['t7'], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('t7')
 })
@@ -225,7 +225,7 @@ test('task rejects a --files entry containing whitespace and mints no task', asy
   await saveRun(dir, started!)
 
   const bad = await cmdTask(c, {
-    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    branch: 'smoke/bad', bead: 'hp-9', surface: 'core', notes: '',
     dependsOn: [], files: ['src/a.ts src/b.ts'], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -250,7 +250,7 @@ test('task rejects a --files entry that is a flag, not a path prefix', async () 
   await saveRun(dir, started!)
 
   const bad = await cmdTask(c, {
-    branch: 'smoke/bad', issue: 9, surface: 'core', notes: '',
+    branch: 'smoke/bad', bead: 'hp-9', surface: 'core', notes: '',
     dependsOn: [], files: ['--surface'], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -270,9 +270,9 @@ test('task echoes the file set it recorded while gated', async () => {
 
   // t1 is dispatched into `research`, which is not terminal, so t2 stays gated and
   // the `queued:` return is the one that runs.
-  await cmdTask(c, { branch: 'feat/core', issue: 1, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
+  await cmdTask(c, { branch: 'feat/core', bead: 'hp-1', surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null })
   const t2 = await cmdTask(c, {
-    branch: 'feat/api', issue: 2, surface: 'api', notes: '',
+    branch: 'feat/api', bead: 'hp-2', surface: 'api', notes: '',
     dependsOn: ['t1'], files: ['src/lib/gating.ts', 'src/cli.ts'], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -291,7 +291,7 @@ test('task echoes files: none on the dispatched return when nothing was declared
   await saveRun(dir, started!)
 
   const t1 = await cmdTask(c, {
-    branch: 'feat/core', issue: 1, surface: 'core', notes: 'core work',
+    branch: 'feat/core', bead: 'hp-1', surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })

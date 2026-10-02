@@ -7,7 +7,7 @@ import {
   gateStatus, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, widenFiles,
 } from '../lib/gating'
 import type { RunEffect } from '../lib/ledger'
-import type { IssueView, PrView } from '../lib/gh'
+import type { PrView } from '../lib/gh'
 import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
 import { queuedWorkerPrompt } from '../lib/outbox'
 import { taskRow } from '../lib/phases'
@@ -17,7 +17,7 @@ import { abandonParagraph, resumeCommand } from '../lib/status'
 import { tierPromptVars } from '../lib/tier-prompt'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
-import { renderWorkerPrompt } from '../lib/worker-prompt'
+import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import type { CheckSubmission } from './courier'
@@ -41,7 +41,6 @@ export interface TaskDeps extends TeardownDeps {
   fileSettleMs: number
   prForBranch: (branch: string) => Promise<number | null>
   prView: (pr: number) => Promise<PrView | null>
-  issueView: (issue: number) => Promise<IssueView | null>
   verdictFor: (run: Run, task: Task) => Promise<VerdictResult | null>
   /** Rendered detail of the failing checks, for the ci-red prompt. */
   ciDetail: (pr: number | null) => Promise<string>
@@ -115,7 +114,7 @@ export async function renderTaskPhasePrompt(
     ...tierPromptVars(task),
     run_id: run.run_id,
     branch: task.branch,
-    issue: String(task.issue),
+    ...beadPromptVars(task),
     pr: task.pr === null ? 'unknown' : String(task.pr),
     pass: String(counterFor(task, task.phase)),
     verdict_path: absoluteArtifactPath(run, task) ?? '',
@@ -141,7 +140,7 @@ export async function renderTaskPhasePrompt(
     case 'merge':
       return renderPrompt(deps.pluginRoot, 'merge', common)
     case 'close':
-      return task.issue_closed_at_entry ? '' : renderPrompt(deps.pluginRoot, 'close', common)
+      return renderPrompt(deps.pluginRoot, 'close', common)
     case 'implement':
       // Re-entry from a red CI needs the failing checks inlined; every other
       // entry gets the standing brief, which points a returning worker at the
@@ -218,7 +217,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
       const bootstrap = repoBootstrap(run.repo_root)
       prompts.push({
-        text: `Dispatch ${task.task_id} (${task.branch}, #${task.issue}):\n` +
+        text: `Dispatch ${task.task_id} (${task.branch}, ${task.bead}):\n` +
           `${bootstrapLine(bootstrap)}\n` +
           `${baseLine(dispatchBase)}\n` +
           `${dispatchSequence(run, task, dispatchBase, bootstrap, hpipeCommand(deps.pluginRoot))}\n\n` +
@@ -307,8 +306,6 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     merged: false,
     mergedAtMs: undefined as number | undefined,
     mergeCommit: undefined as string | undefined,
-    issueClosed: false,
-    closedAtMs: undefined as number | undefined,
     filesClear: false,
     ciBucket: task.ci,
     maxPasses: deps.maxPasses,
@@ -394,20 +391,13 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
       if (task.pr === null) return base
       const view = await deps.prView(task.pr)
       if (!view?.merged) return base
-      // `issue_closed_at_entry` is recorded from this read. Without it the flag was
-      // always false, and an issue closed before its merge — by hand, or by an
-      // earlier PR — stranded the task in `close`.
-      const issue = await deps.issueView(task.issue)
       return {
         ...base, merged: true, mergedAtMs: view.mergedAtMs ?? undefined,
         mergeCommit: view.mergeCommit ?? undefined,
-        issueClosed: issue?.closed ?? false,
       }
     }
-    case 'close': {
-      const view = await deps.issueView(task.issue)
-      return { ...base, issueClosed: view?.closed ?? false, closedAtMs: view?.closedAtMs ?? undefined }
-    }
+    case 'close':
+      return base
     // Recomputed here rather than snapshotted before the loop: a row that holds
     // no files can enter one that does mid-tick (a design row escalating, say),
     // and a snapshot taken before that would release an overlapping sibling onto
@@ -591,7 +581,7 @@ export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<voi
       decision_id: decision.id,
       phase: task.decision_from ?? '', question: decision.question,
       recommendation: decision.recommendation,
-      branch: task.branch, issue: String(task.issue),
+      branch: task.branch, ...beadPromptVars(task),
     })
 
     const result = await deps.send(run.orchestrator_pane, text)

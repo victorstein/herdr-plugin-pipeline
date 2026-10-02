@@ -1,6 +1,6 @@
-# Write the spec — {{branch}} (#{{issue}})
+# Write the spec — {{branch}} ({{bead}})
 
-Write the spec for issue #{{issue}} now. Do not ask whether to proceed.
+Write the spec for bead `{{bead}}` now. Do not ask whether to proceed.
 
 Write it to exactly this path:
 
@@ -18,7 +18,7 @@ gold standard establishes a pattern this work needs, do not invent one — `{{hp
 recommendation.
 
 If you are back here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file for this
-issue under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept, and record in
+bead under `docs/superpowers/reviews/`. Fix every BLOCKER and every MAJOR you accept, and record in
 the spec what changed and why — a half-applied fix is the highest-value finding the next pass has.
 
 Commit and push the spec, then stop.

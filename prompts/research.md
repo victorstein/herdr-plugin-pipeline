@@ -5,7 +5,7 @@ exactly this path:
 
     {{research_path}}
 
-Answer, with evidence: which files own the behaviour issue #{{issue}} is about; what the current
+Answer, with evidence: which files own the behaviour bead `{{bead}}` asks for (`{{hpipe}} brief --task {{task_id}}` prints it); what the current
 control flow is; what versions of the tools and packages involved are actually installed; and what
 the nearest existing example of this kind of change looks like. Cite `file:line`, or the exact
 command and its output.
@@ -14,7 +14,7 @@ Assert nothing from memory. Unverified claims are the single most common blocker
 reviews find, and every later phase — the spec, its reviews, the orchestrator triaging a decision —
 reads this note as established fact.
 
-It may be short. It may not be empty, and it may not simply restate the issue.
+It may be short. It may not be empty, and it may not simply restate the brief.
 
 Your review tier is `{{tier}}`. If what you found shows the task is bigger than that — it reaches
 another surface, changes a contract, or needs a migration — raise it before the spec is written:

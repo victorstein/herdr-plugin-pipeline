@@ -5,6 +5,7 @@ import {
   bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, startWorkerCommand,
   UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const NOW = 10_000_000
 const ADOPTED = NOW - UNSTARTED_GRACE_MS
@@ -16,14 +17,14 @@ const mkRun = (): Run => {
 }
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w23', pane_id: null, agent_status: 'unknown',
   phase: 'research', phase_entered_at: ADOPTED - 60_000, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/wt', registered_at: 0, adopted_at: ADOPTED,
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })

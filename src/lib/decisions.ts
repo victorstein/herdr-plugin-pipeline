@@ -14,6 +14,7 @@ export function openDecision(
     question: input.question,
     recommendation: input.recommendation,
     answer: null, answered_by: null, answered_at: null, prompted_at: null,
+    escalated_at: null, orchestrator_recommendation: null,
   }
   task.decisions.push(decision)
   return decision

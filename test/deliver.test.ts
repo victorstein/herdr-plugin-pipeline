@@ -20,14 +20,14 @@ afterEach(() => {
 })
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
   phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -41,19 +41,19 @@ function mkRun(): Run {
 test('the digest carries the run id, the event lines, and the next prompt', () => {
   const text = buildDigest({
     run: mkRun(),
-    eventLines: ['- feat/x (#1, t1) done, PR #412 open'],
+    eventLines: ['- feat/x (hp-1, t1) done, PR #412 open'],
     phaseNote: ' → pr-review-intent',
     nextPrompt: 'REVIEW THIS',
   })
   expect(text).toContain('[pipeline] run')
   expect(text).toContain('1 events')
-  expect(text).toContain('feat/x (#1, t1) done')
+  expect(text).toContain('feat/x (hp-1, t1) done')
   expect(text).toContain('REVIEW THIS')
 })
 
 test('a digest with no phase change still delivers the events', () => {
   const text = buildDigest({
-    run: mkRun(), eventLines: ['- feat/x (#1, t1) blocked'], phaseNote: '', nextPrompt: '',
+    run: mkRun(), eventLines: ['- feat/x (hp-1, t1) blocked'], phaseNote: '', nextPrompt: '',
   })
   expect(text).toContain('blocked')
 })
@@ -168,13 +168,14 @@ test('a blocked worker line inlines its pane tail', () => {
   run.tasks.push(mkTask({ agent_status: 'blocked' }))
   const text = buildDigest({
     run,
-    eventLines: ['- feat/x (#1, t1) blocked', '    "Do you want to proceed?"'],
+    eventLines: ['- feat/x (hp-1, t1) blocked', '    "Do you want to proceed?"'],
     phaseNote: '', nextPrompt: '',
   })
   expect(text).toContain('Do you want to proceed?')
 })
 
 import { advanceRun, enterRunPhase, isAgentReady } from '../src/lib/machine'
+import { beadTaskFields } from './helpers/bead-fields'
 
 test('an agent that finished its turn is ready, whether idle or done', () => {
   // herdr reports `done` for "idle and not yet seen". An orchestrator driven by
@@ -271,7 +272,7 @@ test('a run that ends without branch-review tells the orchestrator it is done �
   expect(executeAdvance(run)?.phase).toBe('done')
   expect(await renderRunPhasePrompt(run, ROOT)).toBe(
     `Run ${run.run_id} is done — one task landed; branch-review skipped. Nothing more is sent for it.\n` +
-    '- t1 feat/x (#1): done',
+    '- t1 feat/x (hp-1): done',
   )
 })
 
@@ -429,10 +430,10 @@ test('the digest keeps evaluateRun\'s transition note, not just the current phas
 test('a task artifact path resolves against the worktree, not repo_root', () => {
   const run = mkRun()
   const task = mkTask({ phase: 'spec', checkout_path: '/r/.worktrees/feat-x' })
-  task.artifacts.spec = 'docs/superpowers/specs/2026-09-15-issue-210-design.md'
+  task.artifacts.spec = 'docs/superpowers/specs/2026-09-15-hp-210-design.md'
   run.tasks = [task]
   expect(absoluteArtifactPath(run, task))
-    .toBe('/r/.worktrees/feat-x/docs/superpowers/specs/2026-09-15-issue-210-design.md')
+    .toBe('/r/.worktrees/feat-x/docs/superpowers/specs/2026-09-15-hp-210-design.md')
 })
 
 test('a run artifact path resolves against repo_root', () => {
@@ -539,7 +540,7 @@ test('adoptableArtifacts yields nothing when the base ref does not resolve', asy
 
 test('adoptableArtifacts excludes review verdicts, which are added on the branch too', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
-  commitIn(worktree, 'docs/superpowers/reviews/issue-1-spec-review-0.md', 'VERDICT: CLEAR\n')
+  commitIn(worktree, 'docs/superpowers/reviews/hp-1-spec-review-0.md', 'VERDICT: CLEAR\n')
   commitIn(worktree, 'docs/superpowers/notes/misfiled.md', 'the note\n')
 
   expect(await adoptableArtifacts(worktree, new Set())).toEqual([
@@ -725,9 +726,9 @@ test('a non-ASCII candidate path comes back raw, not C-quoted', async () => {
 
 test('the digest appends the footer after the next prompt', () => {
   const text = buildDigest({
-    run: mkRun(), eventLines: ["- t1 x (#1) [spec 2m] agent:idle — worker's move"],
+    run: mkRun(), eventLines: ["- t1 x (hp-1) [spec 2m] agent:idle — worker's move"],
     phaseNote: '', nextPrompt: 'DO THE THING',
-    footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move',
+    footer: 'also waiting on you:\n- t3 y (hp-3) [merge 41m] — YOUR move',
   })
   expect(text).toContain('DO THE THING\n\nalso waiting on you:')
 })
@@ -737,7 +738,7 @@ test('a footer with no next prompt is separated by exactly one blank line', () =
   // case; a naive join leaves three blank lines here.
   const text = buildDigest({
     run: mkRun(), eventLines: ['- e1'], phaseNote: '', nextPrompt: '',
-    footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move',
+    footer: 'also waiting on you:\n- t3 y (hp-3) [merge 41m] — YOUR move',
   })
   expect(text).toContain('- e1\n\nalso waiting on you:')
   expect(text).not.toContain('\n\n\n')
@@ -755,7 +756,7 @@ test('the footer rides any orchestrator delivery, not only the wake-line one', (
   // footer, which is what the driver produces; with it on the dropped one only,
   // `group.find` never sees it.
   const run = mkRun()
-  const footer = 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move'
+  const footer = 'also waiting on you:\n- t3 y (hp-3) [merge 41m] — YOUR move'
   const out = deliveriesFor([
     { paneId: 'w1:p1', run, text: '', isOrchestrator: true, events: [], footer },
     { paneId: 'w1:p1', run, text: 'merge PR #44', isOrchestrator: true, events: [], footer },
@@ -770,7 +771,7 @@ test('a worker delivery never carries the footer', () => {
   const run = mkRun()
   const out = deliveriesFor([
     { paneId: 'w7:p1', run, text: 'worker prompt', isOrchestrator: false, events: [],
-      footer: 'also waiting on you:\n- t3 y (#3) [merge 41m] — YOUR move' },
+      footer: 'also waiting on you:\n- t3 y (hp-3) [merge 41m] — YOUR move' },
   ])
   expect(out[0]?.text).toBe('worker prompt')
 })
@@ -812,16 +813,16 @@ test('branch-review names each task that did not land instead of claiming all me
   const run = mkRun()
   run.phase = 'branch-review'
   run.tasks = [
-    mkTask({ task_id: 't1', phase: 'done', issue: 18 }),
-    mkTask({ task_id: 't2', phase: 'failed', issue: 19, branch: 'fix/19-x' }),
-    mkTask({ task_id: 't3', phase: 'orphaned', issue: 20, branch: 'fix/20-y' }),
+    mkTask({ task_id: 't1', phase: 'done', bead: 'hp-18' }),
+    mkTask({ task_id: 't2', phase: 'failed', bead: 'hp-19', branch: 'fix/19-x' }),
+    mkTask({ task_id: 't3', phase: 'orphaned', bead: 'hp-20', branch: 'fix/20-y' }),
   ]
 
   const text = await promptForRunPhase(run, {} as Config)
 
   expect(text).not.toContain('Every task in')
-  expect(text).toContain('`t2` (#19, `fix/19-x`) stopped at `failed`')
-  expect(text).toContain('`t3` (#20, `fix/20-y`) stopped at `orphaned`')
+  expect(text).toContain('`t2` (hp-19, `fix/19-x`) stopped at `failed`')
+  expect(text).toContain('`t3` (hp-20, `fix/20-y`) stopped at `orphaned`')
   expect(text).not.toContain('`t1`')
 })
 

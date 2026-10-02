@@ -7,18 +7,19 @@ import {
 import { newRun } from '../src/lib/ledger'
 import { cleanupFixtures, tempDir } from './helpers/git-worktree'
 import type { Run, Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 afterEach(cleanupFixtures)
 
 const mkTask = (over: Partial<Task> = {}): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 26, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-26', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
   phase: 'spec-review', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/w', registered_at: 0, adopted_at: 0,
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -29,13 +30,13 @@ const mkRun = (): Run =>
 test('a verdict filename is repo-relative and carries prefix, phase and ordinal', () => {
   // The exact wire format `artifactPathFor`'s legacy `??` branch must keep
   // reproducing for a record that entered this change mid-review.
-  expect(verdictFilename('issue-26', 'spec-review', 2))
-    .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
+  expect(verdictFilename('hp-26', 'spec-review', 2))
+    .toBe('docs/superpowers/reviews/hp-26-spec-review-2.md')
 })
 
 test('the prefix is the issue for a task and the run id for a run', () => {
   const run = mkRun()
-  expect(verdictPrefix(run, mkTask({ issue: 26 }))).toBe('issue-26')
+  expect(verdictPrefix(run, mkTask({ bead: 'hp-26' }))).toBe('hp-26')
   expect(verdictPrefix(run, null)).toBe(run.run_id)
 })
 
@@ -76,7 +77,7 @@ test('the first reservation takes ordinal 0 and the reader agrees', () => {
 
   const reserved = reserveVerdict(run, task, 'spec-review')
 
-  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  expect(reserved).toBe('docs/superpowers/reviews/hp-26-spec-review-0.md')
   expect(task.verdict_seq?.['spec-review']).toBe(1)
   expect(verdictFor(task, 'spec-review')).toBe(reserved)
 })
@@ -88,13 +89,13 @@ test('the reader agrees with the reserver even when the map has a gap', () => {
     verdict_seq: { 'spec-review': 3 },
     artifacts: {
       research: null, spec: null, plan: null,
-      verdicts: { 'spec-review-2': 'docs/superpowers/reviews/issue-26-spec-review-9.md' },
+      verdicts: { 'spec-review-2': 'docs/superpowers/reviews/hp-26-spec-review-9.md' },
     },
   })
 
   const reserved = reserveVerdict(run, task, 'spec-review')
 
-  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-3.md')
+  expect(reserved).toBe('docs/superpowers/reviews/hp-26-spec-review-3.md')
   expect(verdictFor(task, 'spec-review')).toBe(reserved)
 })
 
@@ -102,30 +103,30 @@ test('a filename already on disk is skipped', () => {
   const run = mkRun()
   const task = mkTask({
     checkout_path: checkoutHolding(
-      'docs/superpowers/reviews/issue-26-spec-review-0.md',
-      'docs/superpowers/reviews/issue-26-spec-review-1.md',
+      'docs/superpowers/reviews/hp-26-spec-review-0.md',
+      'docs/superpowers/reviews/hp-26-spec-review-1.md',
     ),
   })
 
   expect(reserveVerdict(run, task, 'spec-review'))
-    .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
+    .toBe('docs/superpowers/reviews/hp-26-spec-review-2.md')
 })
 
 test('freeing a name on disk never moves what an existing key resolves to', () => {
   const run = mkRun()
-  const checkout = checkoutHolding('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  const checkout = checkoutHolding('docs/superpowers/reviews/hp-26-spec-review-0.md')
   const task = mkTask({ checkout_path: checkout })
 
   const first = reserveVerdict(run, task, 'spec-review')
-  expect(first).toBe('docs/superpowers/reviews/issue-26-spec-review-1.md')
+  expect(first).toBe('docs/superpowers/reviews/hp-26-spec-review-1.md')
 
   // The `git mv` preservation workaround, applied four times in this repo's history.
-  rmSync(join(checkout, 'docs/superpowers/reviews/issue-26-spec-review-0.md'))
+  rmSync(join(checkout, 'docs/superpowers/reviews/hp-26-spec-review-0.md'))
   const second = reserveVerdict(run, task, 'spec-review')
 
   expect(task.artifacts.verdicts['spec-review-0']).toBe(first)
   expect(second).not.toBe(first)
-  expect(second).not.toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  expect(second).not.toBe('docs/superpowers/reviews/hp-26-spec-review-0.md')
 })
 
 test('a filename already held in the map is skipped even when absent from disk', () => {
@@ -135,19 +136,19 @@ test('a filename already held in the map is skipped even when absent from disk',
     verdict_seq: { 'spec-review': 1 },
     artifacts: {
       research: null, spec: null, plan: null,
-      verdicts: { 'spec-review-0': 'docs/superpowers/reviews/issue-26-spec-review-1.md' },
+      verdicts: { 'spec-review-0': 'docs/superpowers/reviews/hp-26-spec-review-1.md' },
     },
   })
 
   expect(reserveVerdict(run, task, 'spec-review'))
-    .toBe('docs/superpowers/reviews/issue-26-spec-review-2.md')
+    .toBe('docs/superpowers/reviews/hp-26-spec-review-2.md')
 })
 
 test('an exhausted probe records the floor so the key and the prompt still agree', () => {
   const run = mkRun()
   const held: Record<string, string> = {}
   for (let i = 0; i < 64; i++) {
-    held[`held-${i}`] = `docs/superpowers/reviews/issue-26-spec-review-${i}.md`
+    held[`held-${i}`] = `docs/superpowers/reviews/hp-26-spec-review-${i}.md`
   }
   const task = mkTask({
     checkout_path: checkoutHolding(),
@@ -157,7 +158,7 @@ test('an exhausted probe records the floor so the key and the prompt still agree
   const warnings: string[] = []
   const reserved = reserveVerdict(run, task, 'spec-review', (m) => warnings.push(m))
 
-  expect(reserved).toBe('docs/superpowers/reviews/issue-26-spec-review-0.md')
+  expect(reserved).toBe('docs/superpowers/reviews/hp-26-spec-review-0.md')
   expect(verdictFor(task, 'spec-review')).toBe(reserved)
   expect(warnings).toHaveLength(1)
   expect(warnings[0]).toContain('are taken')

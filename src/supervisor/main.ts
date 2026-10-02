@@ -8,7 +8,8 @@ import {
 } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
-  allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, type RunEffect, saveOrReapply, saveRun,
+  allOrchestratorPanes, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
+  saveOrReapply, saveRun,
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -42,14 +43,6 @@ import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 const EXIT_DUPLICATE = 3
 /** Two ticks' worth: a healthy tick never reaches it, a tick slowed by stalled sends does. */
 const IDLE_READ_MAX_AGE_MS = 2_000
-
-/**
- * No in-place migration: a v4 run mid-`plan` has an orchestrator holding work no
- * worker can inherit. `hpipe status` tells the human to abort it.
- */
-export function isCurrentSchemaRun(run: Run): boolean {
-  return run.schema_version === 2
-}
 
 /**
  * One settle window per tick, not one per pane. Six workers at ACTOR_SETTLE_MS
@@ -306,7 +299,6 @@ async function main(): Promise<void> {
             fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
-            issueView: (issue) => runGh.issueView(issue),
             verdictFor: (r, t) => freshVerdict(r, t, config.FILE_SETTLE_MS),
             removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             removeCheckout: removeCheckoutWithGit,
