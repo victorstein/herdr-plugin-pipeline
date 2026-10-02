@@ -23,6 +23,12 @@ Give them, in a few lines: the question, the worker's recommendation, your own r
 option you recommend, named. Never hand over a bare question: forming the recommendation is the work,
 and passing it up unformed is exactly the cost this pipeline exists to remove.
 
+Then hand it over, so the bead shows it blocked on them and `{{hpipe}} status` lists it under
+"waiting on you":
+
+    {{hpipe}} escalate --task {{task_id}} --decision {{decision_id}} \
+                   --recommend "<the option you recommend, and why>"
+
 ## If the answer grows the task, raise its tier
 
 `{{task_id}}` runs the `{{tier}}` review tier. A decision is often where scope grows: if your answer

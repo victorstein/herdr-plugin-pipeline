@@ -1,6 +1,6 @@
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
-import { openDecisionFor } from './decisions'
+import { escalatedUnanswered, openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
 import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
@@ -158,6 +158,12 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     )
   }
   if (row.actor === 'orchestrator') {
+    const escalated = escalatedUnanswered(task)
+    if (escalated !== null) {
+      return yours(`decision ${escalated.id} was put to the human ` +
+        `${ageMinutes(escalated.escalated_at ?? now, now)}m ago — record their ruling with ` +
+        `\`${hpipe} answer --task ${task.task_id} --decision ${escalated.id} --answer "<their ruling>" --by human\``)
+    }
     // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
     return task.pending_answer === null
       ? yours(`YOUR move: waiting for ${awaitedFor(task)}`)

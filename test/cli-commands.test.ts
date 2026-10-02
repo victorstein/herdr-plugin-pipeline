@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdForget,
+  cmdAbort, cmdAnswer, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdEscalate, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
@@ -15,7 +15,7 @@ import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
-import { openDecisionFor } from '../src/lib/decisions'
+import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/decisions'
 import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
@@ -2107,4 +2107,62 @@ test('close of a bead whose close is already recorded calls nothing and says so'
   expect(result.text).toContain('already closed')
   expect(result.text).not.toContain('--force')
   expect(calls).toBe(0)
+})
+
+async function seedAskedDecision(): Promise<Run> {
+  const run = runWithTasks([{ task_id: 't1', phase: 'blocked-on-decision', decision_from: 'plan' }])
+  openDecision(run.tasks[0]!, { question: 'Which store?', recommendation: 'sqlite' })
+  await saveRun(dir, run)
+  return run
+}
+
+const escalation = (over: Partial<Parameters<typeof cmdEscalate>[1]> = {}): Parameters<typeof cmdEscalate>[1] => ({
+  taskId: 't1', decisionId: 'd1', recommendation: 'sqlite, for the tests', repoKey: 'k', runId: null, ...over,
+})
+
+const savedTask = async (): Promise<Task> => (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+
+test('escalate hands the open decision to the human with the orchestrator\'s recommendation', async () => {
+  await seedAskedDecision()
+  const result = await cmdEscalate(ctx(), escalation())
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('d1 on t1 is now with the human')
+  const task = await savedTask()
+  expect(task.decisions[0]!.escalated_at).toBeGreaterThan(0)
+  expect(task.decisions[0]!.orchestrator_recommendation).toBe('sqlite, for the tests')
+  expect(escalatedUnanswered(task)?.id).toBe('d1')
+})
+
+test('escalate refuses a bare escalation, an unknown decision, and a task not blocked on one', async () => {
+  await seedAskedDecision()
+  expect((await cmdEscalate(ctx(), escalation({ recommendation: ' ' }))).text).toContain('--recommend is required')
+  expect((await cmdEscalate(ctx(), escalation({ decisionId: 'd9' }))).text).toContain('no such decision: d9')
+  expect((await savedTask()).decisions[0]!.escalated_at).toBeNull()
+
+  await cmdRewind(ctx(), { runId: (await listRuns(dir, 'personal'))[0]!.run_id, phase: 'plan', taskId: 't1' })
+  expect((await cmdEscalate(ctx(), escalation())).text).toContain('is not blocked on a decision')
+})
+
+test('a second escalate changes nothing', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  const first = (await savedTask()).decisions[0]!.escalated_at
+  const again = await cmdEscalate(ctx(), escalation({ recommendation: 'something else' }))
+  expect(again.ok).toBe(true)
+  expect(again.text).toContain('already with the human')
+  expect((await savedTask()).decisions[0]).toMatchObject({ escalated_at: first, orchestrator_recommendation: 'sqlite, for the tests' })
+})
+
+test('an answer by the human ends the escalation', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  await cmdAnswer(ctx(), { task: 't1', decision: 'd1', answer: 'sqlite', by: 'human', repoKey: 'k', runId: null })
+  expect(escalatedUnanswered(await savedTask())).toBeNull()
+})
+
+test('an answer by the orchestrator ends the escalation too', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  await cmdAnswer(ctx(), { task: 't1', decision: 'd1', answer: 'sqlite', by: 'orchestrator', repoKey: 'k', runId: null })
+  expect(escalatedUnanswered(await savedTask())).toBeNull()
 })

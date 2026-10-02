@@ -764,3 +764,17 @@ test('a bead out of sync for five failed calls is flagged with bd\'s last error'
   expect(formatStatus([run], { state: 'live' }, 'personal', HP))
     .toContain('⚠ t1 bead hp-1 is out of sync after 5 failed Beads calls: Error: database is locked')
 })
+
+test('a decision put to the human is listed under waiting on you with the command that records the ruling', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'blocked-on-decision', decision_from: 'plan', decisions: [{
+    id: 'd1', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: 1,
+    escalated_at: now - 5 * 60_000, orchestrator_recommendation: 'r2',
+  }] })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('waiting on you:')
+  expect(text).toContain(`decision d1 was put to the human 5m ago — record their ruling with ` +
+    `\`${HP} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
+})

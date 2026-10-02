@@ -1059,6 +1059,40 @@ async function answer(ctx: Ctx, input: {
 }
 export const cmdAnswer = retryingOnStale(answer)
 
+async function escalate(ctx: Ctx, input: {
+  taskId: string; decisionId: string; recommendation: string
+  repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  if (input.recommendation.trim().length === 0) {
+    return fail('--recommend is required: the human gets your recommendation beside the worker\'s')
+  }
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    reach: 'unfinished', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  const decision = task.decisions.find((d) => d.id === input.decisionId)
+  if (!decision) return fail(`no such decision: ${input.decisionId}`)
+  if (decision.answered_by !== null) {
+    return fail(`decision ${decision.id} on ${task.task_id} is already ${decision.answered_by === 'abandoned' ? 'abandoned' : 'answered'}`)
+  }
+  if (task.phase !== 'blocked-on-decision') {
+    return fail(`task ${task.task_id} is not blocked on a decision (phase: ${task.phase})`)
+  }
+  if (decision.escalated_at !== null) {
+    return ok(`decision ${decision.id} on ${task.task_id} is already with the human; nothing changed`)
+  }
+
+  decision.escalated_at = Date.now()
+  decision.orchestrator_recommendation = input.recommendation
+  await saveRun(ctx.stateDir, run)
+  return ok(`decision ${decision.id} on ${task.task_id} is now with the human; its bead shows blocked until ` +
+    `\`${hpipeCommand(ctx.pluginRoot)} answer --task ${task.task_id} --decision ${decision.id} --by human\` records their ruling`)
+}
+export const cmdEscalate = retryingOnStale(escalate)
+
 async function tier(ctx: Ctx, input: {
   taskId: string; tier: string; why: string; callerPane: string | null
   repoKey: string | null; runId: string | null
@@ -1217,6 +1251,7 @@ const USAGE: Record<string, string[]> = {
   rewind: ['hpipe rewind <run-id> <phase> [--task <id>]'],
   release: ['hpipe release --task <id> [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
+  escalate: ['hpipe escalate --task <id> --decision <id> --recommend <text> [--run <run-id>]'],
   answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
   tier: ['hpipe tier --task <id> <light|standard|heavy> --why <text> [--run <run-id>]'],
   resume: ['hpipe resume <run-id>'],
@@ -1408,6 +1443,16 @@ async function dispatch(argv: string[]): Promise<number> {
         decision: flag(rest, 'decision') ?? '',
         answer: flag(rest, 'answer') ?? '',
         by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'escalate':
+      out = await cmdEscalate(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        decisionId: flag(rest, 'decision') ?? '',
+        recommendation: flag(rest, 'recommend') ?? '',
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })

@@ -590,3 +590,10 @@ test('ci-red re-runs an environmental failure with an empty commit, since only t
   expect(text).toContain('say so in the PR')
   expect(text).not.toContain('re-run the check instead of editing code')
 })
+
+test('the decision prompt has the orchestrator escalate whatever it puts to the human', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'decision.md')).text())
+  expect(text).toContain('{{hpipe}} escalate --task {{task_id}} --decision {{decision_id}}')
+  expect(text).toContain('--recommend')
+  expect(text).toContain('the brief (`{{hpipe}} brief --task {{task_id}}`)')
+})
