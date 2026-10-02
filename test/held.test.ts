@@ -2,13 +2,13 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beadHolds, heldBy, holdsBead } from '../src/lib/held'
+import { beadClaimants, beadHolds, heldBy, holdsBead } from '../src/lib/held'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'held-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-function writeRun(session: string, run: { run_id: string; phase: string; tasks: object[] }): void {
+function writeRun(session: string, run: { run_id: string; phase: string; repo_key?: string; tasks: object[] }): void {
   mkdirSync(join(dir, 'runs', session), { recursive: true })
   writeFileSync(join(dir, 'runs', session, `${run.run_id}.json`), JSON.stringify({ schema_version: 3, ...run }))
 }
@@ -42,4 +42,21 @@ test('every session\'s runs are scanned, and only what is held is returned', asy
 
 test('no runs directory means nothing is held', async () => {
   expect((await beadHolds(join(dir, 'empty'))).size).toBe(0)
+})
+
+test('claimants are every current-schema task naming a bead in any session, held or not', async () => {
+  writeRun('personal', {
+    run_id: 'r1', phase: 'done', repo_key: '/code/a',
+    tasks: [{ task_id: 't1', phase: 'implement', bead: 'hp-1', registered_at: 5 }],
+  })
+  writeRun('work', { run_id: 'r2', phase: 'execute', repo_key: '/code/a', tasks: [{ task_id: 't1', phase: 'queued', bead: 'hp-1', registered_at: 7 }] })
+  mkdirSync(join(dir, 'runs', 'work'), { recursive: true })
+  writeFileSync(join(dir, 'runs', 'work', 'old.json'), JSON.stringify({
+    schema_version: 2, run_id: 'old', phase: 'execute', repo_key: '/code/a', tasks: [{ task_id: 't1', phase: 'implement', bead: 'hp-1' }],
+  }))
+
+  expect(await beadClaimants(dir)).toEqual([
+    { session: 'personal', run_id: 'r1', task_id: 't1', repo_key: '/code/a', bead: 'hp-1', holds: false, registered_at: 5 },
+    { session: 'work', run_id: 'r2', task_id: 't1', repo_key: '/code/a', bead: 'hp-1', holds: true, registered_at: 7 },
+  ])
 })

@@ -311,10 +311,13 @@ export class Bd {
     ifUnparsed = 'it may have taken effect, so check before retrying',
   ): Promise<T | BdFailure> {
     return this.#hold(async () => {
+      // Marked before the call: a write that times out, or a process that dies
+      // mid-call, may still have landed, and only the marker makes the next
+      // reader re-export instead of diffing against a stale file.
+      this.#markDirty()
       const out = await this.#call(args)
       if (isBdFailure(out)) return out
       if (this.#exportAfterWrites) await this.#export()
-      else this.#markDirty()
       return parse(out) ?? {
         reason: 'output',
         error: `bd ${args[0]} exited 0 but printed no usable JSON; ${ifUnparsed}: ${out.trim().slice(0, 200)}`,

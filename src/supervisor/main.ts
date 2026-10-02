@@ -4,6 +4,7 @@ import { readBeadsProject } from '../lib/beads-project'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
+import { beadClaimants } from '../lib/held'
 import { Herdr, liveAgentIn } from '../lib/herdr'
 import {
   claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
@@ -18,6 +19,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import { crashLogPath, reapSupervisorSiblings } from '../startup'
+import { SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import {
   deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, uncommittedPaths,
@@ -37,7 +39,6 @@ import {
   applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
   saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
-import { SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
@@ -129,6 +130,7 @@ async function main(): Promise<void> {
   }
 
   const session = sessionKey()
+  const beadLockNotices = new Map<string, string>()
   const herdr = new Herdr()
   const claimed = await claimSupervisor(stateDir, herdr, {
     pid: process.pid,
@@ -425,8 +427,10 @@ async function main(): Promise<void> {
           hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
           now: Date.now,
           budgetMs: SYNC_BUDGET_MS,
+          claimants: () => beadClaimants(stateDir),
           persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
           log: (message) => console.error(`[pipeline] ${message}`),
+          lockNotices: beadLockNotices,
         })
       } catch (error) {
         console.error('[pipeline] beads sync failed this tick:', error)

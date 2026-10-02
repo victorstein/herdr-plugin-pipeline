@@ -201,6 +201,13 @@ test('without export after writes, a write marks the export dirty and exportNow 
   expect(existsSync(join(home(), 'export.dirty'))).toBe(false)
 })
 
+test('a write that fails still marks the export dirty, since a killed write may have landed', async () => {
+  const refusing = scriptBd(`process.stderr.write('Error: database is locked\\n'); process.exit(1)`)
+  const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, exportAfterWrites: false, bin: refusing })
+  expect(isBdFailure(await bd.reopen('hp-1'))).toBe(true)
+  expect(existsSync(join(home(), 'export.dirty'))).toBe(true)
+})
+
 test('refreshExport re-exports only when the export is dirty', async () => {
   const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin: recordingBd() })
   expect(await bd.refreshExport()).toEqual({ ok: true })

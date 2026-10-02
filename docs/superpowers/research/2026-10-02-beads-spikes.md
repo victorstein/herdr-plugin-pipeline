@@ -28,6 +28,8 @@ Scratch store under `mktemp -d`, `BEADS_DIR` and `GIT_CEILING_DIRECTORIES` set, 
 | `update --assignee "" -s open` on an `in_progress` claim | 0 | assignee cleared, `open` — the release works |
 | `update --claim` again | 0 | |
 | `dep add spike-2 spike-1 --type blocks` | 0 | object `{depends_on_id, issue_id, status: "added", type}` |
+| `dep add` again with the same type | 0 | idempotent: no second edge |
+| `dep add` of another type where an edge exists (e.g. `blocks` over `discovered-from`) | 1 | stdout JSON `{"error":"dependency s-4 -> s-1 already exists with type \"discovered-from\" (requested \"blocks\"); remove it first with 'bd dep remove' then re-add"}` — so the reconciler treats any edge between the pair as the `blocks` edge |
 | `comment --file` | 0 | object with `text` |
 | `close --reason-file` (no `--force`) | 0 | |
 | `reopen` | 0 | `open`, **assignee kept** (`hpipe`) |

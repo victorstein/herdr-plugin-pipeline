@@ -1,7 +1,7 @@
 import { type Bd, type BdFailure, type BeadUpdate, type Done, type ExportedBead, isBdFailure } from '../lib/bd'
 import { type DesiredBead, desiredBead, isManagedLabel } from '../lib/bead-desired'
 import { beadsSlug } from '../lib/beads-project'
-import { holdsBead } from '../lib/held'
+import { type BeadClaimant, holdsBead } from '../lib/held'
 import type { RunEffect } from '../lib/ledger'
 import type { Run, Task } from '../lib/types'
 
@@ -14,7 +14,9 @@ export type BeadCall =
   | { kind: 'comment'; marker: string; text: string }
   | { kind: 'close'; reason: string }
 
-export type SyncBd = Pick<Bd, 'readExport' | 'reopen' | 'update' | 'depAdd' | 'comment' | 'close' | 'exportNow'>
+export type SyncBd = Pick<
+  Bd, 'readExport' | 'refreshExport' | 'reopen' | 'update' | 'depAdd' | 'comment' | 'close' | 'exportNow'
+>
 
 export interface SyncDeps {
   /** A try-lock `Bd` that does not export after writes: the pass exports once at its end. */
@@ -22,8 +24,12 @@ export interface SyncDeps {
   hasStore: (slug: string) => Promise<boolean>
   now: () => number
   budgetMs: number
+  /** Every session's run files: a bead released here may be held from another session. */
+  claimants: () => Promise<BeadClaimant[]>
   persist: (run: Run, effect: RunEffect) => Promise<void>
   log: (message: string) => void
+  /** Per slug, the last lock message logged, kept across passes so a busy store is reported once. */
+  lockNotices: Map<string, string>
 }
 
 export function closeReason(task: Task): string {
@@ -56,9 +62,11 @@ export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: str
   if (removeLabels.length > 0) change.removeLabels = removeLabels
   if (Object.keys(change).length > 0) calls.push({ kind: 'update', change })
 
+  // bd 1.3.1 refuses a second edge of another type between the same pair, so any
+  // edge (a `discovered-from` included) stands for the `blocks` one.
   for (const dependsOn of desired.blockedBy) {
-    const present = (actual.dependencies ?? []).some((d) => d.depends_on_id === dependsOn && d.type === 'blocks')
-    if (!present) calls.push({ kind: 'depAdd', dependsOn })
+    const linked = (actual.dependencies ?? []).some((d) => d.depends_on_id === dependsOn)
+    if (!linked) calls.push({ kind: 'depAdd', dependsOn })
   }
   for (const comment of desired.comments) {
     if (!(actual.comments ?? []).some((c) => c.text.includes(comment.marker))) calls.push({ kind: 'comment', ...comment })
@@ -98,31 +106,35 @@ export const recordBeadClosed = (taskId: string, at: number): RunEffect => onTas
 /** Busy, or no `ps` to stamp the lock with: either way no call can run until a later tick. */
 const lockNotTaken = (failure: BdFailure): boolean => failure.reason === 'busy' || failure.reason === 'unavailable'
 
-interface TaskInRun {
-  run: Run
-  task: Task
-}
+type Driver = Pick<BeadClaimant, 'session' | 'run_id' | 'task_id' | 'holds' | 'registered_at'>
+
+const driverKey = (slug: string, bead: string): string => `${slug}\0${bead}`
+
+const drivesOver = (candidate: Driver, current: Driver): boolean =>
+  candidate.holds !== current.holds ? candidate.holds : candidate.registered_at > current.registered_at
 
 /**
- * Which task drives each bead. A bead released by an aborted or failed run can
- * be adopted by a later one; without one driver the two desired states would
- * flip the bead back and forth every tick. The holder wins, else the latest registered.
+ * Which task, across every session, drives each bead. A bead released by an
+ * aborted or failed run can be adopted by a later one, from this session or
+ * another; without one driver the two desired states would flip the bead back
+ * and forth every tick. The holder wins, else the latest registered.
  */
-function beadDrivers(runs: readonly Run[]): Map<string, TaskInRun> {
-  const drivers = new Map<string, TaskInRun>()
-  for (const run of runs) {
-    for (const task of run.tasks) {
-      const current = drivers.get(task.bead)
-      const holds = holdsBead(run, task)
-      const currentHolds = current !== undefined && holdsBead(current.run, current.task)
-      const wins = current === undefined ||
-        (holds && !currentHolds) ||
-        (holds === currentHolds && task.registered_at > current.task.registered_at)
-      if (wins) drivers.set(task.bead, { run, task })
-    }
+function beadDrivers(localRuns: readonly Run[], elsewhere: readonly BeadClaimant[]): Map<string, Driver> {
+  const local: (Driver & { repo_key: string; bead: string })[] = localRuns.flatMap((run) => run.tasks.map((task) => ({
+    session: run.session, run_id: run.run_id, task_id: task.task_id, repo_key: run.repo_key, bead: task.bead,
+    holds: holdsBead(run, task), registered_at: task.registered_at,
+  })))
+  const drivers = new Map<string, Driver>()
+  for (const claimant of [...local, ...elsewhere]) {
+    const key = driverKey(beadsSlug(claimant.repo_key), claimant.bead)
+    const current = drivers.get(key)
+    if (current === undefined || drivesOver(claimant, current)) drivers.set(key, claimant)
   }
   return drivers
 }
+
+const isDriver = (driver: Driver | undefined, run: Run, task: Task): boolean =>
+  driver?.session === run.session && driver.run_id === run.run_id && driver.task_id === task.task_id
 
 function groupBySlug(runs: readonly Run[]): Map<string, Run[]> {
   const bySlug = new Map<string, Run[]>()
@@ -142,23 +154,50 @@ function groupBySlug(runs: readonly Run[]): Map<string, Run[]> {
 export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<void> {
   const started = deps.now()
   const overBudget = (): boolean => deps.now() - started >= deps.budgetMs
+  const localSessions = new Set(runs.map((run) => run.session))
+  const elsewhere = (await deps.claimants()).filter((claimant) => !localSessions.has(claimant.session))
+  const drivers = beadDrivers(runs, elsewhere)
+
+  const lockNotTakenAt = (slug: string, where: string, failure: BdFailure): void => {
+    if (deps.lockNotices.get(slug) !== failure.error) deps.log(`beads ${slug}: pass ended ${where}: ${failure.error}`)
+    deps.lockNotices.set(slug, failure.error)
+  }
 
   let stopped = false
   for (const [slug, slugRuns] of groupBySlug(runs)) {
     if (stopped) break
     if (!(await deps.hasStore(slug))) continue
     const bd = deps.bdFor(slug)
+    // A write whose export failed, or a crash before the export, leaves the file
+    // stale; diffing against it would post the same comment twice.
+    const refreshed = await bd.refreshExport()
+    if (isBdFailure(refreshed)) {
+      if (lockNotTaken(refreshed)) {
+        lockNotTakenAt(slug, 'before reading the export', refreshed)
+        stopped = true
+      } else {
+        deps.log(`beads ${slug}: export is stale and could not be refreshed (${refreshed.error}); skipped this tick`)
+      }
+      continue
+    }
+    deps.lockNotices.delete(slug)
     const actual = new Map(bd.readExport().map((b) => [b.id, b]))
-    const drivers = beadDrivers(slugRuns)
     let wrote = false
 
     for (const run of slugRuns) {
       if (stopped) break
       const effects: RunEffect[] = []
+      const fail = (task: Task, error: string): void => {
+        effects.push(recordSyncFailure(task.task_id, error))
+        if (task.bead_sync.last_error !== error) deps.log(`beads ${slug}: ${task.task_id} (${task.bead}) did not sync: ${error}`)
+      }
       for (const task of run.tasks) {
-        if (drivers.get(task.bead)?.task !== task) continue
+        if (!isDriver(drivers.get(driverKey(slug, task.bead)), run, task)) continue
         const current = actual.get(task.bead)
-        if (current === undefined) continue
+        if (current === undefined) {
+          fail(task, `bead ${task.bead} is not in the Beads export`)
+          continue
+        }
         const closeUnrecorded = task.merged_at_ms !== null && task.bead_closed_at_ms === null
         if (current.status === 'closed' && closeUnrecorded) effects.push(recordBeadClosed(task.task_id, deps.now()))
 
@@ -179,11 +218,9 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         }
         if (failure !== null && lockNotTaken(failure)) {
           stopped = true
-          deps.log(`beads ${slug}: pass ended at ${task.task_id} (${task.bead}): ${failure.error}`)
-        } else if (failure !== null) {
-          effects.push(recordSyncFailure(task.task_id, failure.error))
-          deps.log(`beads ${slug}: ${task.task_id} (${task.bead}) did not sync: ${failure.error}`)
-        } else if (!stopped) effects.push(recordSyncOk(task.task_id, deps.now()))
+          lockNotTakenAt(slug, `at ${task.task_id} (${task.bead})`, failure)
+        } else if (failure !== null) fail(task, failure.error)
+        else if (!stopped) effects.push(recordSyncOk(task.task_id, deps.now()))
         if (stopped) break
       }
       if (effects.length === 0) continue
