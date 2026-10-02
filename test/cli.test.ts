@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newRun, resolveRun, saveRun } from '../src/lib/ledger'
-import { cmdRewind, cmdStart, listFlag } from '../src/cli'
+import { cmdRewind, listFlag } from '../src/cli'
+import type { SetupInput } from '../src/lib/beads-setup'
+import { cmdStart, READY_TOOLS, startBeads } from './helpers/cmd-start'
 import { cmdTask } from './helpers/cmd-task'
 
 let dir: string
@@ -299,4 +301,56 @@ test('task echoes files: none on the dispatched return when nothing was declared
   expect(t1.text).toContain('files: none')
   // The brief still follows, after the header lines.
   expect(t1.text).toContain('core work')
+})
+
+const startInput = {
+  title: 'a', repoKey: 'k', socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
+}
+
+test('start sets Beads up before it opens the run, and says what it set up', async () => {
+  const asked: SetupInput[] = []
+  const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir, prefix: 'hp' }, startBeads({
+    setup: async (input) => {
+      asked.push(input)
+      return { ok: true, slug: 'k-abc123', prefix: 'hp', created: true, notes: [] }
+    },
+  }))
+  expect(out.ok).toBe(true)
+  expect(asked).toEqual([{ stateDir: dir, repoKey: 'k', repoRoot: repoDir, prefix: 'hp' }])
+  expect(out.text).toContain(`beads: created ${join(dir, 'beads', 'k-abc123')} with prefix hp`)
+  expect(out.text).toContain('intake')
+})
+
+test('start refuses without a working bd, and neither sets up nor opens a run', async () => {
+  let setups = 0
+  const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir }, startBeads({
+    tools: async () => ({ ...READY_TOOLS, bd: { state: 'old', version: '1.0.4' } }),
+    setup: async () => {
+      setups++
+      return { ok: true, slug: 's-123456', prefix: 'p', created: false, notes: [] }
+    },
+  }))
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('bd 1.0.4 is older than 1.3.1')
+  expect(setups).toBe(0)
+  expect(await liveRun()).toBeNull()
+})
+
+test('a refused setup opens no run and passes its reason through', async () => {
+  const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir }, startBeads({
+    setup: async () => ({ ok: false, error: 'prefix hp is already the Beads prefix of /code/other — pass --prefix <another>' }),
+  }))
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('pass --prefix <another>')
+  expect(await liveRun()).toBeNull()
+})
+
+test('start goes ahead without bv, saying the board and hpipe next are off', async () => {
+  const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir }, startBeads({
+    tools: async () => ({ ...READY_TOOLS, bv: { state: 'missing', detail: 'ENOENT' } }),
+  }))
+  expect(out.ok).toBe(true)
+  expect(out.text).toContain('tools: bv did not run (ENOENT) — brew install dicklesworthstone/tap/bv')
+  expect(out.text).toContain('the board and `hpipe next` stay off')
+  expect((await liveRun())?.title).toBe('a')
 })

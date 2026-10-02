@@ -6,6 +6,7 @@ import { supervisorState } from '../lib/pidfile'
 import { hpipeCommand } from '../lib/render'
 import { sessionKey } from '../lib/session'
 import { formatStatus } from '../lib/status'
+import { checkTools, toolsLine } from '../lib/tools'
 
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
 if (!stateDir) process.exit(0)
@@ -25,4 +26,5 @@ console.log(formatStatus(
   livePanes,
   Date.now(),
   panes,
+  toolsLine(await checkTools()),
 ))

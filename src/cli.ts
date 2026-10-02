@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
@@ -24,6 +25,7 @@ import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { isLowering, pipelinePanes, registrationTier, type LabelRead } from './lib/tiers'
+import { bdProblem, bvProblem, checkTools, type Tools, toolsLine } from './lib/tools'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -173,16 +175,33 @@ async function resolveTask(ctx: Ctx, input: {
   return { ok: true, value: { run: found.value, task } }
 }
 
+export interface StartBeads {
+  tools: () => Promise<Tools>
+  setup: (input: SetupInput) => Promise<SetupResult>
+}
+
+const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
+
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
-}): Promise<CmdResult> {
+  prefix: string | null
+}, beads: StartBeads = REAL_START_BEADS): Promise<CmdResult> {
   const existing = await runForRepo(ctx.stateDir, ctx.session, input.repoKey)
   if (existing.kind !== 'free') {
     const blocker = existing.kind === 'ambiguous' ? existing.runs[0] as Run : existing.run
     return fail(`a run is already active for this repo: ${blocker.run_id} (phase ${blocker.phase}). ` +
       `Finish it, or run: ${hpipeCommand(ctx.pluginRoot)} abort ${blocker.run_id}`)
   }
+
+  const tools = await beads.tools()
+  const bdBroken = bdProblem(tools.bd)
+  if (bdBroken !== null) return fail(`${bdBroken}\nhpipe start needs a working bd; nothing was started`)
+  const setup = await beads.setup({
+    stateDir: ctx.stateDir, repoKey: input.repoKey, repoRoot: input.repoRoot, prefix: input.prefix,
+  })
+  if (!setup.ok) return fail(setup.error)
+  const bvBroken = bvProblem(tools.bv)
 
   const run = newRun({
     session: ctx.session, socketPath: input.socketPath,
@@ -195,10 +214,14 @@ export async function cmdStart(ctx: Ctx, input: {
     socket_path: input.socketPath, claimed_at: Date.now(),
   })
 
-  const text = await renderPrompt(ctx.pluginRoot, 'intake', {
+  const intake = await renderPrompt(ctx.pluginRoot, 'intake', {
     run_id: run.run_id, title: run.title,
   })
-  return ok(text, JSON.stringify({ run_id: run.run_id }))
+  const preface = [
+    ...setupLines(setup, ctx.stateDir),
+    ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
+  ]
+  return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
@@ -922,7 +945,7 @@ async function tier(ctx: Ctx, input: {
 }
 export const cmdTier = retryingOnStale(tier)
 
-export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
+export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkTools): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
   const herdr = new Herdr()
@@ -938,6 +961,7 @@ export async function cmdStatus(ctx: Ctx): Promise<CmdResult> {
     livePanes,
     Date.now(),
     panes,
+    toolsLine(await tools()),
   ))
 }
 
@@ -1013,6 +1037,11 @@ export function listFlag(argv: string[], name: string): string[] {
   return entries
 }
 
+function withoutFlag(argv: string[], name: string): string[] {
+  const i = argv.indexOf(`--${name}`)
+  return i === -1 ? argv : [...argv.slice(0, i), ...argv.slice(i + 2)]
+}
+
 function positionals(argv: string[]): string[] {
   const found: string[] = []
   for (let i = 0; i < argv.length; i++) {
@@ -1024,7 +1053,7 @@ function positionals(argv: string[]): string[] {
 }
 
 const USAGE: Record<string, string[]> = {
-  start: ['hpipe start <title>'],
+  start: ['hpipe start <title> [--prefix <bead-prefix>]'],
   task: ['hpipe task --branch <branch> (--issue <n> | --title <title> --body-file <path>) --surface <surface> ' +
     '[--tier light|standard|heavy] [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] ' +
     '[--keep-worktree] [--run <run-id>]'],
@@ -1134,7 +1163,8 @@ async function dispatch(argv: string[]): Promise<number> {
   switch (command) {
     case 'start':
       out = await cmdStart(ctx, {
-        title: rest.join(' ').trim(),
+        title: withoutFlag(rest, 'prefix').join(' ').trim(),
+        prefix: flag(rest, 'prefix'),
         repoKey: repo!.repoKey, repoRoot: repo!.repoRoot,
         socketPath: process.env.HERDR_SOCKET_PATH ?? '',
         paneId: process.env.HERDR_PANE_ID ?? '',

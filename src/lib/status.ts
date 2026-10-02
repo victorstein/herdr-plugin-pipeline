@@ -365,7 +365,7 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
-  panes: PaneObservations = {},
+  panes: PaneObservations = {}, tools: string | null = null,
 ): string {
   const holds = panes.holds ?? {}
   const lines: string[] = []
@@ -373,6 +373,7 @@ export function formatStatus(
   lines.push(
     `supervisor: ${supervisor.state}${supervisor.pid ? ` (pid ${supervisor.pid})` : ''}`,
   )
+  if (tools !== null) lines.push(tools)
   if (supervisor.state !== 'live') {
     lines.push('  → nothing will advance until a supervisor is running:')
     lines.push('    herdr plugin action invoke stein.pipeline.supervisor')

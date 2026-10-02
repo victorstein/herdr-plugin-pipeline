@@ -1,4 +1,4 @@
-import { chmodSync } from 'node:fs'
+import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -8,16 +8,16 @@ import { join } from 'node:path'
  * with exit 1 and nothing on stdout, which is what herdr 0.9.0 does. A string
  * response is printed as it is, the way herdr 0.9.0 prints `pane read`.
  */
-export async function makeFakeBin(
+export function makeFakeBinSync(
   dir: string,
   responses: Record<string, unknown>,
   exitCodes: Record<string, number> = {},
-): Promise<string> {
+): string {
   const path = join(dir, 'fake-bin')
   const table = JSON.stringify(responses)
   const codes = JSON.stringify(exitCodes)
 
-  await Bun.write(path, `#!/usr/bin/env bun
+  writeFileSync(path, `#!/usr/bin/env bun
 import { appendFileSync } from 'node:fs'
 const argv = process.argv.slice(2)
 appendFileSync(${JSON.stringify(join(dir, 'calls.log'))}, argv.join(' ') + '\\n')
@@ -41,4 +41,12 @@ process.exit(codes[key] ?? (isError ? 1 : 0))
 `)
   chmodSync(path, 0o755)
   return path
+}
+
+export async function makeFakeBin(
+  dir: string,
+  responses: Record<string, unknown>,
+  exitCodes: Record<string, number> = {},
+): Promise<string> {
+  return makeFakeBinSync(dir, responses, exitCodes)
 }

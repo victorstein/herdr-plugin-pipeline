@@ -74,6 +74,12 @@ title = "Install the hpipe shorthand"
 contexts = ["global"]
 command = ["bun", "run", "src/actions/install-cli.ts"]
 
+[[actions]]
+id = "beads-setup"
+title = "Set up Beads for this repo"
+contexts = ["pane"]
+command = ["bun", "run", "src/actions/beads-setup.ts"]
+
 [[panes]]
 id = "supervisor"
 title = "Pipeline supervisor"

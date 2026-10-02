@@ -8,6 +8,7 @@ import {
   cmdTier, recordWorkerPane,
 } from '../src/cli'
 import { cmdTask } from './helpers/cmd-task'
+import { READY_TOOLS } from './helpers/cmd-start'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
@@ -60,7 +61,7 @@ function runWithTasks(overrides: Partial<Task>[]): Run {
 }
 
 test('status reports no active runs on an empty ledger', async () => {
-  expect((await cmdStatus(ctx())).text).toContain('no active runs')
+  expect((await cmdStatus(ctx(), async () => READY_TOOLS)).text).toContain('no active runs')
 })
 
 test('abort marks the run aborted and it stops being active', async () => {

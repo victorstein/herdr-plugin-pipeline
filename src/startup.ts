@@ -5,6 +5,7 @@ import { Herdr } from './lib/herdr'
 import { readPid } from './lib/pidfile'
 import { gcStaleTmp } from './lib/queue'
 import { sessionKey } from './lib/session'
+import { checkTools, toolsLine } from './lib/tools'
 
 const SUPERVISOR_LABEL = 'Pipeline supervisor'
 const ONE_HOUR_MS = 60 * 60 * 1000
@@ -162,6 +163,8 @@ async function main(): Promise<void> {
   const herdr = new Herdr()
 
   await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)
+  const toolsWarning = toolsLine(await checkTools())
+  if (toolsWarning !== null) console.error(`[pipeline] ${toolsWarning}`)
 
   if (config.HPIPE_LINK) {
     await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)

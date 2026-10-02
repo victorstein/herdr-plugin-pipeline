@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { makeFakeBin } from './helpers/fake-bin'
+import { makeFakeBin, makeFakeBinSync } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts')
@@ -32,6 +32,20 @@ process.exit(1)
 }
 
 /**
+ * `hpipe start` checks bd and bv and sets up a Beads store, so the suite stands
+ * in for both rather than touching the machine's own. Any bd call a change adds
+ * that is not stubbed here fails loudly; a test exercising more of bd replaces
+ * `f.env.BD_BIN` with its own fake bin.
+ */
+const BD_RESPONSES: Record<string, unknown> = {
+  version: 'bd version 1.3.1 (Homebrew)\n',
+  '--json --actor hpipe init': {},
+  '--json --actor hpipe config set issue_id_mode counter': {},
+  '--json --actor hpipe export': {},
+}
+const BV_RESPONSES: Record<string, unknown> = { '--version': 'bv v0.25.2\n' }
+
+/**
  * A real git repo and a scratch ledger. `cmdTask` needs `git rev-parse
  * --show-toplevel` to succeed and an agent file to exist, and the env has to be
  * pinned: a pane running the pipeline carries HERDR_SESSION and no
@@ -52,6 +66,8 @@ function fixture(): Fixture {
     HERDR_SESSION: 'argv-fixture',
     HERDR_SOCKET_PATH: '',
     GH_BIN: defaultGhBin(),
+    BD_BIN: makeFakeBinSync(tempDir('hpipe-argv-bd-'), BD_RESPONSES),
+    BV_BIN: makeFakeBinSync(tempDir('hpipe-argv-bv-'), BV_RESPONSES),
   }
   return { repo, stateDir, env }
 }
@@ -171,7 +187,7 @@ test('decide from another repo does not reach the first repo run', () => {
   git(['init', '-q'], b.repo)
   mkdirSync(join(b.repo, '.claude', 'agents'), { recursive: true })
   writeFileSync(join(b.repo, '.claude', 'agents', 'core-dev.md'), '# core-dev\n')
-  expect(hpipe(['start', 'repo b'], b).code).toBe(0)
+  expect(hpipe(['start', 'repo b', '--prefix', 'repob'], b).code).toBe(0)
 
   const r = hpipe(['decide', '--task', 't1', '--question', 'q', '--recommend', 'r'], b)
   expect(r.code).toBe(1)
@@ -435,4 +451,29 @@ test('tier reads its positional tier and --why, and the caller pane from HERDR_P
   const lowered = hpipe(['tier', '--task', 't1', 'light', '--why', 'smaller than it looked'], f)
   expect(lowered.code).toBe(1)
   expect(lowered.out).toContain('lowering a tier needs a human; run this from your own pane')
+})
+
+test('start sets up a Beads store once, and --prefix names its prefix without joining the title', () => {
+  const f = fixture()
+  const r = hpipe(['start', 'argv', 'fixture', '--prefix', 'argv'], f)
+  expect(r.code).toBe(0)
+  expect(r.out).toContain('beads: created')
+  expect(r.out).toContain('with prefix argv')
+
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  const run = JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8')) as { title: string }
+  expect(run.title).toBe('argv fixture')
+  const slugs = readdirSync(join(f.stateDir, 'beads'))
+  expect(slugs).toHaveLength(1)
+  expect(JSON.parse(readFileSync(join(f.stateDir, 'beads', slugs[0]!, 'project.json'), 'utf8')))
+    .toMatchObject({ prefix: 'argv' })
+})
+
+test('start refuses on a bd older than 1.3.1 and opens no run', () => {
+  const f = fixture()
+  f.env.BD_BIN = makeFakeBinSync(tempDir('hpipe-argv-oldbd-'), { version: 'bd version 1.0.4 (Homebrew)\n' })
+  const r = hpipe(['start', 'argv fixture'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('bd 1.0.4 is older than 1.3.1')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
 })

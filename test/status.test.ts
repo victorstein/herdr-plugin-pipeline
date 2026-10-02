@@ -744,3 +744,10 @@ test('hpipe show on a task from before tiers reads heavy, with no log, and nothi
   expect(text).toContain('tier log:   none')
   expect(text).toContain('visited:    none')
 })
+
+test('a tools problem is printed right under the supervisor line, and nothing when there is none', () => {
+  const line = 'tools: bv did not run (ENOENT) — brew install dicklesworthstone/tap/bv'
+  const text = formatStatus([], { state: 'live', pid: 1 }, 'personal', HP, new Set(), Date.now(), {}, line)
+  expect(text.split('\n').slice(0, 3)).toEqual(['session: personal', 'supervisor: live (pid 1)', line])
+  expect(formatStatus([], { state: 'live', pid: 1 }, 'personal', HP)).not.toContain('tools:')
+})
