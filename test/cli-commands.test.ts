@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdEscalate, cmdForget,
+  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdEscalate, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
@@ -2165,4 +2165,18 @@ test('an answer by the orchestrator ends the escalation too', async () => {
   await cmdEscalate(ctx(), escalation())
   await cmdAnswer(ctx(), { task: 't1', decision: 'd1', answer: 'sqlite', by: 'orchestrator', repoKey: 'k', runId: null })
   expect(escalatedUnanswered(await savedTask())).toBeNull()
+})
+
+test('bead show prints the bead bd shows, and passes a failure through', async () => {
+  const shown = await cmdBeadShow(ctx(), { repoKey: 'k', id: 'hp-3' },
+    async (_repoKey, id) => openBead(id, { title: 'Fix the meter' }))
+  expect(shown.ok).toBe(true)
+  expect(shown.text).toStartWith('hp-3 [open] Fix the meter')
+
+  const failed = await cmdBeadShow(ctx(), { repoKey: 'k', id: 'hp-404' },
+    async () => ({ reason: 'exit', error: 'Error: issue hp-404 not found' }))
+  expect(failed.ok).toBe(false)
+  expect(failed.text).toContain('Error: issue hp-404 not found')
+
+  expect((await cmdBeadShow(ctx(), { repoKey: 'k', id: '' })).text).toContain('usage: hpipe bead show <id>')
 })

@@ -5,14 +5,16 @@ import {
   Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
+import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
+import { bvTriage } from './lib/bv'
 import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
-import { heldBy } from './lib/held'
+import { beadHolds, heldBy } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
   isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, resolveRun, retryOnStaleRun, runById, runForRepo,
@@ -21,6 +23,7 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
+import { formatNext, type TriageByTrack } from './lib/next'
 import { enqueue } from './lib/outbox'
 import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
@@ -30,7 +33,7 @@ import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
-import { bdProblem, bvProblem, checkBd, checkTools, type Tools, toolsLine } from './lib/tools'
+import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -1128,6 +1131,41 @@ async function tier(ctx: Ctx, input: {
 }
 export const cmdTier = retryingOnStale(tier)
 
+export type ShowBead = RegistrationBeads['show']
+
+/** The only way an agent reads Beads: agents never run `bd`. */
+export async function cmdBeadShow(ctx: Ctx, input: { repoKey: string; id: string },
+  show: ShowBead = cliRegistrationBeads(ctx.stateDir).show): Promise<CmdResult> {
+  const id = input.id.trim()
+  if (id.length === 0) return fail(commandUsage(USAGE.bead ?? []))
+  const bead = await show(input.repoKey, id)
+  if (isBdFailure(bead)) return fail(`bd show ${id} failed:\n  ${bead.error}`)
+  return ok(formatBeadDetail(bead))
+}
+
+export type TriageFor = (repoKey: string) => Promise<TriageByTrack | BdFailure>
+
+const cliTriage = (stateDir: string): TriageFor => async (repoKey) => {
+  const bd = await cliBd(stateDir, repoKey)
+  if (isBdFailure(bd)) return bd
+  const bvBroken = bvProblem(await checkBv())
+  if (bvBroken !== null) return { reason: 'unavailable', error: bvBroken }
+  // A failed refresh still leaves the last good export to triage, a write or two behind.
+  await bd.refreshExport()
+  return bvTriage(stateDir, beadsSlug(repoKey))
+}
+
+export async function cmdNext(ctx: Ctx, input: { repoKey: string; limit: number; label: string | null },
+  triage: TriageFor = cliTriage(ctx.stateDir)): Promise<CmdResult> {
+  if (!Number.isInteger(input.limit) || input.limit <= 0) {
+    return fail(`--limit must be a positive whole number, got: ${input.limit}`)
+  }
+  const result = await triage(input.repoKey)
+  if (isBdFailure(result)) return fail(result.error)
+  const held = new Set((await beadHolds(ctx.stateDir)).keys())
+  return ok(formatNext(result, held, { limit: input.limit, label: input.label }))
+}
+
 export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkTools): Promise<CmdResult> {
   const runs = await listRuns(ctx.stateDir, ctx.session)
   const state = await supervisorState(ctx.stateDir, ctx.session)
@@ -1242,6 +1280,8 @@ const USAGE: Record<string, string[]> = {
     '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
+  bead: ['hpipe bead show <id>'],
+  next: ['hpipe next [--limit <n>] [--label <label>]'],
   dispatch: [
     'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
     'hpipe dispatch --done [--run <run-id>]',
@@ -1334,7 +1374,9 @@ async function dispatch(argv: string[]): Promise<number> {
   // with no error anywhere. These six address a run by id, or not at all.
   const byIdOrNothing = ['status', 'drain', 'abort', 'resume', 'forget', 'rewind']
   // --run names the run outright, so the lookup is skipped; `start` has no --run.
-  const needsRepo = command === 'start' ||
+  // These address a repo's Beads store, never a run, so --run cannot stand in for the repo.
+  const storeCommands = ['bead', 'next']
+  const needsRepo = command === 'start' || storeCommands.includes(command ?? '') ||
     (!byIdOrNothing.includes(command ?? '') && flag(rest, 'run') === null)
   const repo = needsRepo ? await repoContext() : null
   if (needsRepo && !repo) {
@@ -1475,6 +1517,24 @@ async function dispatch(argv: string[]): Promise<number> {
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
         force: rest.includes('--force'),
+      })
+      break
+
+    case 'bead': {
+      const [subcommand, id] = positionals(rest)
+      if (subcommand !== 'show') {
+        console.error(commandUsage(usage))
+        return 1
+      }
+      out = await cmdBeadShow(ctx, { repoKey: repo!.repoKey, id: id ?? '' })
+      break
+    }
+
+    case 'next':
+      out = await cmdNext(ctx, {
+        repoKey: repo!.repoKey,
+        limit: Number(flag(rest, 'limit') ?? '5'),
+        label: flag(rest, 'label'),
       })
       break
 

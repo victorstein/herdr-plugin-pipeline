@@ -1,0 +1,22 @@
+import type { BeadDetail } from './bd'
+
+const orNone = (text: string | undefined): string => (text === undefined || text.trim() === '' ? '(none)' : text.trim())
+
+export function formatBeadDetail(bead: BeadDetail): string {
+  const labels = bead.labels ?? []
+  const comments = bead.comments ?? []
+  return [
+    `${bead.id} [${bead.status}] ${bead.title}`,
+    `labels:     ${labels.length > 0 ? labels.join(', ') : 'none'}`,
+    `assignee:   ${bead.assignee || 'none'}`,
+    '',
+    'description:',
+    orNone(bead.description),
+    '',
+    'acceptance:',
+    orNone(bead.acceptance_criteria),
+    '',
+    comments.length === 0 ? 'comments: none' : 'comments:',
+    ...comments.map((comment) => `- ${comment.text.trim().replace(/\n/g, '\n  ')}`),
+  ].join('\n')
+}
