@@ -477,3 +477,11 @@ test('start refuses on a bd older than 1.3.1 and opens no run', () => {
   expect(r.out).toContain('bd 1.0.4 is older than 1.3.1')
   expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
 })
+
+test('start with a --prefix that has no value refuses and opens no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', 'argv fixture', '--prefix'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--prefix needs a value')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
+})

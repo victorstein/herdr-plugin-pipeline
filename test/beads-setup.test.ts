@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beadsHome, beadsSlug, readBeadsProject, writeBeadsProject } from '../src/lib/beads-project'
+import { beadsDir, beadsHome, beadsSlug, readBeadsProject, writeBeadsProject } from '../src/lib/beads-project'
 import { setupBeads, setupLines, type SetupDeps } from '../src/lib/beads-setup'
 
 let dir: string
@@ -128,4 +128,23 @@ test('setupLines says whether the store was created, then each note', () => {
   expect(setupLines({ ok: true, slug: 's-123456', prefix: 'hp', created: false, notes: [] }, '/st')).toEqual([
     'beads: prefix hp, store /st/beads/s-123456',
   ])
+})
+
+test('a bd init that fails after creating the store removes it, so the next setup can init again', async () => {
+  const slug = beadsSlug(KEY)
+  let attempts = 0
+  const { deps } = fakeDeps({
+    initStore: async (stateDir, initSlug) => {
+      attempts++
+      mkdirSync(beadsDir(stateDir, initSlug), { recursive: true })
+      writeFileSync(join(beadsDir(stateDir, initSlug), 'metadata.json'), '{}')
+      return { reason: 'exit', error: 'Error: config set failed' }
+    },
+  })
+  const first = await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'hp' }, deps)
+  expect(!first.ok && first.error).toContain('the half-made store was removed')
+  expect(existsSync(beadsDir(dir, slug))).toBe(false)
+
+  await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'hp' }, deps)
+  expect(attempts).toBe(2)
 })

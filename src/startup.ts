@@ -163,33 +163,38 @@ async function main(): Promise<void> {
   const herdr = new Herdr()
 
   await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)
-  const toolsWarning = toolsLine(await checkTools())
-  if (toolsWarning !== null) console.error(`[pipeline] ${toolsWarning}`)
+  // Not awaited here: a hung bd or bv must not hold up the supervisor pane.
+  const toolsChecked = checkTools()
 
-  if (config.HPIPE_LINK) {
-    await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)
+  try {
+    if (config.HPIPE_LINK) {
+      await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)
+    }
+
+    const workspaceId = await ensureWorkspace(herdr, stateDir, session, config.PIPELINE_WORKSPACE_LABEL)
+    if (!workspaceId) return
+
+    const live = await readPid(stateDir, session)
+    const crashLog = crashLogPath(stateDir, session)
+    const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null, undefined,
+      (paneId) => keepCrashTail(herdr, crashLog, paneId))
+    if (ghosts.length > 0) {
+      console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}; their output is in ${crashLog}`)
+    }
+
+    const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
+    if (!opened.ok) {
+      // herdr reports this in the body while exiting 0 — checking the exit code would miss it.
+      console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
+      return
+    }
+
+    const strays = await clearStrayPanes(herdr, workspaceId)
+    if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
+  } finally {
+    const toolsWarning = toolsLine(await toolsChecked)
+    if (toolsWarning !== null) console.error(`[pipeline] ${toolsWarning}`)
   }
-
-  const workspaceId = await ensureWorkspace(herdr, stateDir, session, config.PIPELINE_WORKSPACE_LABEL)
-  if (!workspaceId) return
-
-  const live = await readPid(stateDir, session)
-  const crashLog = crashLogPath(stateDir, session)
-  const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null, undefined,
-    (paneId) => keepCrashTail(herdr, crashLog, paneId))
-  if (ghosts.length > 0) {
-    console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}; their output is in ${crashLog}`)
-  }
-
-  const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
-  if (!opened.ok) {
-    // herdr reports this in the body while exiting 0 — checking the exit code would miss it.
-    console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
-    return
-  }
-
-  const strays = await clearStrayPanes(herdr, workspaceId)
-  if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
 }
 
 if (import.meta.main) await main()

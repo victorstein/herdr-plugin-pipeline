@@ -1,7 +1,7 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import { Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type Done } from './bd'
 import {
-  beadsHome, beadsSlug, defaultPrefix, normalisePrefix, prefixCollisions, prefixOwner,
+  beadsDir, beadsHome, beadsSlug, defaultPrefix, normalisePrefix, prefixCollisions, prefixOwner,
   readBeadsProject, writeBeadsProject,
 } from './beads-project'
 import { runBounded } from './spawn'
@@ -79,7 +79,12 @@ export async function setupBeads(input: SetupInput, deps: SetupDeps = REAL_SETUP
     : []
   const initialised = await deps.initStore(input.stateDir, slug, prefix)
   if (isBdFailure(initialised)) {
-    return { ok: false, error: `bd init failed in ${home}; nothing was recorded:\n  ${initialised.error}` }
+    // bd refuses to init over an existing .beads, so a store left half-made would fail every later setup.
+    rmSync(beadsDir(input.stateDir, slug), { recursive: true, force: true })
+    return {
+      ok: false,
+      error: `setting up Beads in ${home} failed; the half-made store was removed, so the next setup starts afresh:\n  ${initialised.error}`,
+    }
   }
   await writeBeadsProject(input.stateDir, slug, { repo_root: input.repoRoot, prefix, created_at: deps.now() })
   return { ok: true, slug, prefix, created: true, notes }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync } from 'node:fs'
+import { type Dirent, existsSync, readdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { readJson, writeJson } from './store'
 
@@ -78,6 +78,24 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * Every file path under `root`, relative to it. A directory that cannot be read
+ * is skipped, not fatal: it is no proof of a collision, and refusing on it would
+ * block setup for good.
+ */
+function readablePaths(root: string, under = ''): string[] {
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(join(root, under), { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries.flatMap((entry) => {
+    const path = join(under, entry.name)
+    return entry.isDirectory() ? [path, ...readablePaths(root, path)] : [path]
+  })
+}
+
+/**
  * The state dir is the only copy of the backlog. A store set up again after it
  * was lost restarts its counter at `<prefix>-1`, and new artifact stems would
  * collide with ones already committed under these names.
@@ -86,14 +104,7 @@ export function prefixCollisions(repoRoot: string, prefix: string): string[] {
   const root = join(repoRoot, 'docs', 'superpowers')
   if (!existsSync(root)) return []
   const named = new RegExp(`(^|[^a-z0-9])${escapeRegExp(prefix)}-\\d+($|[^0-9])`, 'i')
-  let paths: string[]
-  try {
-    paths = readdirSync(root, { recursive: true }) as string[]
-  } catch {
-    // A tree setup cannot read is no proof of a collision, and refusing on it would block setup for good.
-    return []
-  }
-  return paths
+  return readablePaths(root)
     .filter((path) => named.test(basename(path)))
     .map((path) => join('docs', 'superpowers', path))
     .sort()

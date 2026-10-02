@@ -1161,16 +1161,22 @@ async function dispatch(argv: string[]): Promise<number> {
 
   let out: CmdResult
   switch (command) {
-    case 'start':
+    case 'start': {
+      const prefix = flag(rest, 'prefix')
+      if (rest.includes('--prefix') && (prefix === null || prefix.startsWith('--'))) {
+        out = fail('--prefix needs a value: hpipe start <title> --prefix <bead-prefix>')
+        break
+      }
       out = await cmdStart(ctx, {
         title: withoutFlag(rest, 'prefix').join(' ').trim(),
-        prefix: flag(rest, 'prefix'),
+        prefix,
         repoKey: repo!.repoKey, repoRoot: repo!.repoRoot,
         socketPath: process.env.HERDR_SOCKET_PATH ?? '',
         paneId: process.env.HERDR_PANE_ID ?? '',
         workspaceId: process.env.HERDR_WORKSPACE_ID ?? '',
       })
       break
+    }
 
     case 'task':
       out = await cmdTask(ctx, {

@@ -94,6 +94,22 @@ test('a docs/superpowers that cannot be read as a directory is treated as holdin
   expect(prefixCollisions(repo, 'hp')).toEqual([])
 })
 
+test('an unreadable directory under docs/superpowers is skipped while its siblings are still scanned', () => {
+  if (process.getuid?.() === 0) return
+  const repo = join(dir, 'repo')
+  const root = join(repo, 'docs', 'superpowers')
+  mkdirSync(join(root, 'locked'), { recursive: true })
+  mkdirSync(join(root, 'specs'), { recursive: true })
+  writeFileSync(join(root, 'locked', 'hp-2-design.md'), '')
+  writeFileSync(join(root, 'specs', 'hp-1-design.md'), '')
+  chmodSync(join(root, 'locked'), 0o000)
+  try {
+    expect(prefixCollisions(repo, 'hp')).toEqual(['docs/superpowers/specs/hp-1-design.md'])
+  } finally {
+    chmodSync(join(root, 'locked'), 0o755)
+  }
+})
+
 test('an unreadable docs/superpowers is treated as holding no collisions', () => {
   if (process.getuid?.() === 0) return
   const repo = join(dir, 'repo')
