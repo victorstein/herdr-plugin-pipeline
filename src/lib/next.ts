@@ -4,6 +4,7 @@ export interface MetricState {
   reason?: string
 }
 
+/** Go nil slices print as `null`, so every list bv emits may be null. */
 export interface TriageRecommendation {
   id: string
   title: string
@@ -14,20 +15,14 @@ export interface TriageRecommendation {
   claimable?: boolean
 }
 
-/** bv's top pick carries `unblocks` as a count; the IDs come from the matching recommendation. */
-export interface TriagePick {
-  id: string
-  title: string
-  score: number
-  reasons?: string[] | null
-  unblocks?: number
-}
-
+/**
+ * One topological layer (`buildRecommendationsByTrack`): `track-A` is everything
+ * actionable now, each later track waits on the one before it, and cyclic beads
+ * share a last track whose reason says so.
+ */
 export interface TriageTrack {
   track_id: string
-  /** bv always prints it, empty when a track has no stated reason. */
   reason?: string
-  top_pick?: TriagePick | null
   recommendations?: TriageRecommendation[] | null
 }
 
@@ -51,53 +46,85 @@ export interface TriageByTrack {
   alerts?: TriageAlert[] | null
 }
 
+/** bv's whole robot envelope: `source_authority` sits beside `triage`, not inside it. */
+export interface TriageOutput {
+  triage: TriageByTrack
+  source_authority?: { claim_safe?: boolean } | null
+}
+
 export interface NextOptions {
   limit: number
   label: string | null
 }
 
+const ACTIONABLE_TRACK = 'track-A'
+const CYCLIC_REASON_PREFIX = 'Cyclic'
+// Triage always runs with bv's TriageConfig, which skips most metrics and samples
+// betweenness, so `skipped` and `approx` are routine; only these mean a metric failed.
+const FAILED_METRIC_STATES = new Set(['timeout', 'pending', 'error'])
+const IDS_PER_LINE = 8
+const MAX_ALERTS = 5
+
 const unblocking = (ids: string[] | null | undefined): string =>
-  ids === null || ids === undefined || ids.length === 0 ? '' : ` — unblocks ${ids.join(', ')}`
+  ids === null || ids === undefined || ids.length === 0 ? '' : ` → frees ${ids.join(', ')}`
+
+const idList = (ids: string[]): string =>
+  ids.length <= IDS_PER_LINE
+    ? ids.join(', ')
+    : `${ids.slice(0, IDS_PER_LINE).join(', ')} +${ids.length - IDS_PER_LINE} more`
 
 function metricWarnings(status: Record<string, MetricState> | undefined): string[] {
   return Object.entries(status ?? {})
-    .filter(([, metric]) => metric.state !== 'computed')
-    .map(([name, metric]) => {
-      const key = name.toLowerCase()
-      const consequence = key === 'cycles'
-        ? ' — cycle-free not proven'
-        : metric.reason === undefined ? '' : ` — ${metric.reason}`
-      return `warning: ${key}: ${metric.state}${consequence}`
-    })
+    .filter(([, metric]) => FAILED_METRIC_STATES.has(metric.state))
+    .map(([name, metric]) =>
+      `warning: ${name.toLowerCase()}: ${metric.state}${metric.reason ? ` — ${metric.reason}` : ''}`)
+}
+
+function pickLine(rec: TriageRecommendation): string {
+  const why = rec.reasons?.[0]
+  return `  ${rec.id} "${rec.title}" score ${rec.score.toFixed(2)}${why ? ` — ${why}` : ''}${unblocking(rec.unblocks_ids)}`
 }
 
 /**
- * Tracks share no dependency, but bv knows nothing about files: two picks from
- * different tracks still serialise with `--files` when they touch the same ones.
+ * Picks in the actionable layer can run in parallel, but bv knows nothing about
+ * files: two of them still serialise through `--files` when they touch the same ones.
  */
-export function formatNext(triage: TriageByTrack, held: ReadonlySet<string>, options: NextOptions): string {
+export function formatNext(output: TriageOutput, held: ReadonlySet<string>, options: NextOptions): string {
+  const { triage } = output
   const lines = metricWarnings(triage.status)
+  if (output.source_authority?.claim_safe === false) {
+    lines.push('warning: bv blanked every pick: the export has records it could not load, so nothing is proven claimable')
+  }
   const wanted = (rec: TriageRecommendation): boolean =>
     !held.has(rec.id) && (options.label === null || (rec.labels ?? []).includes(options.label))
-  const tracks = (triage.recommendations_by_track ?? [])
+  const layers = (triage.recommendations_by_track ?? [])
     .map((track) => ({ track, recommendations: (track.recommendations ?? []).filter(wanted) }))
-    .filter(({ recommendations }) => recommendations.length > 0)
-    .slice(0, options.limit)
 
-  if (tracks.length === 0) lines.push('nothing to pick up: every open bead is held, blocked or filtered out')
-  for (const { track, recommendations } of tracks) {
-    lines.push(`track ${track.track_id}${track.reason ? ` — ${track.reason}` : ''}`)
-    const top = recommendations.find((rec) => rec.id === track.top_pick?.id)
-      ?? recommendations.find((rec) => rec.claimable === true)
-    if (top === undefined) {
-      lines.push('  no claimable pick')
-    } else {
-      lines.push(`  top: ${top.id} "${top.title}" score ${top.score.toFixed(2)}${unblocking(top.unblocks_ids)}`)
-      const reasons = top.reasons ?? []
-      if (reasons.length > 0) lines.push(`    why: ${reasons.join('; ')}`)
+  const actionable = layers.find(({ track }) => track.track_id === ACTIONABLE_TRACK)?.recommendations ?? []
+  const picks = actionable.filter((rec) => rec.claimable === true)
+    .sort((a, b) => b.score - a.score).slice(0, options.limit)
+  const notClaimable = actionable.filter((rec) => rec.claimable !== true).map((rec) => rec.id)
+
+  const later: string[] = []
+  let previous = ACTIONABLE_TRACK
+  for (const { track, recommendations } of layers) {
+    if (track.track_id === ACTIONABLE_TRACK) continue
+    const ids = recommendations.map((rec) => rec.id)
+    if (track.reason?.startsWith(CYCLIC_REASON_PREFIX)) {
+      if (ids.length > 0) later.push(`cyclic, until the cycle is broken: ${idList(ids)}`)
+      continue
     }
-    const others = recommendations.filter((rec) => rec !== top).map((rec) => rec.id)
-    if (others.length > 0) lines.push(`  also: ${others.join(', ')}`)
+    if (ids.length > 0) later.push(`after ${previous}: ${track.track_id} ${idList(ids)}`)
+    previous = track.track_id
+  }
+
+  if (picks.length === 0 && notClaimable.length === 0 && later.length === 0) {
+    lines.push('nothing to pick up: every open bead is held, blocked or filtered out')
+  } else {
+    if (picks.length === 0) lines.push('now: nothing claimable')
+    else lines.push('now (parallel when their --files are disjoint):', ...picks.map(pickLine))
+    if (notClaimable.length > 0) lines.push(`  not claimable: ${idList(notClaimable)}`)
+    lines.push(...later)
   }
 
   const blockers = triage.blockers_to_clear ?? []
@@ -106,7 +133,8 @@ export function formatNext(triage: TriageByTrack, held: ReadonlySet<string>, opt
   }
   const alerts = triage.alerts ?? []
   if (alerts.length > 0) {
-    lines.push('alerts:', ...alerts.map((a) => `  [${a.severity}] ${a.type}: ${a.message}`))
+    lines.push('alerts:', ...alerts.slice(0, MAX_ALERTS).map((a) => `  [${a.severity}] ${a.type}: ${a.message}`))
+    if (alerts.length > MAX_ALERTS) lines.push(`  +${alerts.length - MAX_ALERTS} more`)
   }
   return lines.join('\n')
 }

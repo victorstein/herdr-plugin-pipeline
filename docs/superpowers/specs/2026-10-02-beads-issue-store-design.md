@@ -44,7 +44,7 @@ re-verified each):
 | bv loads an explicit `.jsonl` given by `--db` directly, before the bd bridge that would run `bd export` | bv `cmd/bv/main.go:1937-1943`, `internal/datasource/load.go:150-154,306-311` |
 | bv watches the JSONL's parent dir with fsnotify, 200 ms TUI debounce; its multi-repo mode has no live reload | bv `pkg/watcher/watcher.go:199-410`, `cmd/bv/main.go:2714` |
 | bv "claimable" = open, unblocked, unassigned, not deferred, not an epic | bv `cmd/bv/robot_registry.go:2343` |
-| `--robot-triage-by-track` emits `triage.status`, `alerts`, `blockers_to_clear`, `recommendations_by_track[].top_pick{reasons, unblocks_ids}` | bv `cmd/bv/robot_registry.go:1674`, `pkg/analysis/triage.go:41-52,129-133,442-447` |
+| `--robot-triage-by-track` emits `triage.status`, `alerts`, `blockers_to_clear`, `recommendations_by_track[]` (topological layers; each recommendation carries `reasons`, `unblocks_ids`, `claimable`) | bv `cmd/bv/robot_registry.go:1674`, `pkg/analysis/triage.go:41-52,129-133,442-447,1790-1918` |
 | The TUI's `O` edit path shells out to `br`, never `bd` | bv `pkg/ui/model.go:262-283` |
 | bv's licence is MIT plus a rider that withholds all rights from, and forbids making the software available to or for, OpenAI, Anthropic and anyone acting on their behalf or for their benefit; "use" includes executing | bv `LICENSE` |
 | `herdr plugin pane open` takes `--workspace`, `--cwd`, `--env KEY=VALUE`; `herdr pane rename` exists | `herdr plugin pane open --help`, `herdr pane --help` (herdr 0.9.x) |
@@ -252,10 +252,17 @@ one predicate (`src/lib/held.ts`).
    `bv --robot-triage-by-track --db <slug>/.beads/issues.jsonl` with the §1 env/cwd plus
    `BV_NO_UPDATE_CHECK=1`, `BV_NO_GITIGNORE=1`, killed after 30 s.
 2. Drops recommendations for held beads (§3).
-3. Prints a warning line for any `triage.status` metric that is not `computed`
-   (`cycles: timeout — cycle-free not proven`).
-4. Prints compact text per track — top pick (ID, title, score, `reasons`, `unblocks_ids`), then the
-   track's other IDs — then `blockers_to_clear` and `alerts` if non-empty.
+3. Prints a warning line for any `triage.status` metric whose state is `timeout`, `pending` or
+   `error`. Triage always runs on bv's `TriageConfig`, which skips most metrics and samples
+   betweenness, so `skipped` and `approx` are routine and stay quiet. When the envelope's
+   `source_authority.claim_safe` is false, a warning says bv blanked every pick.
+4. bv's tracks are topological layers, not independent streams: `track-A` is everything actionable
+   now, each later track waits on the one before it, and cyclic beads share a last track. Prints the
+   claimable picks of `track-A` up to `--limit` (ID, title, score, first reason, `unblocks_ids`) —
+   these can run in parallel provided their `--files` are disjoint — then one capped line of IDs per
+   later layer (`after track-A: track-B …`) and one for the cyclic layer, then `blockers_to_clear`
+   and at most 5 `alerts` if non-empty. bv cuts its recommendations to the top 10 before grouping,
+   so `--label` filters those, not every bead.
 
 **`hpipe bead show <id>`** — read-only, locked; prints title, status, labels, description,
 acceptance and comments. The only way an agent reads Beads.
@@ -264,8 +271,9 @@ acceptance and comments. The only way an agent reads Beads.
 - `intake.md:24-30`, `dispatch-registering.md`, `SKILL.md`, `README.md:118,127`: `--issue`/`gh issue
   create` become `hpipe task --title/--bead`; `hpipe task`'s header prints `bead: <id> (filed)` and
   the prompts quote that; the orchestrator runs `hpipe next` before filing new work and adopts
-  existing beads where they fit; bv tracks are dependency-independent but know nothing about files,
-  so parallel dispatch still requires disjoint `--files`; never run `bd` or `bv` directly.
+  existing beads where they fit; picks in `hpipe next`'s actionable layer can run in parallel
+  provided their `--files` are disjoint (bv knows nothing about files), and later layers wait on
+  earlier ones; never run `bd` or `bv` directly.
 - `dispatch.md:44,51-55`: "reading `gh issue view` against a different repo's issues" becomes
   "reading a different repo"; "the issue body is the brief" becomes "the bead's brief, captured at
   registration, is the brief"; `issue:` in the header list becomes `bead:`.
@@ -450,7 +458,7 @@ is one keypress away (`b`).
 | an outside process holds Dolt (a human's `bd`) | bd fails fast "database is locked" → `BdFailure`, handled as above; the README tells humans to use `hpipe bead show` |
 | export fails | `export.dirty`; re-export on next hold; board and reconciler view lag, then catch up |
 | `bv` missing | board tab shows the install hint; `hpipe next` errors with it; pipeline unaffected |
-| bv metric not `computed` | `hpipe next` warns; recommendations still shown |
+| bv metric `timeout`/`pending`/`error` | `hpipe next` warns; recommendations still shown |
 
 ## 11. Verify before implementing
 
@@ -485,8 +493,8 @@ Step 1 of the plan. Each confirms the design or changes the named section.
 - `test/tasks.test.ts`, `test/table.test.ts`: close row has `probeTarget` and no actor or prompt;
   advances only on `bead_closed_at_ms !== null`; stall clause variants.
 - `test/prompts.test.ts`: every template under `prompts/` renders with the new variable set.
-- `test/next.test.ts`: `hpipe next` over bv JSON fixtures — held filtering, non-`computed` warning,
-  empty tracks.
+- `test/next.test.ts`: `hpipe next` over bv JSON fixtures — held filtering, failed-metric warning
+  (routine `skipped`/`approx` quiet), layers, empty tracks, `claim_safe: false`.
 - `test/startup.test.ts`, `test/board.test.ts`: `clearStrayPanes` spares `Board`, `Board: …` and
   recorded panes; the per-slug lifecycle reopens a ghost by pid and closes a board with no live run.
 - `test/integration/smoke.md`: live section on **bd ≥ 1.3.1** and bv ≥ 0.25.2 with a scratch repo —

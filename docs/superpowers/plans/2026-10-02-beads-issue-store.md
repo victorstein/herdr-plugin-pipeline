@@ -7535,7 +7535,7 @@ and add a row after the `hpipe brief` row:
 
 ```markdown
 | `hpipe bead show <id>` | A bead as Beads holds it now: status, labels, description, acceptance, comments |
-| `hpipe next [--limit <n>] [--label <label>]` | The backlog's open, unheld beads ranked by `bv`, one top pick per independent track |
+| `hpipe next [--limit <n>] [--label <label>]` | The unheld beads `bv` ranks claimable now (parallel when their `--files` are disjoint), then the later dependency layers that wait on them |
 ```
 
 In "Review tiers", change (lines 161-163):

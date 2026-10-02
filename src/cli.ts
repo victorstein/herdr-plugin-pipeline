@@ -23,7 +23,7 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
-import { formatNext, type TriageByTrack } from './lib/next'
+import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue } from './lib/outbox'
 import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
@@ -1143,7 +1143,7 @@ export async function cmdBeadShow(ctx: Ctx, input: { repoKey: string; id: string
   return ok(formatBeadDetail(bead))
 }
 
-export type TriageFor = (repoKey: string) => Promise<TriageByTrack | BdFailure>
+export type TriageFor = (repoKey: string) => Promise<TriageOutput | BdFailure>
 
 const cliTriage = (stateDir: string): TriageFor => async (repoKey) => {
   const bd = await cliBd(stateDir, repoKey)
@@ -1281,7 +1281,7 @@ const USAGE: Record<string, string[]> = {
   brief: ['hpipe brief --task <id> [--run <run-id>]'],
   show: ['hpipe show --task <id> [--run <run-id>]'],
   bead: ['hpipe bead show <id>'],
-  next: ['hpipe next [--limit <n>] [--label <label>]'],
+  next: ['hpipe next [--limit <n>] [--label <label>]   (--label filters bv\'s top 10 recommendations, not every bead)'],
   dispatch: [
     'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
     'hpipe dispatch --done [--run <run-id>]',
