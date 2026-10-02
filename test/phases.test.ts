@@ -68,13 +68,12 @@ test('exactly the nine probe-only rows are outside the escalating signals', () =
 })
 
 test('the actorless and human-owned stallable rows name a probe target', () => {
-  // table.test.ts:33 counts only `orchestrator` and `worker` as resolving to a
-  // pane, so these three must declare one; merge and close resolve already.
-  for (const phase of ['ci', 'teardown', 'escalated'] as const) {
+  // table.test.ts counts only `orchestrator` and `worker` as resolving to a pane,
+  // so these must declare one; merge resolves already.
+  for (const phase of ['ci', 'close', 'teardown', 'escalated'] as const) {
     expect(taskRow(phase).probeTarget, `${phase} needs a probe target`).toBe('orchestrator')
   }
   expect(taskRow('merge').probeTarget).toBeUndefined()
-  expect(taskRow('close').probeTarget).toBeUndefined()
 })
 
 test('the tiers are ordered lightest first', () => {

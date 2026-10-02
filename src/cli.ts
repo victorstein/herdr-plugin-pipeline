@@ -35,6 +35,7 @@ import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCom
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
+import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
 import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
 
@@ -919,6 +920,41 @@ async function rewind(ctx: Ctx, input: {
 }
 export const cmdRewind = retryingOnStale(rewind)
 
+export type CloseBead = (repoKey: string, bead: string, reason: string, force: boolean) => Promise<Done | BdFailure>
+
+const cliCloseBead = (stateDir: string): CloseBead => (repoKey, bead, reason, force) =>
+  withCliBd(stateDir, repoKey, (bd) => bd.close(bead, reason, { force }))
+
+/**
+ * The fallback the close stall names once the reconciler's own close keeps
+ * failing. It writes no ledger field: the next reconciler pass sees the bead
+ * closed and records the edge itself, and a forced close is never undone because
+ * the desired state is `closed` too.
+ */
+export async function cmdClose(ctx: Ctx, input: {
+  taskId: string; repoKey: string | null; runId: string | null; force: boolean
+}, close: CloseBead = cliCloseBead(ctx.stateDir)): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    reach: 'unfinished', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  if (task.merged_at_ms === null) {
+    return fail(`no merge is recorded for ${task.task_id}, so its bead must not close yet — ` +
+      `\`${hpipeCommand(ctx.pluginRoot)} rewind ${run.run_id} merge --task ${task.task_id}\` records it`)
+  }
+  const closed = await close(run.repo_key, task.bead, closeReason(task), input.force)
+  if (isBdFailure(closed)) {
+    return fail(`bd would not close ${task.bead}:\n  ${closed.error}` + (input.force
+      ? ''
+      : '\n  → --force overrides bd\'s close guards; use it only once you know why they fired'))
+  }
+  return ok(`closed ${task.bead}${input.force ? ' (forced)' : ''}; the next supervisor pass records it ` +
+    `and tears ${task.task_id} down`)
+}
+
 async function release(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
@@ -1183,6 +1219,7 @@ const USAGE: Record<string, string[]> = {
   resume: ['hpipe resume <run-id>'],
   abort: ['hpipe abort <run-id>'],
   forget: ['hpipe forget <workspace-id>'],
+  close: ['hpipe close --task <id> [--force] [--run <run-id>]'],
 }
 
 const commandUsage = (forms: string[]): string => `usage: ${forms.join('\n       ')}`
@@ -1192,7 +1229,7 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
@@ -1381,6 +1418,15 @@ async function dispatch(argv: string[]): Promise<number> {
         callerPane: process.env.HERDR_PANE_ID || null,
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'close':
+      out = await cmdClose(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+        force: rest.includes('--force'),
       })
       break
 

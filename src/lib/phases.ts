@@ -154,8 +154,10 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
     holdsFiles: true },
   { phase: 'merge', actor: 'orchestrator', signal: 'merged',
     onClear: 'close', prompt: 'merge', stallable: true, holdsFiles: true },
-  { phase: 'close', actor: 'orchestrator', signal: 'closed',
-    onClear: 'teardown', prompt: 'close', stallable: true, holdsFiles: true },
+  // The supervisor's own row: the reconciler closes the bead once the merge is
+  // recorded, so nobody is prompted and the probe goes to the orchestrator.
+  { phase: 'close', signal: 'closed', onClear: 'teardown',
+    stallable: true, probeTarget: 'orchestrator', holdsFiles: true },
   // Teardown is unconditional and runs first (tasks.ts:137), so a task still here
   // past the threshold means this run is not being advanced at all.
   { phase: 'teardown', signal: 'worktree', onClear: 'done',

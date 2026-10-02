@@ -17,7 +17,7 @@ const REVIEW_PROMPTS = [
   'spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality', 'branch-review',
 ]
 const ALL = [
-  'spec', 'plan', 'dispatch', 'dispatch-registering', 'worker-brief', 'ci-red', 'merge', 'close',
+  'spec', 'plan', 'dispatch', 'dispatch-registering', 'worker-brief', 'ci-red', 'merge',
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement',
 ]

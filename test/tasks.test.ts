@@ -259,7 +259,8 @@ test('a PR merged while the orchestrator pane has no agent is noticed (#144)', a
     prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
   }))
   expect(run.tasks[0]?.phase).toBe('close')
-  expect(prompts.find((p) => p.taskId === 't1')?.paneId).toBe('w1:p1')
+  expect(run.tasks[0]?.merged_at_ms).toBe(2_000)
+  expect(prompts.find((p) => p.taskId === 't1')).toBeUndefined()
 })
 
 test('a merged PR advances to close, and a recorded bead close to teardown', async () => {
@@ -362,10 +363,9 @@ test('a phase that advances nothing yields no prompt', async () => {
   expect(await advanceTasks(run, deps())).toHaveLength(0)
 })
 
-test('close tells the orchestrator the supervisor closes the bead itself', async () => {
+test('close renders no prompt: the supervisor closes the bead itself', async () => {
   const run = mkRun([mkTask({ phase: 'close', pr: 42 })])
-  expect(await promptForTaskPhase(run, run.tasks[0]!, deps(), 'merge'))
-    .toContain('The supervisor closes bead `hp-1` itself')
+  expect(await promptForTaskPhase(run, run.tasks[0]!, deps(), 'merge')).toBe('')
 })
 
 const designArtifacts = (): Task['artifacts'] => ({

@@ -186,3 +186,11 @@ test('every worker row renders a non-empty prompt in every tier', async () => {
     }
   }
 })
+
+test('the close row is the supervisor\'s: no actor, no prompt, probed through the orchestrator', () => {
+  const close = taskRow('close')
+  expect(close.actor).toBeUndefined()
+  expect(close.prompt).toBeUndefined()
+  expect(close.probeTarget).toBe('orchestrator')
+  expect(close.stallable).toBe(true)
+})

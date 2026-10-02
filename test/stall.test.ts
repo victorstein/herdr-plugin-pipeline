@@ -974,14 +974,32 @@ test('a merge row names the PR and does not assert it is unmerged — #19', () =
 })
 
 
-test('a close row waits on the supervisor\'s Beads close and names the merge rewind — #19', () => {
-  const run = runWithTask({ phase: 'close' })
+test('a close row with no merge recorded names the rewind into merge — #19', () => {
+  const run = runWithTask({ phase: 'close', merged_at_ms: null })
   const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
   expect(a.short).toBe('bead hp-1 to be closed by the supervisor')
-  expect(a.clause).toContain('close bead hp-1')
+  expect(a.clause).toContain('No merge is recorded for t1')
   expect(a.clause).toContain(`hp rewind ${run.run_id} merge --task t1`)
-  expect(a.clause).not.toContain('gh issue')
-  expect(a.clause).not.toContain('whatever clears')
+})
+
+test('a close row the reconciler is still retrying says so and asks for nothing', () => {
+  const run = runWithTask({
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 2, last_error: 'Error: database is locked', last_ok_at_ms: null },
+  })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.clause).toContain('waiting on the Beads close of hp-1')
+  expect(a.clause).not.toContain('hp close')
+})
+
+test('a close row past five failures quotes bd verbatim and names hpipe close and --force', () => {
+  const refusal = 'cannot close hp-1: assignee is "bob", actor is "hpipe"'
+  const run = runWithTask({
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 5, last_error: refusal, last_ok_at_ms: null },
+  })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.clause).toContain(refusal)
+  expect(a.clause).toContain('`hp close --task t1`')
+  expect(a.clause).toContain('`--force`')
 })
 
 test('a teardown row states the fact and diagnoses no cause — #19', () => {

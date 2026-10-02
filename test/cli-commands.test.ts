@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdForget,
+  cmdAbort, cmdAnswer, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
@@ -2050,4 +2050,50 @@ test('a refused claim refuses the dispatch with bd\'s message and sends nothing'
   expect(result.text).toContain('nothing was sent')
   expect(sent).toEqual([])
   expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+})
+
+const mergedInClose = (): Run =>
+  runWithTasks([{ task_id: 't1', phase: 'close', pr: 7, merged_at_ms: 9_000, merge_commit: 'm3rg3' }])
+
+test('close closes the task\'s bead with the merge as its reason, and writes no ledger field', async () => {
+  await saveRun(dir, mergedInClose())
+  const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
+  const asked: Array<[string, string, string, boolean]> = []
+
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async (repoKey, bead, reason, force) => { asked.push([repoKey, bead, reason, force]); return { ok: true } })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('closed hp-1')
+  expect(asked).toEqual([['k', 'hp-1', 'merged in PR #7 (m3rg3)', false]])
+  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('close --force forces; a refusal passes bd\'s words through and offers --force only when not forced', async () => {
+  await saveRun(dir, mergedInClose())
+  const forced: boolean[] = []
+  const refuse = async (_k: string, _b: string, _r: string, force: boolean) => {
+    forced.push(force)
+    return { reason: 'exit' as const, error: 'cannot close hp-1: assignee is "bob", actor is "hpipe"' }
+  }
+
+  const plain = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false }, refuse)
+  const strong = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: true }, refuse)
+
+  expect(forced).toEqual([false, true])
+  expect(plain.ok).toBe(false)
+  expect(plain.text).toContain('assignee is "bob"')
+  expect(plain.text).toContain('--force')
+  expect(strong.text).not.toContain('--force overrides')
+})
+
+test('close refuses a task with no merge recorded, and names the rewind that records it', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'close', merged_at_ms: null }])
+  await saveRun(dir, run)
+  let calls = 0
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: true },
+    async () => { calls++; return { ok: true } })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`rewind ${run.run_id} merge --task t1`)
+  expect(calls).toBe(0)
 })

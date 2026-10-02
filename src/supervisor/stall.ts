@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
+import { beadOutOfSync } from '../lib/bead-desired'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
@@ -339,11 +340,26 @@ export function stallAwaiting(
     }
   }
   if (row.signal === 'closed' && task) {
+    if (task.merged_at_ms === null) {
+      return {
+        short: awaitedFor(task),
+        clause: `No merge is recorded for ${task.task_id}, so the supervisor will not close bead ${task.bead} ` +
+          `and this phase cannot clear: \`${hpipe} rewind ${run.run_id} merge --task ${task.task_id}\` records it.`,
+      }
+    }
+    if (!beadOutOfSync(task)) {
+      return {
+        short: awaitedFor(task),
+        clause: `This phase is waiting on the Beads close of ${task.bead}, which the supervisor retries every ` +
+          'tick. Nothing is needed from you yet.',
+      }
+    }
     return {
       short: awaitedFor(task),
-      clause: `This phase is waiting for the supervisor to close bead ${task.bead}, which it does once ` +
-        `the merge is recorded. If no merge is recorded, \`${hpipe} rewind ${run.run_id} merge --task ` +
-        `${task.task_id}\` records it.`,
+      clause: `The supervisor's Beads calls for ${task.bead} have failed ${task.bead_sync.failures} times; ` +
+        `the last said:\n\n    ${task.bead_sync.last_error}\n\nFix what it names, or close the bead by hand: ` +
+        `\`${hpipe} close --task ${task.task_id}\`. Add \`--force\` only to override bd's close guards, ` +
+        'once you know why they fired.',
     }
   }
   if (row.signal === 'files' && task) {

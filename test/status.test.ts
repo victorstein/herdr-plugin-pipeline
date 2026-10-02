@@ -395,7 +395,7 @@ test('waiting on you is ordered by task id, as the digest footer is', () => {
   const run = mkRun()
   run.tasks = [
     mkTask({ task_id: 't2', phase: 'merge' }),
-    mkTask({ task_id: 't1', phase: 'close' }),
+    mkTask({ task_id: 't1', phase: 'merge' }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   const section = text.slice(text.indexOf('waiting on you:'))

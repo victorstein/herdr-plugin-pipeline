@@ -139,8 +139,6 @@ export async function renderTaskPhasePrompt(
       return renderPrompt(deps.pluginRoot, 'pr-review-quality', common)
     case 'merge':
       return renderPrompt(deps.pluginRoot, 'merge', common)
-    case 'close':
-      return renderPrompt(deps.pluginRoot, 'close', common)
     case 'implement':
       // Re-entry from a red CI needs the failing checks inlined; every other
       // entry gets the standing brief, which points a returning worker at the

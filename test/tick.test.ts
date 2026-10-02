@@ -405,7 +405,7 @@ test('actionFor answers whose move it is, by rung', () => {
     .toBe('needs a human: `hp rewind r1 <phase> --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
   // #95: the same noun phrase the stall probe uses, so the three channels agree.
   expect(at('merge', { pr: 7 })).toBe('YOUR move: waiting for PR #7 to be merged')
-  expect(at('close')).toBe('YOUR move: waiting for bead hp-1 to be closed by the supervisor')
+  expect(at('close')).toBe('nothing for you — the supervisor is driving')
   expect(at('blocked-on-decision')).toBe('YOUR move: waiting for an answer to the open decision')
   expect(at('blocked-on-decision', { pending_answer: 'd1' }))
     .toBe('nothing for you — waiting for its recorded answer to reach the worker')

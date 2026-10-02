@@ -113,7 +113,7 @@ const TIER_TOKENS =
 
 const COMMON_PROMPTS = [
   'research', 'spec', 'spec-review', 'plan', 'plan-review', 'implement', 'ci-red', 'pr-review',
-  'pr-review-intent', 'pr-review-quality', 'merge', 'close',
+  'pr-review-intent', 'pr-review-quality', 'merge',
 ]
 
 function probeRoot(): string {
@@ -140,7 +140,7 @@ test('every task render site carries the tier variables', async () => {
   const deps = { pluginRoot: root, ciDetail: async () => '' }
   const phases: TaskPhase[] = [
     'research', 'spec', 'spec-review', 'plan', 'plan-review', 'implement', 'pr-review',
-    'pr-review-intent', 'pr-review-quality', 'merge', 'close',
+    'pr-review-intent', 'pr-review-quality', 'merge',
   ]
   for (const phase of phases) {
     const task = mkTask({ phase })
