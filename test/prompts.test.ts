@@ -597,3 +597,12 @@ test('the decision prompt has the orchestrator escalate whatever it puts to the 
   expect(text).toContain('--recommend')
   expect(text).toContain('the brief (`{{hpipe}} brief --task {{task_id}}`)')
 })
+
+test('the worker sends out-of-scope work to discover, and the branch review files it', async () => {
+  const brief = prose(await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text())
+  expect(brief).toContain('{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>')
+  expect(brief).toContain('not into this PR')
+  const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
+  expect(review).toContain('{{hpipe}} discoveries')
+  expect(review).toContain('{{hpipe}} discoveries --file')
+})

@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
+import { DISCOVERED_LABEL } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
@@ -1096,6 +1097,96 @@ async function escalate(ctx: Ctx, input: {
 }
 export const cmdEscalate = retryingOnStale(escalate)
 
+/** The worker's way to keep an out-of-scope find out of its PR. No Beads access: the orchestrator files it. */
+async function discover(ctx: Ctx, input: {
+  taskId: string; title: string; bodyFile: string; repoKey: string | null; runId: string | null
+}): Promise<CmdResult> {
+  if (input.title.trim().length === 0) return fail('--title is required')
+  if (input.title.startsWith('--')) {
+    return fail(`--title got a flag where the title belongs: "${input.title}" — the value after --title is missing`)
+  }
+  const bodyPath = resolve(input.bodyFile)
+  if (input.bodyFile.trim().length === 0 || !isReadableFile(bodyPath)) return fail(`--body-file is not a file: ${bodyPath}`)
+
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId,
+    reach: 'unfinished', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+
+  const id = `x${task.discoveries.length + 1}`
+  const dir = join(ctx.stateDir, 'runs', run.session, `${run.run_id}.discoveries`)
+  mkdirSync(dir, { recursive: true })
+  const bodyCopy = join(dir, `${task.task_id}-${id}.md`)
+  copyFileSync(bodyPath, bodyCopy)
+  task.discoveries.push({ id, title: input.title, body_path: bodyCopy, filed_bead: null })
+  await saveRun(ctx.stateDir, run)
+  return ok(`recorded ${task.task_id}/${id}; the orchestrator files it after the run — keep it out of this PR`)
+}
+export const cmdDiscover = retryingOnStale(discover)
+
+function discoveryList(run: Run): string {
+  const lines = run.tasks.flatMap((task) => task.discoveries.map((d) =>
+    `${task.task_id}/${d.id} ${d.filed_bead === null ? 'unfiled' : `filed as ${d.filed_bead}`} — ${d.title} (${d.body_path})`))
+  return lines.length === 0 ? `no discoveries recorded in ${run.run_id}` : lines.join('\n')
+}
+
+/** Saved the moment a bead exists, so a retry finds it filed and files nothing twice. Returns why it was not saved, or null. */
+async function recordFiled(
+  ctx: Ctx, runId: string, taskId: string, discoveryId: string, bead: string,
+): Promise<string | null> {
+  try {
+    await retryOnStaleRun(async () => {
+      const run = await runById(ctx.stateDir, ctx.session, runId)
+      const found = run?.tasks.find((t) => t.task_id === taskId)?.discoveries.find((d) => d.id === discoveryId)
+      if (!run || !found) throw new Error(`${taskId}/${discoveryId} is gone from the ledger`)
+      found.filed_bead = bead
+      await saveRun(ctx.stateDir, run)
+    })
+    return null
+  } catch (error) {
+    if (isUnlandedSave(error)) return 'the ledger kept changing under the save'
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+export type FileDiscovery = RegistrationBeads['create']
+
+export async function cmdDiscoveries(ctx: Ctx, input: {
+  repoKey: string | null; runId: string | null; file: boolean
+}, fileBead: FileDiscovery = cliRegistrationBeads(ctx.stateDir).create): Promise<CmdResult> {
+  const found = await resolveFor(ctx, {
+    runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'finished-if-named',
+  }, '--run <run-id> lists them anyway')
+  if (!found.ok) return found.result
+  const runId = found.value.run_id
+  if (!input.file) return ok(discoveryList(found.value))
+
+  const pending = found.value.tasks.flatMap((task) =>
+    task.discoveries.filter((d) => d.filed_bead === null).map((d) => ({ taskId: task.task_id, discoveryId: d.id })))
+  for (const { taskId, discoveryId } of pending) {
+    const run = await runById(ctx.stateDir, ctx.session, runId)
+    const task = run?.tasks.find((t) => t.task_id === taskId)
+    const current = task?.discoveries.find((d) => d.id === discoveryId)
+    if (!run || !task || !current || current.filed_bead !== null) continue
+    const created = await fileBead(run.repo_key, {
+      title: current.title, body: readFileSync(current.body_path, 'utf8'),
+      labels: [DISCOVERED_LABEL], depsDiscoveredFrom: task.bead,
+    })
+    if (isBdFailure(created)) {
+      const now = (await runById(ctx.stateDir, ctx.session, runId)) ?? run
+      return fail(`${discoveryList(now)}\nfiling ${taskId}/${discoveryId} failed; nothing after it was filed:\n  ${created.error}`)
+    }
+    const unsaved = await recordFiled(ctx, runId, taskId, discoveryId, created.id)
+    if (unsaved !== null) {
+      return fail(`${taskId}/${discoveryId} was filed as ${created.id}, but ${unsaved} — do not file it again`)
+    }
+  }
+  const after = await runById(ctx.stateDir, ctx.session, runId)
+  return ok(discoveryList(after ?? found.value))
+}
+
 async function tier(ctx: Ctx, input: {
   taskId: string; tier: string; why: string; callerPane: string | null
   repoKey: string | null; runId: string | null
@@ -1292,6 +1383,8 @@ const USAGE: Record<string, string[]> = {
   release: ['hpipe release --task <id> [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
   escalate: ['hpipe escalate --task <id> --decision <id> --recommend <text> [--run <run-id>]'],
+  discover: ['hpipe discover --task <id> --title <title> --body-file <path> [--run <run-id>]'],
+  discoveries: ['hpipe discoveries [--file] [--run <run-id>]'],
   answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
   tier: ['hpipe tier --task <id> <light|standard|heavy> --why <text> [--run <run-id>]'],
   resume: ['hpipe resume <run-id>'],
@@ -1307,7 +1400,7 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
@@ -1497,6 +1590,22 @@ async function dispatch(argv: string[]): Promise<number> {
         recommendation: flag(rest, 'recommend') ?? '',
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'discover':
+      out = await cmdDiscover(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        title: flag(rest, 'title') ?? '',
+        bodyFile: flag(rest, 'body-file') ?? '',
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'discoveries':
+      out = await cmdDiscoveries(ctx, {
+        repoKey: repo?.repoKey ?? null, runId: flag(rest, 'run'), file: rest.includes('--file'),
       })
       break
 

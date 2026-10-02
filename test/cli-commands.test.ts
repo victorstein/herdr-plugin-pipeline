@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDispatchDone, cmdEscalate, cmdForget,
+  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, cmdEscalate, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
@@ -2179,4 +2179,88 @@ test('bead show prints the bead bd shows, and passes a failure through', async (
   expect(failed.text).toContain('Error: issue hp-404 not found')
 
   expect((await cmdBeadShow(ctx(), { repoKey: 'k', id: '' })).text).toContain('usage: hpipe bead show <id>')
+})
+
+async function seedWorkingTask(): Promise<Run> {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  await saveRun(dir, run)
+  return run
+}
+
+const discovery = (title: string, body: string) => {
+  const bodyFile = join(repoDir, `${title.replace(/\W+/g, '-')}.md`)
+  writeFileSync(bodyFile, body)
+  return { taskId: 't1', title, bodyFile, repoKey: 'k', runId: null }
+}
+
+test('discover records the work and keeps a copy of its body beside the run', async () => {
+  const run = await seedWorkingTask()
+  const first = await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  const second = await cmdDiscover(ctx(), discovery('Dead helper', 'nothing calls it\n'))
+
+  expect(first.ok).toBe(true)
+  expect(first.text).toContain('t1/x1')
+  expect(second.text).toContain('t1/x2')
+  const task = (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+  expect(task.discoveries.map((d) => [d.id, d.title, d.filed_bead])).toEqual([
+    ['x1', 'Flaky clock test', null], ['x2', 'Dead helper', null],
+  ])
+  const copy = task.discoveries[0]!.body_path
+  expect(copy).toBe(join(dir, 'runs', 'personal', `${run.run_id}.discoveries`, 't1-x1.md'))
+  expect(readFileSync(copy, 'utf8')).toBe('It fails at midnight.\n')
+})
+
+test('discover refuses an empty title or a body that is not a file, recording nothing', async () => {
+  await seedWorkingTask()
+  expect((await cmdDiscover(ctx(), { ...discovery('x', 'b'), title: ' ' })).ok).toBe(false)
+  expect((await cmdDiscover(ctx(), { ...discovery('y', 'b'), bodyFile: join(repoDir, 'nope.md') })).text)
+    .toContain('--body-file is not a file')
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries).toEqual([])
+})
+
+test('discoveries lists each one with whether it is filed', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  const listed = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: false })
+  expect(listed.ok).toBe(true)
+  expect(listed.text).toContain('t1/x1 unfiled — Flaky clock test')
+})
+
+test('discoveries --file files each unfiled one as a discovered bead, once', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  await cmdDiscover(ctx(), discovery('Dead helper', 'nothing calls it\n'))
+  const filed: BeadCreateInput[] = []
+  const fileBead = async (_repoKey: string, input: BeadCreateInput) => {
+    filed.push(input)
+    return { id: `hp-${10 + filed.length}` }
+  }
+
+  const first = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, fileBead)
+  const again = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, fileBead)
+
+  expect(first.ok).toBe(true)
+  expect(first.text).toContain('t1/x1 filed as hp-11 — Flaky clock test')
+  expect(first.text).toContain('t1/x2 filed as hp-12 — Dead helper')
+  expect(again.ok).toBe(true)
+  expect(filed).toEqual([
+    { title: 'Flaky clock test', body: 'It fails at midnight.\n', labels: ['hpipe:discovered'], depsDiscoveredFrom: 'hp-1' },
+    { title: 'Dead helper', body: 'nothing calls it\n', labels: ['hpipe:discovered'], depsDiscoveredFrom: 'hp-1' },
+  ])
+})
+
+test('a failed filing stops there, keeps what was filed, and says which one failed', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('One', 'a\n'))
+  await cmdDiscover(ctx(), discovery('Two', 'b\n'))
+  let calls = 0
+  const result = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, async () => {
+    calls++
+    return calls === 1 ? { id: 'hp-11' } : { reason: 'exit', error: 'Error: database is locked' }
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('filing t1/x2 failed')
+  expect(result.text).toContain('Error: database is locked')
+  const discoveries = (await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries
+  expect(discoveries.map((d) => d.filed_bead)).toEqual(['hp-11', null])
 })

@@ -9,6 +9,14 @@ from the merged PRs — `gh pr list --state merged --search "<this run's issues>
 one's spec and plan under `docs/superpowers/specs/` and `docs/superpowers/plans/`. Those are the
 contracts the work claimed to fulfil.
 
+Before you write the verdict, read what the workers found out of scope:
+
+    {{hpipe}} discoveries
+
+Each line is a bug or a follow-up a worker recorded instead of fixing it in its PR. File them as
+beads with `{{hpipe}} discoveries --file`, which files every unfiled one, each linked to the bead it
+came from; name in the review any you think are not worth doing.
+
 Check specifically what per-task review cannot see: seams between tasks, duplicated abstractions
 introduced independently by two workers, contradictions between what the first task assumed and what
 the last one built, and requirements that every individual PR passed but no PR actually implemented.

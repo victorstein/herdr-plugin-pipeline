@@ -10,6 +10,9 @@ reach you, and `{{hpipe}} brief --task {{task_id}}` prints it again.
 
 Never run `bd` or `bv` yourself.
 
+Out-of-scope bugs and follow-ups you find go to
+`{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>`, not into this PR.
+
 Read `{{agent_file}}` before your first edit — it is the scoped guide for surface `{{surface}}`, and
 the repo's root `CLAUDE.md` outranks it where they conflict. Work only on this surface, only in this
 worktree, only on `{{branch}}`.

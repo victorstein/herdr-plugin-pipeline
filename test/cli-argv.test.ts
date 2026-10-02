@@ -223,6 +223,7 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
 const SUBCOMMANDS = [
   'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
   'decide', 'answer', 'escalate', 'tier', 'resume', 'abort', 'forget', 'close', 'bead', 'next',
+  'discover', 'discoveries',
 ]
 
 test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
