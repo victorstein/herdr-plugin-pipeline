@@ -112,9 +112,28 @@ export function isBdFailure(value: unknown): value is BdFailure {
   return typeof value === 'object' && value !== null && 'reason' in value && 'error' in value
 }
 
-let ownStartTime: Promise<number> | null = null
-const ownStartedAtMs = (): Promise<number> =>
-  (ownStartTime ??= processStartedAtMs(process.pid).then((at) => at ?? Date.now()))
+let ownStartTime: number | null = null
+
+/** `processStartedAtMs` throws, rather than returning null, when `ps` itself cannot be spawned. */
+async function startedAtMsOf(pid: number): Promise<number | null | 'unknown'> {
+  try {
+    return await processStartedAtMs(pid)
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * Null when `ps` fails. No guess stands in for it: a lock stamped with a wrong
+ * start time looks dead to every other process, which would then take it.
+ */
+async function ownStartedAtMs(): Promise<number | null> {
+  if (ownStartTime === null) {
+    const startedAt = await startedAtMsOf(process.pid)
+    ownStartTime = typeof startedAt === 'number' ? startedAt : null
+  }
+  return ownStartTime
+}
 
 function parseJson<T>(text: string): T | null {
   try {
@@ -133,11 +152,16 @@ function jsonError(text: string): string | null {
 
 /**
  * bd 1.3.1 warns on stderr even when it succeeds outside git: a three-line
- * `beads.role` block (every line names `beads.role`) and, on init, the
- * repository-ID line. Its refusals are plain text on stderr after them.
+ * `beads.role` block and, on init, the repository-ID line. Its refusals are
+ * plain text on stderr after them.
  */
-const isBenignWarning = (line: string): boolean =>
-  line.includes('beads.role') || line.startsWith('Warning: could not compute repository ID')
+const BENIGN_WARNING_PREFIXES = [
+  'warning: beads.role not configured',
+  '  Fix: git config beads.role ',
+  '  Or:  git config beads.role ',
+  'Warning: could not compute repository ID',
+]
+const isBenignWarning = (line: string): boolean => BENIGN_WARNING_PREFIXES.some((prefix) => line.startsWith(prefix))
 
 function failureText(out: Bounded): string {
   const stderr = out.stderr.split('\n')
@@ -194,7 +218,7 @@ export class Bd {
     ], (stdout) => {
       const created = parseJson<{ id?: unknown }>(stdout)
       return typeof created?.id === 'string' ? { id: created.id } : null
-    }))
+    }, 'a bead may have been created, so check the store before retrying'))
   }
 
   async show(id: string): Promise<BeadDetail | BdFailure> {
@@ -248,7 +272,7 @@ export class Bd {
     return this.#hold(async () => (existsSync(this.#dirtyPath) ? this.#export() : DONE))
   }
 
-  /** No spawn and no lock: the export is written atomically by bd. */
+  /** No spawn and no lock: bd writes the export through an atomic rename (`cmd/bd/export.go`, `atomicfile`). */
   readExport(): ExportedBead[] {
     let text: string
     try {
@@ -268,7 +292,11 @@ export class Bd {
   }
 
   async #hold<T>(work: () => Promise<T | BdFailure>): Promise<T | BdFailure> {
-    const token = await this.#acquire()
+    const startedAtMs = await ownStartedAtMs()
+    if (startedAtMs === null) {
+      return { reason: 'unavailable', error: 'could not read this process\'s start time from ps, so the Beads lock was not taken' }
+    }
+    const token = await this.#acquire(startedAtMs)
     if (token === null) return { reason: 'busy', error: 'Beads is busy, retry' }
     try {
       if (this.#exportAfterWrites && existsSync(this.#dirtyPath)) await this.#export()
@@ -278,13 +306,19 @@ export class Bd {
     }
   }
 
-  async #write<T>(args: string[], parse: (stdout: string) => T | null): Promise<T | BdFailure> {
+  async #write<T>(
+    args: string[], parse: (stdout: string) => T | null,
+    ifUnparsed = 'it may have taken effect, so check before retrying',
+  ): Promise<T | BdFailure> {
     return this.#hold(async () => {
       const out = await this.#call(args)
       if (isBdFailure(out)) return out
       if (this.#exportAfterWrites) await this.#export()
       else this.#markDirty()
-      return parse(out) ?? { reason: 'output', error: `bd ${args[0]} printed no usable JSON: ${out.trim().slice(0, 200)}` }
+      return parse(out) ?? {
+        reason: 'output',
+        error: `bd ${args[0]} exited 0 but printed no usable JSON; ${ifUnparsed}: ${out.trim().slice(0, 200)}`,
+      }
     })
   }
 
@@ -323,12 +357,12 @@ export class Bd {
     }
   }
 
-  async #acquire(): Promise<string | null> {
+  async #acquire(startedAtMs: number): Promise<string | null> {
     mkdirSync(this.#home, { recursive: true })
     const deadline = Date.now() + this.#options.lockWaitMs
     for (;;) {
       const token = randomUUID()
-      const holder: LockHolder = { pid: process.pid, started_at_ms: await ownStartedAtMs(), token }
+      const holder: LockHolder = { pid: process.pid, started_at_ms: startedAtMs, token }
       if (await writeJsonExclusive(this.#lockPath, holder)) return token
       if (await this.#reclaimFromDeadHolder()) continue
       if (Date.now() >= deadline) return null
@@ -343,7 +377,9 @@ export class Bd {
       removeJsonIf(this.#lockPath, (current) => current === null)
       return true
     }
-    const startedAt = await processStartedAtMs(holder.pid)
+    const startedAt = await startedAtMsOf(holder.pid)
+    // Without ps there is no telling a dead holder from a live one, so it is left be.
+    if (startedAt === 'unknown') return false
     const alive = startedAt !== null && Math.abs(startedAt - holder.started_at_ms) <= START_TIME_SLOP_MS
     if (alive) return false
     removeJsonIf(this.#lockPath, isHolder(holder.token))

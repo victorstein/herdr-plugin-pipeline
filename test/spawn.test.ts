@@ -18,3 +18,18 @@ test('a command that outlives the timeout is killed and says so', async () => {
   expect(out.timedOut).toBe(true)
   expect(Date.now() - started).toBeLessThan(5_000)
 })
+
+test('a timeout kills the descendants that hold the pipes, not just the child', async () => {
+  const started = Date.now()
+  const out = await runBounded(['sh', '-c', 'echo before; sleep 30 & sleep 30'], { timeoutMs: 200 })
+  expect(out.timedOut).toBe(true)
+  expect(out.stdout).toBe('before\n')
+  expect(Date.now() - started).toBeLessThan(3_000)
+})
+
+test('a descendant left holding the pipes after a normal exit does not hold the call open', async () => {
+  const started = Date.now()
+  const out = await runBounded(['sh', '-c', 'echo done; sleep 3 & exit 0'], { timeoutMs: 10_000 })
+  expect(out).toEqual({ code: 0, stdout: 'done\n', stderr: '', timedOut: false })
+  expect(Date.now() - started).toBeLessThan(2_500)
+})

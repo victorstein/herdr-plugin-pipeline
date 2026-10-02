@@ -41,7 +41,7 @@ for (const flag of ['--body-file', '--file', '--reason-file']) {
   const i = argv.indexOf(flag)
   if (i !== -1) out('file: ' + readFileSync(argv[i + 1], 'utf8').trim())
 }
-process.stderr.write('warning: beads.role is not set\\n')
+process.stderr.write('warning: beads.role not configured (GH#2950).\\n')
 process.stdout.write(JSON.stringify(${JSON.stringify(responses)}[argv[3]] ?? {}))
 `)
 }
@@ -103,7 +103,7 @@ test('an update with nothing to change spawns nothing', async () => {
 test('a refusal carries bd\'s JSON error from stdout, ignoring the stderr warning', async () => {
   const refusing = scriptBd(`
 process.stdout.write(JSON.stringify({ error: 'cannot close hp-1: assignee is "bob", actor is "hpipe"' }))
-process.stderr.write('warning: beads.role is not set\\n')
+process.stderr.write('warning: beads.role not configured (GH#2950).\\n')
 process.exit(1)
 `)
   const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin: refusing })
@@ -113,7 +113,7 @@ process.exit(1)
 
 test('with no JSON error the failure is stderr without the beads.role warning', async () => {
   const locked = scriptBd(`
-process.stderr.write('warning: beads.role is not set\\nError: database is locked\\n')
+process.stderr.write('warning: beads.role not configured (GH#2950).\\nError: database is locked\\n')
 process.exit(1)
 `)
   const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin: locked })
@@ -291,4 +291,40 @@ test('readExport parses the issue lines of the export and skips the rest', () =>
   expect(beads[0]?.dependencies?.[0]).toMatchObject({ depends_on_id: 'hp-0', type: 'blocks' })
   expect(beads[0]?.comments?.[0]?.text).toContain('[hpipe t1/d1/asked]')
   expect(new Bd({ stateDir: join(dir, 'none'), slug: SLUG, lockWaitMs: 0 }).readExport()).toEqual([])
+})
+
+test('no temp file outlives a write that bd refuses or that times out', async () => {
+  const refusing = scriptBd(`process.stderr.write('Error: no such bead\\n'); process.exit(1)`)
+  const refused = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin: refusing })
+  expect(await refused.comment('hp-1', 'text')).toEqual({ reason: 'exit', error: 'Error: no such bead' })
+
+  const hanging = scriptBd('await Bun.sleep(10_000)')
+  const timedOut = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, timeoutMs: 200, bin: hanging })
+  const result = await timedOut.close('hp-1', 'merged', { force: false })
+  expect(isBdFailure(result) ? result.reason : 'no failure').toBe('timeout')
+
+  expect(readdirSync(home()).filter((name) => name.startsWith('.hpipe-'))).toEqual([])
+})
+
+test('a create that exits 0 without an id warns that the bead may exist', async () => {
+  const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, exportAfterWrites: false, bin: recordingBd() })
+  const result = await bd.create({ title: 'T', body: 'B', labels: [] })
+  expect(isBdFailure(result) ? result.reason : 'no failure').toBe('output')
+  expect(isBdFailure(result) ? result.error : '').toContain('a bead may have been created')
+})
+
+test('without ps to stamp the lock, Bd takes no lock and spawns nothing', async () => {
+  const bin = recordingBd()
+  const noPs = mkdtempSync(join(dir, 'empty-path-'))
+  const script = `
+import { Bd } from ${JSON.stringify(join(import.meta.dir, '../src/lib/bd'))}
+const result = await new Bd({ stateDir: ${JSON.stringify(dir)}, slug: ${JSON.stringify(SLUG)}, lockWaitMs: 0, bin: ${JSON.stringify(bin)} }).claim('hp-1')
+process.stdout.write(JSON.stringify(result))
+`
+  const child = Bun.spawn([process.execPath, '-e', script], { env: { ...process.env, PATH: noPs }, stdout: 'pipe' })
+  const result = JSON.parse(await new Response(child.stdout).text())
+  await child.exited
+  expect(result.reason).toBe('unavailable')
+  expect(existsSync(join(home(), 'hpipe.lock'))).toBe(false)
+  expect(existsSync(join(dir, 'bd.log'))).toBe(false)
 })
