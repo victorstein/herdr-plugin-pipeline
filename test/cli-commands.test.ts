@@ -3,12 +3,13 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
+  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
 import type { BeadCreateInput, BeadDetail } from '../src/lib/bd'
 import { cmdTask, fakeBeads, openBead } from './helpers/cmd-task'
+import { cmdDispatchTask } from './helpers/cmd-dispatch'
 import { READY_TOOLS } from './helpers/cmd-start'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
@@ -2023,4 +2024,30 @@ test('rewind onto ci forgets the last CI result, so the next round waits for a f
   expect(task?.phase).toBe('ci')
   expect(task?.pr).toBe(5)
   expect(task?.ci).toBeNull()
+})
+
+test('dispatch --task claims the task\'s bead before it sends the brief', async () => {
+  await registerReadyTask()
+  const order: string[] = []
+  const send = async () => { order.push('send'); return { ok: true } }
+
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send,
+    undefined, async (repoKey, bead) => { order.push(`claim ${repoKey} ${bead}`); return { ok: true } })
+
+  expect(result.ok).toBe(true)
+  expect(order).toEqual(['claim k hp-11', 'send'])
+})
+
+test('a refused claim refuses the dispatch with bd\'s message and sends nothing', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send,
+    undefined, async () => ({ reason: 'exit', error: 'hp-11 is already claimed by bob' }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('hp-11 is already claimed by bob')
+  expect(result.text).toContain('nothing was sent')
+  expect(sent).toEqual([])
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
 })

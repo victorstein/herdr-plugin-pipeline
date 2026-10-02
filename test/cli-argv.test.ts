@@ -46,6 +46,7 @@ const BD_RESPONSES: Record<string, unknown> = {
   '--json --actor hpipe show argv-1': [{ id: 'argv-1', ...ARGV_BEAD }],
   '--json --actor hpipe show argv-2': [{ id: 'argv-2', ...ARGV_BEAD, labels: ['pipeline:tier-light'] }],
   '--json --actor hpipe create': { id: 'argv-77' },
+  '--json --actor hpipe update': {},
 }
 const BV_RESPONSES: Record<string, unknown> = { '--version': 'bv v0.25.2\n' }
 
@@ -372,6 +373,7 @@ test('dispatch --task submits the brief through herdr agent prompt and waits for
   const calls = await Bun.file(log).text()
   expect(calls).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
   expect(calls).toContain('--wait --until working --until blocked --timeout')
+  expect(bdCalls(f)).toContain('--json --actor hpipe update argv-1 --claim')
 })
 
 test('dispatch --task carries herdr\'s own error code through a real failure envelope', async () => {

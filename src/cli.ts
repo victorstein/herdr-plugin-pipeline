@@ -2,8 +2,9 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
-  Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead,
+  Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
+import { claimForDispatch } from './lib/bead-claim'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
@@ -613,6 +614,11 @@ export async function cmdShow(ctx: Ctx, input: {
   return ok(`${detail}\n${baseLine(base)}`)
 }
 
+export type ClaimBead = (repoKey: string, bead: string) => Promise<Done | BdFailure>
+
+const cliClaimBead = (stateDir: string): ClaimBead => (repoKey, bead) =>
+  withCliBd(stateDir, repoKey, (bd) => claimForDispatch(bd, bead))
+
 export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unknown>>
 
 /**
@@ -623,7 +629,8 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
  */
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
-}, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane): Promise<CmdResult> {
+}, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
+claim: ClaimBead = cliClaimBead(ctx.stateDir)): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
   // would strand the opposite way, since registration already moved the task past
@@ -668,6 +675,13 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   if (holder) {
     return fail(`${input.paneId} is already ${holder.task_id}'s worker pane — pass ${task.task_id}'s ` +
       'root pane, from `herdr pane list --workspace <its workspace>`')
+  }
+
+  // Before the send: a brief cannot be recalled, and a bead someone else holds
+  // must refuse the dispatch rather than surface later as a reconciler failure.
+  const claimed = await claim(run.repo_key, task.bead)
+  if (isBdFailure(claimed)) {
+    return fail(`bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`)
   }
 
   const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
