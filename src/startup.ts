@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { isBoardLabel, readBoards } from './lib/boards'
+import { BOARD_PANE_TITLE, readBoards, recordedBoardPanes } from './lib/boards'
 import { loadConfig } from './lib/config'
 import { Herdr } from './lib/herdr'
 import { readPid } from './lib/pidfile'
@@ -130,9 +130,10 @@ export async function keepCrashTail(herdr: Herdr, logPath: string, paneId: strin
  * Clears the shell pane `workspace create` opens alongside the supervisor. It must
  * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
  * the workspace, so clearing it at creation time deletes the very workspace the
- * supervisor was about to open into. Boards are spared by label — `Board` before
- * `board.ts` renames itself — and by record, so the supervisor's first tick may
- * open one before this runs.
+ * supervisor was about to open into. A board is spared if it is recorded, or still
+ * labelled plain `Board` because it has only just opened; the supervisor's first
+ * tick may open one before this runs. A renamed board no record names is a ghost
+ * a herdr restart brought back under a new id.
  */
 export async function clearStrayPanes(
   herdr: Herdr, workspaceId: string, keep: ReadonlySet<string> = new Set(),
@@ -142,7 +143,7 @@ export async function clearStrayPanes(
 
   const closed: string[] = []
   for (const pane of panes) {
-    if (pane.label === SUPERVISOR_LABEL || isBoardLabel(pane.label) || keep.has(pane.pane_id)) continue
+    if (pane.label === SUPERVISOR_LABEL || pane.label === BOARD_PANE_TITLE || keep.has(pane.pane_id)) continue
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
@@ -199,9 +200,7 @@ async function main(): Promise<void> {
       return
     }
 
-    const boardPanes = Object.values(await readBoards(stateDir, session))
-      .map((board) => board.pane_id).filter((id): id is string => id !== null)
-    const strays = await clearStrayPanes(herdr, workspaceId, new Set(boardPanes))
+    const strays = await clearStrayPanes(herdr, workspaceId, recordedBoardPanes(await readBoards(stateDir, session)))
     if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
   } finally {
     const toolsWarning = toolsLine(await toolsChecked)

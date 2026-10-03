@@ -88,6 +88,20 @@ export function refreshingIdleReader(
   }
 }
 
+/** A failing step is logged under its own name and never keeps the steps after it from running. */
+export async function eachIsolated(
+  steps: ReadonlyArray<readonly [string, () => Promise<void>]>,
+  logError: (message: string, error: unknown) => void = console.error,
+): Promise<void> {
+  for (const [name, step] of steps) {
+    try {
+      await step()
+    } catch (error) {
+      logError(`[pipeline] ${name} failed this tick:`, error)
+    }
+  }
+}
+
 /**
  * Takes the session's pid file, or says another supervisor holds it. Only the
  * winner closes the dead supervisor panes beside its own, so two supervisors
@@ -419,11 +433,11 @@ async function main(): Promise<void> {
       }
 
       // Its own read, because the runs above may have been saved since this tick read them.
-      try {
-        const syncRuns = (await listRuns(stateDir, session))
-          .filter(isCurrentSchemaRun)
-          .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key))
-        await syncBeads(syncRuns, {
+      const syncRuns = (await listRuns(stateDir, session))
+        .filter(isCurrentSchemaRun)
+        .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key))
+      await eachIsolated([
+        ['beads sync', () => syncBeads(syncRuns, {
           bdFor: (slug) => new Bd({ stateDir, slug, lockWaitMs: 0, exportAfterWrites: false }),
           hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
           now: Date.now,
@@ -432,18 +446,17 @@ async function main(): Promise<void> {
           persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
           log: (message) => console.error(`[pipeline] ${message}`),
           lockNotices: beadLockNotices,
-        })
-        const pipelineWorkspace = await readWorkspaceId(stateDir, session)
-        if (pipelineWorkspace !== null) {
+        })],
+        ['board upkeep', async () => {
+          const pipelineWorkspace = await readWorkspaceId(stateDir, session)
+          if (pipelineWorkspace === null) return
           await syncBoards(syncRuns, {
             stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
             hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
             herdr,
           })
-        }
-      } catch (error) {
-        console.error('[pipeline] beads sync failed this tick:', error)
-      }
+        }],
+      ])
 
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.

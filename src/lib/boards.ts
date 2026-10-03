@@ -27,8 +27,18 @@ export function boardLabel(slug: string): string {
   return `${BOARD_PANE_TITLE}: ${slug.slice(0, -SLUG_HASH_SUFFIX)} ${slug.slice(-(SLUG_HASH_SUFFIX - 1))}`
 }
 
-export function isBoardLabel(label: string | null | undefined): boolean {
-  return label === BOARD_PANE_TITLE || (label ?? '').startsWith(`${BOARD_PANE_TITLE}: `)
+/** A board that has started and renamed itself; one still labelled plain `Board` has not got that far. */
+export function isRenamedBoardLabel(label: string | null | undefined): boolean {
+  return (label ?? '').startsWith(`${BOARD_PANE_TITLE}: `)
+}
+
+export function sameBoard(a: BoardRecord | undefined, b: BoardRecord | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return a.pane_id === b.pane_id && a.shell_pid === b.shell_pid && a.opened_at_ms === b.opened_at_ms
+}
+
+export function recordedBoardPanes(boards: BoardRegistry): Set<string> {
+  return new Set(Object.values(boards).map((board) => board.pane_id).filter((id): id is string => id !== null))
 }
 
 export async function readBoards(stateDir: string, session: string): Promise<BoardRegistry> {
@@ -36,13 +46,14 @@ export async function readBoards(stateDir: string, session: string): Promise<Boa
 }
 
 /** The supervisor and each board's own process both write here, so every change is read-modify-written under a lock. */
-export async function updateBoards(
-  stateDir: string, session: string, change: (boards: BoardRegistry) => void,
-): Promise<void> {
+export async function updateBoards<T>(
+  stateDir: string, session: string, change: (boards: BoardRegistry) => T,
+): Promise<T> {
   const path = boardsPath(stateDir, session)
-  await withFileLock(path, async () => {
+  return withFileLock(path, async () => {
     const boards = (await readJson<BoardRegistry>(path)) ?? {}
-    change(boards)
+    const outcome = change(boards)
     await writeJson(path, boards)
+    return outcome
   })
 }

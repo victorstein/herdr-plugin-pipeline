@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
-import { claimSupervisor } from '../src/supervisor/main'
+import { claimSupervisor, eachIsolated } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
 
 let dir: string
@@ -105,4 +105,17 @@ test('the reopen action opens nothing while a supervisor is live — #97', async
   expect(await proc.exited, err).toBe(0)
   expect(out).toContain('already running')
   expect(existsSync(join(dir, 'calls.log'))).toBe(false)
+})
+
+test('a failing beads sync neither skips board upkeep nor takes the blame for a board failure', async () => {
+  const ran: string[] = []
+  const logged: string[] = []
+  await eachIsolated([
+    ['beads sync', async () => { ran.push('beads'); throw new Error('bd') }],
+    ['board upkeep', async () => { ran.push('boards'); throw new Error('herdr') }],
+  ], (message) => { logged.push(message) })
+  expect(ran).toEqual(['beads', 'boards'])
+  expect(logged).toEqual([
+    '[pipeline] beads sync failed this tick:', '[pipeline] board upkeep failed this tick:',
+  ])
 })

@@ -420,8 +420,10 @@ task's `pr`) instead of `gh pr list --search "<issues>"`.
 
 **Open.** `herdr plugin pane open --plugin <id> --entrypoint board --placement tab --no-focus
 --workspace <pipeline workspace id> --cwd $STATE/beads/<slug> --env HPIPE_BEADS_SLUG=<slug>`.
-`src/board.ts` renames its own pane (`HERDR_PANE_ID`) to `Board: <basename> <hash6>`, records
-`{slug: {pane_id, shell_pid}}` in `$STATE/boards.<session>.json`, then spawns `bv --db
+The open's output carries the new pane id, which the supervisor records at once. `src/board.ts`
+records `{slug: {pane_id, shell_pid}}` in `$STATE/boards.<session>.json`, then renames its own pane
+(`HERDR_PANE_ID`) to `Board: <basename> <hash6>` — record first, so a renamed board is always
+recorded; one that cannot record itself keeps the plain `Board` label and still runs bv — then spawns `bv --db
 $STATE/beads/<slug>/.beads/issues.jsonl` (with the §1 env and `BV_NO_UPDATE_CHECK=1`,
 `BV_NO_GITIGNORE=1`) as a child with inherited stdio and exits with its code. If `bv` is missing it
 prints `brew install dicklesworthstone/tap/bv` and exits non-zero, dropping to the shell.
@@ -433,11 +435,16 @@ live (not `done`) v3 run in this session:
   their labels), gets its pane closed if present and a fresh one opened;
 - a recorded board whose slug has no live run is closed and unrecorded.
 
-**Cleanup.** `clearStrayPanes` (`startup.ts:128-139`) spares panes labelled exactly `Board` (just
-opened, not yet renamed), labelled `Board: …`, or recorded in `boards.<session>.json`. The
-supervisor's first tick can run before `clearStrayPanes` (`startup.ts:177-189`); with this
-exemption that ordering no longer matters. Ghost boards are handled by the pid rule above, so
-`reapGhostPanes` is unchanged. An **Open board** action (pattern of `src/actions/supervisor.ts:21-30`)
+**Cleanup.** `clearStrayPanes` (`startup.ts:128-139`) and the supervisor's tick spare only panes
+recorded in `boards.<session>.json` and panes labelled exactly `Board` (just opened, not yet
+renamed). A pane in the pipeline workspace labelled `Board: …` that no record names is a ghost — a
+herdr restart brings panes back under new ids — and is closed: by `clearStrayPanes` at startup, and
+by the tick, which lists the panes before reading the registry so a board recording itself
+concurrently is never mistaken for one. Only panes whose label starts with `Board: ` are touched. A
+board whose close fails keeps its record and is retried next tick. The supervisor's first tick can
+run before `clearStrayPanes` (`startup.ts:177-189`); with these exemptions that ordering no longer
+matters. Ghosts that keep a recorded pane id are handled by the pid rule above, so `reapGhostPanes`
+is unchanged. An **Open board** action (pattern of `src/actions/supervisor.ts:21-30`)
 forces a reopen.
 
 **Read-only by construction.** `--db <file>` keeps bv off Dolt. The TUI's `O` edit path calls `br`;

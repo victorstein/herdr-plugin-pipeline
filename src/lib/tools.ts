@@ -8,7 +8,7 @@ const VERSION_CHECK_TIMEOUT_MS = 10_000
 
 /** Not config keys: the CLI loads no config, and two processes reading different bins would let two bd versions write one store. */
 export const bdBin = (): string => process.env.BD_BIN ?? 'bd'
-export const bvBin = (): string => process.env.BV_BIN ?? 'bv'
+export const bvBin = (env: Record<string, string | undefined> = process.env): string => env.BV_BIN ?? 'bv'
 
 export type ToolCheck =
   | { state: 'ok'; version: string }
