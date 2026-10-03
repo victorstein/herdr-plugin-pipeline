@@ -636,7 +636,7 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
-claim: ClaimBead = cliClaimBead(ctx.stateDir)): Promise<CmdResult> {
+  claim: ClaimBead = cliClaimBead(ctx.stateDir)): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
   // would strand the opposite way, since registration already moved the task past
@@ -1068,6 +1068,7 @@ async function escalate(ctx: Ctx, input: {
   taskId: string; decisionId: string; recommendation: string
   repoKey: string | null; runId: string | null
 }): Promise<CmdResult> {
+  if (input.decisionId.trim().length === 0) return fail('--decision is required')
   if (input.recommendation.trim().length === 0) {
     return fail('--recommend is required: the human gets your recommendation beside the worker\'s')
   }
@@ -1087,14 +1088,18 @@ async function escalate(ctx: Ctx, input: {
     return fail(`task ${task.task_id} is not blocked on a decision (phase: ${task.phase})`)
   }
   if (decision.escalated_at !== null) {
-    return ok(`decision ${decision.id} on ${task.task_id} is already with the human; nothing changed`)
+    const kept = decision.orchestrator_recommendation !== input.recommendation
+      ? `; the original recommendation was kept: ${decision.orchestrator_recommendation ?? '(none given)'}`
+      : ''
+    return ok(`decision ${decision.id} on ${task.task_id} is already with the human; nothing changed${kept}`)
   }
 
   decision.escalated_at = Date.now()
   decision.orchestrator_recommendation = input.recommendation
   await saveRun(ctx.stateDir, run)
   return ok(`decision ${decision.id} on ${task.task_id} is now with the human; its bead shows blocked until ` +
-    `\`${hpipeCommand(ctx.pluginRoot)} answer --task ${task.task_id} --decision ${decision.id} --by human\` records their ruling`)
+    `\`${hpipeCommand(ctx.pluginRoot)} answer --task ${task.task_id} --decision ${decision.id} --answer "<their ruling>" --by human\` ` +
+    'records their ruling')
 }
 export const cmdEscalate = retryingOnStale(escalate)
 

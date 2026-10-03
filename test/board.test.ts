@@ -157,6 +157,15 @@ test('no Beads store, no board', async () => {
   expect(calls).toEqual([])
 })
 
+test('a freshly recorded board missing from the pane list is booting, not dead, until its grace runs out', async () => {
+  await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: 'w9:p7', shell_pid: null, opened_at_ms: 99_000 } })
+  const { herdr, calls } = fakeHerdr([])
+  await syncBoards([runIn('execute')], deps(herdr))
+  expect(calls).toEqual([])
+  await syncBoards([runIn('execute')], deps(herdr, { now: () => 129_001 }))
+  expect(calls).toEqual([OPEN()])
+})
+
 test('a board is labelled with its repo and hash, and only that reads as a renamed board', () => {
   expect(boardLabel('meter-abc123')).toBe('Board: meter abc123')
   expect(isRenamedBoardLabel('Board: meter abc123')).toBe(true)

@@ -56,10 +56,11 @@ export async function openBoard(
 }
 
 async function isLive(board: BoardRecord, listed: ReadonlySet<string>, deps: BoardDeps): Promise<boolean> {
-  if (board.pane_id !== null && !listed.has(board.pane_id)) return false
-  if (board.pane_id === null || board.shell_pid === null) {
-    return deps.now() - board.opened_at_ms < BOARD_OPEN_GRACE_MS
-  }
+  const booting = deps.now() - board.opened_at_ms < BOARD_OPEN_GRACE_MS
+  // The action can open and record a board between this tick's pane list and its
+  // registry read, so a fresh record of an unlisted pane is one still booting.
+  if (board.pane_id !== null && !listed.has(board.pane_id)) return booting
+  if (board.pane_id === null || board.shell_pid === null) return booting
   const shellPid = await deps.herdr.paneShellPid(board.pane_id)
   // Unknown is not dead: closing a pane that cannot be identified could close a live board.
   return shellPid === undefined || shellPid === board.shell_pid

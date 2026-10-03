@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
-import { claimSupervisor, eachIsolated } from '../src/supervisor/main'
+import { claimSupervisor, eachIsolated, sharedRead } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
 
 let dir: string
@@ -115,6 +115,20 @@ test('a failing beads sync neither skips board upkeep nor takes the blame for a 
     ['board upkeep', async () => { ran.push('boards'); throw new Error('herdr') }],
   ], (message) => { logged.push(message) })
   expect(ran).toEqual(['beads', 'boards'])
+  expect(logged).toEqual([
+    '[pipeline] beads sync failed this tick:', '[pipeline] board upkeep failed this tick:',
+  ])
+})
+
+test('a run read that fails skips only the steps reading it, and is attempted once per tick', async () => {
+  let reads = 0
+  const runs = sharedRead(async () => { reads++; throw new Error('runs dir unreadable') })
+  const logged: string[] = []
+  await eachIsolated([
+    ['beads sync', async () => { await runs() }],
+    ['board upkeep', async () => { await runs() }],
+  ], (message) => { logged.push(message) })
+  expect(reads).toBe(1)
   expect(logged).toEqual([
     '[pipeline] beads sync failed this tick:', '[pipeline] board upkeep failed this tick:',
   ])

@@ -2127,6 +2127,7 @@ test('escalate hands the open decision to the human with the orchestrator\'s rec
   const result = await cmdEscalate(ctx(), escalation())
   expect(result.ok).toBe(true)
   expect(result.text).toContain('d1 on t1 is now with the human')
+  expect(result.text).toContain('answer --task t1 --decision d1 --answer "<their ruling>" --by human')
   const task = await savedTask()
   expect(task.decisions[0]!.escalated_at).toBeGreaterThan(0)
   expect(task.decisions[0]!.orchestrator_recommendation).toBe('sqlite, for the tests')
@@ -2136,6 +2137,9 @@ test('escalate hands the open decision to the human with the orchestrator\'s rec
 test('escalate refuses a bare escalation, an unknown decision, and a task not blocked on one', async () => {
   await seedAskedDecision()
   expect((await cmdEscalate(ctx(), escalation({ recommendation: ' ' }))).text).toContain('--recommend is required')
+  const noDecision = await cmdEscalate(ctx(), escalation({ decisionId: '' }))
+  expect(noDecision.ok).toBe(false)
+  expect(noDecision.text).toContain('--decision is required')
   expect((await cmdEscalate(ctx(), escalation({ decisionId: 'd9' }))).text).toContain('no such decision: d9')
   expect((await savedTask()).decisions[0]!.escalated_at).toBeNull()
 
@@ -2150,7 +2154,16 @@ test('a second escalate changes nothing', async () => {
   const again = await cmdEscalate(ctx(), escalation({ recommendation: 'something else' }))
   expect(again.ok).toBe(true)
   expect(again.text).toContain('already with the human')
+  expect(again.text).toContain('the original recommendation was kept')
   expect((await savedTask()).decisions[0]).toMatchObject({ escalated_at: first, orchestrator_recommendation: 'sqlite, for the tests' })
+})
+
+test('a repeated escalate with the same recommendation does not mention keeping one', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  const again = await cmdEscalate(ctx(), escalation())
+  expect(again.text).toContain('already with the human')
+  expect(again.text).not.toContain('recommendation was kept')
 })
 
 test('an answer by the human ends the escalation', async () => {

@@ -89,6 +89,15 @@ export function refreshingIdleReader(
 }
 
 /** A failing step is logged under its own name and never keeps the steps after it from running. */
+/**
+ * One read shared by the steps that call it, made by the first of them: inside
+ * `eachIsolated`, a read that fails fails only the steps that need it.
+ */
+export function sharedRead<T>(read: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined
+  return () => (pending ??= read())
+}
+
 export async function eachIsolated(
   steps: ReadonlyArray<readonly [string, () => Promise<void>]>,
   logError: (message: string, error: unknown) => void = console.error,
@@ -433,11 +442,11 @@ async function main(): Promise<void> {
       }
 
       // Its own read, because the runs above may have been saved since this tick read them.
-      const syncRuns = (await listRuns(stateDir, session))
+      const syncRuns = sharedRead(async () => (await listRuns(stateDir, session))
         .filter(isCurrentSchemaRun)
-        .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key))
+        .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key)))
       await eachIsolated([
-        ['beads sync', () => syncBeads(syncRuns, {
+        ['beads sync', async () => syncBeads(await syncRuns(), {
           bdFor: (slug) => new Bd({ stateDir, slug, lockWaitMs: 0, exportAfterWrites: false }),
           hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
           now: Date.now,
@@ -450,7 +459,7 @@ async function main(): Promise<void> {
         ['board upkeep', async () => {
           const pipelineWorkspace = await readWorkspaceId(stateDir, session)
           if (pipelineWorkspace === null) return
-          await syncBoards(syncRuns, {
+          await syncBoards(await syncRuns(), {
             stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
             hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
             herdr,
