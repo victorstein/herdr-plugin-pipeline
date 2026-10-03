@@ -205,8 +205,8 @@ In `src/lib/types.ts`:
   registration. It is the worker's brief for the life of the run; later edits to the bead do not
   reach a running task.
 - New `Task.bead_closed_at_ms: number | null` (§8).
-- New `Task.bead_sync: { failures: number, last_error: string | null, last_ok_at_ms: number | null }`
-  — `failures` is monotone.
+- New `Task.bead_sync: { failures: number, streak: number, last_error: string | null, last_ok_at_ms: number | null }`
+  — `failures` is monotone; `streak` counts failures since the last converged write.
 - New `Task.discoveries: { id, title, body_path, filed_bead: string | null }[]` (§7).
 - New `Decision.escalated_at: number | null` (§6).
 - `Run.schema_version` → 3 (`src/lib/ledger.ts:40`); `runForRepo` (`ledger.ts:349-361`) ignores v2
@@ -324,14 +324,19 @@ idempotent against the desired state, so a crash at any point simply recomputes 
 tick. Comments are idempotent through their marker: the reconciler posts one only when the export
 shows no comment carrying it.
 
-**Budget.** The pass stops after 2 s of wall time or at the first lock it cannot take, and resumes
-next tick. The lock is per call (§2), so a CLI command waits at most one call. One export closes
-the pass. A registration burst therefore spreads over a few ticks instead of stalling one.
+**Budget.** The pass stops after 2 s of wall time, checked before each repo's export refresh and
+before each call, and resumes next tick. A lock it cannot take ends only that repo's share of the
+pass; the next repo still runs. Each pass starts one repo later than the last, so a repo whose
+calls use up the budget every tick cannot starve the others. The supervisor's `bd` calls time out
+after 5 s, not the CLI's 30 s, so one hung `bd` cannot hold the serial tick for long. The lock is
+per call (§2), so a CLI command waits at most one call. One export per repo closes the pass. A
+registration burst therefore spreads over a few ticks instead of stalling one.
 
-**Failures.** A failed call increments `task.bead_sync.failures` (monotone), stores `last_error`,
-and moves on to the next task; it never blocks phase advancement except through the close row
-(§8). `hpipe status` shows any task whose bead has been out of sync for more than 5 failures, with
-`last_error`. The reconciler's ledger writes (`bead_sync`, `bead_closed_at_ms`) are saved with
+**Failures.** A failed call increments `task.bead_sync.failures` (monotone) and `streak`, stores
+`last_error`, and moves on to the next task; it never blocks phase advancement except through the
+close row (§8). A converged write resets `streak` and clears `last_error`. A bead is out of sync
+once `streak` reaches 5 with `last_error` standing, so transient failures spread over a run's life
+never add up to an alert; `hpipe status` shows such a task with `last_error`. The reconciler's ledger writes (`bead_sync`, `bead_closed_at_ms`) are saved with
 `saveOrReapply` as replayable effects.
 
 **Why races are gone.** `resume` after `abort`, a rewind out of `failed`, a re-dispatch: each
@@ -396,7 +401,7 @@ stale close can outlive a rewind.
 clause (`src/supervisor/stall.ts:341-352`, rewritten) reads the task:
 - `merged_at_ms === null` (a rewind straight into `close`): "no merge recorded — rewind into
   `merge`", as today.
-- `bead_sync.failures < 5`: "waiting on the Beads close".
+- `bead_sync.streak < 5`: "waiting on the Beads close".
 - otherwise: `last_error` verbatim, and **`hpipe close --task tN [--force]`**, which runs `Bd.close`
   synchronously (forced only with `--force`). The next pass sees it closed and sets
   `bead_closed_at_ms`; a forced close is never undone, because desired is `closed` too.
@@ -457,8 +462,8 @@ is one keypress away (`b`).
 |---|---|
 | `bd` missing or < 1.3.1 | `start` refuses; `task` / `dispatch` / `bead show` fail with the version error; `status` shows `tools:` |
 | synchronous create / show / claim fails | the command fails with bd's message; nothing is registered or dispatched |
-| a reconciler call fails | `bead_sync.failures`/`last_error` recorded; next task proceeds; retried next tick; shown in `status` past 5; blocks only the close row |
-| close keeps failing | stall clause at 5 failures → `hpipe close --task tN [--force]` with bd's error verbatim |
+| a reconciler call fails | `bead_sync.failures`/`streak`/`last_error` recorded; next task proceeds; retried next tick; shown in `status` at 5 in a row; blocks only the close row |
+| close keeps failing | stall clause at 5 consecutive failures → `hpipe close --task tN [--force]` with bd's error verbatim |
 | CLI cannot get the lock in 10 s | "Beads is busy, retry" (at most one call ahead of it) |
 | supervisor cannot get the lock | ends this tick's pass; resumes next tick |
 | `bd` hangs | killed at 30 s → `BdFailure{timeout}` |

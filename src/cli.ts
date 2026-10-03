@@ -476,7 +476,7 @@ async function registerTask(
       verdicts: {},
     },
     merged_at_ms: null, merge_commit: null, bead_closed_at_ms: null,
-    bead_sync: { failures: 0, last_error: null, last_ok_at_ms: null },
+    bead_sync: { failures: 0, streak: 0, last_error: null, last_ok_at_ms: null },
     discoveries: [], passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: input.notes,
     tier: chosen.tier,

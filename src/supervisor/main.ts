@@ -19,7 +19,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
-import { SYNC_BUDGET_MS, syncBeads } from './beads-sync'
+import { SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { syncBoards } from './boards'
 import {
   deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
@@ -155,6 +155,7 @@ async function main(): Promise<void> {
 
   const session = sessionKey()
   const beadLockNotices = new Map<string, string>()
+  const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
   const claimed = await claimSupervisor(stateDir, herdr, {
     pid: process.pid,
@@ -447,7 +448,9 @@ async function main(): Promise<void> {
         .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key)))
       await eachIsolated([
         ['beads sync', async () => syncBeads(await syncRuns(), {
-          bdFor: (slug) => new Bd({ stateDir, slug, lockWaitMs: 0, exportAfterWrites: false }),
+          bdFor: (slug) => new Bd({
+            stateDir, slug, lockWaitMs: 0, exportAfterWrites: false, timeoutMs: SYNC_BD_TIMEOUT_MS,
+          }),
           hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
           now: Date.now,
           budgetMs: SYNC_BUDGET_MS,
@@ -455,6 +458,7 @@ async function main(): Promise<void> {
           persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
           log: (message) => console.error(`[pipeline] ${message}`),
           lockNotices: beadLockNotices,
+          slugCursor: beadSyncCursor,
         })],
         ['board upkeep', async () => {
           const pipelineWorkspace = await readWorkspaceId(stateDir, session)

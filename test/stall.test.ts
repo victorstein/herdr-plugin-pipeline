@@ -984,7 +984,7 @@ test('a close row with no merge recorded names the rewind into merge — #19', (
 
 test('a close row the reconciler is still retrying says so and asks for nothing', () => {
   const run = runWithTask({
-    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 2, last_error: 'Error: database is locked', last_ok_at_ms: null },
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 6, streak: 2, last_error: 'Error: database is locked', last_ok_at_ms: 1 },
   })
   const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
   expect(a.clause).toContain('waiting on the Beads close of hp-1')
@@ -994,11 +994,11 @@ test('a close row the reconciler is still retrying says so and asks for nothing'
 test('a close row past five failures quotes bd verbatim and names hpipe close and --force', () => {
   const refusal = 'cannot close hp-1: assignee is "bob", actor is "hpipe"'
   const run = runWithTask({
-    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 5, last_error: refusal, last_ok_at_ms: null },
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 5, streak: 5, last_error: refusal, last_ok_at_ms: null },
   })
   const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
   expect(a.clause).toContain(refusal)
-  expect(a.clause).toContain('5 of the supervisor\'s Beads calls for hp-1 have failed so far')
+  expect(a.clause).toContain('The last 5 of the supervisor\'s Beads calls for hp-1 have failed in a row')
   expect(a.clause).toContain('`hp close --task t1`')
   expect(a.clause).toContain('`--force`')
 })

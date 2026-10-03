@@ -758,11 +758,11 @@ test('a tools problem is printed right under the supervisor line, and nothing wh
   expect(formatStatus([], { state: 'live', pid: 1 }, 'personal', HP)).not.toContain('tools:')
 })
 
-test('a bead out of sync for five failed calls is flagged with bd\'s last error', () => {
+test('a bead out of sync for five consecutive failed calls is flagged with bd\'s last error', () => {
   const run = mkRun()
-  run.tasks = [mkTask({ phase: 'implement', bead_sync: { failures: 5, last_error: 'Error: database is locked', last_ok_at_ms: null } })]
+  run.tasks = [mkTask({ phase: 'implement', bead_sync: { failures: 7, streak: 5, last_error: 'Error: database is locked', last_ok_at_ms: null } })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP))
-    .toContain('⚠ t1 bead hp-1 is out of sync after 5 failed Beads calls: Error: database is locked')
+    .toContain('⚠ t1 bead hp-1 is out of sync after 5 consecutive failed Beads calls: Error: database is locked')
 })
 
 test('a decision put to the human is listed under waiting on you with the command that records the ruling', () => {

@@ -278,8 +278,8 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
 
   for (const task of run.tasks) {
     if (beadOutOfSync(task)) {
-      lines.push(`  ⚠ ${task.task_id} bead ${task.bead} is out of sync after ${task.bead_sync.failures} ` +
-        `failed Beads calls: ${task.bead_sync.last_error}`)
+      lines.push(`  ⚠ ${task.task_id} bead ${task.bead} is out of sync after ${task.bead_sync.streak} ` +
+        `consecutive failed Beads calls: ${task.bead_sync.last_error}`)
     }
 
     const open = openDecisionFor(task)

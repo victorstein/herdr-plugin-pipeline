@@ -138,9 +138,11 @@ export interface BeadBrief {
   captured_at_ms: number
 }
 
-/** `failures` is monotone; a converged write clears `last_error`. */
+/** `failures` is monotone; a converged write clears `last_error` and resets `streak`. */
 export interface BeadSync {
   failures: number
+  /** Failures since the last converged write: what "out of sync" is judged on. */
+  streak: number
   last_error: string | null
   last_ok_at_ms: number | null
 }

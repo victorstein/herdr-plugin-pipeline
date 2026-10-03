@@ -46,7 +46,7 @@ export function commentMarker(taskId: string, decisionId: string, kind: 'asked' 
 }
 
 export function beadOutOfSync(task: Task): boolean {
-  return task.bead_sync.failures >= BEAD_SYNC_ALERT_FAILURES && task.bead_sync.last_error !== null
+  return task.bead_sync.streak >= BEAD_SYNC_ALERT_FAILURES && task.bead_sync.last_error !== null
 }
 
 function dependencyBeads(task: Task, run: Run): string[] {

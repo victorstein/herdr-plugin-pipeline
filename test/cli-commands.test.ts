@@ -164,7 +164,7 @@ test('task registration records the bead and its brief, and seeds artifact paths
   expect(task?.bead).toBe('hp-210')
   expect(task?.brief).toMatchObject({ title: 'Bead hp-210', description: 'What hp-210 asks for.', acceptance: 'hp-210 is done.' })
   expect(task?.bead_closed_at_ms).toBeNull()
-  expect(task?.bead_sync).toEqual({ failures: 0, last_error: null, last_ok_at_ms: null })
+  expect(task?.bead_sync).toEqual({ failures: 0, streak: 0, last_error: null, last_ok_at_ms: null })
   expect(task?.discoveries).toEqual([])
   expect(task?.notes).toBe('land first')
   expect(task?.artifacts.research).toContain('hp-210')

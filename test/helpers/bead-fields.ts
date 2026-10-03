@@ -14,7 +14,7 @@ export function beadTaskFields(): {
       acceptance: 'The tile reads Bar.', labels: [], captured_at_ms: 0,
     },
     bead_closed_at_ms: null,
-    bead_sync: { failures: 0, last_error: null, last_ok_at_ms: null },
+    bead_sync: { failures: 0, streak: 0, last_error: null, last_ok_at_ms: null },
     discoveries: [],
   }
 }

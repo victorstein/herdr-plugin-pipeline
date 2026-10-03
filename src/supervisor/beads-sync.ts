@@ -6,6 +6,11 @@ import type { RunEffect } from '../lib/ledger'
 import type { Run, Task } from '../lib/types'
 
 export const SYNC_BUDGET_MS = 2_000
+/**
+ * The budget is only checked between calls, so a hung bd would hold the serial
+ * tick for its whole timeout; the CLI's 30 s is too long for that.
+ */
+export const SYNC_BD_TIMEOUT_MS = 5_000
 
 export type BeadCall =
   | { kind: 'reopen' }
@@ -33,6 +38,11 @@ export interface SyncDeps {
    * could not be refreshed), kept across passes so a lasting problem is reported once.
    */
   lockNotices: Map<string, string>
+  /**
+   * Which repo the next pass starts at. It moves on every pass, so a repo whose
+   * calls use up the budget each tick cannot starve the repos after it.
+   */
+  slugCursor: { index: number }
 }
 
 export function closeReason(task: Task): string {
@@ -94,11 +104,13 @@ const onTask = (taskId: string, change: (task: Task) => void): RunEffect => (run
 }
 
 export const recordSyncFailure = (taskId: string, error: string): RunEffect => onTask(taskId, (task) => {
-  task.bead_sync = { ...task.bead_sync, failures: task.bead_sync.failures + 1, last_error: error }
+  // A run file written before `streak` existed has none.
+  const { failures, streak } = task.bead_sync
+  task.bead_sync = { ...task.bead_sync, failures: failures + 1, streak: (streak ?? 0) + 1, last_error: error }
 })
 
 export const recordSyncOk = (taskId: string, at: number): RunEffect => onTask(taskId, (task) => {
-  task.bead_sync = { ...task.bead_sync, last_error: null, last_ok_at_ms: at }
+  task.bead_sync = { ...task.bead_sync, streak: 0, last_error: null, last_ok_at_ms: at }
 })
 
 /** Only after a recorded merge: a bead a human closed by hand must not let an unmerged task tear down. */
@@ -156,11 +168,18 @@ function groupBySlug(runs: readonly Run[]): Map<string, Run[]> {
   return bySlug
 }
 
+function rotated<T>(items: readonly T[], start: number): T[] {
+  if (items.length === 0) return []
+  const offset = start % items.length
+  return [...items.slice(offset), ...items.slice(0, offset)]
+}
+
 /**
  * Converges every bead to the state its task's ledger implies. Runs after the
  * advance loop over every run file in the session, `done` and aborted ones
- * included, since their beads still need releasing. A lock it cannot take or the
- * time budget ends the pass; what is left is recomputed next tick.
+ * included, since their beads still need releasing. A lock it cannot take ends
+ * that repo's share of the pass and the time budget ends the whole pass; what is
+ * left is recomputed next tick.
  */
 export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<void> {
   const started = deps.now()
@@ -204,9 +223,13 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     }
   }
 
-  let stopped = false
-  for (const [slug, slugRuns] of groupBySlug(runs)) {
-    if (stopped) break
+  const bySlug = groupBySlug(runs)
+  const slugs = rotated([...bySlug.keys()].sort(), deps.slugCursor.index)
+  deps.slugCursor.index++
+  for (const slug of slugs) {
+    if (overBudget()) break
+    const slugRuns = bySlug.get(slug)!
+    let stopped = false
     if (!(await deps.hasStore(slug))) {
       await failWaitingOnClose(slug, slugRuns, (run) =>
         `no Beads store for ${run.repo_key}; run the 'Set up Beads for this repo' action or \`hpipe start\` in that repo`)
@@ -219,7 +242,6 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     if (isBdFailure(refreshed)) {
       if (lockNotTaken(refreshed)) {
         lockNotTakenAt(slug, 'before reading the export', refreshed)
-        stopped = true
       } else {
         noticeOnce(slug, `export is stale and could not be refreshed (${refreshed.error}); skipped this tick`)
         await failWaitingOnClose(slug, slugRuns, () => `the Beads export could not be refreshed: ${refreshed.error}`)

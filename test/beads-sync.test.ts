@@ -105,6 +105,7 @@ function deps(store: ReturnType<typeof fakeStore>, over: Partial<SyncDeps> = {})
     budgetMs: 2_000,
     claimants: async () => [],
     lockNotices: new Map(),
+    slugCursor: { index: 0 },
     persist: async (run) => { persisted.push(structuredClone(run)) },
     log: () => {},
     ...over,
@@ -199,8 +200,8 @@ test('a failed call is counted on its task, monotonically, and the next task sti
   await syncBeads([run], d)
   await syncBeads([run], d)
 
-  expect(first.bead_sync).toEqual({ failures: 2, last_error: 'Error: database is locked', last_ok_at_ms: null })
-  expect(second.bead_sync).toEqual({ failures: 0, last_error: null, last_ok_at_ms: 1_000 })
+  expect(first.bead_sync).toEqual({ failures: 2, streak: 2, last_error: 'Error: database is locked', last_ok_at_ms: null })
+  expect(second.bead_sync).toEqual({ failures: 0, streak: 0, last_error: null, last_ok_at_ms: 1_000 })
   expect(d.persisted.at(-1)?.tasks[0]?.bead_sync.failures).toBe(2)
 })
 
@@ -560,4 +561,77 @@ test('two sessions whose released tasks tie on registration pick the same driver
 
   expect(fromP.calls).toEqual([])
   expect(fromQ.calls).toEqual([])
+})
+
+function twoRepos(failA: (id: string, kind: string) => BdFailure | null = () => null) {
+  const runA = runWith(mkTask({ phase: 'implement' }))
+  runA.repo_key = '/code/alpha'
+  const runB = runWith(mkTask({ phase: 'implement' }))
+  runB.repo_key = '/code/beta'
+  runB.run_id = 'r2'
+  const stores = new Map([
+    [beadsSlug(runA.repo_key), fakeStore([bead('hp-1')], failA)],
+    [beadsSlug(runB.repo_key), fakeStore([bead('hp-1')])],
+  ])
+  const refreshedSlugs: string[] = []
+  const bdFor = (slug: string): SyncBd => {
+    const { bd } = stores.get(slug)!
+    return { ...bd, refreshExport: () => { refreshedSlugs.push(slug); return bd.refreshExport() } }
+  }
+  return {
+    runA, runB, bdFor, refreshedSlugs,
+    storeA: stores.get(beadsSlug(runA.repo_key))!, storeB: stores.get(beadsSlug(runB.repo_key))!,
+  }
+}
+
+test('a busy lock in one repo ends only that repo\'s pass; the next repo still converges', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'refreshExport' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor }))
+  expect(repos.storeA.calls).toEqual([])
+  expect(repos.storeB.calls).toHaveLength(1)
+})
+
+test('a lock taken mid-pass in one repo still lets the next repo converge', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'update' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor }))
+  expect(repos.storeA.calls).toHaveLength(1)
+  expect(repos.storeB.calls).toHaveLength(1)
+})
+
+test('a spent budget is checked before the next repo\'s export refresh, not only between calls', async () => {
+  const repos = twoRepos()
+  let clock = 0
+  repos.storeA.onEachCall(() => { clock += 2_500 })
+  repos.storeB.onEachCall(() => { clock += 2_500 })
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor, now: () => clock }))
+  expect(repos.refreshedSlugs).toHaveLength(1)
+})
+
+test('each pass starts one repo later, so a repo that spends the budget every tick cannot starve the rest', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'update' ? { reason: 'timeout', error: 'bd update was killed after 5s' } : null))
+  let clock = 0
+  const spend = () => { clock += 2_500 }
+  repos.storeA.onEachCall(spend)
+  repos.storeB.onEachCall(spend)
+  const d = deps(repos.storeA, { bdFor: repos.bdFor, now: () => clock })
+  await syncBeads([repos.runA, repos.runB], d)
+  await syncBeads([repos.runA, repos.runB], d)
+  expect(new Set(repos.refreshedSlugs).size).toBe(2)
+})
+
+test('the failure streak counts consecutive failures and resets on a converged write; the total does not', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const run = runWith(task)
+  let failing = true
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (failing && kind === 'update' ? { reason: 'exit', error: 'Error: database is locked' } : null))
+  const d = deps(store)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(task.bead_sync).toMatchObject({ failures: 2, streak: 2 })
+
+  failing = false
+  await syncBeads([run], d)
+  expect(task.bead_sync).toMatchObject({ failures: 2, streak: 0, last_error: null })
 })

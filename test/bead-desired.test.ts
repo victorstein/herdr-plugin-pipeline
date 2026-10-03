@@ -155,10 +155,14 @@ test('the comment marker is spelled the one way the reconciler looks for', () =>
   expect(commentMarker('t3', 'd2', 'ruling')).toBe('[hpipe t3/d2/ruling]')
 })
 
-test('a bead is out of sync at five failed calls with an error still standing', () => {
-  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 5, last_error: 'locked', last_ok_at_ms: null } }))).toBe(true)
-  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 4, last_error: 'locked', last_ok_at_ms: null } }))).toBe(false)
-  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 9, last_error: null, last_ok_at_ms: 3 } }))).toBe(false)
+test('a bead is out of sync at five consecutive failed calls with an error still standing', () => {
+  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 5, streak: 5, last_error: 'locked', last_ok_at_ms: null } }))).toBe(true)
+  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 5, streak: 4, last_error: 'locked', last_ok_at_ms: null } }))).toBe(false)
+  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 9, streak: 0, last_error: null, last_ok_at_ms: 3 } }))).toBe(false)
+})
+
+test('one failure after many transient ones does not count as out of sync', () => {
+  expect(beadOutOfSync(mkTask({ bead_sync: { failures: 6, streak: 1, last_error: 'locked', last_ok_at_ms: 3 } }))).toBe(false)
 })
 
 function abort(run: Run): Run {

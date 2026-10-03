@@ -356,7 +356,7 @@ export function stallAwaiting(
     }
     return {
       short: awaitedFor(task),
-      clause: `${task.bead_sync.failures} of the supervisor's Beads calls for ${task.bead} have failed so far; ` +
+      clause: `The last ${task.bead_sync.streak} of the supervisor's Beads calls for ${task.bead} have failed in a row; ` +
         `the last said:\n\n    ${task.bead_sync.last_error}\n\nFix what it names, or close the bead by hand: ` +
         `\`${hpipe} close --task ${task.task_id}\`. Add \`--force\` only to override bd's close guards, ` +
         'once you know why they fired.',
