@@ -237,6 +237,8 @@ test('a dead board whose close fails is not replaced this tick', async () => {
   expect(await readBoards(dir, 'personal')).toEqual({ [SLUG]: board })
 })
 
+const ISSUE_LINE = '{"_type":"issue","id":"meter-1","title":"a"}\n'
+
 function paneDeps(over: Partial<BoardPaneDeps> = {}) {
   const spawned: { argv: string[]; cwd: string; env: Record<string, string | undefined> }[] = []
   const renamed: string[] = []
@@ -245,6 +247,8 @@ function paneDeps(over: Partial<BoardPaneDeps> = {}) {
     env: { HERDR_PLUGIN_STATE_DIR: dir, HPIPE_BEADS_SLUG: SLUG, HERDR_PANE_ID: 'w9:p4', HERDR_SESSION: 'personal', BV_BIN: 'fake-bv' },
     parentPid: 4242,
     now: () => 100_000,
+    sleep: async () => {},
+    readExport: async () => ISSUE_LINE,
     renamePane: async (paneId, label) => { renamed.push(`${paneId} ${label}`) },
     updateBoards,
     which: (bin) => (bin === 'fake-bv' ? '/bin/fake-bv' : null),
@@ -302,6 +306,49 @@ test('a board pane missing its slug exits 1 without running bv', async () => {
   const { paneDeps: d, spawned } = paneDeps({ env: { HERDR_PLUGIN_STATE_DIR: dir } })
   expect(await runBoardPane(d)).toBe(1)
   expect(spawned).toEqual([])
+})
+
+test('the board pane waits while the export is missing or empty, then runs bv once an issue appears', async () => {
+  const exports: (string | null)[] = [null, '', '{"_type":"memory","key":"k"}\n', ISSUE_LINE]
+  const sleeps: number[] = []
+  const { paneDeps: d, spawned, errors } = paneDeps({
+    readExport: async () => (exports.length > 1 ? exports.shift()! : ISSUE_LINE),
+    sleep: async (ms) => { sleeps.push(ms) },
+  })
+  expect(await runBoardPane(d)).toBe(0)
+  expect(sleeps).toEqual([2_000, 2_000])
+  expect(spawned).toHaveLength(1)
+  expect(errors.filter((message) => message.includes('Waiting for the first bead'))).toHaveLength(1)
+})
+
+test('bv quitting at once on an empty export sends the pane back to waiting, then runs bv again', async () => {
+  let exportText = ISSUE_LINE
+  let clock = 100_000
+  let launches = 0
+  let sleeps = 0
+  const { paneDeps: d } = paneDeps({
+    now: () => clock,
+    readExport: async () => exportText,
+    sleep: async () => { sleeps += 1; exportText = ISSUE_LINE },
+    runBv: async () => {
+      launches += 1
+      clock += 300
+      if (launches === 1) exportText = ''
+      return 0
+    },
+  })
+  expect(await runBoardPane(d)).toBe(0)
+  expect(launches).toBe(2)
+  expect(sleeps).toBe(1)
+})
+
+test('bv exiting after a long session ends the pane with its exit code', async () => {
+  let clock = 100_000
+  const { paneDeps: d } = paneDeps({
+    now: () => clock,
+    runBv: async () => { clock += 60_000; return 3 },
+  })
+  expect(await runBoardPane(d)).toBe(3)
 })
 
 function actionDeps(herdr: BoardDeps['herdr'], over: Partial<OpenBoardActionDeps> = {}) {

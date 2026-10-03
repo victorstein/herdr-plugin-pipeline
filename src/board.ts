@@ -10,6 +10,9 @@ export interface BoardPaneDeps {
   /** The pane's shell: it is exec'd into the user's shell when bv exits, keeping its pid. */
   parentPid: number
   now: () => number
+  sleep: (ms: number) => Promise<void>
+  /** The export's text, or null while the file does not exist yet. */
+  readExport: (path: string) => Promise<string | null>
   renamePane: (paneId: string, label: string) => Promise<unknown>
   updateBoards: typeof updateBoards
   which: (bin: string) => string | null
@@ -21,6 +24,11 @@ const processDeps = (): BoardPaneDeps => ({
   env: process.env,
   parentPid: process.ppid,
   now: Date.now,
+  sleep: (ms) => Bun.sleep(ms),
+  readExport: async (path) => {
+    const file = Bun.file(path)
+    return (await file.exists()) ? file.text() : null
+  },
   renamePane: (paneId, label) => new Herdr().paneRename(paneId, label),
   updateBoards,
   which: (bin) => Bun.which(bin),
@@ -28,6 +36,16 @@ const processDeps = (): BoardPaneDeps => ({
     Bun.spawn(argv, { cwd, env, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' }).exited,
   error: console.error,
 })
+
+const FIRST_ISSUE_POLL_MS = 2_000
+// bv exits at once on an export with no issues, so a launch this short may have hit that.
+const QUICK_EXIT_MS = 5_000
+
+function holdsIssue(exportText: string | null): boolean {
+  return (exportText ?? '').split('\n').some((line) => {
+    try { return (JSON.parse(line) as { _type?: string })._type === 'issue' } catch { return false }
+  })
+}
 
 /**
  * Records the board, then renames it — in that order, because the supervisor
@@ -60,9 +78,19 @@ export async function runBoardPane(deps: BoardPaneDeps = processDeps()): Promise
     deps.error(`[pipeline] bv is not installed — ${BV_INSTALL_HINT}`)
     return 1
   }
-  return deps.runBv([bin, '--db', beadsExportPath(stateDir, slug)], {
-    cwd: beadsHome(stateDir, slug), env: bvSpawnEnv(stateDir, slug),
-  })
+  const exportPath = beadsExportPath(stateDir, slug)
+  const hasIssue = async () => holdsIssue(await deps.readExport(exportPath))
+  for (;;) {
+    if (!(await hasIssue())) {
+      deps.error(`Waiting for the first bead in ${exportPath}…`)
+      while (!(await hasIssue())) await deps.sleep(FIRST_ISSUE_POLL_MS)
+    }
+    const launchedAt = deps.now()
+    const exitCode = await deps.runBv([bin, '--db', exportPath], {
+      cwd: beadsHome(stateDir, slug), env: bvSpawnEnv(stateDir, slug),
+    })
+    if (deps.now() - launchedAt >= QUICK_EXIT_MS || (await hasIssue())) return exitCode
+  }
 }
 
 if (import.meta.main) process.exit(await runBoardPane())
