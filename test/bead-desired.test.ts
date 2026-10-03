@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  AWAITING_HUMAN_LABEL, beadOutOfSync, commentMarker, desiredBead, isManagedLabel,
+  AWAITING_HUMAN_LABEL, beadOutOfSync, commentMarker, desiredBead, discoveryLabel, DISCOVERED_LABEL, isManagedLabel,
 } from '../src/lib/bead-desired'
 import { escalatedUnanswered, openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
@@ -145,10 +145,10 @@ test('each depends_on task becomes a blocks edge to its bead, on every row', () 
 })
 
 test('only the hpipe: and phase: namespaces are hpipe\'s to remove', () => {
-  for (const label of ['phase:plan', 'hpipe:run=r9', AWAITING_HUMAN_LABEL, 'hpipe:discovered']) {
+  for (const label of ['phase:plan', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
     expect(isManagedLabel(label), label).toBe(true)
   }
-  for (const label of ['pipeline:tier-light', 'ui', 'phased']) expect(isManagedLabel(label), label).toBe(false)
+  for (const label of ['pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) expect(isManagedLabel(label), label).toBe(false)
 })
 
 test('the comment marker is spelled the one way the reconciler looks for', () => {

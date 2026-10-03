@@ -361,7 +361,7 @@ through the desired state of §5.
   and copies the body into `$STATE/runs/<session>/<run_id>.discoveries/`. No Beads access.
 - **Orchestrator:** `branch-review.md` adds a step: `hpipe discoveries` lists them;
   `hpipe discoveries --file` runs `Bd.create` per unfiled discovery with
-  `labels: ['hpipe:discovered']` and `depsDiscoveredFrom: <task bead>` (non-blocking), storing
+  `labels: ['discovered', 'discovery:<run>:<task>:<id>']` and `depsDiscoveredFrom: <task bead>` (non-blocking), storing
   `filed_bead` in the same save so a retry files nothing twice.
 - `worker-brief.md` gains one line: out-of-scope bugs and follow-ups go to `hpipe discover`, not
   into the current PR.

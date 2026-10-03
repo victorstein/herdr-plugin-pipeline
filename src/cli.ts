@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import {
   Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
-import { DISCOVERED_LABEL } from './lib/bead-desired'
+import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
@@ -1118,10 +1119,15 @@ async function discover(ctx: Ctx, input: {
   const id = `x${task.discoveries.length + 1}`
   const dir = join(ctx.stateDir, 'runs', run.session, `${run.run_id}.discoveries`)
   mkdirSync(dir, { recursive: true })
-  const bodyCopy = join(dir, `${task.task_id}-${id}.md`)
-  copyFileSync(bodyPath, bodyCopy)
+  const bodyCopy = join(dir, `${task.task_id}-${id}-${randomUUID().slice(0, 8)}.md`)
+  copyFileSync(bodyPath, bodyCopy, fsConstants.COPYFILE_EXCL)
   task.discoveries.push({ id, title: input.title, body_path: bodyCopy, filed_bead: null })
-  await saveRun(ctx.stateDir, run)
+  try {
+    await saveRun(ctx.stateDir, run)
+  } catch (error) {
+    rmSync(bodyCopy, { force: true })
+    throw error
+  }
   return ok(`recorded ${task.task_id}/${id}; the orchestrator files it after the run — keep it out of this PR`)
 }
 export const cmdDiscover = retryingOnStale(discover)
@@ -1151,11 +1157,29 @@ async function recordFiled(
   }
 }
 
-export type FileDiscovery = RegistrationBeads['create']
+export type FileDiscovery = (
+  repoKey: string, input: BeadCreateInput, dedupeLabel: string,
+) => Promise<CreatedBead | BdFailure>
+
+/**
+ * A create whose ledger save failed leaves a bead carrying the discovery's label, so look for it
+ * first: the retry adopts that bead instead of filing a second one.
+ */
+export async function fileUnlessFiled(
+  bd: Pick<Bd, 'refreshExport' | 'readExport' | 'create'>, input: BeadCreateInput, dedupeLabel: string,
+): Promise<CreatedBead | BdFailure> {
+  const refreshed = await bd.refreshExport()
+  if (isBdFailure(refreshed)) return refreshed
+  const existing = bd.readExport().find((bead) => bead.labels?.includes(dedupeLabel))
+  return existing === undefined ? bd.create({ ...input, labels: [...input.labels, dedupeLabel] }) : { id: existing.id }
+}
+
+const cliFileDiscovery = (stateDir: string): FileDiscovery => (repoKey, input, label) =>
+  withCliBd(stateDir, repoKey, (bd) => fileUnlessFiled(bd, input, label))
 
 export async function cmdDiscoveries(ctx: Ctx, input: {
   repoKey: string | null; runId: string | null; file: boolean
-}, fileBead: FileDiscovery = cliRegistrationBeads(ctx.stateDir).create): Promise<CmdResult> {
+}, fileBead: FileDiscovery = cliFileDiscovery(ctx.stateDir)): Promise<CmdResult> {
   const found = await resolveFor(ctx, {
     runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'finished-if-named',
   }, '--run <run-id> lists them anyway')
@@ -1170,10 +1194,15 @@ export async function cmdDiscoveries(ctx: Ctx, input: {
     const task = run?.tasks.find((t) => t.task_id === taskId)
     const current = task?.discoveries.find((d) => d.id === discoveryId)
     if (!run || !task || !current || current.filed_bead !== null) continue
+    let body: string
+    try {
+      body = readFileSync(current.body_path, 'utf8')
+    } catch {
+      return fail(`${taskId}/${discoveryId}'s body copy is missing: ${current.body_path}; nothing after it was filed`)
+    }
     const created = await fileBead(run.repo_key, {
-      title: current.title, body: readFileSync(current.body_path, 'utf8'),
-      labels: [DISCOVERED_LABEL], depsDiscoveredFrom: task.bead,
-    })
+      title: current.title, body, labels: [DISCOVERED_LABEL], depsDiscoveredFrom: task.bead,
+    }, discoveryLabel(runId, taskId, discoveryId))
     if (isBdFailure(created)) {
       const now = (await runById(ctx.stateDir, ctx.session, runId)) ?? run
       return fail(`${discoveryList(now)}\nfiling ${taskId}/${discoveryId} failed; nothing after it was filed:\n  ${created.error}`)

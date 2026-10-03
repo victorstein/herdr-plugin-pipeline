@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, cmdEscalate, cmdForget,
+  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, fileUnlessFiled, cmdEscalate, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
@@ -2206,7 +2206,7 @@ test('discover records the work and keeps a copy of its body beside the run', as
     ['x1', 'Flaky clock test', null], ['x2', 'Dead helper', null],
   ])
   const copy = task.discoveries[0]!.body_path
-  expect(copy).toBe(join(dir, 'runs', 'personal', `${run.run_id}.discoveries`, 't1-x1.md'))
+  expect(copy.startsWith(join(dir, 'runs', 'personal', `${run.run_id}.discoveries`, 't1-x1-'))).toBe(true)
   expect(readFileSync(copy, 'utf8')).toBe('It fails at midnight.\n')
 })
 
@@ -2231,7 +2231,7 @@ test('discoveries --file files each unfiled one as a discovered bead, once', asy
   await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
   await cmdDiscover(ctx(), discovery('Dead helper', 'nothing calls it\n'))
   const filed: BeadCreateInput[] = []
-  const fileBead = async (_repoKey: string, input: BeadCreateInput) => {
+  const fileBead = async (_repoKey: string, input: BeadCreateInput, _label: string) => {
     filed.push(input)
     return { id: `hp-${10 + filed.length}` }
   }
@@ -2244,8 +2244,8 @@ test('discoveries --file files each unfiled one as a discovered bead, once', asy
   expect(first.text).toContain('t1/x2 filed as hp-12 — Dead helper')
   expect(again.ok).toBe(true)
   expect(filed).toEqual([
-    { title: 'Flaky clock test', body: 'It fails at midnight.\n', labels: ['hpipe:discovered'], depsDiscoveredFrom: 'hp-1' },
-    { title: 'Dead helper', body: 'nothing calls it\n', labels: ['hpipe:discovered'], depsDiscoveredFrom: 'hp-1' },
+    { title: 'Flaky clock test', body: 'It fails at midnight.\n', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' },
+    { title: 'Dead helper', body: 'nothing calls it\n', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' },
   ])
 })
 
@@ -2263,4 +2263,49 @@ test('a failed filing stops there, keeps what was filed, and says which one fail
   expect(result.text).toContain('Error: database is locked')
   const discoveries = (await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries
   expect(discoveries.map((d) => d.filed_bead)).toEqual(['hp-11', null])
+})
+
+test('two discovers racing on one save both land, each keeping its own body', async () => {
+  await seedWorkingTask()
+  const [first, second] = await Promise.all([
+    cmdDiscover(ctx(), discovery('Alpha', 'alpha body\n')),
+    cmdDiscover(ctx(), discovery('Beta', 'beta body\n')),
+  ])
+  expect([first.ok, second.ok]).toEqual([true, true])
+  const discoveries = (await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries
+  expect(discoveries.map((d) => d.id).sort()).toEqual(['x1', 'x2'])
+  expect(discoveries.map((d) => [d.title, readFileSync(d.body_path, 'utf8')]).sort()).toEqual([
+    ['Alpha', 'alpha body\n'], ['Beta', 'beta body\n'],
+  ])
+})
+
+test('a body copy that has gone missing fails the filing instead of throwing', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('One', 'a\n'))
+  rmSync((await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries[0]!.body_path)
+  let created = false
+  const result = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, async () => {
+    created = true
+    return { id: 'hp-11' }
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('body copy is missing')
+  expect(created).toBe(false)
+})
+
+test('fileUnlessFiled adopts a bead already carrying the discovery label and creates nothing', async () => {
+  const created: BeadCreateInput[] = []
+  const bd = {
+    refreshExport: async () => ({ ok: true as const }),
+    readExport: () => [
+      { id: 'hp-5', title: 'other', status: 'open', labels: ['discovered'] },
+      { id: 'hp-9', title: 'One', status: 'open', labels: ['discovered', 'discovery:r1:t1:x1'] },
+    ],
+    create: async (input: BeadCreateInput) => { created.push(input); return { id: 'hp-20' } },
+  }
+  const input = { title: 'One', body: 'a', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' }
+  expect(await fileUnlessFiled(bd, input, 'discovery:r1:t1:x1')).toEqual({ id: 'hp-9' })
+  expect(created).toEqual([])
+  expect(await fileUnlessFiled(bd, input, 'discovery:r1:t1:x2')).toEqual({ id: 'hp-20' })
+  expect(created[0]!.labels).toEqual(['discovered', 'discovery:r1:t1:x2'])
 })

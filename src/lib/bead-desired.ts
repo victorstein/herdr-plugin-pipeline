@@ -8,7 +8,13 @@ import type { Run, Task } from './types'
 export const RUN_LABEL_PREFIX = 'hpipe:run='
 export const PHASE_LABEL_PREFIX = 'phase:'
 export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
-export const DISCOVERED_LABEL = 'hpipe:discovered'
+/**
+ * Provenance labels sit outside the managed namespaces on purpose: a discovered bead can later be
+ * adopted with `hpipe task --bead`, and the reconciler strips managed labels no task desires.
+ */
+export const DISCOVERED_LABEL = 'discovered'
+export const discoveryLabel = (runId: string, taskId: string, discoveryId: string): string =>
+  `discovery:${runId}:${taskId}:${discoveryId}`
 const MANAGED_LABEL_PREFIXES: readonly string[] = ['hpipe:', PHASE_LABEL_PREFIX]
 
 /** `hpipe status` and the close stall both speak up from here, so the two never disagree. */
