@@ -605,6 +605,8 @@ test('the worker sends out-of-scope work to discover, and the branch review file
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')
+  expect(review).toContain('stops at the first failure')
+  expect(review).not.toContain('all-or-nothing')
 })
 
 test('intake and registration start from the backlog, adopt with --bead, and never run bd or bv', async () => {

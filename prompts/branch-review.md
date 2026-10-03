@@ -15,8 +15,9 @@ Before you write the verdict, read what the workers found out of scope:
 
 Each line is a bug or a follow-up a worker recorded instead of fixing it in its PR. File them as
 beads with `{{hpipe}} discoveries --file`, which files every unfiled one, each linked to the bead it
-came from. Filing is all-or-nothing, so name in the review any the human may want to close after
-filing.
+came from. Filing goes in order and stops at the first failure, keeping what it already filed; once
+the cause is fixed, run it again and it carries on without filing any twice. Name in the review any
+the human may want to close after filing.
 
 Check specifically what per-task review cannot see: seams between tasks, duplicated abstractions
 introduced independently by two workers, contradictions between what the first task assumed and what

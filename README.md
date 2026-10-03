@@ -161,7 +161,8 @@ instruction as each phase completes.
 Workers record out-of-scope bugs and follow-ups with `hpipe discover` instead of fixing them in their
 PR. At the branch review the orchestrator lists them with `hpipe discoveries` and files them with
 `hpipe discoveries --file`: one bead each, labelled `discovered` and `discovery:<run>:<task>:<id>`,
-linked to the bead it came from. Filing is all-or-nothing, and a retry files nothing twice.
+linked to the bead it came from. Filing goes in order and stops at the first failure, keeping what
+it already filed; a retry carries on from there and files nothing twice.
 
 When a decision needs you, the orchestrator runs `hpipe escalate --task <id> --decision <id>
 --recommend "<its recommendation>"`: the task's bead turns `blocked`, gains `hpipe:awaiting-human`,
