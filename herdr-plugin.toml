@@ -80,8 +80,20 @@ title = "Set up Beads for this repo"
 contexts = ["pane"]
 command = ["bun", "run", "src/actions/beads-setup.ts"]
 
+[[actions]]
+id = "board"
+title = "Open board"
+contexts = ["pane"]
+command = ["bun", "run", "src/actions/board.ts"]
+
 [[panes]]
 id = "supervisor"
 title = "Pipeline supervisor"
 placement = "tab"
 command = ["sh", "-c", "bun run src/supervisor/main.ts; code=$?; [ $code = 3 ] || echo '[pipeline] supervisor exited — run hpipe status'; exec \"${SHELL:-/bin/sh}\""]
+
+[[panes]]
+id = "board"
+title = "Board"
+placement = "tab"
+command = ["sh", "-c", "bun run src/board.ts; exec \"${SHELL:-/bin/sh}\""]

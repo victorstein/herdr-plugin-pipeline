@@ -1,5 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { isBoardLabel, readBoards } from './lib/boards'
 import { loadConfig } from './lib/config'
 import { Herdr } from './lib/herdr'
 import { readPid } from './lib/pidfile'
@@ -12,6 +13,13 @@ const ONE_HOUR_MS = 60 * 60 * 1000
 
 const workspaceIdPath = (stateDir: string, session: string) =>
   join(stateDir, `workspace.${session}.id`)
+
+export async function readWorkspaceId(stateDir: string, session: string): Promise<string | null> {
+  const recorded = Bun.file(workspaceIdPath(stateDir, session))
+  if (!(await recorded.exists())) return null
+  const id = (await recorded.text()).trim()
+  return id.length === 0 ? null : id
+}
 
 export async function ensureWorkspace(
   herdr: Herdr, stateDir: string, session: string, label: string,
@@ -82,10 +90,8 @@ export async function reapGhostPanes(
 export async function reapSupervisorSiblings(
   herdr: Herdr, stateDir: string, session: string, ownPaneId: string, ownShellPid: number,
 ): Promise<string[]> {
-  const recorded = Bun.file(workspaceIdPath(stateDir, session))
-  if (!(await recorded.exists())) return []
-  const workspaceId = (await recorded.text()).trim()
-  if (workspaceId.length === 0) return []
+  const workspaceId = await readWorkspaceId(stateDir, session)
+  if (workspaceId === null) return []
   return reapGhostPanes(herdr, workspaceId, ownShellPid, ownPaneId, (paneId) =>
     keepCrashTail(herdr, crashLogPath(stateDir, session), paneId))
 }
@@ -124,15 +130,19 @@ export async function keepCrashTail(herdr: Herdr, logPath: string, paneId: strin
  * Clears the shell pane `workspace create` opens alongside the supervisor. It must
  * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
  * the workspace, so clearing it at creation time deletes the very workspace the
- * supervisor was about to open into.
+ * supervisor was about to open into. Boards are spared by label — `Board` before
+ * `board.ts` renames itself — and by record, so the supervisor's first tick may
+ * open one before this runs.
  */
-export async function clearStrayPanes(herdr: Herdr, workspaceId: string): Promise<string[]> {
+export async function clearStrayPanes(
+  herdr: Herdr, workspaceId: string, keep: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const panes = await herdr.paneList(workspaceId)
   if (panes.length <= 1) return []
 
   const closed: string[] = []
   for (const pane of panes) {
-    if (pane.label === SUPERVISOR_LABEL) continue
+    if (pane.label === SUPERVISOR_LABEL || isBoardLabel(pane.label) || keep.has(pane.pane_id)) continue
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
@@ -189,7 +199,9 @@ async function main(): Promise<void> {
       return
     }
 
-    const strays = await clearStrayPanes(herdr, workspaceId)
+    const boardPanes = Object.values(await readBoards(stateDir, session))
+      .map((board) => board.pane_id).filter((id): id is string => id !== null)
+    const strays = await clearStrayPanes(herdr, workspaceId, new Set(boardPanes))
     if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
   } finally {
     const toolsWarning = toolsLine(await toolsChecked)

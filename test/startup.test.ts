@@ -139,3 +139,17 @@ test('linkHpipe creates the symlink and replaces a stale one', async () => {
   await linkHpipe(target, link)
   expect(await Bun.file(link).text()).toContain('#!/usr/bin/env bun')
 })
+
+test('clearStrayPanes spares a board, by label or by its recorded pane, and closes the rest', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane list': { result: { panes: [
+      { pane_id: 'w3:p1', label: 'Pipeline supervisor' },
+      { pane_id: 'w3:p2', label: 'Board' },
+      { pane_id: 'w3:p3', label: 'Board: meter abc123' },
+      { pane_id: 'w3:p4', label: 'zsh' },
+      { pane_id: 'w3:p5', label: null },
+    ] } },
+    'pane close': { result: {} },
+  })
+  expect(await clearStrayPanes(new Herdr(bin), 'w3', new Set(['w3:p4']))).toEqual(['w3:p5'])
+})

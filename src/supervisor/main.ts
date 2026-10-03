@@ -18,8 +18,9 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
-import { crashLogPath, reapSupervisorSiblings } from '../startup'
+import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
 import { SYNC_BUDGET_MS, syncBeads } from './beads-sync'
+import { syncBoards } from './boards'
 import {
   deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, uncommittedPaths,
@@ -432,6 +433,14 @@ async function main(): Promise<void> {
           log: (message) => console.error(`[pipeline] ${message}`),
           lockNotices: beadLockNotices,
         })
+        const pipelineWorkspace = await readWorkspaceId(stateDir, session)
+        if (pipelineWorkspace !== null) {
+          await syncBoards(syncRuns, {
+            stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
+            hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
+            herdr,
+          })
+        }
       } catch (error) {
         console.error('[pipeline] beads sync failed this tick:', error)
       }
