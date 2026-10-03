@@ -68,6 +68,18 @@ const MAX_ALERTS = 5
 const unblocking = (ids: string[] | null | undefined): string =>
   ids === null || ids === undefined || ids.length === 0 ? '' : ` → frees ${ids.join(', ')}`
 
+const LEADING_PICTOGRAPH = /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u200D]*\s*/u
+// Dots stay inside a word for bd's hierarchical ids (`hp-1.2`); a sentence's full stop is trimmed.
+const BEAD_ID_DELIMITER = /[^\p{L}\p{N}_.-]+/u
+
+/** bv decorates its reasons (🔓 📊 ✅ ⏳); the orchestrator reads plain text. */
+const plainReason = (reason: string): string => reason.replace(LEADING_PICTOGRAPH, '')
+
+const namesEvery = (reason: string, ids: readonly string[]): boolean => {
+  const words = new Set(reason.split(BEAD_ID_DELIMITER).map((word) => word.replace(/\.+$/, '')))
+  return ids.every((id) => words.has(id))
+}
+
 const idList = (ids: string[]): string =>
   ids.length <= IDS_PER_LINE
     ? ids.join(', ')
@@ -81,8 +93,9 @@ function metricWarnings(status: Record<string, MetricState> | undefined): string
 }
 
 function pickLine(rec: TriageRecommendation): string {
-  const why = rec.reasons?.[0]
-  return `  ${rec.id} "${rec.title}" score ${rec.score.toFixed(2)}${why ? ` — ${why}` : ''}${unblocking(rec.unblocks_ids)}`
+  const why = rec.reasons?.[0] === undefined ? '' : plainReason(rec.reasons[0])
+  const frees = why !== '' && namesEvery(why, rec.unblocks_ids ?? []) ? '' : unblocking(rec.unblocks_ids)
+  return `  ${rec.id} "${rec.title}" score ${rec.score.toFixed(2)}${why ? ` — ${why}` : ''}${frees}`
 }
 
 /**

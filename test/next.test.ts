@@ -74,6 +74,50 @@ test('--label keeps only beads carrying it, and --limit caps the picks', () => {
   expect(capped).not.toContain('"Meter"')
 })
 
+const picksOnly = (...recommendations: TriageRecommendation[]): TriageOutput => ({
+  triage: { recommendations_by_track: [{ track_id: 'track-A', reason: '', recommendations }] },
+})
+
+test('a pick whose bv reason already names every bead it frees drops the frees suffix, and its emoji', () => {
+  const live = picksOnly(rec('bvs-1', {
+    title: 'BV layer A', score: 0.39, reasons: ['🔓 Unblocks 1 item(s): bvs-2'], unblocks_ids: ['bvs-2'],
+  }))
+  expect(formatNext(live, new Set(), ALL)).toBe([
+    'now (parallel when their --files are disjoint):',
+    '  bvs-1 "BV layer A" score 0.39 — Unblocks 1 item(s): bvs-2',
+  ].join('\n'))
+})
+
+test('a reason naming only some of the freed beads, or a longer id, keeps the frees suffix; a full stop does not', () => {
+  const partial = picksOnly(
+    rec('hp-1', { reasons: ['🔓 Unblocks 2 item(s): hp-2'], unblocks_ids: ['hp-2', 'hp-3'] }),
+    rec('hp-4', { score: 0.4, reasons: ['🔓 Unblocks 1 item(s): hp-10'], unblocks_ids: ['hp-1'] }),
+    rec('hp-5', { score: 0.3, reasons: ['Frees hp-6 and hp-1.2.'], unblocks_ids: ['hp-6', 'hp-1.2'] }),
+  )
+  expect(formatNext(partial, new Set(), ALL)).toBe([
+    'now (parallel when their --files are disjoint):',
+    '  hp-1 "Bead hp-1" score 0.50 — Unblocks 2 item(s): hp-2 → frees hp-2, hp-3',
+    '  hp-4 "Bead hp-4" score 0.40 — Unblocks 1 item(s): hp-10 → frees hp-1',
+    '  hp-5 "Bead hp-5" score 0.30 — Frees hp-6 and hp-1.2.',
+  ].join('\n'))
+})
+
+test('bv\'s leading pictograph is stripped from every kind of reason, plain text left as it is', () => {
+  const decorated = picksOnly(
+    rec('hp-1', { score: 0.9, reasons: ['📊 High centrality in dependency graph'] }),
+    rec('hp-2', { score: 0.8, reasons: ['✅ Ready to work'] }),
+    rec('hp-3', { score: 0.7, reasons: ['⏳ Stale for 14 days'] }),
+    rec('hp-4', { score: 0.6, reasons: ['P1 priority'] }),
+  )
+  expect(formatNext(decorated, new Set(), ALL)).toBe([
+    'now (parallel when their --files are disjoint):',
+    '  hp-1 "Bead hp-1" score 0.90 — High centrality in dependency graph',
+    '  hp-2 "Bead hp-2" score 0.80 — Ready to work',
+    '  hp-3 "Bead hp-3" score 0.70 — Stale for 14 days',
+    '  hp-4 "Bead hp-4" score 0.60 — P1 priority',
+  ].join('\n'))
+})
+
 test('a layer with nothing claimable says so, and an empty triage says nothing is there to pick up', () => {
   const blocked: TriageOutput = {
     triage: { recommendations_by_track: [{ track_id: 'track-A', reason: '', recommendations: [rec('hp-8', { claimable: false })] }] },
