@@ -284,6 +284,11 @@ and are no longer advanced: finish them on the previous release, then upgrade an
 supervisor. They do not block `hpipe start`, and the commands that address a task or its
 discoveries do not see them.
 
+Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
+complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
+smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,
+a copy or a link into another checkout, with the **Install the hpipe shorthand** action.
+
 ## Answering a decision
 
     hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
