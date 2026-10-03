@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.7.1...v2.0.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* replace GitHub Issues with Beads as the issue store ([#156](https://github.com/victorstein/herdr-plugin-pipeline/issues/156))
+
+### Features
+
+* replace GitHub Issues with Beads as the issue store ([#156](https://github.com/victorstein/herdr-plugin-pipeline/issues/156)) ([f4c769d](https://github.com/victorstein/herdr-plugin-pipeline/commit/f4c769df91cdd2111e8aeca8d5203a236b1f432d))
+
 ## [1.7.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.7.0...v1.7.1) (2026-09-27)
 
 
