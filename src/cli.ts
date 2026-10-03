@@ -3,7 +3,7 @@ import { copyFileSync, constants as fsConstants, existsSync, mkdirSync, readFile
 import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import {
-  Bd, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
+  Bd, BD_ACTOR, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
 import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
@@ -16,10 +16,10 @@ import { observePanes } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
-import { beadHolds, heldBy } from './lib/held'
+import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, resolveRun, retryOnStaleRun, runById, runForRepo,
+  isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
   runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
   wasAborted, writeOrchestrator,
 } from './lib/ledger'
@@ -148,15 +148,14 @@ type Resolved<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
  * Resolve a run for one command, or the sentence to print instead. Every
  * command goes through here so `--run` is validated and a failure is worded the
  * same way whoever asked; `escape` is how this command reaches a finished run,
- * or null when it has no way in.
+ * or null when it has no way in. Runs of an older schema are not candidates: they
+ * are no longer advanced, and a leftover one would make every task id ambiguous.
  */
-async function resolveFor(
-  ctx: Ctx, query: RunQuery, escape: string | null, resolveAmongRuns = resolveRun,
-): Promise<Resolved<Run>> {
+async function resolveFor(ctx: Ctx, query: RunQuery, escape: string | null): Promise<Resolved<Run>> {
   if (query.runId !== null && query.runId.trim().length === 0) {
     return { ok: false, result: fail('--run needs a run id') }
   }
-  const resolved = await resolveAmongRuns(ctx.stateDir, ctx.session, query)
+  const resolved = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, query)
   return resolved.ok
     ? { ok: true, value: resolved.run }
     : { ok: false, result: resolveFailure(ctx, query, escape, resolved) }
@@ -239,6 +238,9 @@ const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
 const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
   'queued', 'research', 'spec', 'spec-review', 'plan', 'plan-review', 'blocked-on-files', 'implement',
 ])
+const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
+  ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'merge',
+])
 
 /** The store for this repo, or why the CLI cannot use one. */
 async function cliBd(stateDir: string, repoKey: string): Promise<Bd | BdFailure> {
@@ -290,22 +292,59 @@ interface TaskInput {
   callerPane?: string | null
 }
 
+/**
+ * Why taking `tasks`' beads back would give a bead two holders, or null. A bead
+ * released by an abort or a failure may have been adopted by another run, from
+ * any session; the reconciler would then follow one of the two silently, and
+ * the other would stall in `close` with advice that closes the wrong run's bead.
+ */
+async function beadsTakenMeanwhile(ctx: Ctx, run: Run, tasks: readonly Task[]): Promise<string | null> {
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  const holds = await beadHolds(ctx.stateDir)
+  const conflicts: string[] = []
+  for (const task of tasks) {
+    const holder = holds.get(task.bead)
+    if (holder === undefined) continue
+    if (holder.session === run.session && holder.run_id === run.run_id && holder.task_id === task.task_id) continue
+    conflicts.push(`bead ${task.bead} (${task.task_id}) is now held by ${holder.task_id} (${holder.phase}) ` +
+      `in run ${holder.run_id}, session ${holder.session} — finish that run, or abort it from its own session ` +
+      `with \`${hpipe} abort ${holder.run_id}\`, then retry`)
+  }
+  if (conflicts.length === 0) return null
+  return `${conflicts.join('\n')}\nOr leave this one where it is and register its work as a new task on a ` +
+    'different bead'
+}
+
 const isReadableFile = (path: string): boolean => existsSync(path) && statSync(path).isFile()
+
+async function lastClaimant(stateDir: string, repoKey: string, bead: string): Promise<BeadClaimant | null> {
+  const named = (await beadClaimants(stateDir)).filter((c) => c.repo_key === repoKey && c.bead === bead)
+  return named.reduce<BeadClaimant | null>((latest, c) =>
+    (latest === null || c.registered_at > latest.registered_at ? c : latest), null)
+}
 
 /**
  * Why an existing bead cannot become a task, or null. Each refusal keeps one of
  * bd's close guards from firing at merge: a foreign assignee, an open blocker,
  * or an open child.
  */
-async function adoptionRefusal(stateDir: string, bead: BeadDetail): Promise<string | null> {
+async function adoptionRefusal(stateDir: string, repoKey: string, bead: BeadDetail): Promise<string | null> {
   if (bead.status === 'closed') return `bead ${bead.id} is closed — adopt an open bead, or file a new one with --title`
-  if ((bead.assignee ?? '') !== '') {
-    return `bead ${bead.id} is assigned to ${bead.assignee} — only an unassigned bead can be adopted`
-  }
   const holder = await heldBy(stateDir, bead.id)
   if (holder !== null) {
     return `bead ${bead.id} is already held by ${holder.task_id} (${holder.phase}) in run ${holder.run_id}, ` +
       `session ${holder.session}`
+  }
+  if (bead.assignee === BD_ACTOR) {
+    const releasedBy = await lastClaimant(stateDir, repoKey, bead.id)
+    if (releasedBy !== null) {
+      return `bead ${bead.id} is still assigned to hpipe by ${releasedBy.task_id} of run ${releasedBy.run_id} ` +
+        `(session ${releasedBy.session}), which no longer holds it. Only the supervisor of session ` +
+        `${releasedBy.session} releases it, on its next tick once it is running; adopt it after that`
+    }
+  }
+  if ((bead.assignee ?? '') !== '') {
+    return `bead ${bead.id} is assigned to ${bead.assignee} — only an unassigned bead can be adopted`
   }
   const blockers = (bead.dependencies ?? []).filter((d) => d.dependency_type === 'blocks' && d.status !== 'closed')
   if (blockers.length > 0) {
@@ -340,7 +379,7 @@ async function registerTask(
   }
   // A v2 run's tasks carry no bead, so it must neither take this task nor make
   // the resolution ambiguous.
-  const found = await resolveFor(ctx, query, null, resolveCurrentSchemaRun)
+  const found = await resolveFor(ctx, query, null)
   if (!found.ok) return found.result
   const run = found.value
 
@@ -425,7 +464,7 @@ async function registerTask(
     const id = input.bead!.trim()
     const shown = await attempt.showBeadOnce(run.repo_key, id)
     if (isBdFailure(shown)) return fail(`bd show ${id} failed; nothing was registered:\n  ${shown.error}`)
-    const refusal = await adoptionRefusal(ctx.stateDir, shown)
+    const refusal = await adoptionRefusal(ctx.stateDir, run.repo_key, shown)
     if (refusal !== null) return fail(refusal)
     adopted = shown
   }
@@ -685,6 +724,9 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
 
   // Before the send: a brief cannot be recalled, and a bead someone else holds
   // must refuse the dispatch rather than surface later as a reconciler failure.
+  // Until `recordPane` clears `awaiting_brief` the desired bead is still open and
+  // unassigned, so a reconciler pass in between un-assigns this claim once and the
+  // next pass re-assigns it: harmless, and not worth a ledger write before the send.
   const claimed = await claim(run.repo_key, task.bead)
   if (isBdFailure(claimed)) {
     return fail(`bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`)
@@ -839,6 +881,11 @@ async function rewind(ctx: Ctx, input: {
     if (!task) return fail(`no such task: ${input.taskId}`)
     rewoundTask = task
 
+    if (!phaseHoldsBead(run.phase, task.phase) && phaseHoldsBead(run.phase, input.phase)) {
+      const taken = await beadsTakenMeanwhile(ctx, run, [task])
+      if (taken !== null) return fail(`${input.taskId} was not rewound:\n${taken}`)
+    }
+
     if (task.pending_answer !== null) {
       run.history.push({
         at: Date.now(), task_id: task.task_id, from: task.phase, to: input.phase,
@@ -894,6 +941,10 @@ async function rewind(ctx: Ctx, input: {
     if (PHASES_BEFORE_A_PR.has(task.phase)) {
       task.pr = null
       task.ci = null
+    }
+    // A standing merge keeps the bead closed through the rework, and a standing
+    // close would clear `close` the instant `merge` records the merge again.
+    if (PHASES_BEFORE_A_MERGE.has(task.phase)) {
       task.merged_at_ms = null
       task.merge_commit = null
       task.bead_closed_at_ms = null
@@ -1325,7 +1376,8 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   run.escalated_from = run.phase
   run.phase = 'done'
   await saveRun(ctx.stateDir, run)
-  return ok(`aborted ${run.run_id}; worktrees and branches left alone. Undo: hpipe resume ${run.run_id}`)
+  return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
+    `supervisor's next tick. Undo: hpipe resume ${run.run_id}`)
 }
 export const cmdAbort = retryingOnStale(abort)
 
@@ -1338,6 +1390,8 @@ async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   }
 
   const back = run.escalated_from
+  const taken = await beadsTakenMeanwhile(ctx, run, run.tasks.filter((task) => holdsBead({ phase: back }, task)))
+  if (taken !== null) return fail(`${run.run_id} was not resumed:\n${taken}`)
   run.history.push({ at: Date.now(), from: 'done', to: back, why: 'resumed' })
   run.phase = back
   run.escalated_from = null

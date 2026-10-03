@@ -21,6 +21,7 @@ import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
+import { desiredBead } from '../src/lib/bead-desired'
 
 let dir: string
 let repoDir: string
@@ -69,7 +70,9 @@ test('status reports no active runs on an empty ledger', async () => {
 
 test('abort marks the run aborted and it stops being active', async () => {
   const run = await seed()
-  expect((await cmdAbort(ctx(), { runId: run.run_id })).ok).toBe(true)
+  const result = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('its beads are released on the supervisor\'s next tick')
   const after = (await listRuns(dir, 'personal'))[0]
   expect(after?.phase).toBe('done')
   expect(after?.history.at(-1)?.why).toContain('aborted')
@@ -630,7 +633,7 @@ test('rewind to implement or earlier forgets the PR and the bead close, so neith
   // `merge` is a level: a sticky pr pointing at an already-merged PR would carry
   // the reworked task straight through merge on the old PR's mergedAt.
   for (const phase of ['implement', 'blocked-on-files', 'plan', 'research'] as const) {
-    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    const run = runWithTasks([{ task_id: 't1', bead: `hp-${phase}`, phase: 'done', ...MERGED_PR_STATE }])
     await saveRun(dir, run)
 
     expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
@@ -685,17 +688,33 @@ test('a task resumed into implement with its PR still open waits for a new push'
   expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
 })
 
-test('rewind onto a phase that works the current PR keeps it', async () => {
-  for (const phase of ['pr-review-intent', 'ci', 'merge', 'close'] as const) {
-    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
-    await saveRun(dir, run)
+test('rewind after a merge onto a phase that works the current PR keeps the PR but forgets the merge and the close', async () => {
+  // Kept, the merge would hold the bead closed through the rework, and the old
+  // close would clear `close` the instant the task merged again.
+  for (const phase of ['pr-review', 'pr-review-intent', 'ci', 'merge'] as const) {
+    for (const from of ['close', 'teardown', 'done'] as const) {
+      const run = runWithTasks([{ task_id: 't1', bead: `hp-${from}-${phase}`, phase: from, ...MERGED_PR_STATE, merge_commit: 'm3rg3' }])
+      await saveRun(dir, run)
 
-    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+      expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
 
-    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
-    expect(task?.pr, phase).toBe(5)
-    expect(task?.merged_at_ms, phase).toBe(9_000)
+      const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+      expect(task.pr, `${from} → ${phase}`).toBe(5)
+      expect(task.merged_at_ms, `${from} → ${phase}`).toBeNull()
+      expect(task.merge_commit, `${from} → ${phase}`).toBeNull()
+      expect(task.bead_closed_at_ms, `${from} → ${phase}`).toBeNull()
+      expect(desiredBead(task, run).status, `${from} → ${phase}`).not.toBe('closed')
+    }
   }
+})
+
+test('rewind onto close keeps the merge and the PR', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+  await saveRun(dir, run)
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'close', taskId: 't1' })).ok).toBe(true)
+  const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+  expect(task.pr).toBe(5)
+  expect(task.merged_at_ms).toBe(9_000)
 })
 
 test('rewind clears a pending answer and records the discard', async () => {
@@ -2321,4 +2340,126 @@ test('fileUnlessFiled adopts a bead already carrying the discovery label and cre
   expect(created).toEqual([])
   expect(await fileUnlessFiled(bd, input, 'discovery:r1:t1:x2')).toEqual({ id: 'hp-20' })
   expect(created[0]!.labels).toEqual(['discovered', 'discovery:r1:t1:x2'])
+})
+
+async function leftoverV2RunHoldingT1(phase: Task['phase']): Promise<Run> {
+  const old = runWithTasks([{ task_id: 't1', phase, decision_from: 'plan' }])
+  old.schema_version = 2
+  await saveRun(dir, old)
+  return old
+}
+
+const taskIn = async (runId: string): Promise<Task> =>
+  (await listRuns(dir, 'personal')).find((r) => r.run_id === runId)!.tasks[0]!
+
+test('a leftover v2 run holding t1 does not make dispatch ambiguous: it reaches the v3 task', async () => {
+  await registerReadyTask()
+  const current = (await listRuns(dir, 'personal'))[0]!
+  await leftoverV2RunHoldingT1('queued')
+  const { send } = recordingSend()
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
+  expect(result.ok).toBe(true)
+  expect((await taskIn(current.run_id)).pane_id).toBe('w1-2')
+})
+
+test('a leftover v2 run holding t1 does not make close ambiguous: it closes the v3 task\'s bead', async () => {
+  const current = mergedInClose()
+  await saveRun(dir, current)
+  await leftoverV2RunHoldingT1('close')
+  const asked: string[] = []
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async (_repoKey, bead) => { asked.push(bead); return { ok: true } })
+  expect(result.ok).toBe(true)
+  expect(asked).toEqual(['hp-1'])
+})
+
+test('a leftover v2 run holding t1 does not make escalate ambiguous: it escalates the v3 decision', async () => {
+  const current = await seedAskedDecision()
+  await leftoverV2RunHoldingT1('blocked-on-decision')
+  const result = await cmdEscalate(ctx(), escalation())
+  expect(result.ok).toBe(true)
+  expect((await taskIn(current.run_id)).decisions[0]!.escalated_at).toBeGreaterThan(0)
+})
+
+test('a leftover v2 run holding t1 does not make discover or discoveries ambiguous', async () => {
+  const current = await seedWorkingTask()
+  await leftoverV2RunHoldingT1('implement')
+  expect((await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))).ok).toBe(true)
+  expect((await taskIn(current.run_id)).discoveries).toHaveLength(1)
+  const listed = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: false })
+  expect(listed.ok).toBe(true)
+  expect(listed.text).toContain('t1/x1 unfiled — Flaky clock test')
+})
+
+async function otherSessionHolding(bead: string): Promise<Run> {
+  const other = newRun({ session: 'work', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'b' })
+  other.tasks = [mkTask({ task_id: 't4', bead, phase: 'implement' })]
+  await saveRun(dir, other)
+  return other
+}
+
+test('resume refuses while another run has adopted a bead one of its tasks would hold again', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const other = await otherSessionHolding('hp-1')
+
+  const result = await cmdResume(ctx(), { runId: run.run_id })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-1 (t1) is now held by t4 (implement) in run ${other.run_id}, session work`)
+  expect(result.text).toContain(`abort ${other.run_id}`)
+  expect((await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.phase).toBe('done')
+})
+
+test('resume goes ahead when the only other claimant of its bead has released it', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const other = await otherSessionHolding('hp-1')
+  other.tasks[0]!.phase = 'failed'
+  await saveRun(dir, other)
+
+  expect((await cmdResume(ctx(), { runId: run.run_id })).ok).toBe(true)
+})
+
+test('rewind out of failed refuses while another run has adopted the task\'s bead', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'failed' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const other = await otherSessionHolding('hp-1')
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-1 (t1) is now held by t4 (implement) in run ${other.run_id}, session work`)
+  expect((await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]?.phase).toBe('failed')
+})
+
+test('rewind between phases that do not hold the bead is not refused over another run\'s hold', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'failed' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await otherSessionHolding('hp-1')
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'done', taskId: 't1' })).ok).toBe(true)
+})
+
+test('--bead still assigned to hpipe by a run that released it names that run and the supervisor it waits on', async () => {
+  await seedInRepoWithBrief()
+  const released = newRun({ session: 'work', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'b' })
+  released.tasks = [mkTask({ task_id: 't4', bead: 'hp-12', phase: 'implement', registered_at: 5 })]
+  released.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  released.escalated_from = 'execute'
+  released.phase = 'done'
+  await saveRun(dir, released)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
+    fakeBeads({ show: async (_repoKey, id) => openBead(id, { assignee: 'hpipe' }) }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-12 is still assigned to hpipe by t4 of run ${released.run_id} (session work)`)
+  expect(result.text).toContain('the supervisor of session work')
+  expect(await registered()).toEqual([])
 })

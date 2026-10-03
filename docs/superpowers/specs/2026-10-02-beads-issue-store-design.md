@@ -341,7 +341,9 @@ never add up to an alert; `hpipe status` shows such a task with `last_error`. Th
 
 **Why races are gone.** `resume` after `abort`, a rewind out of `failed`, a re-dispatch: each
 changes the ledger, and the next pass computes the new desired state from it. There is no older
-release waiting to undo a newer claim.
+release waiting to undo a newer claim. A released bead may have been adopted by another run
+meanwhile, so `resume` and a rewind from a phase that does not hold the bead into one that does
+refuse while `heldBy` names another task, in any session: one bead never has two holders.
 
 ## 6. Decisions
 
@@ -392,9 +394,10 @@ Why the guards do not fire:
 `probeTarget: 'orchestrator'` (as `ci` and `teardown` have, so `table.test.ts:34-40` holds);
 `tasks.ts:143-144` stops rendering it; `prompts/close.md` is deleted. Its signal
 (`machine.ts:240-250`) becomes `task.bead_closed_at_ms !== null`. The field is set only by a pass
-that saw the bead closed *after* a merge was recorded, and any rewind that clears `merged_at_ms`
-also clears `bead_closed_at_ms` (`cli.ts:755-761`) — the desired state flips back to not-closed and
-the reconciler reopens and re-claims the bead. So it is an edge, with no clock comparison, and no
+that saw the bead closed *after* a merge was recorded, and a rewind to `merge` or any earlier phase
+clears `merged_at_ms`, `merge_commit` and `bead_closed_at_ms` (the PR fields only to `implement` or
+earlier) — the desired state flips back to not-closed and the reconciler reopens and re-claims the
+bead for the rework. So it is an edge, with no clock comparison, and no
 stale close can outlive a rewind.
 
 **Close stall.** The row is `stallable`; the probe is time-based (`TASK_STALL_MINUTES`), and its
