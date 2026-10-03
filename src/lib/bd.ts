@@ -49,6 +49,7 @@ export interface ExportedBead {
   status: string
   assignee?: string
   labels?: string[]
+  metadata?: Record<string, unknown>
   dependencies?: BeadEdge[]
   comments?: BeadComment[]
 }
@@ -69,6 +70,7 @@ export interface BeadDetail {
   status: string
   assignee?: string
   labels?: string[]
+  metadata?: Record<string, unknown>
   dependencies?: LinkedBead[]
   dependents?: LinkedBead[]
   comments?: BeadComment[]
@@ -87,6 +89,8 @@ export interface BeadUpdate {
   assignee?: string
   addLabels?: string[]
   removeLabels?: string[]
+  setMetadata?: Record<string, string>
+  unsetMetadata?: string[]
 }
 
 export interface BdOptions {
@@ -241,6 +245,8 @@ export class Bd {
       ...(change.assignee === undefined ? [] : ['--assignee', change.assignee]),
       ...(change.addLabels ?? []).flatMap((label) => ['--add-label', label]),
       ...(change.removeLabels ?? []).flatMap((label) => ['--remove-label', label]),
+      ...Object.entries(change.setMetadata ?? {}).flatMap(([key, value]) => ['--set-metadata', `${key}=${value}`]),
+      ...(change.unsetMetadata ?? []).flatMap((key) => ['--unset-metadata', key]),
     ]
     if (args.length === 0) return DONE
     return this.#write(['update', id, ...args], () => DONE)

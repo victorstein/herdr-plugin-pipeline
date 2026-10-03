@@ -5,7 +5,11 @@ import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
 import type { Run, Task } from './types'
 
-export const RUN_LABEL_PREFIX = 'hpipe:run='
+/**
+ * A metadata key, not a label: bd sorts labels, and a long `hpipe:run=…` label
+ * pushed `phase:` off the end of every bv card.
+ */
+export const RUN_METADATA_KEY = 'hpipe.run'
 export const PHASE_LABEL_PREFIX = 'phase:'
 export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
 /**
@@ -33,6 +37,7 @@ export interface DesiredBead {
   /** Null is unassigned. */
   assignee: string | null
   labels: string[]
+  metadata: Record<string, string>
   blockedBy: string[]
   comments: DesiredComment[]
 }
@@ -89,22 +94,24 @@ function decisionComments(task: Task): DesiredComment[] {
  * disagree about whether a task still holds its bead.
  */
 export function desiredBead(task: Task, run: Run): DesiredBead {
-  const runLabel = `${RUN_LABEL_PREFIX}${run.run_id}`
   const phaseLabel = `${PHASE_LABEL_PREFIX}${task.phase}`
-  const shared = { bead: task.bead, blockedBy: dependencyBeads(task, run), comments: decisionComments(task) }
+  const shared = {
+    bead: task.bead, metadata: { [RUN_METADATA_KEY]: run.run_id },
+    blockedBy: dependencyBeads(task, run), comments: decisionComments(task),
+  }
 
   if (task.merged_at_ms !== null) {
-    return { ...shared, status: 'closed', assignee: BD_ACTOR, labels: [runLabel] }
+    return { ...shared, status: 'closed', assignee: BD_ACTOR, labels: [] }
   }
   if (!phaseHoldsBead(run.phase, task.phase)) {
     const why = wasAborted(run) && !TERMINAL_BAD.has(task.phase) ? `${PHASE_LABEL_PREFIX}aborted` : phaseLabel
-    return { ...shared, status: 'open', assignee: null, labels: [runLabel, why] }
+    return { ...shared, status: 'open', assignee: null, labels: [why] }
   }
   if (escalatedUnanswered(task) !== null) {
-    return { ...shared, status: 'blocked', assignee: BD_ACTOR, labels: [runLabel, phaseLabel, AWAITING_HUMAN_LABEL] }
+    return { ...shared, status: 'blocked', assignee: BD_ACTOR, labels: [phaseLabel, AWAITING_HUMAN_LABEL] }
   }
   if (task.phase !== 'queued' && task.awaiting_brief !== true) {
-    return { ...shared, status: 'in_progress', assignee: BD_ACTOR, labels: [runLabel, phaseLabel] }
+    return { ...shared, status: 'in_progress', assignee: BD_ACTOR, labels: [phaseLabel] }
   }
-  return { ...shared, status: 'open', assignee: null, labels: [runLabel, phaseLabel] }
+  return { ...shared, status: 'open', assignee: null, labels: [phaseLabel] }
 }

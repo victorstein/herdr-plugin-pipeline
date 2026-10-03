@@ -943,8 +943,8 @@ hpipe task --branch smoke/bsm-1 --title "Say hello" --body-file /tmp/bsm-body.md
 ```
 
 **Expect:** `task_id: t1`, `tier: light (--tier)`, `bead: bsm-1 (filed)`. Within a tick or two
-`hpipe bead show bsm-1` reads `bsm-1 [open] Say hello`, labels including `hpipe:run=<run-id>`, assignee
-`none`, then the description and `Acceptance` text you wrote.
+`hpipe bead show bsm-1` reads `bsm-1 [open] Say hello`, label `phase:queued`, assignee
+`none`, `run: <run-id>`, then the description and `Acceptance` text you wrote.
 
 Run the printed `dispatch, in order:` block. After `hpipe dispatch --task t1`, `hpipe bead show bsm-1`
 reads `[in_progress]`, assignee `hpipe`, label `phase:research`. **(human)** On the board (press `b`)

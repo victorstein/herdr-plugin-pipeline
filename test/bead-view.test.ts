@@ -4,12 +4,13 @@ import { formatBeadDetail } from '../src/lib/bead-view'
 test('a bead prints its title, status, labels, description, acceptance and comments', () => {
   expect(formatBeadDetail({
     id: 'hp-3', title: 'Fix the meter', status: 'in_progress', assignee: 'hpipe', labels: ['ui', 'phase:plan'],
-    description: 'It drifts.\n', acceptance_criteria: 'It holds.',
+    metadata: { 'hpipe.run': 'r7', other: 'x' }, description: 'It drifts.\n', acceptance_criteria: 'It holds.',
     comments: [{ text: 'Ruling by the human on t1/d1:\n\nsqlite\n\n[hpipe t1/d1/ruling]' }],
   })).toBe([
     'hp-3 [in_progress] Fix the meter',
     'labels:     ui, phase:plan',
     'assignee:   hpipe',
+    'run:        r7',
     '',
     'description:',
     'It drifts.',
@@ -29,4 +30,5 @@ test('a bare bead says none rather than printing blanks', () => {
   expect(text).toContain('description:\n(none)')
   expect(text).toContain('acceptance:\n(none)')
   expect(text).toContain('comments: none')
+  expect(text).not.toContain('run:')
 })

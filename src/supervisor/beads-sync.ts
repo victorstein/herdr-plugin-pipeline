@@ -88,6 +88,9 @@ export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: str
   const removeLabels = labels.filter((label) => isManagedLabel(label) && !desired.labels.includes(label))
   if (addLabels.length > 0) change.addLabels = addLabels
   if (removeLabels.length > 0) change.removeLabels = removeLabels
+  const metadata = actual.metadata ?? {}
+  const setMetadata = Object.fromEntries(Object.entries(desired.metadata).filter(([key, value]) => metadata[key] !== value))
+  if (Object.keys(setMetadata).length > 0) change.setMetadata = setMetadata
   if (Object.keys(change).length > 0) calls.push({ kind: 'update', change })
 
   // bd 1.3.1 refuses a second edge of another type between the same pair, so any

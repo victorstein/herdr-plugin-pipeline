@@ -74,6 +74,7 @@ test('each method sends the argv of spec §2, and the files it hands bd hold the
   expect(await bd.claim('hp-7')).toEqual({ ok: true })
   expect(await bd.update('hp-7', {
     status: 'open', assignee: '', addLabels: ['phase:plan'], removeLabels: ['phase:spec'],
+    setMetadata: { 'hpipe.run': 'r2' }, unsetMetadata: ['stale.key'],
   })).toEqual({ ok: true })
   expect(await bd.reopen('hp-7')).toEqual({ ok: true })
   expect(await bd.comment('hp-7', 'A ruling.\n')).toEqual({ ok: true })
@@ -84,7 +85,8 @@ test('each method sends the argv of spec §2, and the files it hands bd hold the
     '--json --actor hpipe create --title Fix the tile --body-file <tmp> --acceptance It reads Bar. ' +
       '-l pipeline:tier-light -l ui --deps discovered-from:hp-1',
     '--json --actor hpipe update hp-7 --claim',
-    '--json --actor hpipe update hp-7 -s open --assignee  --add-label phase:plan --remove-label phase:spec',
+    '--json --actor hpipe update hp-7 -s open --assignee  --add-label phase:plan --remove-label phase:spec ' +
+      '--set-metadata hpipe.run=r2 --unset-metadata stale.key',
     '--json --actor hpipe reopen hp-7',
     '--json --actor hpipe comment hp-7 --file <tmp>',
     '--json --actor hpipe dep add hp-7 hp-1 --type blocks',
@@ -284,7 +286,8 @@ test('readExport parses the issue lines of the export and skips the rest', () =>
   writeFileSync(beadsExportPath(dir, SLUG), [
     JSON.stringify({
       _type: 'issue', id: 'hp-1', title: 'One', status: 'in_progress', assignee: 'hpipe',
-      labels: ['phase:plan'], dependencies: [{ issue_id: 'hp-1', depends_on_id: 'hp-0', type: 'blocks' }],
+      labels: ['phase:plan'], metadata: { 'hpipe.run': 'r1' },
+      dependencies: [{ issue_id: 'hp-1', depends_on_id: 'hp-0', type: 'blocks' }],
       comments: [{ id: 'c1', text: 'hi [hpipe t1/d1/asked]' }],
     }),
     JSON.stringify({ _type: 'memory', key: 'k', value: 'v' }),
@@ -294,7 +297,9 @@ test('readExport parses the issue lines of the export and skips the rest', () =>
 
   const beads = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0 }).readExport()
   expect(beads.map((b) => b.id)).toEqual(['hp-1'])
-  expect(beads[0]).toMatchObject({ status: 'in_progress', assignee: 'hpipe', labels: ['phase:plan'] })
+  expect(beads[0]).toMatchObject({
+    status: 'in_progress', assignee: 'hpipe', labels: ['phase:plan'], metadata: { 'hpipe.run': 'r1' },
+  })
   expect(beads[0]?.dependencies?.[0]).toMatchObject({ depends_on_id: 'hp-0', type: 'blocks' })
   expect(beads[0]?.comments?.[0]?.text).toContain('[hpipe t1/d1/asked]')
   expect(new Bd({ stateDir: join(dir, 'none'), slug: SLUG, lockWaitMs: 0 }).readExport()).toEqual([])

@@ -243,7 +243,7 @@ one predicate (`src/lib/held.ts`).
 - `--bead` path (replaces `--issue`): `Bd.show`, memoised the same way. Refuses a bead that is
   closed, assigned, held, has an open `blocks` dependency, or has open child beads (parent-child
   dependents — an epic or a human-made parent would trip the open-children close guard). The brief comes from that show.
-- Nothing else in `cmdTask` touches Beads: the run label and the `blocks` edges for `--depends-on`
+- Nothing else in `cmdTask` touches Beads: the run metadata, the labels and the `blocks` edges for `--depends-on`
   are desired state the reconciler applies (§5).
 
 **`hpipe next [--limit N] [--label L]`** — read-only, orchestrator-facing.
@@ -303,22 +303,26 @@ need releasing — grouped by slug.
 
 | Ledger condition (first match wins) | status | assignee | labels |
 |---|---|---|---|
-| `merged_at_ms !== null` | `closed` | `hpipe` | `hpipe:run=<id>` |
-| the task no longer holds its bead (held predicate, §3) | `open` | — | `hpipe:run=<id>`, `phase:<phase>` (or `phase:aborted`) |
-| an escalated, unanswered decision | `blocked` | `hpipe` | `hpipe:run=<id>`, `phase:<phase>`, `hpipe:awaiting-human` |
-| task dispatched: phase is not `queued` and `awaiting_brief !== true` (set on entering `research` from `queued`, cleared by `dispatch`, `cli.ts:602-603`, `machine.ts:104-105`) | `in_progress` | `hpipe` | `hpipe:run=<id>`, `phase:<phase>` |
-| otherwise (registered, not yet dispatched) | `open` | — | `hpipe:run=<id>`, `phase:<phase>` |
+| `merged_at_ms !== null` | `closed` | `hpipe` | — |
+| the task no longer holds its bead (held predicate, §3) | `open` | — | `phase:<phase>` (or `phase:aborted`) |
+| an escalated, unanswered decision | `blocked` | `hpipe` | `phase:<phase>`, `hpipe:awaiting-human` |
+| task dispatched: phase is not `queued` and `awaiting_brief !== true` (set on entering `research` from `queued`, cleared by `dispatch`, `cli.ts:602-603`, `machine.ts:104-105`) | `in_progress` | `hpipe` | `phase:<phase>` |
+| otherwise (registered, not yet dispatched) | `open` | — | `phase:<phase>` |
 
-Plus, regardless of row: a `blocks` edge to each `depends_on` task's bead; and one comment per
+Plus, regardless of row: bead metadata `hpipe.run` = the run id; a `blocks` edge to each `depends_on` task's bead; and one comment per
 escalated decision (question, worker's and orchestrator's recommendations) and per answered decision
 (the ruling), each ending in a marker `[hpipe <task_id>/<decision_id>/<asked|ruling>]`. Labels in
 the `hpipe:` and `phase:` namespaces not in the desired set are removed; other labels are left
-alone.
+alone. The run id is metadata rather than a label because bd sorts labels and bv truncates a card's
+label line: a long `hpipe:run=<id>` label sorted ahead of `phase:` and hid it. Beads labelled
+`hpipe:run=<id>` by earlier builds lose that label to the namespace rule. Nothing reads the run id
+back; held and adoption go by the ledger (§3).
 
 **Actual state** comes from `Bd.readExport()` — no spawn, no lock.
 
 **Convergence.** For each task whose actual bead differs from desired, the minimal calls, in this
-order: `reopen` (closed → not closed); one `update` folding status, assignee and label changes;
+order: `reopen` (closed → not closed); one `update` folding status, assignee, label and metadata
+changes (`--set-metadata hpipe.run=<id>` when the export's value differs);
 `depAdd` per missing edge; `comment` per missing marker; `close` (→ closed, §8). Each call is
 idempotent against the desired state, so a crash at any point simply recomputes the remainder next
 tick. Comments are idempotent through their marker: the reconciler posts one only when the export
