@@ -202,8 +202,10 @@ reach of every worker worktree. hpipe is its only writer: every write runs as ac
 at a time under a lock, and the supervisor converges each bead to what the run's ledger says — claimed
 while its task is worked, blocked while a decision waits on you, released if the task is abandoned or
 the run aborted, closed once its PR merges. The close is the supervisor's; nobody is prompted for it.
-A bead's fine phase is its `phase:<name>` label; the run driving it is bead metadata `hpipe.run`,
-which `hpipe bead show` prints as `run:`.
+A bead's fine phase is a label naming it bare (`research`, `spec-review`, or `aborted` once a run is
+aborted); the run driving it is bead metadata `hpipe.run`, which `hpipe bead show` prints as `run:`.
+A label of your own that equals a phase name (say `plan`) on an adopted bead becomes hpipe's to swap.
+The `phase:<name>` labels earlier builds wrote are removed on the next tick.
 
 **Install** `bd` 1.3.1 or newer — Homebrew core's `beads` formula (`brew install beads`); older
 releases lack the close guards this relies on — and, for the board and `hpipe next`, `bv` 0.25.2 or

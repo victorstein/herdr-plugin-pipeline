@@ -4,6 +4,7 @@ import {
 } from '../src/lib/bead-desired'
 import { escalatedUnanswered, openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
+import { TASK_ROWS } from '../src/lib/phases'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -41,34 +42,34 @@ test('a task in a terminal-bad phase releases its bead, its phase label saying w
   for (const phase of ['failed', 'blocked-on-failure'] as const) {
     const task = mkTask({ phase })
     expect(desiredBead(task, runWith(task)), phase)
-      .toMatchObject({ status: 'open', assignee: null, labels: [`phase:${phase}`] })
+      .toMatchObject({ status: 'open', assignee: null, labels: [phase] })
   }
 })
 
 test('a task rewound to done without a merge holds nothing, so its bead is released', () => {
   const task = mkTask({ phase: 'done' })
-  expect(desiredBead(task, runWith(task))).toMatchObject({ status: 'open', assignee: null, labels: ['phase:done'] })
+  expect(desiredBead(task, runWith(task))).toMatchObject({ status: 'open', assignee: null, labels: ['done'] })
 })
 
-test('an aborted run releases every unmerged bead as phase:aborted, and a resume re-claims it', () => {
+test('an aborted run releases every unmerged bead as aborted, and a resume re-claims it', () => {
   const task = mkTask({ phase: 'implement' })
   const run = runWith(task)
   run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
   run.escalated_from = 'execute'
   run.phase = 'done'
-  expect(desiredBead(task, run)).toMatchObject({ status: 'open', assignee: null, labels: ['phase:aborted'] })
+  expect(desiredBead(task, run)).toMatchObject({ status: 'open', assignee: null, labels: ['aborted'] })
 
   run.history.push({ at: 2, from: 'done', to: 'execute', why: 'resumed' })
   run.phase = 'execute'
   run.escalated_from = null
-  expect(desiredBead(task, run)).toMatchObject({ status: 'in_progress', assignee: 'hpipe', labels: ['phase:implement'] })
+  expect(desiredBead(task, run)).toMatchObject({ status: 'in_progress', assignee: 'hpipe', labels: ['implement'] })
 })
 
 test('a run that ended on its own releases an unfinished task under that task\'s phase', () => {
   const task = mkTask({ phase: 'failed' })
   const run = runWith(task)
   run.phase = 'done'
-  expect(desiredBead(task, run)).toMatchObject({ status: 'open', labels: ['phase:failed'] })
+  expect(desiredBead(task, run)).toMatchObject({ status: 'open', labels: ['failed'] })
 })
 
 test('an escalated task keeps its claim: the human may resume it', () => {
@@ -79,7 +80,7 @@ test('an escalated task keeps its claim: the human may resume it', () => {
 test('a registered task its worker has not been briefed on stays open and unassigned', () => {
   const queued = mkTask({ phase: 'queued' })
   expect(desiredBead(queued, runWith(queued)))
-    .toMatchObject({ status: 'open', assignee: null, labels: ['phase:queued'] })
+    .toMatchObject({ status: 'open', assignee: null, labels: ['queued'] })
   const unbriefed = mkTask({ phase: 'research', awaiting_brief: true })
   expect(desiredBead(unbriefed, runWith(unbriefed))).toMatchObject({ status: 'open', assignee: null })
   const briefed = mkTask({ phase: 'research' })
@@ -95,7 +96,7 @@ test('an escalated, unanswered decision blocks the bead, marks it for the human 
   expect(escalatedUnanswered(task)?.id).toBe('d1')
   const desired = desiredBead(task, runWith(task))
   expect(desired).toMatchObject({
-    status: 'blocked', assignee: 'hpipe', labels: ['phase:blocked-on-decision', AWAITING_HUMAN_LABEL],
+    status: 'blocked', assignee: 'hpipe', labels: ['blocked-on-decision', AWAITING_HUMAN_LABEL],
   })
   expect(desired.comments.map((c) => c.marker)).toEqual(['[hpipe t1/d1/asked]'])
   const text = desired.comments[0]!.text
@@ -144,7 +145,7 @@ test('each depends_on task becomes a blocks edge to its bead, on every row', () 
   expect(desiredBead(first, runWith(first, second)).blockedBy).toEqual([])
 })
 
-test('every row records the run id in metadata rather than a label, which would push phase: off a bv card', () => {
+test('every row records the run id in metadata rather than a label, which would push the phase label off a bv card', () => {
   const merged = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
   const queued = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued' })
   const working = mkTask({ task_id: 't3', bead: 'hp-3', phase: 'implement' })
@@ -156,11 +157,25 @@ test('every row records the run id in metadata rather than a label, which would 
   }
 })
 
-test('only the hpipe: and phase: namespaces are hpipe\'s to remove', () => {
-  for (const label of ['phase:plan', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
+test('hpipe manages its hpipe: labels, every bare task phase name and aborted; a human\'s labels stay theirs', () => {
+  const taskPhases = TASK_ROWS.map((row) => row.phase)
+  for (const label of [...taskPhases, 'aborted', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
     expect(isManagedLabel(label), label).toBe(true)
   }
-  for (const label of ['pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) expect(isManagedLabel(label), label).toBe(false)
+  for (const label of ['frontend', 'pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) {
+    expect(isManagedLabel(label), label).toBe(false)
+  }
+})
+
+test('a phase: label from an earlier build stays managed, so the reconciler migrates it away', () => {
+  for (const label of ['phase:research', 'phase:aborted', 'phase:retired-phase']) expect(isManagedLabel(label), label).toBe(true)
+})
+
+test('the phase label is the bare phase name, short enough to survive a bv card', () => {
+  for (const phase of ['research', 'spec-review', 'blocked-on-files'] as const) {
+    const task = mkTask({ phase })
+    expect(desiredBead(task, runWith(task)).labels, phase).toEqual([phase])
+  }
 })
 
 test('the comment marker is spelled the one way the reconciler looks for', () => {
@@ -195,8 +210,8 @@ test('a depends_on id naming no task in the run adds no edge', () => {
   expect(desiredBead(task, runWith(task)).blockedBy).toEqual([])
 })
 
-test('an aborted run releases a done but unmerged task as phase:aborted, since its work never landed', () => {
+test('an aborted run releases a done but unmerged task as aborted, since its work never landed', () => {
   const task = mkTask({ phase: 'done' })
   expect(desiredBead(task, abort(runWith(task))))
-    .toMatchObject({ status: 'open', assignee: null, labels: ['phase:aborted'] })
+    .toMatchObject({ status: 'open', assignee: null, labels: ['aborted'] })
 })

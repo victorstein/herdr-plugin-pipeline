@@ -3,12 +3,12 @@ import { formatBeadDetail } from '../src/lib/bead-view'
 
 test('a bead prints its title, status, labels, description, acceptance and comments', () => {
   expect(formatBeadDetail({
-    id: 'hp-3', title: 'Fix the meter', status: 'in_progress', assignee: 'hpipe', labels: ['ui', 'phase:plan'],
+    id: 'hp-3', title: 'Fix the meter', status: 'in_progress', assignee: 'hpipe', labels: ['ui', 'plan'],
     metadata: { 'hpipe.run': 'r7', other: 'x' }, description: 'It drifts.\n', acceptance_criteria: 'It holds.',
     comments: [{ text: 'Ruling by the human on t1/d1:\n\nsqlite\n\n[hpipe t1/d1/ruling]' }],
   })).toBe([
     'hp-3 [in_progress] Fix the meter',
-    'labels:     ui, phase:plan',
+    'labels:     ui, plan',
     'assignee:   hpipe',
     'run:        r7',
     '',

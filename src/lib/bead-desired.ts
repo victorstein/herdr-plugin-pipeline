@@ -3,14 +3,22 @@ import { escalatedUnanswered } from './decisions'
 import { TERMINAL_BAD } from './gating'
 import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
+import { TASK_ROWS } from './phases'
 import type { Run, Task } from './types'
 
 /**
  * A metadata key, not a label: bd sorts labels, and a long `hpipe:run=…` label
- * pushed `phase:` off the end of every bv card.
+ * pushed the phase label off the end of every bv card.
  */
 export const RUN_METADATA_KEY = 'hpipe.run'
-export const PHASE_LABEL_PREFIX = 'phase:'
+export const ABORTED_LABEL = 'aborted'
+/**
+ * Phase labels are bare phase names because a bv card is ~22 characters wide and
+ * truncated `phase:research` to `phase:re`. Earlier builds wrote the prefixed form;
+ * keeping it managed lets the reconciler strip it from their beads.
+ */
+const LEGACY_PHASE_LABEL_PREFIX = 'phase:'
+const PHASE_LABELS: ReadonlySet<string> = new Set([...TASK_ROWS.map((row) => row.phase), ABORTED_LABEL])
 export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
 /**
  * Provenance labels sit outside the managed namespaces on purpose: a discovered bead can later be
@@ -19,7 +27,7 @@ export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
 export const DISCOVERED_LABEL = 'discovered'
 export const discoveryLabel = (runId: string, taskId: string, discoveryId: string): string =>
   `discovery:${runId}:${taskId}:${discoveryId}`
-const MANAGED_LABEL_PREFIXES: readonly string[] = ['hpipe:', PHASE_LABEL_PREFIX]
+const MANAGED_LABEL_PREFIXES: readonly string[] = ['hpipe:', LEGACY_PHASE_LABEL_PREFIX]
 
 /** `hpipe status` and the close stall both speak up from here, so the two never disagree. */
 export const BEAD_SYNC_ALERT_FAILURES = 5
@@ -42,9 +50,9 @@ export interface DesiredBead {
   comments: DesiredComment[]
 }
 
-/** Labels outside these namespaces are a human's, and the reconciler never removes them. */
+/** Every other label is a human's, and the reconciler never removes it. */
 export const isManagedLabel = (label: string): boolean =>
-  MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+  PHASE_LABELS.has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
 
 export function commentMarker(taskId: string, decisionId: string, kind: 'asked' | 'ruling'): string {
   return `[hpipe ${taskId}/${decisionId}/${kind}]`
@@ -94,7 +102,7 @@ function decisionComments(task: Task): DesiredComment[] {
  * disagree about whether a task still holds its bead.
  */
 export function desiredBead(task: Task, run: Run): DesiredBead {
-  const phaseLabel = `${PHASE_LABEL_PREFIX}${task.phase}`
+  const phaseLabel: string = task.phase
   const shared = {
     bead: task.bead, metadata: { [RUN_METADATA_KEY]: run.run_id },
     blockedBy: dependencyBeads(task, run), comments: decisionComments(task),
@@ -104,7 +112,7 @@ export function desiredBead(task: Task, run: Run): DesiredBead {
     return { ...shared, status: 'closed', assignee: BD_ACTOR, labels: [] }
   }
   if (!phaseHoldsBead(run.phase, task.phase)) {
-    const why = wasAborted(run) && !TERMINAL_BAD.has(task.phase) ? `${PHASE_LABEL_PREFIX}aborted` : phaseLabel
+    const why = wasAborted(run) && !TERMINAL_BAD.has(task.phase) ? ABORTED_LABEL : phaseLabel
     return { ...shared, status: 'open', assignee: null, labels: [why] }
   }
   if (escalatedUnanswered(task) !== null) {

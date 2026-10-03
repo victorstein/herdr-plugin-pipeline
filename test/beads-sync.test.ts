@@ -120,16 +120,24 @@ function deps(store: ReturnType<typeof fakeStore>, over: Partial<SyncDeps> = {})
 
 test('a dispatched task\'s open bead gets one update folding status, assignee and labels; foreign labels stay', () => {
   const task = mkTask({ phase: 'implement' })
-  const actual = bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['phase:research', 'ui'] })
+  const actual = bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['research', 'ui'] })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([{
     kind: 'update',
-    change: { status: 'in_progress', assignee: 'hpipe', addLabels: ['phase:implement'], removeLabels: ['phase:research'] },
+    change: { status: 'in_progress', assignee: 'hpipe', addLabels: ['implement'], removeLabels: ['research'] },
   }])
+})
+
+test('a bead labelled phase:research by an earlier build swaps it for the bare phase name', () => {
+  const task = mkTask({ phase: 'plan' })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:research', 'ui'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'update', change: { addLabels: ['plan'], removeLabels: ['phase:research'] } },
+  ])
 })
 
 test('a bead labelled hpipe:run= by an earlier build loses that label and gets the run id as metadata', () => {
   const task = mkTask({ phase: 'implement' })
-  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', labels: ['hpipe:run=r1', 'phase:implement', 'ui'] })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', labels: ['hpipe:run=r1', 'implement', 'ui'] })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
     { kind: 'update', change: { removeLabels: ['hpipe:run=r1'], setMetadata: { 'hpipe.run': 'r1' } } },
   ])
@@ -138,7 +146,7 @@ test('a bead labelled hpipe:run= by an earlier build loses that label and gets t
 test('a bead carrying another run\'s id in metadata is overwritten with the driving run\'s, other keys left be', () => {
   const task = mkTask({ phase: 'implement' })
   const actual = bead('hp-1', {
-    status: 'in_progress', assignee: 'hpipe', labels: ['phase:implement'], metadata: { 'hpipe.run': 'r0', owner: 'ana' },
+    status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r0', owner: 'ana' },
   })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
     { kind: 'update', change: { setMetadata: { 'hpipe.run': 'r1' } } },
@@ -147,7 +155,7 @@ test('a bead carrying another run\'s id in metadata is overwritten with the driv
 
 test('a bead already as desired needs no call', () => {
   const task = mkTask({ phase: 'implement' })
-  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:implement'] })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([])
 })
 
@@ -156,15 +164,15 @@ test('a closed bead the ledger wants open again is reopened before its update', 
   const actual = bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
     { kind: 'reopen' },
-    { kind: 'update', change: { status: 'in_progress', addLabels: ['phase:implement'] } },
+    { kind: 'update', change: { status: 'in_progress', addLabels: ['implement'] } },
   ])
 })
 
 test('a merged task\'s bead is relabelled, then closed last with the merge as its reason', () => {
   const task = mkTask({ phase: 'close', merged_at_ms: 5 })
-  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:merge'] })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['merge'] })
   expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
-    { kind: 'update', change: { removeLabels: ['phase:merge'] } },
+    { kind: 'update', change: { removeLabels: ['merge'] } },
     { kind: 'close', reason: 'merged in PR #7 (m3rg3)' },
   ])
 })
@@ -191,13 +199,13 @@ test('a closed bead that should stay closed is left alone, whoever it is assigne
 test('a pass converges every task and exports once', async () => {
   const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'implement' })
   const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
-  const store = fakeStore([bead('hp-1', { labels: ['phase:research'] }), bead('hp-2')])
+  const store = fakeStore([bead('hp-1', { labels: ['research'] }), bead('hp-2')])
 
   await syncBeads([runWith(first, second)], deps(store))
 
   expect(store.calls).toEqual([
-    'update hp-1 {"status":"in_progress","assignee":"hpipe","addLabels":["phase:implement"],"removeLabels":["phase:research"],"setMetadata":{"hpipe.run":"r1"}}',
-    'update hp-2 {"addLabels":["phase:queued"],"setMetadata":{"hpipe.run":"r1"}}',
+    'update hp-1 {"status":"in_progress","assignee":"hpipe","addLabels":["implement"],"removeLabels":["research"],"setMetadata":{"hpipe.run":"r1"}}',
+    'update hp-2 {"addLabels":["queued"],"setMetadata":{"hpipe.run":"r1"}}',
     'depAdd hp-2 hp-1',
   ])
   expect(store.exports()).toBe(1)
@@ -205,7 +213,7 @@ test('a pass converges every task and exports once', async () => {
 
 test('a pass with nothing to change neither writes, exports nor saves', async () => {
   const task = mkTask({ phase: 'queued' })
-  const store = fakeStore([bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['phase:queued'] })])
+  const store = fakeStore([bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['queued'] })])
   const d = deps(store)
   await syncBeads([runWith(task)], d)
   expect(store.calls).toEqual([])
@@ -274,7 +282,7 @@ test('a pass that crashed part-way converges on the next one', async () => {
   await syncBeads([run], d)
 
   expect(store.calls).toEqual([
-    'update hp-2 {"addLabels":["phase:queued"],"setMetadata":{"hpipe.run":"r1"}}', 'depAdd hp-2 hp-1', 'depAdd hp-2 hp-1',
+    'update hp-2 {"addLabels":["queued"],"setMetadata":{"hpipe.run":"r1"}}', 'depAdd hp-2 hp-1', 'depAdd hp-2 hp-1',
   ])
   expect(second.bead_sync).toMatchObject({ failures: 1, last_error: null })
 })
@@ -285,12 +293,12 @@ test('done and aborted runs are visited: an aborted run\'s claimed bead is relea
   run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
   run.escalated_from = 'execute'
   run.phase = 'done'
-  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:implement'] })])
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
 
   await syncBeads([run], deps(store))
 
   expect(store.calls).toEqual([
-    'update hp-1 {"status":"open","assignee":"","addLabels":["phase:aborted"],"removeLabels":["phase:implement"]}',
+    'update hp-1 {"status":"open","assignee":"","addLabels":["aborted"],"removeLabels":["implement"]}',
   ])
 })
 
@@ -299,8 +307,8 @@ test('bead_closed_at_ms is set only once a merge is recorded and the export show
   const unmerged = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
   const run = runWith(merged, unmerged)
   const store = fakeStore([
-    bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:close'] }),
-    bead('hp-2', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:implement'] }),
+    bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['close'] }),
+    bead('hp-2', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] }),
   ])
   let clock = 1_000
   const d = deps(store, { now: () => clock })
@@ -320,7 +328,7 @@ test('a rewind that clears the merge flips the bead back: reopened and re-claime
   const task = mkTask({ phase: 'implement', merged_at_ms: null, bead_closed_at_ms: null })
   const store = fakeStore([bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })])
   await syncBeads([runWith(task)], deps(store))
-  expect(store.calls).toEqual(['reopen hp-1', 'update hp-1 {"status":"in_progress","addLabels":["phase:implement"]}'])
+  expect(store.calls).toEqual(['reopen hp-1', 'update hp-1 {"status":"in_progress","addLabels":["implement"]}'])
 })
 
 test('a repo with no Beads store is skipped', async () => {
@@ -353,7 +361,7 @@ test('a merged task waiting on a bead another task drives counts a failure namin
   const merged = mkTask({ phase: 'close', merged_at_ms: 5, registered_at: 1 })
   const olderRun = runWith(merged)
   olderRun.run_id = 'r0'
-  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:implement'] })])
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
 
   await syncBeads([runWith(holder), olderRun], deps(store))
 
@@ -400,7 +408,7 @@ test('a bead an aborted run released and a later run took is driven by the run h
   oldRun.escalated_from = 'execute'
   oldRun.phase = 'done'
   const taken = mkTask({ phase: 'implement', registered_at: 2 })
-  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:implement'] })])
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
 
   await syncBeads([runWith(taken), oldRun], deps(store))
   await syncBeads([oldRun, runWith(taken)], deps(store))
@@ -513,14 +521,14 @@ test('any existing edge between the pair stands for the blocks edge, since bd re
   const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
   const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
   const actual = bead('hp-2', {
-    metadata: { 'hpipe.run': 'r1' }, labels: ['phase:queued'], dependencies: [{ depends_on_id: 'hp-1', type: 'discovered-from' }],
+    metadata: { 'hpipe.run': 'r1' }, labels: ['queued'], dependencies: [{ depends_on_id: 'hp-1', type: 'discovered-from' }],
   })
   expect(callsFor(desiredBead(second, runWith(first, second)), actual, closeReason(second))).toEqual([])
 })
 
 test('a write whose export failed is re-exported before the next diff, so no comment is posted twice', async () => {
   const task = mkTask({ phase: 'blocked-on-decision', decision_from: 'plan', decisions: [escalatedDecision()] })
-  const store = fakeStore([bead('hp-1', { status: 'blocked', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:blocked-on-decision', 'hpipe:awaiting-human'] })])
+  const store = fakeStore([bead('hp-1', { status: 'blocked', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['blocked-on-decision', 'hpipe:awaiting-human'] })])
   const run = runWith(task)
   const d = deps(store)
 
@@ -579,7 +587,7 @@ test('a bead this session released and another session took is left to the sessi
   const released = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
   writeRunFile(released)
   writeRunFile(runInSession('q', mkTask({ phase: 'implement', registered_at: 2 })))
-  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r2' }, labels: ['phase:implement'] })])
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r2' }, labels: ['implement'] })])
 
   await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
 
@@ -602,7 +610,7 @@ test('once the other session merges the bead, this session\'s older release does
 test('a bead no other session claims is still released by this one', async () => {
   const released = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
   writeRunFile(released)
-  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r0' }, labels: ['phase:implement'] })])
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r0' }, labels: ['implement'] })])
 
   await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
 
@@ -654,7 +662,7 @@ test('two sessions whose released tasks tie on registration pick the same driver
   inQ.run_id = 'r2'
   writeRunFile(inP)
   writeRunFile(inQ)
-  const releasedByQ = bead('hp-1', { status: 'open', metadata: { 'hpipe.run': 'r2' }, labels: ['phase:aborted'] })
+  const releasedByQ = bead('hp-1', { status: 'open', metadata: { 'hpipe.run': 'r2' }, labels: ['aborted'] })
 
   const fromP = fakeStore([releasedByQ])
   await syncBeads([inP], deps(fromP, { claimants: () => beadClaimants(stateDir) }))

@@ -943,12 +943,12 @@ hpipe task --branch smoke/bsm-1 --title "Say hello" --body-file /tmp/bsm-body.md
 ```
 
 **Expect:** `task_id: t1`, `tier: light (--tier)`, `bead: bsm-1 (filed)`. Within a tick or two
-`hpipe bead show bsm-1` reads `bsm-1 [open] Say hello`, label `phase:queued`, assignee
+`hpipe bead show bsm-1` reads `bsm-1 [open] Say hello`, label `queued`, assignee
 `none`, `run: <run-id>`, then the description and `Acceptance` text you wrote.
 
 Run the printed `dispatch, in order:` block. After `hpipe dispatch --task t1`, `hpipe bead show bsm-1`
-reads `[in_progress]`, assignee `hpipe`, label `phase:research`. **(human)** On the board (press `b`)
-the card moves to the in-progress column and its `phase:` label follows the task through `spec`,
+reads `[in_progress]`, assignee `hpipe`, label `research`. **(human)** On the board (press `b`)
+the card moves to the in-progress column and its phase label follows the task through `spec`,
 `plan` and `implement` as `hpipe status` shows each.
 
 Merge the PR when prompted. **Expect**, within a tick or two: `hpipe bead show bsm-1` reads `[closed]`
@@ -973,14 +973,14 @@ it — or, with nothing else open, `nothing to pick up: every open bead is held,
 hpipe abort <run-id>
 ```
 
-Within a tick or two: `hpipe bead show bsm-2` reads `[open]`, assignee `none`, label `phase:aborted`,
+Within a tick or two: `hpipe bead show bsm-2` reads `[open]`, assignee `none`, label `aborted`,
 and `hpipe next` **(human)** now offers `bsm-2`.
 
 ```bash
 hpipe resume <run-id>
 ```
 
-Within a tick or two: `bsm-2` reads `[in_progress]`, assignee `hpipe`, its `phase:<phase>` label again,
+Within a tick or two: `bsm-2` reads `[in_progress]`, assignee `hpipe`, its `<phase>` label again,
 and `hpipe next` **(human)** no longer offers it.
 
 ### 8e. Adopting an existing bead (`--bead`)
@@ -1034,8 +1034,8 @@ saw in the table at the end of this section; a result that differs from "look fo
 back, not something to patch mid-run.
 
 1. **bv board legibility (human).** Run a task as in 8b with the board tab open and press `b`.
-   *Look for:* the `phase:` and `hpipe:` labels are legible on the kanban cards (not truncated to
-   nothing). Then give a bead a non-built-in status, with no live run:
+   *Look for:* the phase labels (`research`, `spec-review`) and the `hpipe:` labels are legible on the kanban
+   cards (not truncated). Then give a bead a non-built-in status, with no live run:
    `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd update <id> -s deferred`, and
    refresh the board. *Look for:* a `deferred` column exists, or the card is dropped — record which.
 2. **Linked-bead field names.** On a bead that has both a `blocks` dependent and a `parent-child` child:
@@ -1072,7 +1072,7 @@ back, not something to patch mid-run.
    stays compact — a screenful, at most 5 ids per line then `+N more` — and any `warning:` line is one you
    can act on, not recurring noise.
 7. **A whole task, end to end.** Run one task from dispatch to merge as in 8b, then abort and resume a
-   second (8d). *Look for:* the bead goes `open → in_progress → closed`; **(human)** the `phase:` label on
+   second (8d). *Look for:* the bead goes `open → in_progress → closed`; **(human)** the phase label on
    the board updates at each phase; an abort releases the bead (`open`, no assignee) and a resume
    re-claims it.
 

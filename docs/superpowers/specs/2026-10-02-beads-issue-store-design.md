@@ -290,7 +290,8 @@ the claim. The reconciler would reach the same state; doing it here lets the dis
 refusal.
 
 **Board columns.** Status shows open / in_progress / blocked / closed; the fine phase is a
-`phase:<name>` label on the card. No custom statuses (whether bv renders them as columns is
+label on the card naming it bare (`research`, `spec-review`) — a card is ~22 characters wide, and
+`phase:research` was cut to `phase:re`. No custom statuses (whether bv renders them as columns is
 unverified; §11).
 
 ## 5. The reconciler
@@ -304,18 +305,20 @@ need releasing — grouped by slug.
 | Ledger condition (first match wins) | status | assignee | labels |
 |---|---|---|---|
 | `merged_at_ms !== null` | `closed` | `hpipe` | — |
-| the task no longer holds its bead (held predicate, §3) | `open` | — | `phase:<phase>` (or `phase:aborted`) |
-| an escalated, unanswered decision | `blocked` | `hpipe` | `phase:<phase>`, `hpipe:awaiting-human` |
-| task dispatched: phase is not `queued` and `awaiting_brief !== true` (set on entering `research` from `queued`, cleared by `dispatch`, `cli.ts:602-603`, `machine.ts:104-105`) | `in_progress` | `hpipe` | `phase:<phase>` |
-| otherwise (registered, not yet dispatched) | `open` | — | `phase:<phase>` |
+| the task no longer holds its bead (held predicate, §3) | `open` | — | `<phase>` (or `aborted`) |
+| an escalated, unanswered decision | `blocked` | `hpipe` | `<phase>`, `hpipe:awaiting-human` |
+| task dispatched: phase is not `queued` and `awaiting_brief !== true` (set on entering `research` from `queued`, cleared by `dispatch`, `cli.ts:602-603`, `machine.ts:104-105`) | `in_progress` | `hpipe` | `<phase>` |
+| otherwise (registered, not yet dispatched) | `open` | — | `<phase>` |
 
 Plus, regardless of row: bead metadata `hpipe.run` = the run id; a `blocks` edge to each `depends_on` task's bead; and one comment per
 escalated decision (question, worker's and orchestrator's recommendations) and per answered decision
-(the ruling), each ending in a marker `[hpipe <task_id>/<decision_id>/<asked|ruling>]`. Labels in
-the `hpipe:` and `phase:` namespaces not in the desired set are removed; other labels are left
-alone. The run id is metadata rather than a label because bd sorts labels and bv truncates a card's
-label line: a long `hpipe:run=<id>` label sorted ahead of `phase:` and hid it. Beads labelled
-`hpipe:run=<id>` by earlier builds lose that label to the namespace rule. Nothing reads the run id
+(the ruling), each ending in a marker `[hpipe <task_id>/<decision_id>/<asked|ruling>]`. Managed labels
+— the `hpipe:` namespace, every task phase name, `aborted`, and the `phase:` namespace earlier builds
+wrote — not in the desired set are removed; other labels are left alone. A human's own label that
+equals a phase name (say `plan`) on an adopted bead is therefore hpipe's, and is removed while the
+task is not in that phase. The run id is metadata rather than a label because bd sorts labels and bv truncates a card's
+label line: a long `hpipe:run=<id>` label sorted ahead of the phase label and hid it. Beads labelled
+`hpipe:run=<id>` or `phase:<name>` by earlier builds lose that label to the namespace rule. Nothing reads the run id
 back; held and adoption go by the ledger (§3).
 
 **Actual state** comes from `Bd.readExport()` — no spawn, no lock.
@@ -417,7 +420,7 @@ clause (`src/supervisor/stall.ts:341-352`, rewritten) reads the task:
 
 **Releases** follow from the desired-state table. A task in `TERMINAL_BAD` (including a rewind to
 `failed`, the documented abandon path) or in an aborted run gets an `open`, unassigned bead with its
-`phase:` label showing why, and stops being held, so `hpipe next` offers it again. `resume`,
+phase label showing why, and stops being held, so `hpipe next` offers it again. `resume`,
 rewinding out of `failed`, and re-dispatch flip it back. `orphaned` is post-merge
 (`teardown.ts:186`), so its `merged_at_ms` keeps the bead `closed`. `escalated` keeps the claim (the
 human may resume). `hpipe forget` touches no bead.
@@ -491,7 +494,7 @@ Step 1 of the plan. Each confirms the design or changes the named section.
    `update --assignee "" -s open` on an `in_progress` claim, `reopen` then `claim`, `dep add`,
    `comment --file`, close without `--force` — all succeed; and the export carries labels, deps and
    comment text (§2, §5, §8).
-2. bv's board with `phase:` labels: are labels legible on cards; does a custom status render as a
+2. bv's board with phase labels: are labels legible on cards; does a custom status render as a
    column (§4)?
 3. `herdr plugin pane open` with `--env`/`--cwd`: the env reaches the pane, `HERDR_PANE_ID` is set,
    and `herdr pane rename` works on a plugin pane (§9).
