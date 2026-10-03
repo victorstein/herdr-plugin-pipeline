@@ -6,7 +6,7 @@ import { Herdr } from './lib/herdr'
 import { readPid } from './lib/pidfile'
 import { gcStaleTmp } from './lib/queue'
 import { sessionKey } from './lib/session'
-import { checkTools, toolsLine } from './lib/tools'
+import { checkTools, toolsLine, type Tools } from './lib/tools'
 
 const SUPERVISOR_LABEL = 'Pipeline supervisor'
 const ONE_HOUR_MS = 60 * 60 * 1000
@@ -162,6 +162,14 @@ export async function linkHpipe(target: string, linkPath: string): Promise<void>
   symlinkSync(target, linkPath)
 }
 
+/**
+ * Started before the pane work and awaited only in its `finally`: a rejection
+ * caught here can neither go unhandled meanwhile nor replace an error in flight.
+ */
+export function startToolsCheck(check: () => Promise<Tools> = checkTools): Promise<Tools | null> {
+  return check().catch(() => null)
+}
+
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR
@@ -175,7 +183,7 @@ async function main(): Promise<void> {
 
   await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)
   // Not awaited here: a hung bd or bv must not hold up the supervisor pane.
-  const toolsChecked = checkTools()
+  const toolsChecked = startToolsCheck()
 
   try {
     if (config.HPIPE_LINK) {
@@ -203,7 +211,8 @@ async function main(): Promise<void> {
     const strays = await clearStrayPanes(herdr, workspaceId, recordedBoardPanes(await readBoards(stateDir, session)))
     if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
   } finally {
-    const toolsWarning = toolsLine(await toolsChecked)
+    const tools = await toolsChecked
+    const toolsWarning = tools === null ? null : toolsLine(tools)
     if (toolsWarning !== null) console.error(`[pipeline] ${toolsWarning}`)
   }
 }

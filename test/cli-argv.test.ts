@@ -484,3 +484,11 @@ test('start with a --prefix that has no value refuses and opens no run', () => {
   expect(r.out).toContain('--prefix needs a value')
   expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
 })
+
+test('start with a flag where the --prefix value belongs refuses and opens no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', 't', '--prefix', '--x'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--prefix needs a value')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
+})

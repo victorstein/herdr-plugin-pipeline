@@ -80,7 +80,16 @@ export async function setupBeads(input: SetupInput, deps: SetupDeps = REAL_SETUP
   const initialised = await deps.initStore(input.stateDir, slug, prefix)
   if (isBdFailure(initialised)) {
     // bd refuses to init over an existing .beads, so a store left half-made would fail every later setup.
-    rmSync(beadsDir(input.stateDir, slug), { recursive: true, force: true })
+    const halfMade = beadsDir(input.stateDir, slug)
+    try {
+      rmSync(halfMade, { recursive: true, force: true })
+    } catch (error) {
+      return {
+        ok: false,
+        error: `setting up Beads in ${home} failed, and the half-made store could not be removed (${error}); ` +
+          `remove ${halfMade} by hand before the next setup:\n  ${initialised.error}`,
+      }
+    }
     return {
       ok: false,
       error: `setting up Beads in ${home} failed; the half-made store was removed, so the next setup starts afresh:\n  ${initialised.error}`,

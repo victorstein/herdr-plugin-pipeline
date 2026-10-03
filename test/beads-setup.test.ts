@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beadsDir, beadsHome, beadsSlug, readBeadsProject, writeBeadsProject } from '../src/lib/beads-project'
@@ -147,4 +147,24 @@ test('a bd init that fails after creating the store removes it, so the next setu
 
   await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'hp' }, deps)
   expect(attempts).toBe(2)
+})
+
+test('a half-made store that cannot be removed is named, so the user can remove it by hand', async () => {
+  const slug = beadsSlug(KEY)
+  const home = beadsHome(dir, slug)
+  const { deps } = fakeDeps({
+    initStore: async (stateDir, initSlug) => {
+      mkdirSync(beadsDir(stateDir, initSlug), { recursive: true })
+      chmodSync(home, 0o555)
+      return { reason: 'exit', error: 'Error: config set failed' }
+    },
+  })
+  try {
+    const result = await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'hp' }, deps)
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error).toContain(`remove ${beadsDir(dir, slug)} by hand`)
+    expect(!result.ok && result.error).toContain('Error: config set failed')
+  } finally {
+    chmodSync(home, 0o755)
+  }
 })

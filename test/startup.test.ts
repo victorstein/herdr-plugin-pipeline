@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import {
-  clearStrayPanes, ensureWorkspace, keepCrashTail, linkHpipe, reapGhostPanes, reapSupervisorSiblings,
+  clearStrayPanes, ensureWorkspace, keepCrashTail, linkHpipe, reapGhostPanes, reapSupervisorSiblings, startToolsCheck,
 } from '../src/startup'
 
 let dir: string
@@ -152,4 +152,13 @@ test('clearStrayPanes spares a just-opened board and recorded boards, and closes
     'pane close': { result: {} },
   })
   expect(await clearStrayPanes(new Herdr(bin), 'w3', new Set(['w3:p3']))).toEqual(['w3:p4', 'w3:p5'])
+})
+
+test('a tools check that rejects settles as null, so it never surfaces as an unhandled rejection', async () => {
+  expect(await startToolsCheck(() => Promise.reject(new Error('spawn failed')))).toBeNull()
+})
+
+test('a tools check that resolves passes its result through', async () => {
+  const tools = { bd: { state: 'ok' as const, version: '1.3.1' }, bv: { state: 'ok' as const, version: '0.25.2' } }
+  expect(await startToolsCheck(async () => tools)).toEqual(tools)
 })
