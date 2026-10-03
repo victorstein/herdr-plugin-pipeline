@@ -13,11 +13,12 @@ and plans its own bead.
    first lands) or with `--depends-on` when the second genuinely needs the first's result. App tasks
    depend on the `core` task that builds what they consume.
 
-3. **Back every task with one bead, no exceptions.** Start from the backlog: `{{hpipe}} next` lists
-   this repo's open beads that no live task holds, as bv ranks them — first the picks claimable now,
-   then one line per later dependency layer, each waiting on the one before it. Adopt one that fits
-   with `--bead <id>`, and file new work only for what the backlog does not already hold;
-   `{{hpipe}} bead show <id>` reads a bead. Adoption refuses a bead that is closed, assigned, held by
+3. **Back every task with one bead, no exceptions.** Start from the backlog: `{{hpipe}} next` shows
+   bv's top 10 recommendations among this repo's open beads that no live task holds — first the
+   picks claimable now (capped by `--limit`, default 5), then one line per later dependency layer,
+   each waiting on the one before it. Adopt one that fits with `--bead <id>`. A bead it omits may
+   still exist, so before filing what looks like known work, raise `--limit`, read the bead with
+   `{{hpipe}} bead show <id>` when you know its id, or ask the user. Adoption refuses a bead that is closed, assigned, held by
    a live task in any session, blocked by an open bead, or the parent of open child beads. A new
    bead's body is the worker's entire brief: the goal, the constraints, and `file:line` pointers to
    where the work belongs, with the acceptance criteria in a file of their own. The brief is captured
@@ -57,8 +58,9 @@ and plans its own bead.
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
    exists. `--files` and `--depends-on` are **comma-separated**: a value containing whitespace is
    rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the
-   task id, then a `tier:` line naming the tier it recorded and why, then a `files:` line echoing
-   exactly what it recorded (or `files: none`) — check both say what you meant — and then either the
+   task id, then a `tier:` line naming the tier it recorded and why, then `bead: <id> (filed)` when it
+   filed one, then a `files:` line echoing exactly what it recorded (or `files: none`) — check `tier:`
+   and `files:` say what you meant — then a `bootstrap:` line, and then either the
    worker brief to dispatch or `queued: waiting on …`, which is correct, and you will be told when
    that task is ready. A brief to dispatch comes with a `base: <commit> (…)` line: cut that task's
    worktree from that commit (`herdr worktree create … --base <commit>`), never from your local

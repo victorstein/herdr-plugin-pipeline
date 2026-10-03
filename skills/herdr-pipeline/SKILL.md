@@ -36,8 +36,10 @@ behaviour; this skill does.
    `bd` ≥ 1.3.1; the prefix must start with a letter) and prints the intake prompt. Follow it.
 2. One bead per task; **the bead's brief is the worker's entire brief** (goal, acceptance criteria,
    `file:line` pointers), captured when the task is registered. Check the backlog first: `hpipe next`
-   lists unheld open beads as bv ranks them — the picks claimable `now`, then one line per later
-   dependency layer, each waiting on the one before — and `hpipe bead show <id>` reads one.
+   shows bv's top 10 recommendations among unheld open beads — the picks claimable `now` (capped by
+   `--limit`, default 5), then one line per later dependency layer, each waiting on the one before —
+   and `hpipe bead show <id>` reads one. A bead `next` omits may still exist: before filing what looks
+   like known work, raise `--limit`, `bead show` a known id, or ask the user.
    Register: `hpipe task --branch <b> --bead <id> --surface <s> [--depends-on t1,t2] [--files a/,b/c.ts]`
    — or `--title "<t>" --body-file <path> [--acceptance-file <path>]` instead of `--bead` to file a
    new bead in the same step; it prints `bead: <id> (filed)`. Adoption refuses a bead that is closed,
@@ -91,7 +93,7 @@ The supervisor nudges a silent task with a stall probe (workers every 45 min, th
 | Orchestrator pane died / replaced | Run inside the new orchestrator pane (it claims the pane it runs in): `herdr plugin action invoke claim --plugin stein.pipeline`. Held prompts and a catch-up digest follow |
 | Supervisor dead | `herdr plugin action invoke supervisor --plugin stein.pipeline` |
 | Task blocked behind a failed sibling's `--files` | `hpipe release --task <id>` |
-| A task sits in `close` and status shows its bead out of sync | Fix what bd's error names, or `hpipe close --task <id>` (`--force` only to override bd's close guards) |
+| A task sits in `close` and status shows its bead out of sync | Relay bd's error to the user (never run `bd` yourself), or `hpipe close --task <id>`; `--force` (overrides bd's close guards) only with the user's go-ahead |
 | `hpipe start` refuses on bd's version | `brew upgrade beads` (the user's call — ask first); bd ≥ 1.3.1 is required |
 | `hpipe next` or the board says `bv` is missing | The pipeline runs without it. Installing it is the user's call — its licence carries a rider (see the README) |
 | The repo's `Board: …` tab is gone | `herdr plugin action invoke board --plugin stein.pipeline` from a pane in the repo, or let the supervisor reopen it next tick |

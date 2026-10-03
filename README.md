@@ -51,11 +51,12 @@ at all:
 | Claim this pane as orchestrator | rebind a run whose orchestrator pane changed |
 | Reopen the supervisor | when `status` says it died |
 | Drain pending events | force a queue drain |
-| Set up Beads for this repo | create the repo's Beads store (run from a pane in the repo; `HPIPE_BEADS_PREFIX` overrides the prefix) |
+| Set up Beads for this repo | create the repo's Beads store with the default prefix (run from a pane in the repo) |
 | Open board | reopen the repo's `bv` board tab (run from a pane in the repo) |
 
-A CLI is only needed for the recovery commands, which take arguments actions cannot: `rewind`,
-`release`, `abort`, `resume`, `forget`. Run those as `bun run <plugin-root>/src/cli.ts …`, or install
+A CLI is only needed for the commands that take arguments actions cannot: the recovery commands
+`rewind`, `release`, `abort`, `resume`, `forget` and `close`, and the read-only `bead show` and
+`next`. Run those as `bun run <plugin-root>/src/cli.ts …`, or install
 the shorthand with the **Install the hpipe shorthand** action — it links `bin/hpipe` into
 `~/.local/bin` (override with `HPIPE_BIN_DIR`) and tells you if that is not on your PATH.
 
@@ -210,9 +211,11 @@ missing or too old.
 
 **Setup** happens on the first `hpipe start` in a repo, or on demand with the **Set up Beads for this
 repo** action from a pane in it. Bead ids are `<prefix>-<n>`; the prefix defaults to the repo's name
-cut to eight characters. `hpipe start --prefix <p>` picks another (for the action, set
-`HPIPE_BEADS_PREFIX`). A prefix must start with a letter and hold only lowercase letters, digits and
-dashes. Setup refuses a prefix another repo's store already uses, and one whose `<prefix>-<n>` names
+cut to eight characters. To choose another, pass `hpipe start --prefix <p>` on the first start: once
+the store exists the prefix is fixed and `--prefix` is ignored. The action uses the default prefix,
+or `HPIPE_BEADS_PREFIX` if it is set in herdr's own environment. A prefix holds letters, digits and
+dashes and must start with a letter; it is stored lowercase, with any trailing dashes trimmed. Setup
+refuses a prefix another repo's store already uses, and one whose `<prefix>-<n>` names
 already appear under `docs/superpowers/`.
 
 **Back up `$HERDR_PLUGIN_STATE_DIR/beads`.** It is the only copy of every backlog, and it cannot be
@@ -226,9 +229,8 @@ The supervisor re-claims them on its next pass, but until then they look free.
 
 **The board.** Each repo with a live run in the session gets one `Board: <repo> <hash>` tab in the
 pipeline workspace, running `bv` on the export hpipe writes after every change; press `b` for the
-kanban. The supervisor closes it once the repo has no live run. Only recorded boards and a
-just-opened `Board` tab are spared: a `Board: …` tab no record names — what a herdr restart leaves
-behind — is closed as a ghost and replaced. The **Open board** action reopens it. It is read-only by
+kanban. The supervisor closes it once the repo has no live run, and a stale `Board: …` tab left by a
+herdr restart is closed and replaced. The **Open board** action reopens it. It is read-only by
 construction. **Never install `br` alongside `bv`**: bv's edit path shells out to `br`, which would
 write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
 
