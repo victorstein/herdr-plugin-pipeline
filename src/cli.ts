@@ -611,7 +611,7 @@ export async function cmdTask(
   if (outcome.registeredAs !== null) {
     return fail(
       `task ${outcome.registeredAs} is registered with bead ${filed.id}, but: ${reason}\n` +
-      `  → hpipe brief --task ${outcome.registeredAs} prints its brief; do not register it again`,
+      `  → ${hpipeCommand(ctx.pluginRoot)} brief --task ${outcome.registeredAs} prints its brief; do not register it again`,
     )
   }
   return fail(
@@ -707,7 +707,7 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   const briefedPhase = taskRow('queued').onClear as TaskPhase
   if (task.phase !== briefedPhase) {
     return fail(`task ${task.task_id} is already in ${task.phase}, past ${briefedPhase} — ` +
-      `its worker has the brief; \`hpipe brief --task ${task.task_id}\` prints it to reread`)
+      `its worker has the brief; \`${hpipeCommand(ctx.pluginRoot)} brief --task ${task.task_id}\` prints it to reread`)
   }
 
   // Checked before the send, because a brief sent to the wrong pane cannot be

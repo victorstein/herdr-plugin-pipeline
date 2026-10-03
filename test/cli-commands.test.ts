@@ -21,11 +21,15 @@ import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
+import { hpipeCommand } from '../src/lib/render'
 import { desiredBead } from '../src/lib/bead-desired'
 
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
+/** A plugin root `hpipe` on PATH cannot resolve into, so hints must carry the absolute invocation. */
+const UNLINKED_ROOT = '/nonexistent/plugin/root'
+const UNLINKED_HPIPE = `bun run ${join(UNLINKED_ROOT, 'src', 'cli.ts')}`
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'clicmd-'))
@@ -451,7 +455,8 @@ test('a failure after the registration landed says so, and does not invite a sec
 
   expect(result.ok).toBe(false)
   expect(result.text).toContain('task t1 is registered with bead hp-318')
-  expect(result.text).toContain('hpipe brief --task t1')
+  expect(result.text).toContain(`${hpipeCommand(noPrompts)} brief --task t1`)
+  expect(hpipeCommand(noPrompts)).not.toBe('hpipe')
   expect(result.text).not.toContain('--bead hp-318')
   expect((await registered()).map((t) => t.bead)).toEqual(['hp-318'])
 })
@@ -1619,13 +1624,13 @@ test('dispatch --task refuses a task whose worker is already past its first phas
   await saveRun(dir, run!)
   const { sent, send } = recordingSend()
 
-  const result = await cmdDispatchTask(ctx(), {
+  const result = await cmdDispatchTask({ ...ctx(), pluginRoot: UNLINKED_ROOT }, {
     taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
   }, send)
 
   expect(result.ok).toBe(false)
   expect(result.text).toContain('already in implement')
-  expect(result.text).toContain('brief --task t1')
+  expect(result.text).toContain(`\`${UNLINKED_HPIPE} brief --task t1\``)
   expect(sent).toEqual([])
 })
 
@@ -2143,10 +2148,10 @@ const savedTask = async (): Promise<Task> => (await listRuns(dir, 'personal'))[0
 
 test('escalate hands the open decision to the human with the orchestrator\'s recommendation', async () => {
   await seedAskedDecision()
-  const result = await cmdEscalate(ctx(), escalation())
+  const result = await cmdEscalate({ ...ctx(), pluginRoot: UNLINKED_ROOT }, escalation())
   expect(result.ok).toBe(true)
   expect(result.text).toContain('d1 on t1 is now with the human')
-  expect(result.text).toContain('answer --task t1 --decision d1 --answer "<their ruling>" --by human')
+  expect(result.text).toContain(`\`${UNLINKED_HPIPE} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
   const task = await savedTask()
   expect(task.decisions[0]!.escalated_at).toBeGreaterThan(0)
   expect(task.decisions[0]!.orchestrator_recommendation).toBe('sqlite, for the tests')
