@@ -51,3 +51,21 @@ test('a failed show or a refused claim comes back as bd said it', async () => {
   const refused = fakeBd({}, { claim: { reason: 'exit', error: 'hp-1 is already claimed by bob' } })
   expect(await claimForDispatch(refused.bd, 'hp-1')).toEqual({ reason: 'exit', error: 'hp-1 is already claimed by bob' })
 })
+
+test('a closed bead is not reset first, and the claim bd refuses refuses the dispatch', async () => {
+  const { bd, calls } = fakeBd(
+    { status: 'closed', assignee: 'hpipe' },
+    { claim: { reason: 'exit', error: 'cannot claim hp-1: issue is closed' } },
+  )
+  expect(await claimForDispatch(bd, 'hp-1')).toEqual({ reason: 'exit', error: 'cannot claim hp-1: issue is closed' })
+  expect(calls).toEqual(['show hp-1', 'claim hp-1'])
+})
+
+test('a bead another actor holds in progress is not reset, and their claim refuses the dispatch', async () => {
+  const { bd, calls } = fakeBd(
+    { status: 'in_progress', assignee: 'bob' },
+    { claim: { reason: 'exit', error: 'hp-1 is already claimed by bob' } },
+  )
+  expect(await claimForDispatch(bd, 'hp-1')).toEqual({ reason: 'exit', error: 'hp-1 is already claimed by bob' })
+  expect(calls).toEqual(['show hp-1', 'claim hp-1'])
+})

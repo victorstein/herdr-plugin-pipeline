@@ -32,12 +32,16 @@ export interface BeadHold {
 }
 
 /** Adoption, `hpipe next` and the reconciler's release rule all read this one predicate. */
+export function phaseHoldsBead(runPhase: string, taskPhase: string): boolean {
+  if (runPhase === 'done') return false
+  const phase = taskPhase as TaskPhase
+  return !TERMINAL_OK.has(phase) && !TERMINAL_BAD.has(phase)
+}
+
 export function holdsBead<T extends { phase: string; bead?: string }>(
   run: { phase: string }, task: T,
 ): task is T & { bead: string } {
-  if (task.bead === undefined || run.phase === 'done') return false
-  const phase = task.phase as TaskPhase
-  return !TERMINAL_OK.has(phase) && !TERMINAL_BAD.has(phase)
+  return task.bead !== undefined && phaseHoldsBead(run.phase, task.phase)
 }
 
 /** A task of any session that names a bead, whether or not it still holds it. */

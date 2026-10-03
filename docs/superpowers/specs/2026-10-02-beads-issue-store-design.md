@@ -299,12 +299,12 @@ unverified; §11).
 loop over every run file in the session — `done` and aborted runs included, since their beads still
 need releasing — grouped by slug.
 
-**Desired state**, a pure function `desiredBead(task, run, decisions)` in `src/lib/bead-desired.ts`:
+**Desired state**, a pure function `desiredBead(task, run)` in `src/lib/bead-desired.ts`:
 
 | Ledger condition (first match wins) | status | assignee | labels |
 |---|---|---|---|
 | `merged_at_ms !== null` | `closed` | `hpipe` | `hpipe:run=<id>` |
-| task in `TERMINAL_BAD`, or run `done` and task not `done` | `open` | — | `hpipe:run=<id>`, `phase:<phase>` (or `phase:aborted`) |
+| the task no longer holds its bead (held predicate, §3) | `open` | — | `hpipe:run=<id>`, `phase:<phase>` (or `phase:aborted`) |
 | an escalated, unanswered decision | `blocked` | `hpipe` | `hpipe:run=<id>`, `phase:<phase>`, `hpipe:awaiting-human` |
 | task dispatched: phase is not `queued` and `awaiting_brief !== true` (set on entering `research` from `queued`, cleared by `dispatch`, `cli.ts:602-603`, `machine.ts:104-105`) | `in_progress` | `hpipe` | `hpipe:run=<id>`, `phase:<phase>` |
 | otherwise (registered, not yet dispatched) | `open` | — | `hpipe:run=<id>`, `phase:<phase>` |

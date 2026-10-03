@@ -160,3 +160,27 @@ test('a bead is out of sync at five failed calls with an error still standing', 
   expect(beadOutOfSync(mkTask({ bead_sync: { failures: 4, last_error: 'locked', last_ok_at_ms: null } }))).toBe(false)
   expect(beadOutOfSync(mkTask({ bead_sync: { failures: 9, last_error: null, last_ok_at_ms: 3 } }))).toBe(false)
 })
+
+function abort(run: Run): Run {
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.escalated_from = 'execute'
+  run.phase = 'done'
+  return run
+}
+
+test('an aborted run still closes the bead of a task that merged before the abort', () => {
+  const task = mkTask({ phase: 'done', merged_at_ms: 5 })
+  expect(desiredBead(task, abort(runWith(task))))
+    .toMatchObject({ status: 'closed', assignee: 'hpipe', labels: [RUN_LABEL] })
+})
+
+test('a depends_on id naming no task in the run adds no edge', () => {
+  const task = mkTask({ depends_on: ['t-missing'] })
+  expect(desiredBead(task, runWith(task)).blockedBy).toEqual([])
+})
+
+test('an aborted run releases a done but unmerged task as phase:aborted, since its work never landed', () => {
+  const task = mkTask({ phase: 'done' })
+  expect(desiredBead(task, abort(runWith(task))))
+    .toMatchObject({ status: 'open', assignee: null, labels: [RUN_LABEL, 'phase:aborted'] })
+})

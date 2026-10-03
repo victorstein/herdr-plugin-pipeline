@@ -1,7 +1,7 @@
 import { BD_ACTOR } from './bd'
 import { escalatedUnanswered } from './decisions'
 import { TERMINAL_BAD } from './gating'
-import { holdsBead } from './held'
+import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
 import type { Run, Task } from './types'
 
@@ -96,7 +96,7 @@ export function desiredBead(task: Task, run: Run): DesiredBead {
   if (task.merged_at_ms !== null) {
     return { ...shared, status: 'closed', assignee: BD_ACTOR, labels: [runLabel] }
   }
-  if (!holdsBead(run, { phase: task.phase, bead: task.bead })) {
+  if (!phaseHoldsBead(run.phase, task.phase)) {
     const why = wasAborted(run) && !TERMINAL_BAD.has(task.phase) ? `${PHASE_LABEL_PREFIX}aborted` : phaseLabel
     return { ...shared, status: 'open', assignee: null, labels: [runLabel, why] }
   }

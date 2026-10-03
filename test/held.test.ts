@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beadClaimants, beadHolds, heldBy, holdsBead } from '../src/lib/held'
+import { beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from '../src/lib/held'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'held-')) })
@@ -23,6 +23,13 @@ test('a live task in a live run holds its bead; a finished task, a finished run 
   }
   expect(holdsBead({ phase: 'done' }, { phase: 'implement', bead: 'hp-1' })).toBe(false)
   expect(holdsBead(live, { phase: 'implement' })).toBe(false)
+})
+
+test('phaseHoldsBead is the held predicate on phases alone, for callers whose task always names a bead', () => {
+  expect(phaseHoldsBead('execute', 'implement')).toBe(true)
+  expect(phaseHoldsBead('execute', 'failed')).toBe(false)
+  expect(phaseHoldsBead('execute', 'done')).toBe(false)
+  expect(phaseHoldsBead('done', 'implement')).toBe(false)
 })
 
 test('every session\'s runs are scanned, and only what is held is returned', async () => {
