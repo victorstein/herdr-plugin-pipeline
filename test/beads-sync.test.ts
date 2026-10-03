@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BdFailure, BeadUpdate, Done, ExportedBead } from '../src/lib/bd'
 import { desiredBead } from '../src/lib/bead-desired'
+import { beadsSlug } from '../src/lib/beads-project'
 import { beadClaimants } from '../src/lib/held'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
@@ -314,7 +315,8 @@ test('a merged task waiting on its close in a repo with no store counts a failur
   await syncBeads([run], d)
 
   expect(waiting.bead_sync).toMatchObject({
-    failures: 2, last_error: 'no Beads store for /code/repo; run the setup action or `hpipe close`',
+    failures: 2,
+    last_error: 'no Beads store for /code/repo; run the \'Set up Beads for this repo\' action or `hpipe start` in that repo',
   })
   expect(working.bead_sync.failures).toBe(0)
   expect(logged).toHaveLength(1)
@@ -502,4 +504,60 @@ test('a bead no other session claims is still released by this one', async () =>
   await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
 
   expect(store.calls).toHaveLength(1)
+})
+
+test('an export that cannot be refreshed is logged once while the error stays the same', async () => {
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const logged: string[] = []
+  const d = deps(store, { log: (message) => { logged.push(message) } })
+  const run = runWith(mkTask({ phase: 'implement' }))
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(store.calls).toEqual([])
+  expect(logged).toEqual([
+    `beads ${beadsSlug('/code/repo')}: export is stale and could not be refreshed (disk full); skipped this tick`,
+  ])
+})
+
+test('an export that cannot be refreshed counts a failure for a merged task waiting on its close, and only that task', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const working = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const store = fakeStore([bead('hp-1'), bead('hp-2')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const d = deps(store)
+
+  await syncBeads([runWith(waiting, working)], d)
+
+  expect(waiting.bead_sync).toMatchObject({ failures: 1, last_error: 'the Beads export could not be refreshed: disk full' })
+  expect(working.bead_sync.failures).toBe(0)
+  expect(d.persisted).toHaveLength(1)
+})
+
+test('a lock not taken on refresh counts no failure, even for a task waiting on its close', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([runWith(waiting)], deps(store))
+  expect(waiting.bead_sync.failures).toBe(0)
+})
+
+test('two sessions whose released tasks tie on registration pick the same driver, so neither flips the bead', async () => {
+  const inP = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  const inQ = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  inQ.session = 'q'
+  inQ.run_id = 'r2'
+  writeRunFile(inP)
+  writeRunFile(inQ)
+  const releasedByQ = bead('hp-1', { status: 'open', labels: ['hpipe:run=r2', 'phase:aborted'] })
+
+  const fromP = fakeStore([releasedByQ])
+  await syncBeads([inP], deps(fromP, { claimants: () => beadClaimants(stateDir) }))
+  const fromQ = fakeStore([releasedByQ])
+  await syncBeads([inQ], deps(fromQ, { claimants: () => beadClaimants(stateDir) }))
+
+  expect(fromP.calls).toEqual([])
+  expect(fromQ.calls).toEqual([])
 })

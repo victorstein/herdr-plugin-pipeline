@@ -28,7 +28,10 @@ export interface SyncDeps {
   claimants: () => Promise<BeadClaimant[]>
   persist: (run: Run, effect: RunEffect) => Promise<void>
   log: (message: string) => void
-  /** Per slug, the last lock message logged, kept across passes so a busy store is reported once. */
+  /**
+   * Per slug, the last pass-level notice logged (a lock not taken, an export that
+   * could not be refreshed), kept across passes so a lasting problem is reported once.
+   */
   lockNotices: Map<string, string>
 }
 
@@ -110,8 +113,14 @@ type Driver = Pick<BeadClaimant, 'session' | 'run_id' | 'task_id' | 'holds' | 'r
 
 const driverKey = (slug: string, bead: string): string => `${slug}\0${bead}`
 
-const drivesOver = (candidate: Driver, current: Driver): boolean =>
-  candidate.holds !== current.holds ? candidate.holds : candidate.registered_at > current.registered_at
+const identity = (driver: Driver): string => `${driver.session}\0${driver.run_id}\0${driver.task_id}`
+
+/** Every session must pick the same driver, so a full tie falls to identity rather than to which run was read first. */
+function drivesOver(candidate: Driver, current: Driver): boolean {
+  if (candidate.holds !== current.holds) return candidate.holds
+  if (candidate.registered_at !== current.registered_at) return candidate.registered_at > current.registered_at
+  return identity(candidate) > identity(current)
+}
 
 /**
  * Which task, across every session, drives each bead. A bead released by an
@@ -160,10 +169,12 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
   const elsewhere = (await deps.claimants()).filter((claimant) => !localSessions.has(claimant.session))
   const drivers = beadDrivers(runs, elsewhere)
 
-  const lockNotTakenAt = (slug: string, where: string, failure: BdFailure): void => {
-    if (deps.lockNotices.get(slug) !== failure.error) deps.log(`beads ${slug}: pass ended ${where}: ${failure.error}`)
-    deps.lockNotices.set(slug, failure.error)
+  const noticeOnce = (slug: string, notice: string): void => {
+    if (deps.lockNotices.get(slug) !== notice) deps.log(`beads ${slug}: ${notice}`)
+    deps.lockNotices.set(slug, notice)
   }
+  const lockNotTakenAt = (slug: string, where: string, failure: BdFailure): void =>
+    noticeOnce(slug, `pass ended ${where}: ${failure.error}`)
 
   const failureOf = (slug: string, effects: RunEffect[]) => (task: Task, error: string): void => {
     effects.push(recordSyncFailure(task.task_id, error))
@@ -180,20 +191,25 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     }
   }
 
+  /**
+   * Every other bead write can wait for a later pass, but a merged task's close
+   * cannot clear without one, and the close stall must not call that waiting.
+   */
+  const failWaitingOnClose = async (slug: string, slugRuns: readonly Run[], why: (run: Run) => string): Promise<void> => {
+    for (const run of slugRuns) {
+      const effects: RunEffect[] = []
+      const fail = failureOf(slug, effects)
+      for (const task of run.tasks.filter(waitsOnClose)) fail(task, why(run))
+      await save(slug, run, effects)
+    }
+  }
+
   let stopped = false
   for (const [slug, slugRuns] of groupBySlug(runs)) {
     if (stopped) break
     if (!(await deps.hasStore(slug))) {
-      // Every other bead write can wait for a store, but a merged task's close
-      // cannot clear without one, and the close stall must not call that waiting.
-      for (const run of slugRuns) {
-        const effects: RunEffect[] = []
-        const fail = failureOf(slug, effects)
-        for (const task of run.tasks.filter(waitsOnClose)) {
-          fail(task, `no Beads store for ${run.repo_key}; run the setup action or \`hpipe close\``)
-        }
-        await save(slug, run, effects)
-      }
+      await failWaitingOnClose(slug, slugRuns, (run) =>
+        `no Beads store for ${run.repo_key}; run the 'Set up Beads for this repo' action or \`hpipe start\` in that repo`)
       continue
     }
     const bd = deps.bdFor(slug)
@@ -205,7 +221,8 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         lockNotTakenAt(slug, 'before reading the export', refreshed)
         stopped = true
       } else {
-        deps.log(`beads ${slug}: export is stale and could not be refreshed (${refreshed.error}); skipped this tick`)
+        noticeOnce(slug, `export is stale and could not be refreshed (${refreshed.error}); skipped this tick`)
+        await failWaitingOnClose(slug, slugRuns, () => `the Beads export could not be refreshed: ${refreshed.error}`)
       }
       continue
     }
