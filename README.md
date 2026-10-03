@@ -236,6 +236,8 @@ kanban. The supervisor closes it once the repo has no live run, and a stale `Boa
 herdr restart is closed and replaced. The **Open board** action reopens it. It is read-only by
 construction. **Never install `br` alongside `bv`**: bv's edit path shells out to `br`, which would
 write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
+The board shows a red `History load failed: … not a git repository` line because the store lives
+outside git; it is expected and harmless, and bv has no way to turn it off.
 
 **bv's licence.** bv is MIT-licensed with a rider. Its
 [LICENSE](https://github.com/Dicklesworthstone/beads_viewer/blob/main/LICENSE) says, among other
