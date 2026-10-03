@@ -48,15 +48,16 @@ to close. It returns once the agent is ready for input, which is when the handof
 `--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its 0.9.0 signature. That
 prohibition is about `agent start` only — `worktree create` has `--cwd` and needs it.
 
-The brief is rendered for that task and carries the issue number, the surface, the artifact paths the
-supervisor watches and the task id the worker needs for `{{hpipe}} decide`. Do not summarise it or
-send the worker task text of your own: the issue body is the brief, and anything you say here instead
-of in the issue is lost. The copy you were shown is for you to read; `dispatch --task` sends its
-own. When it came from `{{hpipe}} task`, the header lines above it — `task_id:`, `tier:`, `issue:`
-when it filed one, `files:`, `bootstrap:`, `base:` and the `dispatch, in order:` block — are yours:
-confirm the `tier:` and `files:` lines match what you declared, then run the block, which cuts the
-worktree from the `base:` commit and runs what `bootstrap:` names in the new checkout before
-`agent start`.
+The brief is rendered for that task and carries the bead id, the brief captured at registration, the
+surface, the artifact paths the supervisor watches and the task id the worker needs for
+`{{hpipe}} decide`. Do not summarise it or send the worker task text of your own: the bead's brief,
+captured at registration, is the brief, and anything you say here instead of in it is lost. The copy
+you were shown is for you to read; `dispatch --task` sends its own, and claims the task's bead first —
+if bd refuses the claim, nothing is sent and the refusal says why. When it came from `{{hpipe}} task`,
+the header lines above it — `task_id:`, `tier:`, `bead:` when it filed one, `files:`, `bootstrap:`,
+`base:` and the `dispatch, in order:` block — are yours: confirm the `tier:` and `files:` lines match
+what you declared, then run the block, which cuts the worktree from the `base:` commit and runs what
+`bootstrap:` names in the new checkout before `agent start`.
 `{{hpipe}} brief --task <id>` prints the bare brief again if you need to reread it, and
 `{{hpipe}} show --task <id>` prints what the run recorded for the task — its phase, files,
 dependencies, artifact paths, PR and CI — and, while it is unfinished, a freshly fetched `base:`

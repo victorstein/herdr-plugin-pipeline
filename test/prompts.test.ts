@@ -273,7 +273,7 @@ test('a brief re-sent past research, with no notes, carries no batch-context hea
 
 test('a brief with notes carries them under the batch-context heading', async () => {
   const text = await renderBriefFor([briefTask({ notes: 'land after t1' })], 0)
-  expect(text).toContain('Batch context the public issue does not carry: land after t1')
+  expect(text).toContain('Batch context the bead does not carry: land after t1')
 })
 
 test('a task depending on a core-surface sibling gets no repo-specific build command', async () => {
@@ -302,10 +302,10 @@ test('the merge prompt asks for a bootstrap re-run where the rebase happens', as
 })
 
 test('the dispatch prompt names every header line a dispatching task prints', async () => {
-  // Named rather than counted: `issue:` appears only when --title filed one, and
+  // Named rather than counted: `bead:` appears only when --title filed one, and
   // a count is how the convention drifted before.
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
-  for (const line of ['task_id:', 'tier:', 'issue:', 'files:', 'bootstrap:', 'base:']) {
+  for (const line of ['task_id:', 'tier:', 'bead:', 'files:', 'bootstrap:', 'base:']) {
     expect(text).toContain(`\`${line}\``)
   }
   expect(text).not.toMatch(/(two|three|four|five) header/)
@@ -605,4 +605,64 @@ test('the worker sends out-of-scope work to discover, and the branch review file
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')
+})
+
+test('intake and registration start from the backlog, adopt with --bead, and never run bd or bv', async () => {
+  for (const name of ['intake', 'dispatch-registering']) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text())
+    expect(text, name).toContain('{{hpipe}} next')
+    expect(text, name).toContain('--bead <id>')
+    expect(text, name).toContain('--acceptance-file <path>')
+    expect(text, name).toContain('Never run `bd` or `bv` yourself')
+    expect(text, name).toContain('know nothing about files')
+    expect(text, name).not.toContain('gh issue')
+    expect(text, name).not.toContain('--issue')
+    expect(text, name).not.toContain('share no dependency')
+  }
+  const intake = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(intake).toContain('`bead: <id> (filed)`')
+  expect(intake).toContain('{{hpipe}} bead show <id>')
+  expect(intake).toContain('later dependency layer')
+})
+
+test('dispatch says the bead\'s captured brief is the brief, and that dispatch claims the bead', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text())
+  expect(text).toContain('the bead\'s brief, captured at registration, is the brief')
+  expect(text).toContain('claims the task\'s bead first')
+  expect(text).not.toContain('issue')
+})
+
+test('the branch review finds the run\'s PRs in the ledger, not by searching GitHub issues', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
+  expect(text).toContain('`{{hpipe}} show --task <id>` prints each task\'s `pr:`')
+  expect(text).not.toContain('gh pr list')
+})
+
+test('the skill teaches the Beads commands and the rule against running bd', async () => {
+  const skill = await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text()
+  for (const needle of [
+    'hpipe next', 'hpipe bead show <id>', '--bead <id>', '--prefix', 'hpipe escalate --task',
+    'hpipe discoveries --file', 'hpipe close --task', 'Never run `bd` or `bv` yourself',
+  ]) {
+    expect(skill, needle).toContain(needle)
+  }
+  expect(skill).not.toContain('GitHub issue')
+  expect(skill).not.toContain('--issue')
+  expect(skill).not.toContain('share no dependency')
+})
+
+test('the README documents Beads setup, backups, the br and reclaim warnings and bv\'s licence rider', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  for (const needle of [
+    '## Beads', 'brew install beads', 'brew install dicklesworthstone/tap/bv', 'Set up Beads for this repo',
+    'hpipe start --prefix', 'Back up `$HERDR_PLUGIN_STATE_DIR/beads`', 'Never install `br`', 'Open board',
+    'Never run `bd reclaim`', 'must start with a letter',
+    '"Restricted Parties" means OpenAI, L.L.C.; Anthropic, PBC;',
+    'https://github.com/Dicklesworthstone/beads_viewer/blob/main/LICENSE',
+  ]) {
+    expect(readme, needle).toContain(needle)
+  }
+  expect(readme).not.toContain('--issue <n>')
+  expect(readme).not.toContain('gh issue create')
+  expect(readme).not.toContain('independent tracks')
 })

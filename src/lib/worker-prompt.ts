@@ -47,7 +47,7 @@ export async function renderWorkerPrompt(
 }
 
 function batchContext(notes: string): string {
-  return notes.trim() === '' ? '' : `Batch context the public issue does not carry: ${notes}`
+  return notes.trim() === '' ? '' : `Batch context the bead does not carry: ${notes}`
 }
 
 // An optional section renders to '' on a line of its own and would leave a
