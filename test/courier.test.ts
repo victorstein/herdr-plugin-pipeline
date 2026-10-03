@@ -12,6 +12,7 @@ import {
   submissionOf, withoutFaintText,
 } from '../src/supervisor/courier'
 import { deliveriesFor, type PendingPrompt } from '../src/supervisor/deliver'
+import { beadTaskFields } from './helpers/bead-fields'
 
 interface FakeIO extends PromptIO { calls: string[] }
 
@@ -341,14 +342,14 @@ function mkRun(): Run {
   run.phase = 'execute'
   run.orchestrator_pane = 'w1:p1'
   run.tasks = [{
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
     depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
     phase: 'spec', phase_entered_at: 1000, escalated_from: null,
     head_sha_at_entry: null, pr: null, ci: null, checkout_path: '/r/wt',
     registered_at: 0, adopted_at: 0,
     artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   } satisfies Task]
   return run

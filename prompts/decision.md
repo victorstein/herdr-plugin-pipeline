@@ -1,4 +1,4 @@
-# Decision from {{task_id}} — {{branch}} (#{{issue}}), asked in `{{phase}}`
+# Decision from {{task_id}} — {{branch}} ({{bead}}), asked in `{{phase}}`
 
 The worker has stopped and is waiting on you.
 
@@ -12,7 +12,7 @@ The worker has stopped and is waiting on you.
 
 ## Answer it yourself where the answer already exists
 
-Read before you escalate: issue #{{issue}}, the repo's `CLAUDE.md`, the surface's agent file, and an
+Read before you escalate: the brief (`{{hpipe}} brief --task {{task_id}}`), the repo's `CLAUDE.md`, the surface's agent file, and an
 existing call site that already settles the same question. If the answer is determined by any of
 those, it is not a decision — answer it and cite where it came from. Escalating a question the repo
 already answers spends the human's attention on nothing.
@@ -22,6 +22,12 @@ already answers spends the human's attention on nothing.
 Give them, in a few lines: the question, the worker's recommendation, your own read of it, and the
 option you recommend, named. Never hand over a bare question: forming the recommendation is the work,
 and passing it up unformed is exactly the cost this pipeline exists to remove.
+
+Then hand it over, so the bead shows it blocked on them and `{{hpipe}} status` lists it under
+"waiting on you":
+
+    {{hpipe}} escalate --task {{task_id}} --decision {{decision_id}} \
+                   --recommend "<the option you recommend, and why>"
 
 ## If the answer grows the task, raise its tier
 

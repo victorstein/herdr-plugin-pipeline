@@ -1,8 +1,9 @@
 import { awaitedFor } from './awaiting'
-import { openDecisionFor } from './decisions'
+import { beadOutOfSync } from './bead-desired'
+import { escalatedUnanswered, openDecisionFor } from './decisions'
 import { filesOverlap, isInFlight } from './gating'
 import { counterFor } from './machine'
-import { hasLanded, runIsDriven, wasAborted } from './ledger'
+import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
@@ -157,6 +158,12 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     )
   }
   if (row.actor === 'orchestrator') {
+    const escalated = escalatedUnanswered(task)
+    if (escalated !== null) {
+      return yours(`decision ${escalated.id} was put to the human ` +
+        `${ageMinutes(escalated.escalated_at ?? now, now)}m ago — record their ruling with ` +
+        `\`${hpipe} answer --task ${task.task_id} --decision ${escalated.id} --answer "<their ruling>" --by human\``)
+    }
     // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
     return task.pending_answer === null
       ? yours(`YOUR move: waiting for ${awaitedFor(task)}`)
@@ -256,7 +263,7 @@ function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): s
     const move = moveFor(run, task, hpipe, now, holds)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
-    return [`    ${task.task_id} ${task.branch} (#${task.issue}) [${task.phase} ${age}m] — ${move.clause}`]
+    return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
   })
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
 }
@@ -270,6 +277,11 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
   const lines: string[] = []
 
   for (const task of run.tasks) {
+    if (beadOutOfSync(task)) {
+      lines.push(`  ⚠ ${task.task_id} bead ${task.bead} is out of sync after ${task.bead_sync.streak} ` +
+        `consecutive failed Beads calls: ${task.bead_sync.last_error}`)
+    }
+
     const open = openDecisionFor(task)
     if (open) {
       lines.push(
@@ -365,7 +377,7 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
-  panes: PaneObservations = {},
+  panes: PaneObservations = {}, tools: string | null = null,
 ): string {
   const holds = panes.holds ?? {}
   const lines: string[] = []
@@ -373,6 +385,7 @@ export function formatStatus(
   lines.push(
     `supervisor: ${supervisor.state}${supervisor.pid ? ` (pid ${supervisor.pid})` : ''}`,
   )
+  if (tools !== null) lines.push(tools)
   if (supervisor.state !== 'live') {
     lines.push('  → nothing will advance until a supervisor is running:')
     lines.push('    herdr plugin action invoke stein.pipeline.supervisor')
@@ -395,11 +408,13 @@ export function formatStatus(
       lines.push(`    "claim" action from the pane that should drive this run`)
     }
 
-    if (run.schema_version !== 2) {
+    // Its tasks predate `bead`, so no task line can be drawn for them.
+    if (!isCurrentSchemaRun(run)) {
       lines.push(
-        `  ⚠ run ${run.run_id} was started by an earlier plugin version and cannot be ` +
-        `advanced — ${hpipe} abort ${run.run_id} to release the repo.`,
+        `  ⚠ run ${run.run_id} was started by an earlier plugin version and is ignored here: ` +
+        'nothing advances it and it does not hold the repo. Finish it on the release that started it.',
       )
+      continue
     }
 
     // `phase === 'escalated'`, never `escalated_from !== null`: cmdAbort sets
@@ -422,22 +437,20 @@ export function formatStatus(
       const bits = [
         `  ${task.task_id}`,
         task.branch,
-        `#${task.issue}`,
+        task.bead,
         `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
         tierOf(task),
         task.agent_status,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' ') + (run.schema_version === 2 ? taskLineMove(run, task, hpipe, now, holds) : ''))
+      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds))
     }
 
-    if (run.schema_version === 2) {
-      lines.push(...intakeWarning(run, hpipe))
-      lines.push(...waitingOnYou(run, hpipe, now, holds))
-      lines.push(...taskWarnings(run, hpipe, now))
-      lines.push(...deliveryWarnings(run, livePanes, now, panes))
-    }
+    lines.push(...intakeWarning(run, hpipe))
+    lines.push(...waitingOnYou(run, hpipe, now, holds))
+    lines.push(...taskWarnings(run, hpipe, now))
+    lines.push(...deliveryWarnings(run, livePanes, now, panes))
   }
 
   return lines.join('\n')
@@ -483,7 +496,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `task:       ${task.task_id}`,
     `run:        ${run.run_id}`,
     `branch:     ${task.branch}`,
-    `issue:      #${task.issue}`,
+    `bead:       ${task.bead}`,
     `surface:    ${task.surface}`,
     `files:      ${listOrNone(task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,

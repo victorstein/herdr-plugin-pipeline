@@ -4,14 +4,14 @@ import { ARTIFACT_ROOT, REVIEWS_DIR, taskVerdictPrefix } from './verdict-path'
 import type { Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
-const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
+export const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
 /**
  * `escalated` is absent on purpose: one rewind resumes it, but a dependent
  * cascaded into `blocked-on-failure` is terminal and would stay there after its
  * dependency finished. The dependent waits instead; a human who abandons the
  * escalated task rewinds it to `failed`, and the cascade happens then.
  */
-const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
+export const TERMINAL_BAD: ReadonlySet<TaskPhase> = new Set<TaskPhase>([
   'failed', 'orphaned', 'blocked-on-failure',
 ])
 
@@ -92,7 +92,7 @@ function normaliseDeclared(entry: string, roots: string[]): string | null {
  * document that happens to live under the root is still a file this task edits.
  */
 export function separatePipelineArtifacts(
-  declared: string[], task: Pick<Task, 'issue' | 'artifacts'>,
+  declared: string[], task: Pick<Task, 'bead' | 'artifacts'>,
 ): { kept: string[]; ignored: string[] } {
   const { research, spec, plan, verdicts } = task.artifacts
   const ownFiles = [research, spec, plan].filter((p): p is string => p !== null)

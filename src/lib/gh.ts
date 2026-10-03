@@ -10,20 +10,6 @@ export interface PrView {
   headSha: string | null
 }
 
-export interface FiledIssue {
-  number: number
-  url: string
-}
-
-export interface GhFailure {
-  error: string
-}
-
-export interface IssueView {
-  closed: boolean
-  closedAtMs: number | null
-}
-
 export function rollUpBucket(rows: CheckRow[]): CiBucket {
   if (rows.length === 0) return 'pending'
   if (rows.some((r) => r.bucket === 'fail')) return 'fail'
@@ -106,33 +92,5 @@ export class Gh {
       mergeCommit: view.mergeCommit?.oid ?? null,
       headSha: view.headRefOid,
     }
-  }
-
-  async issueView(issue: number): Promise<IssueView | null> {
-    const view = await this.json<{ closed: boolean; closedAt: string | null }>(
-      ['issue', 'view', String(issue), '--json', 'closed,closedAt'],
-    )
-    if (!view) return null
-    return { closed: view.closed, closedAtMs: view.closedAt ? Date.parse(view.closedAt) : null }
-  }
-
-  /** The failure is returned rather than swallowed: `hpipe task` prints why the labels were unreadable. */
-  async issueLabels(issue: number): Promise<string[] | GhFailure> {
-    const { code, text, stderr } = await this.run(['issue', 'view', String(issue), '--json', 'labels'])
-    if (code !== 0) return { error: stderr.trim() || text.trim() || `gh exited ${code}` }
-    try {
-      const view = JSON.parse(text) as { labels?: { name: string }[] }
-      return (view.labels ?? []).map((label) => label.name)
-    } catch {
-      return { error: `gh printed no JSON: ${text.trim()}` }
-    }
-  }
-
-  /** `gh issue create` has no `--json`; the new issue's URL on stdout is the only handle on it. */
-  async issueCreate(title: string, bodyFile: string): Promise<FiledIssue | GhFailure> {
-    const { code, text, stderr } = await this.run(['issue', 'create', '--title', title, '--body-file', bodyFile])
-    const match = code === 0 ? text.match(/https?:\/\/\S+\/issues\/(\d+)/) : null
-    if (match) return { number: Number(match[1]), url: match[0] }
-    return { error: stderr.trim() || text.trim() || `gh exited ${code}` }
   }
 }

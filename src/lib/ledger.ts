@@ -12,6 +12,17 @@ export function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
 }
 
+export const SCHEMA_VERSION = 3
+
+/**
+ * No in-place migration: a run of another schema is never advanced, never
+ * blocks `hpipe start`, and `hpipe status` tells the human to finish it on the
+ * release that wrote it.
+ */
+export function isCurrentSchemaRun(run: Run): boolean {
+  return run.schema_version === SCHEMA_VERSION
+}
+
 export function newRun(input: {
   session: SessionKey
   socketPath: string
@@ -37,7 +48,7 @@ export function newRun(input: {
     artifacts: { verdicts: {} },
     tasks: [],
     history: [],
-    schema_version: 2,
+    schema_version: SCHEMA_VERSION,
     revision: 0,
     intake_closed: false,
     passes: {},
@@ -300,8 +311,17 @@ export const hasLanded = (task: Task): boolean =>
 export async function resolveRun(
   stateDir: string, session: SessionKey, query: RunQuery,
 ): Promise<RunResolution> {
-  const runs = await listRuns(stateDir, session)
+  return resolveAmong(await listRuns(stateDir, session), query)
+}
 
+/** `resolveRun` blind to runs of another schema: what a command that writes v3 fields resolves against. */
+export async function resolveCurrentSchemaRun(
+  stateDir: string, session: SessionKey, query: RunQuery,
+): Promise<RunResolution> {
+  return resolveAmong((await listRuns(stateDir, session)).filter(isCurrentSchemaRun), query)
+}
+
+function resolveAmong(runs: Run[], query: RunQuery): RunResolution {
   if (query.runId !== null) {
     const named = runs.find((r) => r.run_id === query.runId)
     if (!named) return { ok: false, reason: 'no-such-run' }
@@ -344,12 +364,14 @@ export type RepoRun =
  * "The run for this repo", read the same way by `hpipe start` and the claim
  * action. A run in no phase row still occupies the repo: the old first-match
  * lookup threw on it, and reading it as absent would let `start` open a second
- * run beside it while `claim` reported there was none.
+ * run beside it while `claim` reported there was none. A run of another schema
+ * does not: nothing will ever advance it here.
  */
 export async function runForRepo(
   stateDir: string, session: SessionKey, repoKey: string,
 ): Promise<RepoRun> {
-  const resolved = await resolveRun(stateDir, session, {
+  const runs = (await listRuns(stateDir, session)).filter(isCurrentSchemaRun)
+  const resolved = resolveAmong(runs, {
     runId: null, repoKey, phases: null, taskId: null, reach: 'unfinished',
   })
   if (resolved.ok) return { kind: 'one', run: resolved.run }

@@ -41,22 +41,23 @@ worker is working: it interrupts the turn. Measured on a live run.
 **`--cwd` on `worktree create` is not optional.** Without it herdr resolves the repo from the
 *focused* workspace, which is usually not yours — the supervisor's own workspace is focused on a cold
 start. Omitting it creates the worktree in whatever repo happens to be focused and launches the
-worker there, reading `gh issue view` against a different repo's issues. Measured on a live run.
+worker there, reading a different repo. Measured on a live run.
 
 `agent start` adopts the **existing** root pane — it does not create one, and there is no orphan pane
 to close. It returns once the agent is ready for input, which is when the handoff can go. Do not pass
 `--cwd`, `--workspace` or `--split` **to `agent start`**; they are not in its 0.9.0 signature. That
 prohibition is about `agent start` only — `worktree create` has `--cwd` and needs it.
 
-The brief is rendered for that task and carries the issue number, the surface, the artifact paths the
-supervisor watches and the task id the worker needs for `{{hpipe}} decide`. Do not summarise it or
-send the worker task text of your own: the issue body is the brief, and anything you say here instead
-of in the issue is lost. The copy you were shown is for you to read; `dispatch --task` sends its
-own. When it came from `{{hpipe}} task`, the header lines above it — `task_id:`, `tier:`, `issue:`
-when it filed one, `files:`, `bootstrap:`, `base:` and the `dispatch, in order:` block — are yours:
-confirm the `tier:` and `files:` lines match what you declared, then run the block, which cuts the
-worktree from the `base:` commit and runs what `bootstrap:` names in the new checkout before
-`agent start`.
+The brief is rendered for that task and carries the bead id, the brief captured at registration, the
+surface, the artifact paths the supervisor watches and the task id the worker needs for
+`{{hpipe}} decide`. Do not summarise it or send the worker task text of your own: the bead's brief,
+captured at registration, is the brief, and anything you say here instead of in it is lost. The copy
+you were shown is for you to read; `dispatch --task` sends its own, and claims the task's bead first —
+if bd refuses the claim, nothing is sent and the refusal says why. When it came from `{{hpipe}} task`,
+the header lines above it — `task_id:`, `tier:`, `bead:` when it filed one, `files:`, `bootstrap:`,
+`base:` and the `dispatch, in order:` block — are yours: confirm the `tier:` and `files:` lines match
+what you declared, then run the block, which cuts the worktree from the `base:` commit and runs what
+`bootstrap:` names in the new checkout before `agent start`.
 `{{hpipe}} brief --task <id>` prints the bare brief again if you need to reread it, and
 `{{hpipe}} show --task <id>` prints what the run recorded for the task — its phase, files,
 dependencies, artifact paths, PR and CI — and, while it is unfinished, a freshly fetched `base:`

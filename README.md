@@ -3,14 +3,16 @@
 Drives a software pipeline across herdr worktrees, with the design work pushed down to the agent that
 has actually read the code.
 
-One **worker** agent owns each GitHub issue end to end: research → spec → adversarial review → plan →
+One **worker** agent owns each bead end to end: research → spec → adversarial review → plan →
 adversarial review → implement → PR review → CI → merge → close → teardown, with the reviews a task
-runs set by its **tier** (below). The **orchestrator** keeps intake (research the problem, file the
-issue, dispatch), decision triage, merge, close, and the whole-branch review at the end.
+runs set by its **tier** (below). The **orchestrator** keeps intake (pick or file the bead, dispatch),
+decision triage, merge, and the whole-branch review at the end; the supervisor closes the bead once
+the merge is recorded. The backlog lives in [Beads](https://github.com/gastownhall/beads), one
+database per repo (see **Beads** below); GitHub keeps the PRs, CI and merges.
 
 Workers surface **decisions, not drafts**. When one hits a choice it should not make alone, it calls
 `hpipe decide` with a question *and a recommendation*; the orchestrator answers what it can from the
-issue or the existing code, and escalates the rest to you with a recommendation already formed.
+brief or the existing code, and escalates the rest to you with a recommendation already formed.
 
 Event hooks only enqueue. One supervisor pane per herdr session owns all timing, evaluation, and
 delivery, prompting each agent with its next instruction just in time — so the pipeline never has to
@@ -27,8 +29,9 @@ or, for local development:
 
     herdr plugin link /path/to/herdr-plugin-pipeline
 
-Requires herdr 0.9.0+, bun, and gh. No build step, and no runtime dependencies —
-`@types/bun` and `typescript` are devDependencies for `bun run typecheck` only.
+Requires herdr 0.9.0+, bun, gh, and `bd` 1.3.1+ (`brew install beads`); `bv` 0.25.2+ for the board
+and `hpipe next` (see **Beads** below). No build step, and no runtime dependencies — `@types/bun` and
+`typescript` are devDependencies for `bun run typecheck` only.
 
 **Claude Code skill.** `skills/herdr-pipeline/SKILL.md` teaches an agent to drive the pipeline:
 the ground rules, running a batch, and recovery. Link it into your user skills so it loads in any
@@ -48,9 +51,12 @@ at all:
 | Claim this pane as orchestrator | rebind a run whose orchestrator pane changed |
 | Reopen the supervisor | when `status` says it died |
 | Drain pending events | force a queue drain |
+| Set up Beads for this repo | create the repo's Beads store with the default prefix (run from a pane in the repo) |
+| Open board | reopen the repo's `bv` board tab (run from a pane in the repo) |
 
-A CLI is only needed for the recovery commands, which take arguments actions cannot: `rewind`,
-`release`, `abort`, `resume`, `forget`. Run those as `bun run <plugin-root>/src/cli.ts …`, or install
+A CLI is only needed for the commands that take arguments actions cannot: the recovery commands
+`rewind`, `release`, `abort`, `resume`, `forget` and `close`, and the read-only `bead show` and
+`next`. Run those as `bun run <plugin-root>/src/cli.ts …`, or install
 the shorthand with the **Install the hpipe shorthand** action — it links `bin/hpipe` into
 `~/.local/bin` (override with `HPIPE_BIN_DIR`) and tells you if that is not on your PATH.
 
@@ -115,17 +121,21 @@ From the orchestrator's pane:
 
     hpipe start "chat meter"
 
-The orchestrator is then prompted to research the work, open one GitHub issue per task — **the issue
-body is the brief** — and register each with:
+The first `hpipe start` in a repo sets up its Beads store. The orchestrator is then prompted to
+research the work, run `hpipe next` over the repo's backlog, and back each task with one bead —
+**the bead's brief, captured when the task is registered, is the worker's brief** — registering each
+with:
 
-    hpipe task --branch <branch> --issue <n> --surface <surface> \
+    hpipe task --branch <branch> --bead <id> --surface <surface> \
                [--tier light|standard|heavy] \
                [--depends-on <id,id>] [--files <prefix,prefix>] [--notes <batch context>] \
                [--run <run-id>]
 
-Work that has no issue yet is filed and registered in one step: `--title <title> --body-file <path>`
-in place of `--issue <n>` runs `gh issue create` in the run's repo, after every other check has
-passed, and registers the task under the new number.
+Work the backlog does not hold yet is filed and registered in one step: `--title <title>
+--body-file <path> [--acceptance-file <path>]` in place of `--bead <id>` creates the bead after every
+other check has passed, and registers the task under its id. Adopting with `--bead` refuses a bead
+that is closed, assigned, held by a live task in any session, blocked by an open bead, or the parent
+of open child beads — each would trip one of bd's close guards at merge.
 
 When a task is ready the orchestrator creates its worktree, starts a bare agent in the root pane, and
 hands it the brief with:
@@ -135,15 +145,28 @@ hands it the brief with:
 which submits the rendered brief over `herdr agent prompt` and exits non-zero unless herdr sees the
 worker start on it. The brief cannot ride on `herdr agent start` itself: herdr refuses to pass an
 argument containing its fences and backticks. When the batch is complete the orchestrator closes
-intake with `hpipe dispatch --done`. Everything after that is injected: each worker gets its next
+intake with `hpipe dispatch --done`. `dispatch --task` claims the task's bead first; if bd refuses the
+claim, nothing is sent. Everything after that is injected: each worker gets its next
 instruction as each phase completes.
 
 `hpipe status` shows the fleet, every open decision, and anything waiting on you. For one task:
 
 | | |
 |---|---|
-| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, issue, surface, files, dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
+| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, bead, surface, files, dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
 | `hpipe brief --task <id> [--run <run-id>]` | The worker brief, rendered bare. Read-only — registering a task is the only other place it is printed |
+| `hpipe bead show <id>` | A bead as Beads holds it now: status, labels, description, acceptance, comments |
+| `hpipe next [--limit <n>] [--label <label>]` | The unheld beads `bv` ranks claimable now (parallel only when their `--files` are disjoint), then one line per later dependency layer, each waiting on the one before; then blockers to clear and alerts. `--label` filters bv's top 10 recommendations, not every bead |
+
+Workers record out-of-scope bugs and follow-ups with `hpipe discover` instead of fixing them in their
+PR. At the branch review the orchestrator lists them with `hpipe discoveries` and files them with
+`hpipe discoveries --file`: one bead each, labelled `discovered` and `discovery:<run>:<task>:<id>`,
+linked to the bead it came from. Filing goes in order and stops at the first failure, keeping what
+it already filed; a retry carries on from there and files nothing twice.
+
+When a decision needs you, the orchestrator runs `hpipe escalate --task <id> --decision <id>
+--recommend "<its recommendation>"`: the task's bead turns `blocked`, gains `hpipe:awaiting-human`,
+and carries the question as a comment until you answer.
 
 Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
@@ -158,8 +181,8 @@ Every task carries a tier that decides which reviews it runs:
 | `heavy` | ✓ | ✓ | `pr-review-intent`, then `pr-review-quality` |
 
 The orchestrator sets it at registration with `--tier light|standard|heavy`; a new task defaults to
-`standard`. An issue labelled `pipeline:tier-light`, `pipeline:tier-standard` or `pipeline:tier-heavy`
-overrides `--tier`, and an issue carrying two tier labels is refused. Labels are read once, at
+`standard`. A bead labelled `pipeline:tier-light`, `pipeline:tier-standard` or `pipeline:tier-heavy`
+overrides `--tier`, and a bead carrying two tier labels is refused. Labels are read once, at
 registration, and `hpipe task` prints the result as `tier: <tier> (<why>)`.
 
 Mid-run, `hpipe tier --task <id> <tier> --why "<reason>"` changes it. Raising works from any pane;
@@ -170,6 +193,80 @@ log, and every phase the task visited.
 
 A run in which at most one task landed skips the final `branch-review` and finishes. Either way,
 the orchestrator is sent a short notice when its run reaches `done`, saying where each task ended.
+
+## Beads
+
+Each repo's backlog is its own [Beads](https://github.com/gastownhall/beads) database, kept in the
+plugin's state dir at `$HERDR_PLUGIN_STATE_DIR/beads/<repo>-<hash>/` — never in your repo, and out of
+reach of every worker worktree. hpipe is its only writer: every write runs as actor `hpipe`, one call
+at a time under a lock, and the supervisor converges each bead to what the run's ledger says — claimed
+while its task is worked, blocked while a decision waits on you, released if the task is abandoned or
+the run aborted, closed once its PR merges. The close is the supervisor's; nobody is prompted for it.
+A bead's fine phase is a label naming it bare (`research`, `spec-review`, or `aborted` once a run is
+aborted); the run driving it is bead metadata `hpipe.run`, which `hpipe bead show` prints as `run:`.
+A label of your own that equals a phase name (say `plan`) on an adopted bead becomes hpipe's to swap.
+The `phase:<name>` labels earlier builds wrote are removed on the next tick.
+
+**Install** `bd` 1.3.1 or newer — Homebrew core's `beads` formula (`brew install beads`); older
+releases lack the close guards this relies on — and, for the board and `hpipe next`, `bv` 0.25.2 or
+newer (`brew install dicklesworthstone/tap/bv` — read its licence first, below). `BD_BIN` / `BV_BIN`
+point at other binaries. `hpipe start` refuses without a working `bd`; without `bv` the pipeline runs
+and only the board and `hpipe next` are off. `hpipe status` prints a `tools:` line when either is
+missing or too old.
+
+**Setup** happens on the first `hpipe start` in a repo, or on demand with the **Set up Beads for this
+repo** action from a pane in it. Bead ids are `<prefix>-<n>`; the prefix defaults to the repo's name
+cut to eight characters. To choose another, pass `hpipe start --prefix <p>` on the first start: once
+the store exists the prefix is fixed and `--prefix` is ignored. The action uses the default prefix,
+or `HPIPE_BEADS_PREFIX` if it is set in herdr's own environment. A prefix holds letters, digits and
+dashes and must start with a letter; it is stored lowercase, with any trailing dashes trimmed. Setup
+refuses a prefix another repo's store already uses, and one whose `<prefix>-<n>` names
+already appear under `docs/superpowers/`.
+
+**Back up `$HERDR_PLUGIN_STATE_DIR/beads`.** It is the only copy of every backlog, and it cannot be
+rebuilt from the repo: set up again, a store restarts its counter at `<prefix>-1`.
+
+**Do not run `bd` yourself while a run is live.** The store takes one writer at a time and a second
+fails fast; read a bead with `hpipe bead show <id>` instead. **Never run `bd reclaim` on an hpipe
+store**: every claim carries a 5-minute lease that hpipe never renews and nothing else acts on, so
+`bd reclaim` would revert each bead claimed more than five minutes ago to `open` behind hpipe's back.
+The supervisor re-claims them on its next pass, but until then they look free.
+
+**The board.** Each repo with a live run in the session gets one `Board: <repo> <hash>` tab in the
+pipeline workspace, running `bv` on the export hpipe writes after every change; press `b` for the
+kanban. The supervisor closes it once the repo has no live run, and a stale `Board: …` tab left by a
+herdr restart is closed and replaced. The **Open board** action reopens it. It is read-only by
+construction. **Never install `br` alongside `bv`**: bv's edit path shells out to `br`, which would
+write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
+The board shows a red `History load failed: … not a git repository` line because the store lives
+outside git; it is expected and harmless, and bv has no way to turn it off.
+
+**bv's licence.** bv is MIT-licensed with a rider. Its
+[LICENSE](https://github.com/Dicklesworthstone/beads_viewer/blob/main/LICENSE) says, among other
+things:
+
+> "Restricted Parties" means OpenAI, L.L.C.; Anthropic, PBC; any of their respective Affiliates; and
+> any person or entity acting directly or indirectly on behalf of, for the benefit of, or under the
+> direction of any of the foregoing (including any officer, director, employee, contractor, agent,
+> consultant, service provider, or representative).
+>
+> Notwithstanding any other provision of this License, no rights are granted to any Restricted Party.
+> Any purported license, sublicense, assignment, transfer, or other permission to any Restricted Party
+> is null and void absent the express prior written permission of Jeffrey Emanuel.
+>
+> You may not provide, disclose, distribute, sublicense, sell, lease, lend, host, make available, or
+> otherwise permit access to the Software or any derivative work of the Software (as defined in
+> applicable copyright law) (collectively, "Derivative Works") to or for any Restricted Party.
+>
+> For purposes of this rider, "use" includes, without limitation: copying, modifying, merging,
+> publishing, distributing, sublicensing, selling, transferring, making available, hosting,
+> deploying, executing, benchmarking, testing, analyzing, indexing, or incorporating the Software or
+> any Derivative Works into any dataset, training corpus, evaluation harness, or pipeline for machine
+> learning or other automated systems.
+
+Read the whole licence and judge for yourself whether the rider applies to you — `hpipe next` runs
+`bv` on an agent's behalf — before you install it. This plugin vendors and forks none of bv's code; it
+only runs the binary you install, and everything but the board and `hpipe next` works without it.
 
 ## Models
 
@@ -188,6 +285,16 @@ holding a task in `pr-review` cannot be read by an earlier version, so finish or
 before rolling back. Tasks registered before tiers existed carry none and run as `heavy` — every
 review, as before.
 
+The Beads release moves the ledger to `schema_version: 3`. Runs started before it are not migrated
+and are no longer advanced: finish them on the previous release, then upgrade and restart the
+supervisor. They do not block `hpipe start`, and the commands that address a task or its
+discoveries do not see them.
+
+Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
+complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
+smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,
+a copy or a link into another checkout, with the **Install the hpipe shorthand** action.
+
 ## Answering a decision
 
     hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
@@ -200,22 +307,24 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 
 | | |
 |---|---|
-| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters and any undelivered answer. Rewinding a task to `implement` or earlier also forgets its recorded PR and CI state, which `implement` rediscovers from the branch's open PR. It refuses a phase that is in no row, and rewinding a task to a terminal phase also abandons any decision still open on it |
+| Advanced early | `hpipe rewind <run> <phase> [--task <id>]` — clears retry counters and any undelivered answer. Rewinding a task to `implement` or earlier also forgets its recorded PR and CI state, which `implement` rediscovers from the branch's open PR; rewinding it to `merge` or earlier forgets a recorded merge and bead close, so the bead reopens for the rework. It refuses a phase that is in no row, or a rewind that would take back a bead another run has adopted since, and rewinding a task to a terminal phase also abandons any decision still open on it |
 | Two live runs in one session | `task`, `brief`, `show`, `dispatch`, `release`, `decide` and `answer` resolve against the repo you are standing in and refuse a finished run. If one still cannot tell, it names the candidates — pass `--run <run-id>` |
 | A task is escalated | `hpipe rewind <run> <phase> --task <id>` resumes it; `hpipe rewind <run> failed --task <id>` abandons it. The run stays in `execute`, and the task's dependents stay queued, until you do one |
 | A task was rewound to `done` without merging | It does not count as landed. If it is the run's only task, the run escalates instead of finishing — `hpipe rewind <run> done` finishes it |
 | A task needs more (or less) review than its tier | `hpipe tier --task <id> <tier> --why "<reason>"`. Lowering is refused from pipeline panes; run it from your own |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
-| Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`) |
+| Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`, which refuses while another run holds one of its beads) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
 | Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
 | A pane stopped answering (agent exited, usage limit) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |
-| A run from an older plugin version | It is refused, not migrated. `hpipe abort <id>` to release the repo |
+| A run from an older plugin version | It is not migrated or advanced, and does not block `hpipe start`. Finish it on the release that started it, or `hpipe abort <id>` |
+| A task's bead will not close | `hpipe status` shows bd's error once it has failed five times; fix that, or `hpipe close --task <id>` (`--force` only to override bd's close guards) |
 | Plugin misbehaving | `herdr plugin disable stein.pipeline` |
 | Out permanently | `herdr plugin unlink stein.pipeline`, then `rm ~/.local/bin/hpipe` |
 
 Nothing the plugin owns is load-bearing for the work: runs are bookkeeping, and the artifacts are
-files in your repo and objects on GitHub.
+files in your repo and objects on GitHub. The backlog is the exception: back up
+`$HERDR_PLUGIN_STATE_DIR/beads` (see **Beads**).
 
 ## Design
 

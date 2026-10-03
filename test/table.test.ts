@@ -6,6 +6,7 @@ import type { TaskPhase } from '../src/lib/types'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 import { advanceTasks, renderTaskPhasePrompt, type TaskDeps } from '../src/supervisor/tasks'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const ALL: readonly PhaseRow<string>[] = [...RUN_ROWS, ...TASK_ROWS]
 
@@ -122,14 +123,14 @@ const ROOT = join(import.meta.dir, '..')
 
 function taskIn(phase: TaskPhase, tier: Tier): Task {
   return {
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
     depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
     phase, phase_entered_at: 0, escalated_from: null,
     head_sha_at_entry: null, pr: 42, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: 0, adopted_at: 0,
     artifacts: { research: 'r.md', spec: 's.md', plan: 'p.md', verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
     tier,
   }
@@ -151,7 +152,6 @@ const clearingTick = (): TaskDeps => ({
   fileSettleMs: 0,
   prForBranch: async () => 42,
   prView: async () => null,
-  issueView: async () => null,
   verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
   removeWorktree: async () => 'removed',
   removeCheckout: async () => ({ removed: true }),
@@ -185,4 +185,12 @@ test('every worker row renders a non-empty prompt in every tier', async () => {
       expect(text.length, `${tier}: ${row.phase}`).toBeGreaterThan(0)
     }
   }
+})
+
+test('the close row is the supervisor\'s: no actor, no prompt, probed through the orchestrator', () => {
+  const close = taskRow('close')
+  expect(close.actor).toBeUndefined()
+  expect(close.prompt).toBeUndefined()
+  expect(close.probeTarget).toBe('orchestrator')
+  expect(close.stallable).toBe(true)
 })

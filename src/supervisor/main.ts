@@ -1,20 +1,26 @@
 import { join } from 'node:path'
+import { Bd } from '../lib/bd'
+import { readBeadsProject } from '../lib/beads-project'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { Gh } from '../lib/gh'
+import { beadClaimants } from '../lib/held'
 import { Herdr, liveAgentIn } from '../lib/herdr'
 import {
   claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
 } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
-  allOrchestratorPanes, isUnlandedSave, listRuns, loadRun, type RunEffect, saveOrReapply, saveRun,
+  allOrchestratorPanes, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
+  saveOrReapply, saveRun,
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
-import { crashLogPath, reapSupervisorSiblings } from '../startup'
+import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
+import { type LockContention, SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
+import { syncBoards } from './boards'
 import {
   deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
   refreshBadges, uncommittedPaths,
@@ -42,14 +48,6 @@ import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 const EXIT_DUPLICATE = 3
 /** Two ticks' worth: a healthy tick never reaches it, a tick slowed by stalled sends does. */
 const IDLE_READ_MAX_AGE_MS = 2_000
-
-/**
- * No in-place migration: a v4 run mid-`plan` has an orchestrator holding work no
- * worker can inherit. `hpipe status` tells the human to abort it.
- */
-export function isCurrentSchemaRun(run: Run): boolean {
-  return run.schema_version === 2
-}
 
 /**
  * One settle window per tick, not one per pane. Six workers at ACTOR_SETTLE_MS
@@ -87,6 +85,29 @@ export function refreshingIdleReader(
       reader = build()
     }
     return reader(paneId)
+  }
+}
+
+/** A failing step is logged under its own name and never keeps the steps after it from running. */
+/**
+ * One read shared by the steps that call it, made by the first of them: inside
+ * `eachIsolated`, a read that fails fails only the steps that need it.
+ */
+export function sharedRead<T>(read: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined
+  return () => (pending ??= read())
+}
+
+export async function eachIsolated(
+  steps: ReadonlyArray<readonly [string, () => Promise<void>]>,
+  logError: (message: string, error: unknown) => void = console.error,
+): Promise<void> {
+  for (const [name, step] of steps) {
+    try {
+      await step()
+    } catch (error) {
+      logError(`[pipeline] ${name} failed this tick:`, error)
+    }
   }
 }
 
@@ -133,6 +154,9 @@ async function main(): Promise<void> {
   }
 
   const session = sessionKey()
+  const beadPassNotices = new Map<string, string>()
+  const beadLockContention = new Map<string, LockContention>()
+  const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
   const claimed = await claimSupervisor(stateDir, herdr, {
     pid: process.pid,
@@ -306,7 +330,6 @@ async function main(): Promise<void> {
             fileSettleMs: config.FILE_SETTLE_MS,
             prForBranch: (branch) => runGh.prForBranch(branch),
             prView: (pr) => runGh.prView(pr),
-            issueView: (issue) => runGh.issueView(issue),
             verdictFor: (r, t) => freshVerdict(r, t, config.FILE_SETTLE_MS),
             removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             removeCheckout: removeCheckoutWithGit,
@@ -419,6 +442,36 @@ async function main(): Promise<void> {
             `(${error.message}); what landed may be sent again next tick`)
         }
       }
+
+      // Its own read, because the runs above may have been saved since this tick read them.
+      const syncRuns = sharedRead(async () => (await listRuns(stateDir, session))
+        .filter(isCurrentSchemaRun)
+        .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key)))
+      await eachIsolated([
+        ['beads sync', async () => syncBeads(await syncRuns(), {
+          bdFor: (slug) => new Bd({
+            stateDir, slug, lockWaitMs: 0, exportAfterWrites: false, timeoutMs: SYNC_BD_TIMEOUT_MS,
+          }),
+          hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
+          now: Date.now,
+          budgetMs: SYNC_BUDGET_MS,
+          claimants: () => beadClaimants(stateDir),
+          persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
+          log: (message) => console.error(`[pipeline] ${message}`),
+          passNotices: beadPassNotices,
+          lockContention: beadLockContention,
+          slugCursor: beadSyncCursor,
+        })],
+        ['board upkeep', async () => {
+          const pipelineWorkspace = await readWorkspaceId(stateDir, session)
+          if (pipelineWorkspace === null) return
+          await syncBoards(await syncRuns(), {
+            stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
+            hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
+            herdr,
+          })
+        }],
+      ])
 
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.

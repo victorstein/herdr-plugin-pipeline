@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import { isLowering, pipelinePanes, registrationTier } from '../src/lib/tiers'
 import type { Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 function refusal(result: ReturnType<typeof registrationTier>): string {
   if (result.ok) throw new Error(`expected a refusal, got tier ${result.tier}`)
@@ -38,16 +39,6 @@ test('an unknown --tier is refused even when no labels were read', () => {
   expect(refusal(registrationTier('huge', null))).toBe('--tier must be one of light, standard, heavy, got: huge')
 })
 
-test('unreadable labels fall back to --tier, else standard, and say why on one line', () => {
-  const unreadable = { error: 'HTTP 401: Bad credentials\n(https://api.github.com)' }
-  expect(registrationTier('heavy', unreadable)).toEqual({
-    ok: true, tier: 'heavy', source: 'flag', why: '--tier; labels unreadable: HTTP 401: Bad credentials',
-  })
-  expect(registrationTier(undefined, unreadable)).toEqual({
-    ok: true, tier: 'standard', source: 'default', why: 'default; labels unreadable: HTTP 401: Bad credentials',
-  })
-})
-
 test('labels that were never read leave --tier, else the default', () => {
   expect(registrationTier(undefined, null)).toEqual({ ok: true, tier: 'standard', source: 'default', why: 'default' })
   expect(registrationTier('light', null)).toEqual({ ok: true, tier: 'light', source: 'flag', why: '--tier' })
@@ -64,12 +55,12 @@ test('the pipeline panes are the orchestrator and every task pane, live or last'
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   run.orchestrator_pane = 'w1:p1'
   const task = (over: Partial<Task>): Task => ({
-    task_id: 't1', branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+    task_id: 't1', branch: 'b', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
     keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown',
     phase: 'implement', phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
     pr: null, ci: null, checkout_path: null, registered_at: 0, adopted_at: null,
     artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
     ...over,
   })

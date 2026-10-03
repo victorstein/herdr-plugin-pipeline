@@ -1,16 +1,25 @@
 import { chmodSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { BOARD_PANE_TITLE, readBoards, recordedBoardPanes } from './lib/boards'
 import { loadConfig } from './lib/config'
 import { Herdr } from './lib/herdr'
 import { readPid } from './lib/pidfile'
 import { gcStaleTmp } from './lib/queue'
 import { sessionKey } from './lib/session'
+import { checkTools, toolsLine, type Tools } from './lib/tools'
 
 const SUPERVISOR_LABEL = 'Pipeline supervisor'
 const ONE_HOUR_MS = 60 * 60 * 1000
 
 const workspaceIdPath = (stateDir: string, session: string) =>
   join(stateDir, `workspace.${session}.id`)
+
+export async function readWorkspaceId(stateDir: string, session: string): Promise<string | null> {
+  const recorded = Bun.file(workspaceIdPath(stateDir, session))
+  if (!(await recorded.exists())) return null
+  const id = (await recorded.text()).trim()
+  return id.length === 0 ? null : id
+}
 
 export async function ensureWorkspace(
   herdr: Herdr, stateDir: string, session: string, label: string,
@@ -81,10 +90,8 @@ export async function reapGhostPanes(
 export async function reapSupervisorSiblings(
   herdr: Herdr, stateDir: string, session: string, ownPaneId: string, ownShellPid: number,
 ): Promise<string[]> {
-  const recorded = Bun.file(workspaceIdPath(stateDir, session))
-  if (!(await recorded.exists())) return []
-  const workspaceId = (await recorded.text()).trim()
-  if (workspaceId.length === 0) return []
+  const workspaceId = await readWorkspaceId(stateDir, session)
+  if (workspaceId === null) return []
   return reapGhostPanes(herdr, workspaceId, ownShellPid, ownPaneId, (paneId) =>
     keepCrashTail(herdr, crashLogPath(stateDir, session), paneId))
 }
@@ -123,15 +130,20 @@ export async function keepCrashTail(herdr: Herdr, logPath: string, paneId: strin
  * Clears the shell pane `workspace create` opens alongside the supervisor. It must
  * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
  * the workspace, so clearing it at creation time deletes the very workspace the
- * supervisor was about to open into.
+ * supervisor was about to open into. A board is spared if it is recorded, or still
+ * labelled plain `Board` because it has only just opened; the supervisor's first
+ * tick may open one before this runs. A renamed board no record names is a ghost
+ * a herdr restart brought back under a new id.
  */
-export async function clearStrayPanes(herdr: Herdr, workspaceId: string): Promise<string[]> {
+export async function clearStrayPanes(
+  herdr: Herdr, workspaceId: string, keep: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const panes = await herdr.paneList(workspaceId)
   if (panes.length <= 1) return []
 
   const closed: string[] = []
   for (const pane of panes) {
-    if (pane.label === SUPERVISOR_LABEL) continue
+    if (pane.label === SUPERVISOR_LABEL || pane.label === BOARD_PANE_TITLE || keep.has(pane.pane_id)) continue
     await herdr.paneClose(pane.pane_id)
     closed.push(pane.pane_id)
   }
@@ -150,6 +162,14 @@ export async function linkHpipe(target: string, linkPath: string): Promise<void>
   symlinkSync(target, linkPath)
 }
 
+/**
+ * Started before the pane work and awaited only in its `finally`: a rejection
+ * caught here can neither go unhandled meanwhile nor replace an error in flight.
+ */
+export function startToolsCheck(check: () => Promise<Tools> = checkTools): Promise<Tools | null> {
+  return check().catch(() => null)
+}
+
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR
@@ -162,31 +182,39 @@ async function main(): Promise<void> {
   const herdr = new Herdr()
 
   await gcStaleTmp(join(stateDir, 'queue', session), ONE_HOUR_MS)
+  // Not awaited here: a hung bd or bv must not hold up the supervisor pane.
+  const toolsChecked = startToolsCheck()
 
-  if (config.HPIPE_LINK) {
-    await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)
+  try {
+    if (config.HPIPE_LINK) {
+      await linkHpipe(join(pluginRoot, 'src', 'cli.ts'), config.HPIPE_LINK_PATH)
+    }
+
+    const workspaceId = await ensureWorkspace(herdr, stateDir, session, config.PIPELINE_WORKSPACE_LABEL)
+    if (!workspaceId) return
+
+    const live = await readPid(stateDir, session)
+    const crashLog = crashLogPath(stateDir, session)
+    const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null, undefined,
+      (paneId) => keepCrashTail(herdr, crashLog, paneId))
+    if (ghosts.length > 0) {
+      console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}; their output is in ${crashLog}`)
+    }
+
+    const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
+    if (!opened.ok) {
+      // herdr reports this in the body while exiting 0 — checking the exit code would miss it.
+      console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
+      return
+    }
+
+    const strays = await clearStrayPanes(herdr, workspaceId, recordedBoardPanes(await readBoards(stateDir, session)))
+    if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
+  } finally {
+    const tools = await toolsChecked
+    const toolsWarning = tools === null ? null : toolsLine(tools)
+    if (toolsWarning !== null) console.error(`[pipeline] ${toolsWarning}`)
   }
-
-  const workspaceId = await ensureWorkspace(herdr, stateDir, session, config.PIPELINE_WORKSPACE_LABEL)
-  if (!workspaceId) return
-
-  const live = await readPid(stateDir, session)
-  const crashLog = crashLogPath(stateDir, session)
-  const ghosts = await reapGhostPanes(herdr, workspaceId, live?.pane_pid ?? null, undefined,
-    (paneId) => keepCrashTail(herdr, crashLog, paneId))
-  if (ghosts.length > 0) {
-    console.log(`[pipeline] closed ghost panes: ${ghosts.join(', ')}; their output is in ${crashLog}`)
-  }
-
-  const opened = await herdr.pluginPaneOpen(pluginId, 'supervisor', workspaceId)
-  if (!opened.ok) {
-    // herdr reports this in the body while exiting 0 — checking the exit code would miss it.
-    console.error(`[pipeline] could not open supervisor pane: ${opened.code} ${opened.message}`)
-    return
-  }
-
-  const strays = await clearStrayPanes(herdr, workspaceId)
-  if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
 }
 
 if (import.meta.main) await main()

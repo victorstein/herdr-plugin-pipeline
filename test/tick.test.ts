@@ -9,26 +9,27 @@ import {
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
 import { actionFor, ageMinutes } from '../src/lib/status'
-import { isCurrentSchemaRun, makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
-import { loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
+import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import { TASK_ROWS, TIERS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'tick-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
   phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -124,6 +125,7 @@ test('a pane exit while blocked fails the task and abandons its decisions', () =
     decisions: [{
       id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
       answer: null, answered_by: null, answered_at: null, prompted_at: null,
+      escalated_at: null, orchestrator_recommendation: null,
     }],
   })])
   const events: QueuedEvent[] = [
@@ -141,6 +143,7 @@ test('an answered but undelivered decision is also abandoned on pane death', () 
     decisions: [{
       id: 'd1', asked_at: 1, from_phase: 'implement', question: 'q?', recommendation: 'r',
       answer: 'go ahead', answered_by: 'orchestrator', answered_at: 2, prompted_at: null,
+      escalated_at: null, orchestrator_recommendation: null,
     }],
   })])
   const events: QueuedEvent[] = [
@@ -225,7 +228,7 @@ test('a rebind keeps the recorded checkout when the event carries none — #116'
   expect(run.tasks[0]?.checkout_path).toBe('/r/.worktrees/feat-x')
 })
 
-test('a run without schema_version 2 is never advanced', () => {
+test('a run without schema_version 3 is never advanced', () => {
   const run = mkRun([mkTask({ phase: 'implement' })])
   run.phase = 'execute'
   run.orchestrator_pane = 'w1:p1'
@@ -402,7 +405,7 @@ test('actionFor answers whose move it is, by rung', () => {
     .toBe('needs a human: `hp rewind r1 <phase> --task t1` resumes it, `hp rewind r1 failed --task t1` abandons it — the run holds in execute until one is run')
   // #95: the same noun phrase the stall probe uses, so the three channels agree.
   expect(at('merge', { pr: 7 })).toBe('YOUR move: waiting for PR #7 to be merged')
-  expect(at('close')).toBe('YOUR move: waiting for issue #1 to close')
+  expect(at('close')).toBe('nothing for you — the supervisor is driving')
   expect(at('blocked-on-decision')).toBe('YOUR move: waiting for an answer to the open decision')
   expect(at('blocked-on-decision', { pending_answer: 'd1' }))
     .toBe('nothing for you — waiting for its recorded answer to reach the worker')
@@ -420,7 +423,7 @@ test('actionFor answers whose move it is, by rung', () => {
   expect(at('research')).toBe("worker's move: waiting for its research artifact")
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
-  expect(at('implement')).toBe("worker's move: waiting for a pushed PR for feat/x (#1)")
+  expect(at('implement')).toBe("worker's move: waiting for a pushed PR for feat/x (hp-1)")
   for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
     expect(at(phase)).toBe('nothing for you — the supervisor is driving')
     // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
@@ -557,7 +560,7 @@ test('a digest line carries the task, the phase, the age and the action', () => 
   const now = 1_000_000
   const line = wakeLine({ task: mkTask({ phase: 'implement', phase_entered_at: now - 720_000 }) })
   expect(describeWake(line, now, 'hp'))
-    .toBe("t1 feat/x (#1) [implement 12m] agent:idle — worker's move: waiting for a pushed PR for feat/x (#1)")
+    .toBe("t1 feat/x (hp-1) [implement 12m] agent:idle — worker's move: waiting for a pushed PR for feat/x (hp-1)")
 })
 
 test('a digest line names the missing artifact of an idle worker', () => {
@@ -571,7 +574,7 @@ test('a digest line names the missing artifact of an idle worker', () => {
     }),
   })
   expect(describeWake(line, now, 'hp')).toBe(
-    't1 feat/x (#1) [research 12m] agent:idle — YOUR move: worker idle with nothing at /wt/r.md ' +
+    't1 feat/x (hp-1) [research 12m] agent:idle — YOUR move: worker idle with nothing at /wt/r.md ' +
     '(2 candidates, too many to adopt: a.md, b.md)',
   )
 })
@@ -585,7 +588,7 @@ test('a phase that moved this tick renders as a transition and drops the age', (
     task: mkTask({ phase: 'spec', phase_entered_at: now }),
   })
   expect(describeWake(line, now, 'hp'))
-    .toBe("t1 feat/x (#1) [research → spec] agent:idle — worker's move: waiting for its spec artifact")
+    .toBe("t1 feat/x (hp-1) [research → spec] agent:idle — worker's move: waiting for its spec artifact")
 })
 
 test('a blocked line indents its pane tail four spaces under the bullet', () => {
@@ -596,7 +599,7 @@ test('a blocked line indents its pane tail four spaces under the bullet', () => 
     task: mkTask({ phase: 'plan', phase_entered_at: now }),
   })
   expect(describeWake(line, now, 'hp')).toBe(
-    "t1 feat/x (#1) [implement → plan] agent:blocked — worker's move: waiting for its plan artifact\n" +
+    "t1 feat/x (hp-1) [implement → plan] agent:blocked — worker's move: waiting for its plan artifact\n" +
     '    Do you want to proceed?\n' +
     '    yes / no',
   )
@@ -635,15 +638,15 @@ test('the footer names orchestrator-owned and escalated tasks that produced no l
   // Declared out of order on purpose: with these already sorted the sort never
   // has to do anything and deleting it leaves the suite green.
   run.tasks = [
-    mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'escalated',
+    mkTask({ task_id: 't2', branch: 'fix/b', bead: 'hp-31', phase: 'escalated',
              escalated_from: 'plan', phase_entered_at: now - 3_780_000 }),
-    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge', pr: 41,
+    mkTask({ task_id: 't1', branch: 'fix/a', bead: 'hp-30', phase: 'merge', pr: 41,
              phase_entered_at: now - 2_460_000 }),
   ]
   expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
     'also waiting on you:\n' +
-    '- t1 fix/a (#30) [merge 41m] — YOUR move: waiting for PR #41 to be merged\n' +
-    '- t2 fix/b (#31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2` resumes it, `hp rewind r1 failed --task t2` abandons it — the run holds in execute until one is run',
+    '- t1 fix/a (hp-30) [merge 41m] — YOUR move: waiting for PR #41 to be merged\n' +
+    '- t2 fix/b (hp-31) [escalated 63m] — needs a human: `hp rewind r1 plan --task t2` resumes it, `hp rewind r1 failed --task t2` abandons it — the run holds in execute until one is run',
   )
 })
 
@@ -780,8 +783,8 @@ test('the footer agrees with hpipe status on the rows no actor column can see', 
   ]
   expect(parkedFooter(run, new Set(), now, 'hp')).toBe(
     'also waiting on you:\n' +
-    '- t2 feat/x (#1) [blocked-on-files 0m] — YOUR move: `hp release --task t1`\n' +
-    '- t3 feat/x (#1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
+    '- t2 feat/x (hp-1) [blocked-on-files 0m] — YOUR move: `hp release --task t1`\n' +
+    '- t3 feat/x (hp-1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
     '(src/b.ts) — have it commit and push',
   )
 })
@@ -806,7 +809,7 @@ test('the footer lists an unstarted worker a quiet digest would otherwise hide �
   })])
   const footer = parkedFooter(run, new Set(), now, 'hp')
   expect(footer).toContain('also waiting on you:')
-  expect(footer).toContain('t1 feat/x (#1) [research 166m] — YOUR move: no agent detected in its worktree')
+  expect(footer).toContain('t1 feat/x (hp-1) [research 166m] — YOUR move: no agent detected in its worktree')
 })
 
 test('binding a worker pane re-arms the stall ladder, and a repeat bind does not — #12', () => {
@@ -887,15 +890,15 @@ test('a run asking after a slow send gets a fresh idle reading, not the one from
 test('a catch-up names every task\'s phase, age and whose move it is, from the ledger — #91', () => {
   const now = 10 * 60_000
   const run = mkRun([
-    mkTask({ task_id: 't2', branch: 'b/two', issue: 2, phase: 'merge', phase_entered_at: 0 }),
+    mkTask({ task_id: 't2', branch: 'b/two', bead: 'hp-2', phase: 'merge', phase_entered_at: 0 }),
     mkTask({ task_id: 't1', phase: 'spec', phase_entered_at: 7 * 60_000 }),
   ])
   run.phase_entered_at = 0
   const text = catchUpDigest(run, now, 'hp')
   expect(text.split('\n')).toEqual([
     'catch-up: digests for this run did not reach you, so here is where it stands now (run in execute 10m):',
-    `- t1 feat/x (#1) [spec 3m] — ${actionFor(run, run.tasks[1] as Task, 'hp', now)}`,
-    `- t2 b/two (#2) [merge 10m] — ${actionFor(run, run.tasks[0] as Task, 'hp', now)}`,
+    `- t1 feat/x (hp-1) [spec 3m] — ${actionFor(run, run.tasks[1] as Task, 'hp', now)}`,
+    `- t2 b/two (hp-2) [merge 10m] — ${actionFor(run, run.tasks[0] as Task, 'hp', now)}`,
   ])
 })
 
@@ -972,6 +975,7 @@ test('a decision opened in merge returns to merge when the worker pane goes, not
   t1.decisions = [{
     id: 'd1', asked_at: 0, from_phase: 'merge', question: 'q', recommendation: 'r',
     answer: null, answered_by: null, answered_at: null, prompted_at: null,
+    escalated_at: null, orchestrator_recommendation: null,
   }]
   applyEvents([run], [closed('w7:p1', 'w7')], 'personal', new Set())
   expect(t1.phase).toBe('merge')

@@ -11,17 +11,18 @@ import { artifactPathFor } from '../src/supervisor/deliver'
 import { verdictFor } from '../src/lib/verdict-path'
 import type { QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
 import { applyEvents } from '../src/supervisor/tick'
+import { beadTaskFields } from './helpers/bead-fields'
 
 function taskFixture(phase: TaskPhase): Task {
   return {
-    task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+    task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
     depends_on: [], files: [], keep_worktree: false,
     workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
     phase, phase_entered_at: Date.now(), escalated_from: null,
     head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
     artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   }
 }
@@ -76,13 +77,13 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'decide-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+  task_id: 't1', branch: 'b', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
   keep_worktree: false, workspace_id: null, pane_id: null,
   agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -586,7 +587,7 @@ test('answering a decision raised on a review row does not move the verdict path
   const task = mkTask({ task_id: 't1', phase: 'spec-review', pane_id: 'w7:p1' })
   task.verdict_seq = { 'spec-review': 1 }
   task.artifacts.verdicts = {
-    'spec-review-0': 'docs/superpowers/reviews/issue-1-spec-review-0.md',
+    'spec-review-0': 'docs/superpowers/reviews/hp-1-spec-review-0.md',
   }
   const decision = openDecision(task, { question: 'narrow it?', recommendation: 'narrow' })
   answerDecision(task, decision.id, 'narrow it', 'human')
@@ -599,7 +600,7 @@ test('answering a decision raised on a review row does not move the verdict path
   // review row rather than off `task.phase` — the task is parked in
   // `blocked-on-decision` right now, which resolves to a different row entirely.
   const handed = verdictFor(task, 'spec-review')
-  expect(handed).toBe('docs/superpowers/reviews/issue-1-spec-review-0.md')
+  expect(handed).toBe('docs/superpowers/reviews/hp-1-spec-review-0.md')
 
   await sendAndConfirm(run)
 
@@ -608,7 +609,7 @@ test('answering a decision raised on a review row does not move the verdict path
   expect(run.tasks[0]?.phase).toBe('spec-review')
   expect(task.verdict_seq).toEqual({ 'spec-review': 1 })
   expect(task.artifacts.verdicts).toEqual({
-    'spec-review-0': 'docs/superpowers/reviews/issue-1-spec-review-0.md',
+    'spec-review-0': 'docs/superpowers/reviews/hp-1-spec-review-0.md',
   })
   expect(verdictFor(task, 'spec-review')).toBe(handed)
   expect(artifactPathFor(run, task)).toBe(handed)

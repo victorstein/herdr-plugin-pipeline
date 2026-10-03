@@ -1,0 +1,747 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { BdFailure, BeadUpdate, Done, ExportedBead } from '../src/lib/bd'
+import { desiredBead } from '../src/lib/bead-desired'
+import { beadsSlug } from '../src/lib/beads-project'
+import { beadClaimants } from '../src/lib/held'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task } from '../src/lib/types'
+import {
+  callsFor, closeReason, LOCK_CONTENTION_NOTICE_MS, type SyncBd, type SyncDeps, syncBeads,
+} from '../src/supervisor/beads-sync'
+import { beadTaskFields } from './helpers/bead-fields'
+
+const mkTask = (over: Partial<Task> = {}): Task => ({
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
+  keep_worktree: false, workspace_id: null, pane_id: null, agent_status: 'unknown',
+  phase: 'implement', phase_entered_at: 0, escalated_from: null, head_sha_at_entry: null,
+  pr: 7, ci: null, checkout_path: null, registered_at: 0, adopted_at: null,
+  artifacts: { research: null, spec: null, plan: null, verdicts: {} },
+  merged_at_ms: null, merge_commit: 'm3rg3', ...beadTaskFields(), passes: {}, decisions: [],
+  decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
+  ...over,
+})
+
+function runWith(...tasks: Task[]): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: '/code/repo', repoRoot: '/code/repo', title: 'a' })
+  run.run_id = 'r1'
+  run.phase = 'execute'
+  run.tasks = tasks
+  return run
+}
+
+const bead = (id: string, over: Partial<ExportedBead> = {}): ExportedBead =>
+  ({ id, title: id, status: 'open', labels: [], dependencies: [], comments: [], ...over })
+
+/**
+ * An in-memory store with a separate export, as bd has: writes change the live
+ * store and mark the export dirty; only a successful export or refresh copies it.
+ * Records each call it is asked to make.
+ */
+function fakeStore(beads: ExportedBead[], fail: (id: string, kind: string) => BdFailure | null = () => null) {
+  const live = new Map(beads.map((b) => [b.id, structuredClone(b)]))
+  let exported = beads.map((b) => structuredClone(b))
+  let dirty = false
+  let exportFailure: BdFailure | null = null
+  const calls: string[] = []
+  let exports = 0
+  let refreshes = 0
+  let onCall = (): void => {}
+  const answer = (id: string, call: string, apply: (b: ExportedBead) => void): Promise<Done | BdFailure> => {
+    calls.push(call)
+    onCall()
+    const failure = fail(id, call.split(' ')[0]!)
+    if (failure !== null) return Promise.resolve(failure)
+    dirty = true
+    const target = live.get(id)
+    if (target) apply(target)
+    return Promise.resolve({ ok: true })
+  }
+  const exportLive = (): Done | BdFailure => {
+    if (exportFailure !== null) return exportFailure
+    exported = [...live.values()].map((b) => structuredClone(b))
+    dirty = false
+    return { ok: true }
+  }
+  const bd: SyncBd = {
+    readExport: () => exported.map((b) => structuredClone(b)),
+    refreshExport: async () => {
+      const failure = fail('', 'refreshExport')
+      if (failure !== null) return failure
+      if (!dirty) return { ok: true }
+      refreshes++
+      return exportLive()
+    },
+    reopen: (id) => answer(id, `reopen ${id}`, (b) => { b.status = 'open' }),
+    update: (id, change: BeadUpdate) => answer(id, `update ${id} ${JSON.stringify(change)}`, (b) => {
+      if (change.status !== undefined) b.status = change.status
+      if (change.assignee !== undefined) b.assignee = change.assignee
+      b.labels = [...(b.labels ?? []).filter((l) => !(change.removeLabels ?? []).includes(l)), ...(change.addLabels ?? [])]
+      const metadata = { ...b.metadata, ...change.setMetadata }
+      for (const key of change.unsetMetadata ?? []) delete metadata[key]
+      b.metadata = metadata
+    }),
+    depAdd: (from, to) => answer(from, `depAdd ${from} ${to}`, (b) => {
+      b.dependencies = [...(b.dependencies ?? []), { depends_on_id: to, type: 'blocks' }]
+    }),
+    comment: (id, text) => answer(id, `comment ${id}`, (b) => { b.comments = [...(b.comments ?? []), { text }] }),
+    close: (id, reason) => answer(id, `close ${id} ${reason}`, (b) => { b.status = 'closed' }),
+    exportNow: async () => {
+      exports++
+      return exportLive()
+    },
+  }
+  return {
+    bd, calls, exports: () => exports, refreshes: () => refreshes,
+    onEachCall: (hook: () => void) => { onCall = hook },
+    failExports: (failure: BdFailure | null) => { exportFailure = failure },
+  }
+}
+
+function deps(store: ReturnType<typeof fakeStore>, over: Partial<SyncDeps> = {}): SyncDeps & { persisted: Run[] } {
+  const persisted: Run[] = []
+  return {
+    persisted,
+    bdFor: () => store.bd,
+    hasStore: async () => true,
+    now: () => 1_000,
+    budgetMs: 2_000,
+    claimants: async () => [],
+    passNotices: new Map(),
+    lockContention: new Map(),
+    slugCursor: { index: 0 },
+    persist: async (run) => { persisted.push(structuredClone(run)) },
+    log: () => {},
+    ...over,
+  }
+}
+
+test('a dispatched task\'s open bead gets one update folding status, assignee and labels; foreign labels stay', () => {
+  const task = mkTask({ phase: 'implement' })
+  const actual = bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['research', 'ui'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([{
+    kind: 'update',
+    change: { status: 'in_progress', assignee: 'hpipe', addLabels: ['implement'], removeLabels: ['research'] },
+  }])
+})
+
+test('a bead labelled phase:research by an earlier build swaps it for the bare phase name', () => {
+  const task = mkTask({ phase: 'plan' })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:research', 'ui'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'update', change: { addLabels: ['plan'], removeLabels: ['phase:research'] } },
+  ])
+})
+
+test('a bead labelled hpipe:run= by an earlier build loses that label and gets the run id as metadata', () => {
+  const task = mkTask({ phase: 'implement' })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', labels: ['hpipe:run=r1', 'implement', 'ui'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'update', change: { removeLabels: ['hpipe:run=r1'], setMetadata: { 'hpipe.run': 'r1' } } },
+  ])
+})
+
+test('a bead carrying another run\'s id in metadata is overwritten with the driving run\'s, other keys left be', () => {
+  const task = mkTask({ phase: 'implement' })
+  const actual = bead('hp-1', {
+    status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r0', owner: 'ana' },
+  })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'update', change: { setMetadata: { 'hpipe.run': 'r1' } } },
+  ])
+})
+
+test('a bead already as desired needs no call', () => {
+  const task = mkTask({ phase: 'implement' })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([])
+})
+
+test('a closed bead the ledger wants open again is reopened before its update', () => {
+  const task = mkTask({ phase: 'implement' })
+  const actual = bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'reopen' },
+    { kind: 'update', change: { status: 'in_progress', addLabels: ['implement'] } },
+  ])
+})
+
+test('a merged task\'s bead is relabelled, then closed last with the merge as its reason', () => {
+  const task = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['merge'] })
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+    { kind: 'update', change: { removeLabels: ['merge'] } },
+    { kind: 'close', reason: 'merged in PR #7 (m3rg3)' },
+  ])
+})
+
+test('missing edges and comments come after the update and before the close', () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'blocked-on-decision', decision_from: 'plan', depends_on: ['t1'] })
+  second.decisions = [{
+    id: 'd1', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: 1, escalated_at: 2, orchestrator_recommendation: 'o',
+  }]
+  const calls = callsFor(desiredBead(second, runWith(first, second)), bead('hp-2'), closeReason(second))
+  expect(calls.map((c) => c.kind)).toEqual(['update', 'depAdd', 'comment'])
+  expect(calls[1]).toEqual({ kind: 'depAdd', dependsOn: 'hp-1' })
+  expect(calls[2]).toMatchObject({ kind: 'comment', marker: '[hpipe t2/d1/asked]' })
+})
+
+test('a closed bead that should stay closed is left alone, whoever it is assigned to', () => {
+  const task = mkTask({ phase: 'done', merged_at_ms: 5 })
+  expect(callsFor(desiredBead(task, runWith(task)), bead('hp-1', { status: 'closed', metadata: { 'hpipe.run': 'r1' }, labels: [] }), closeReason(task)))
+    .toEqual([])
+})
+
+test('a pass converges every task and exports once', async () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'implement' })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
+  const store = fakeStore([bead('hp-1', { labels: ['research'] }), bead('hp-2')])
+
+  await syncBeads([runWith(first, second)], deps(store))
+
+  expect(store.calls).toEqual([
+    'update hp-1 {"status":"in_progress","assignee":"hpipe","addLabels":["implement"],"removeLabels":["research"],"setMetadata":{"hpipe.run":"r1"}}',
+    'update hp-2 {"addLabels":["queued"],"setMetadata":{"hpipe.run":"r1"}}',
+    'depAdd hp-2 hp-1',
+  ])
+  expect(store.exports()).toBe(1)
+})
+
+test('a pass with nothing to change neither writes, exports nor saves', async () => {
+  const task = mkTask({ phase: 'queued' })
+  const store = fakeStore([bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['queued'] })])
+  const d = deps(store)
+  await syncBeads([runWith(task)], d)
+  expect(store.calls).toEqual([])
+  expect(store.exports()).toBe(0)
+  expect(d.persisted).toEqual([])
+})
+
+test('a failed call is counted on its task, monotonically, and the next task still converges', async () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'implement' })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const run = runWith(first, second)
+  const store = fakeStore([bead('hp-1'), bead('hp-2')],
+    (id) => (id === 'hp-1' ? { reason: 'exit', error: 'Error: database is locked' } : null))
+  const d = deps(store)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(first.bead_sync).toEqual({ failures: 2, streak: 2, last_error: 'Error: database is locked', last_ok_at_ms: null })
+  expect(second.bead_sync).toEqual({ failures: 0, streak: 0, last_error: null, last_ok_at_ms: 1_000 })
+  expect(d.persisted.at(-1)?.tasks[0]?.bead_sync.failures).toBe(2)
+})
+
+test('a held lock ends the pass at once and counts as no failure', async () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'implement' })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const store = fakeStore([bead('hp-1'), bead('hp-2')], () => ({ reason: 'busy', error: 'Beads is busy, retry' }))
+
+  await syncBeads([runWith(first, second)], deps(store))
+
+  expect(store.calls).toEqual([])
+  expect(first.bead_sync.failures).toBe(0)
+  expect(store.exports()).toBe(0)
+})
+
+test('the 2 s budget stops a pass part-way, and the next pass does only what is left', async () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'implement' })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
+  const run = runWith(first, second)
+  const store = fakeStore([bead('hp-1'), bead('hp-2')])
+  let clock = 0
+  store.onEachCall(() => { clock += 1_500 })
+  const d = deps(store, { now: () => clock })
+
+  await syncBeads([run], d)
+  expect(store.calls.map((c) => c.split(' ').slice(0, 2).join(' '))).toEqual(['update hp-1', 'update hp-2'])
+  expect(store.exports()).toBe(1)
+
+  await syncBeads([run], d)
+  expect(store.calls.slice(2)).toEqual(['depAdd hp-2 hp-1'])
+})
+
+test('a pass that crashed part-way converges on the next one', async () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
+  const run = runWith(first, second)
+  let failNextDep = true
+  const store = fakeStore([bead('hp-1', { status: 'closed', metadata: { 'hpipe.run': 'r1' }, labels: [] }), bead('hp-2')], (_id, kind) => {
+    if (kind !== 'depAdd' || !failNextDep) return null
+    failNextDep = false
+    return { reason: 'timeout', error: 'bd dep was killed after 30s' }
+  })
+  const d = deps(store)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(store.calls).toEqual([
+    'update hp-2 {"addLabels":["queued"],"setMetadata":{"hpipe.run":"r1"}}', 'depAdd hp-2 hp-1', 'depAdd hp-2 hp-1',
+  ])
+  expect(second.bead_sync).toMatchObject({ failures: 1, last_error: null })
+})
+
+test('done and aborted runs are visited: an aborted run\'s claimed bead is released', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const run = runWith(task)
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.escalated_from = 'execute'
+  run.phase = 'done'
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
+
+  await syncBeads([run], deps(store))
+
+  expect(store.calls).toEqual([
+    'update hp-1 {"status":"open","assignee":"","addLabels":["aborted"],"removeLabels":["implement"]}',
+  ])
+})
+
+test('bead_closed_at_ms is set only once a merge is recorded and the export shows the bead closed', async () => {
+  const merged = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'close', merged_at_ms: 5 })
+  const unmerged = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const run = runWith(merged, unmerged)
+  const store = fakeStore([
+    bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['close'] }),
+    bead('hp-2', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] }),
+  ])
+  let clock = 1_000
+  const d = deps(store, { now: () => clock })
+
+  await syncBeads([run], d)
+  expect(merged.bead_closed_at_ms).toBeNull()
+  expect(store.calls).toContain('close hp-1 merged in PR #7 (m3rg3)')
+  expect(store.calls).toContain('reopen hp-2')
+
+  clock = 2_000
+  await syncBeads([run], d)
+  expect(merged.bead_closed_at_ms).toBe(2_000)
+  expect(unmerged.bead_closed_at_ms).toBeNull()
+})
+
+test('a rewind that clears the merge flips the bead back: reopened and re-claimed', async () => {
+  const task = mkTask({ phase: 'implement', merged_at_ms: null, bead_closed_at_ms: null })
+  const store = fakeStore([bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })])
+  await syncBeads([runWith(task)], deps(store))
+  expect(store.calls).toEqual(['reopen hp-1', 'update hp-1 {"status":"in_progress","addLabels":["implement"]}'])
+})
+
+test('a repo with no Beads store is skipped', async () => {
+  const store = fakeStore([bead('hp-1')])
+  await syncBeads([runWith(mkTask())], deps(store, { hasStore: async () => false }))
+  expect(store.calls).toEqual([])
+})
+
+test('a merged task waiting on its close in a repo with no store counts a failure, logged once; others are untouched', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const working = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const logged: string[] = []
+  const d = deps(fakeStore([]), { hasStore: async () => false, log: (message) => { logged.push(message) } })
+  const run = runWith(waiting, working)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(waiting.bead_sync).toMatchObject({
+    failures: 2,
+    last_error: 'no Beads store for /code/repo; run the \'Set up Beads for this repo\' action or `hpipe start` in that repo',
+  })
+  expect(working.bead_sync.failures).toBe(0)
+  expect(logged).toHaveLength(1)
+  expect(d.persisted).toHaveLength(2)
+})
+
+test('a merged task waiting on a bead another task drives counts a failure naming the driver', async () => {
+  const holder = mkTask({ phase: 'implement', registered_at: 2 })
+  const merged = mkTask({ phase: 'close', merged_at_ms: 5, registered_at: 1 })
+  const olderRun = runWith(merged)
+  olderRun.run_id = 'r0'
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
+
+  await syncBeads([runWith(holder), olderRun], deps(store))
+
+  expect(merged.bead_sync.failures).toBe(1)
+  expect(merged.bead_sync.last_error).toContain('driven by t1 of run r1 (session p)')
+  expect(merged.bead_closed_at_ms).toBeNull()
+  expect(store.calls).toEqual([])
+})
+
+test('a merged task waiting on a bead another task drives records the close once the bead is closed', async () => {
+  const holder = mkTask({ phase: 'close', merged_at_ms: 9, bead_closed_at_ms: 9, registered_at: 2 })
+  const merged = mkTask({ phase: 'close', merged_at_ms: 5, registered_at: 1 })
+  const olderRun = runWith(merged)
+  olderRun.run_id = 'r0'
+  const store = fakeStore([bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })])
+
+  await syncBeads([runWith(holder), olderRun], deps(store))
+
+  expect(merged.bead_closed_at_ms).toBe(1_000)
+  expect(merged.bead_sync.failures).toBe(0)
+  expect(store.calls).toEqual([])
+})
+
+test('a lock that could not be taken for want of ps also ends the pass without a failure', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const store = fakeStore([bead('hp-1')], () => ({ reason: 'unavailable', error: 'could not read this process\'s start time' }))
+  await syncBeads([runWith(task)], deps(store))
+  expect(task.bead_sync.failures).toBe(0)
+})
+
+test('a closed bead whose close is already recorded saves nothing on later passes', async () => {
+  const task = mkTask({ phase: 'done', merged_at_ms: 1, bead_closed_at_ms: 5 })
+  const store = fakeStore([bead('hp-1', { status: 'closed', metadata: { 'hpipe.run': 'r1' }, labels: [] })])
+  const d = deps(store)
+  await syncBeads([runWith(task)], d)
+  expect(d.persisted).toEqual([])
+})
+
+test('a bead an aborted run released and a later run took is driven by the run holding it', async () => {
+  const abandoned = mkTask({ phase: 'implement', registered_at: 1 })
+  const oldRun = runWith(abandoned)
+  oldRun.run_id = 'r0'
+  oldRun.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  oldRun.escalated_from = 'execute'
+  oldRun.phase = 'done'
+  const taken = mkTask({ phase: 'implement', registered_at: 2 })
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })])
+
+  await syncBeads([runWith(taken), oldRun], deps(store))
+  await syncBeads([oldRun, runWith(taken)], deps(store))
+
+  expect(store.calls).toEqual([])
+})
+
+const escalatedDecision = (): Task['decisions'][number] => ({
+  id: 'd1', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
+  answer: null, answered_by: null, answered_at: null, prompted_at: 1, escalated_at: 2, orchestrator_recommendation: 'o',
+})
+
+test('a lock taken mid-pass ends it without a failure', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const store = fakeStore([bead('hp-1')], (_id, kind) => (kind === 'update' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([runWith(task)], deps(store))
+  expect(store.calls).toHaveLength(1)
+  expect(task.bead_sync.failures).toBe(0)
+})
+
+function contendedStore() {
+  let busy = true
+  const store = fakeStore([bead('hp-1')], () => (busy ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  return { store, free: () => { busy = false }, take: () => { busy = true } }
+}
+
+function loggingDeps(store: ReturnType<typeof fakeStore>) {
+  const logged: string[] = []
+  let clock = 0
+  const d = deps(store, { log: (message) => { logged.push(message) }, now: () => clock })
+  return { d, logged, at: (ms: number) => { clock = ms } }
+}
+
+test('a lock held by another session only briefly logs nothing', async () => {
+  const { store, free } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  for (const ms of [0, 1_000, 10_000, LOCK_CONTENTION_NOTICE_MS - 1]) {
+    at(ms)
+    await syncBeads([run], d)
+  }
+  free()
+  at(LOCK_CONTENTION_NOTICE_MS + 1_000)
+  await syncBeads([run], d)
+  expect(logged).toEqual([])
+})
+
+test('a lock that stays held past the threshold is logged once for the whole episode', async () => {
+  const { store } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  for (const ms of [0, 10_000, LOCK_CONTENTION_NOTICE_MS, LOCK_CONTENTION_NOTICE_MS + 1_000, 5 * LOCK_CONTENTION_NOTICE_MS]) {
+    at(ms)
+    await syncBeads([run], d)
+  }
+  expect(logged).toHaveLength(1)
+  expect(logged[0]).toContain('Beads is busy, retry')
+})
+
+test('the end of a logged episode is logged once, and the next episode starts its own threshold', async () => {
+  const { store, free, take } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  at(0)
+  await syncBeads([run], d)
+  at(LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  free()
+  at(LOCK_CONTENTION_NOTICE_MS + 1_000)
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(2)
+  expect(logged[1]).toContain('Beads lock free again')
+
+  take()
+  at(LOCK_CONTENTION_NOTICE_MS + 2_000)
+  await syncBeads([run], d)
+  at(2 * LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(2)
+})
+
+test('a lock taken mid-pass counts toward the same episode as one taken before the export', async () => {
+  let failing: 'refreshExport' | 'update' = 'refreshExport'
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === failing ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  at(0)
+  await syncBeads([run], d)
+  failing = 'update'
+  at(LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(1)
+})
+
+test('an export that stays stale is still logged at once, and once', async () => {
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const { d, logged } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(logged).toEqual([
+    `beads ${beadsSlug(run.repo_key)}: export is stale and could not be refreshed (disk full); skipped this tick`,
+  ])
+})
+
+test('any existing edge between the pair stands for the blocks edge, since bd refuses a second type', () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
+  const second = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'queued', depends_on: ['t1'] })
+  const actual = bead('hp-2', {
+    metadata: { 'hpipe.run': 'r1' }, labels: ['queued'], dependencies: [{ depends_on_id: 'hp-1', type: 'discovered-from' }],
+  })
+  expect(callsFor(desiredBead(second, runWith(first, second)), actual, closeReason(second))).toEqual([])
+})
+
+test('a write whose export failed is re-exported before the next diff, so no comment is posted twice', async () => {
+  const task = mkTask({ phase: 'blocked-on-decision', decision_from: 'plan', decisions: [escalatedDecision()] })
+  const store = fakeStore([bead('hp-1', { status: 'blocked', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['blocked-on-decision', 'hpipe:awaiting-human'] })])
+  const run = runWith(task)
+  const d = deps(store)
+
+  store.failExports({ reason: 'exit', error: 'disk full' })
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(store.calls).toEqual(['comment hp-1'])
+
+  store.failExports(null)
+  await syncBeads([run], d)
+  expect(store.calls).toEqual(['comment hp-1'])
+  expect(store.refreshes()).toBe(2)
+})
+
+test('a bead missing from the export counts as a failure, logged once while the error stays the same', async () => {
+  const task = mkTask({ phase: 'close', merged_at_ms: 5, bead: 'hp-9' })
+  const store = fakeStore([bead('hp-1')])
+  const logged: string[] = []
+  const d = deps(store, { log: (message) => { logged.push(message) } })
+  const run = runWith(task)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(task.bead_sync).toMatchObject({ failures: 2, last_error: 'bead hp-9 is not in the Beads export' })
+  expect(task.bead_closed_at_ms).toBeNull()
+  expect(logged).toHaveLength(1)
+})
+
+let stateDir: string
+beforeEach(() => { stateDir = mkdtempSync(join(tmpdir(), 'beads-sync-')) })
+afterEach(() => { rmSync(stateDir, { recursive: true, force: true }) })
+
+function writeRunFile(run: Run): void {
+  mkdirSync(join(stateDir, 'runs', run.session), { recursive: true })
+  writeFileSync(join(stateDir, 'runs', run.session, `${run.run_id}.json`), JSON.stringify(run))
+}
+
+function abortedRun(task: Task): Run {
+  const run = runWith(task)
+  run.run_id = 'r0'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.escalated_from = 'execute'
+  run.phase = 'done'
+  return run
+}
+
+function runInSession(session: string, task: Task): Run {
+  const run = runWith(task)
+  run.session = session
+  run.run_id = 'r2'
+  return run
+}
+
+test('a bead this session released and another session took is left to the session holding it', async () => {
+  const released = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  writeRunFile(released)
+  writeRunFile(runInSession('q', mkTask({ phase: 'implement', registered_at: 2 })))
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r2' }, labels: ['implement'] })])
+
+  await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
+
+  expect(store.calls).toEqual([])
+})
+
+test('once the other session merges the bead, this session\'s older release does not reopen it', async () => {
+  const released = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  writeRunFile(released)
+  const merged = runInSession('q', mkTask({ phase: 'done', merged_at_ms: 9, registered_at: 2 }))
+  merged.phase = 'done'
+  writeRunFile(merged)
+  const store = fakeStore([bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r2' }, labels: [] })])
+
+  await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
+
+  expect(store.calls).toEqual([])
+})
+
+test('a bead no other session claims is still released by this one', async () => {
+  const released = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  writeRunFile(released)
+  const store = fakeStore([bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r0' }, labels: ['implement'] })])
+
+  await syncBeads([released], deps(store, { claimants: () => beadClaimants(stateDir) }))
+
+  expect(store.calls).toHaveLength(1)
+})
+
+test('an export that cannot be refreshed is logged once while the error stays the same', async () => {
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const logged: string[] = []
+  const d = deps(store, { log: (message) => { logged.push(message) } })
+  const run = runWith(mkTask({ phase: 'implement' }))
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+
+  expect(store.calls).toEqual([])
+  expect(logged).toEqual([
+    `beads ${beadsSlug('/code/repo')}: export is stale and could not be refreshed (disk full); skipped this tick`,
+  ])
+})
+
+test('an export that cannot be refreshed counts a failure for a merged task waiting on its close, and only that task', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const working = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const store = fakeStore([bead('hp-1'), bead('hp-2')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const d = deps(store)
+
+  await syncBeads([runWith(waiting, working)], d)
+
+  expect(waiting.bead_sync).toMatchObject({ failures: 1, last_error: 'the Beads export could not be refreshed: disk full' })
+  expect(working.bead_sync.failures).toBe(0)
+  expect(d.persisted).toHaveLength(1)
+})
+
+test('a lock not taken on refresh counts no failure, even for a task waiting on its close', async () => {
+  const waiting = mkTask({ phase: 'close', merged_at_ms: 5 })
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([runWith(waiting)], deps(store))
+  expect(waiting.bead_sync.failures).toBe(0)
+})
+
+test('two sessions whose released tasks tie on registration pick the same driver, so neither flips the bead', async () => {
+  const inP = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  const inQ = abortedRun(mkTask({ phase: 'implement', registered_at: 1 }))
+  inQ.session = 'q'
+  inQ.run_id = 'r2'
+  writeRunFile(inP)
+  writeRunFile(inQ)
+  const releasedByQ = bead('hp-1', { status: 'open', metadata: { 'hpipe.run': 'r2' }, labels: ['aborted'] })
+
+  const fromP = fakeStore([releasedByQ])
+  await syncBeads([inP], deps(fromP, { claimants: () => beadClaimants(stateDir) }))
+  const fromQ = fakeStore([releasedByQ])
+  await syncBeads([inQ], deps(fromQ, { claimants: () => beadClaimants(stateDir) }))
+
+  expect(fromP.calls).toEqual([])
+  expect(fromQ.calls).toEqual([])
+})
+
+function twoRepos(failA: (id: string, kind: string) => BdFailure | null = () => null) {
+  const runA = runWith(mkTask({ phase: 'implement' }))
+  runA.repo_key = '/code/alpha'
+  const runB = runWith(mkTask({ phase: 'implement' }))
+  runB.repo_key = '/code/beta'
+  runB.run_id = 'r2'
+  const stores = new Map([
+    [beadsSlug(runA.repo_key), fakeStore([bead('hp-1')], failA)],
+    [beadsSlug(runB.repo_key), fakeStore([bead('hp-1')])],
+  ])
+  const refreshedSlugs: string[] = []
+  const bdFor = (slug: string): SyncBd => {
+    const { bd } = stores.get(slug)!
+    return { ...bd, refreshExport: () => { refreshedSlugs.push(slug); return bd.refreshExport() } }
+  }
+  return {
+    runA, runB, bdFor, refreshedSlugs,
+    storeA: stores.get(beadsSlug(runA.repo_key))!, storeB: stores.get(beadsSlug(runB.repo_key))!,
+  }
+}
+
+test('a busy lock in one repo ends only that repo\'s pass; the next repo still converges', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'refreshExport' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor }))
+  expect(repos.storeA.calls).toEqual([])
+  expect(repos.storeB.calls).toHaveLength(1)
+})
+
+test('a lock taken mid-pass in one repo still lets the next repo converge', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'update' ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor }))
+  expect(repos.storeA.calls).toHaveLength(1)
+  expect(repos.storeB.calls).toHaveLength(1)
+})
+
+test('a spent budget is checked before the next repo\'s export refresh, not only between calls', async () => {
+  const repos = twoRepos()
+  let clock = 0
+  repos.storeA.onEachCall(() => { clock += 2_500 })
+  repos.storeB.onEachCall(() => { clock += 2_500 })
+  await syncBeads([repos.runA, repos.runB], deps(repos.storeA, { bdFor: repos.bdFor, now: () => clock }))
+  expect(repos.refreshedSlugs).toHaveLength(1)
+})
+
+test('each pass starts one repo later, so a repo that spends the budget every tick cannot starve the rest', async () => {
+  const repos = twoRepos((_id, kind) => (kind === 'update' ? { reason: 'timeout', error: 'bd update was killed after 5s' } : null))
+  let clock = 0
+  const spend = () => { clock += 2_500 }
+  repos.storeA.onEachCall(spend)
+  repos.storeB.onEachCall(spend)
+  const d = deps(repos.storeA, { bdFor: repos.bdFor, now: () => clock })
+  await syncBeads([repos.runA, repos.runB], d)
+  await syncBeads([repos.runA, repos.runB], d)
+  expect(new Set(repos.refreshedSlugs).size).toBe(2)
+})
+
+test('the failure streak counts consecutive failures and resets on a converged write; the total does not', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const run = runWith(task)
+  let failing = true
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (failing && kind === 'update' ? { reason: 'exit', error: 'Error: database is locked' } : null))
+  const d = deps(store)
+
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(task.bead_sync).toMatchObject({ failures: 2, streak: 2 })
+
+  failing = false
+  await syncBeads([run], d)
+  expect(task.bead_sync).toMatchObject({ failures: 2, streak: 0, last_error: null })
+})

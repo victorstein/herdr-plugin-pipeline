@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
+import { beadOutOfSync } from '../lib/bead-desired'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
@@ -339,18 +340,26 @@ export function stallAwaiting(
     }
   }
   if (row.signal === 'closed' && task) {
-    // Not "the issue is still open": `closedByMerge` needs `merged_at_ms`, which
-    // only the merge row writes. A task rewound into `close` from before `merge`
-    // has none, so a closed issue never satisfies it and this row parks with the
-    // work already done; a rewind into `merge` records the merge and passes through.
+    if (task.merged_at_ms === null) {
+      return {
+        short: awaitedFor(task),
+        clause: `No merge is recorded for ${task.task_id}, so the supervisor will not close bead ${task.bead} ` +
+          `and this phase cannot clear: \`${hpipe} rewind ${run.run_id} merge --task ${task.task_id}\` records it.`,
+      }
+    }
+    if (!beadOutOfSync(task)) {
+      return {
+        short: awaitedFor(task),
+        clause: `This phase is waiting on the Beads close of ${task.bead}, which the supervisor retries every ` +
+          'tick. Nothing is needed from you yet.',
+      }
+    }
     return {
       short: awaitedFor(task),
-      clause: `This phase is waiting for issue #${task.issue} to close. Check it with ` +
-        `\`gh issue view ${task.issue} --json closed,state\`; if the PR body used a phrase ` +
-        'GitHub does not treat as a closing keyword, close it by hand. If it is already ' +
-        'closed, this phase cannot see it: it only counts a close it can tie to this ' +
-        `task's recorded merge, which \`${hpipe} rewind ${run.run_id} merge --task ` +
-        `${task.task_id}\` records.`,
+      clause: `The last ${task.bead_sync.streak} of the supervisor's Beads calls for ${task.bead} have failed in a row; ` +
+        `the last said:\n\n    ${task.bead_sync.last_error}\n\nFix what it names, or close the bead by hand: ` +
+        `\`${hpipe} close --task ${task.task_id}\`. Add \`--force\` only to override bd's close guards, ` +
+        'once you know why they fired.',
     }
   }
   if (row.signal === 'files' && task) {

@@ -1,26 +1,35 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cmdAbort, cmdAnswer, cmdBrief, cmdDecide, cmdDispatchDone, cmdDispatchTask, cmdForget,
+  cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, fileUnlessFiled, cmdEscalate, cmdForget,
   cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
   cmdTier, recordWorkerPane,
 } from '../src/cli'
-import { cmdTask } from './helpers/cmd-task'
+import type { BeadCreateInput, BeadDetail } from '../src/lib/bd'
+import { cmdTask, fakeBeads, openBead } from './helpers/cmd-task'
+import { cmdDispatchTask } from './helpers/cmd-dispatch'
+import { READY_TOOLS } from './helpers/cmd-start'
 import { artifactPathFor, taskSignalsFor } from '../src/supervisor/deliver'
 import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
-import { openDecisionFor } from '../src/lib/decisions'
+import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/decisions'
 import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
+import { hpipeCommand } from '../src/lib/render'
+import { desiredBead } from '../src/lib/bead-desired'
 
 let dir: string
 let repoDir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 'personal' })
+/** A plugin root `hpipe` on PATH cannot resolve into, so hints must carry the absolute invocation. */
+const UNLINKED_ROOT = '/nonexistent/plugin/root'
+const UNLINKED_HPIPE = `bun run ${join(UNLINKED_ROOT, 'src', 'cli.ts')}`
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'clicmd-'))
@@ -42,13 +51,13 @@ async function seed() {
 }
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+  task_id: 't1', branch: 'b', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
   keep_worktree: false, workspace_id: null, pane_id: null,
   agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
   escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: 0, adopted_at: null,
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -60,12 +69,14 @@ function runWithTasks(overrides: Partial<Task>[]): Run {
 }
 
 test('status reports no active runs on an empty ledger', async () => {
-  expect((await cmdStatus(ctx())).text).toContain('no active runs')
+  expect((await cmdStatus(ctx(), async () => READY_TOOLS)).text).toContain('no active runs')
 })
 
 test('abort marks the run aborted and it stops being active', async () => {
   const run = await seed()
-  expect((await cmdAbort(ctx(), { runId: run.run_id })).ok).toBe(true)
+  const result = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('its beads are released on the supervisor\'s next tick')
   const after = (await listRuns(dir, 'personal'))[0]
   expect(after?.phase).toBe('done')
   expect(after?.history.at(-1)?.why).toContain('aborted')
@@ -86,13 +97,13 @@ test('resume on a run that was never aborted is refused', async () => {
 test('forget unbinds a workspace from its task', async () => {
   const run = await seed()
   run.tasks.push({
-    task_id: 't1', branch: 'b', issue: 1, surface: 'core', depends_on: [], files: [],
+    task_id: 't1', branch: 'b', bead: 'hp-1', surface: 'core', depends_on: [], files: [],
     keep_worktree: false, workspace_id: 'w7', pane_id: 'w7:p1',
     agent_status: 'idle', phase: 'implement', phase_entered_at: 0,
     escalated_from: null, head_sha_at_entry: null, pr: null, ci: null,
     checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
     artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-    merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+    merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
     decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   })
   await saveRun(dir, run)
@@ -140,7 +151,7 @@ test('release unblocks a sibling that was waiting on the same files', async () =
   expect(filesClearFor(saved!.tasks[1]!, saved!.tasks)).toBe(true)
 })
 
-test('task registration requires an issue and seeds artifact paths', async () => {
+test('task registration records the bead and its brief, and seeds artifact paths from the bead id', async () => {
   // t1 stays in flight so the new task's dependsOn leaves it gated — a task
   // dispatched immediately at registration moves off 'queued' (covered by
   // cli.test.ts), which is not what this test is checking.
@@ -149,7 +160,7 @@ test('task registration requires an issue and seeds artifact paths', async () =>
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/land-first', issue: 210, surface: 'core', notes: 'land first',
+    branch: 'feat/land-first', bead: 'hp-210', surface: 'core', notes: 'land first',
     dependsOn: ['t1'], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -157,11 +168,15 @@ test('task registration requires an issue and seeds artifact paths', async () =>
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   const task = saved?.tasks.find((t) => t.task_id === 't2')
-  expect(task?.issue).toBe(210)
+  expect(task?.bead).toBe('hp-210')
+  expect(task?.brief).toMatchObject({ title: 'Bead hp-210', description: 'What hp-210 asks for.', acceptance: 'hp-210 is done.' })
+  expect(task?.bead_closed_at_ms).toBeNull()
+  expect(task?.bead_sync).toEqual({ failures: 0, streak: 0, last_error: null, last_ok_at_ms: null })
+  expect(task?.discoveries).toEqual([])
   expect(task?.notes).toBe('land first')
-  expect(task?.artifacts.research).toContain('issue-210')
-  expect(task?.artifacts.spec).toContain('issue-210')
-  expect(task?.artifacts.plan).toContain('issue-210')
+  expect(task?.artifacts.research).toContain('hp-210')
+  expect(task?.artifacts.spec).toContain('hp-210')
+  expect(task?.artifacts.plan).toContain('hp-210')
   expect(task?.registered_at).toBeGreaterThan(0)
   expect(task?.phase).toBe('queued')
 })
@@ -171,7 +186,7 @@ test('the three seeded artifact paths are distinct and land in the right directo
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/paths', issue: 42, surface: 'core', notes: '',
+    branch: 'feat/paths', bead: 'hp-42', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -193,7 +208,7 @@ test('a task dispatched at registration prints the base it is cut from, one cont
   const requested: Array<[string, string[] | null]> = []
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/dependent', issue: 43, surface: 'core', notes: '',
+    branch: 'feat/dependent', bead: 'hp-43', surface: 'core', notes: '',
     dependsOn: ['t1'], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   }, undefined, async (repoRoot, merges) => {
@@ -214,7 +229,7 @@ test('a queued registration fetches nothing and prints no base', async () => {
   let fetched = false
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/later', issue: 44, surface: 'core', notes: '',
+    branch: 'feat/later', bead: 'hp-44', surface: 'core', notes: '',
     dependsOn: ['t1'], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   }, undefined, async () => {
@@ -233,7 +248,7 @@ test('registering a task reopens intake', async () => {
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/reopen', issue: 7, surface: 'core', notes: '',
+    branch: 'feat/reopen', bead: 'hp-7', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -244,7 +259,7 @@ test('registering a task reopens intake', async () => {
 })
 
 const unfiledTask = {
-  branch: 'feat/tile-label', issue: 0, surface: 'core', notes: '',
+  branch: 'feat/tile-label', surface: 'core', notes: '',
   dependsOn: [] as string[], files: [] as string[], keepWorktree: false,
   repoKey: 'k', runId: null,
 }
@@ -258,8 +273,6 @@ async function seedInRepoWithBrief(): Promise<string> {
 
 const registered = async (): Promise<Task[]> => (await listRuns(dir, 'personal'))[0]!.tasks
 
-const issue318 = { number: 318, url: 'https://github.com/o/r/issues/318' }
-
 /** Lands a write between the command's read and its save, as the supervisor would. */
 async function supervisorWrites(change: (run: Run) => void): Promise<void> {
   const run = (await listRuns(dir, 'personal'))[0]!
@@ -267,42 +280,92 @@ async function supervisorWrites(change: (run: Run) => void): Promise<void> {
   await saveRun(dir, run)
 }
 
-test('--title files the issue in the run\'s repo and registers the task under its number', async () => {
-  const bodyFile = await seedInRepoWithBrief()
-  const filed: string[][] = []
+const counting = (): { beads: ReturnType<typeof fakeBeads>; created: () => number; shown: () => number } => {
+  let created = 0
+  let shown = 0
+  return {
+    beads: fakeBeads({
+      create: async () => { created++; return { id: 'hp-318' } },
+      show: async (_repoKey, id) => { shown++; return openBead(id) },
+    }),
+    created: () => created,
+    shown: () => shown,
+  }
+}
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 'Relabel the tile', bodyFile },
-    async (repoRoot, title, path) => { filed.push([repoRoot, title, path]); return issue318 })
+test('--title files the bead with its body and acceptance, and registers the task under its id', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  const acceptanceFile = join(repoDir, 'acceptance.md')
+  writeFileSync(acceptanceFile, 'The tile reads Bar.\n')
+  const filed: Array<[string, BeadCreateInput]> = []
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 'Relabel the tile', bodyFile, acceptanceFile },
+    fakeBeads({ create: async (repoKey, input) => { filed.push([repoKey, input]); return { id: 'hp-318' } } }))
 
   expect(result.ok).toBe(true)
-  expect(result.text).toContain('issue: #318 (filed)')
-  expect(filed).toEqual([[repoDir, 'Relabel the tile', bodyFile]])
+  expect(result.text).toContain('bead: hp-318 (filed)')
+  expect(filed).toEqual([['k', {
+    title: 'Relabel the tile', body: 'Relabel the settings tile.\n', acceptance: 'The tile reads Bar.\n', labels: [],
+  }]])
   const task = (await registered())[0]!
-  expect(task.issue).toBe(318)
-  expect(task.artifacts.spec).toContain('issue-318')
+  expect(task.bead).toBe('hp-318')
+  expect(task.artifacts.spec).toContain('hp-318')
+  expect(task.brief).toMatchObject({
+    title: 'Relabel the tile', description: 'Relabel the settings tile.\n', acceptance: 'The tile reads Bar.\n', labels: [],
+  })
 })
 
-test('--issue and --title together are rejected before anything is filed', async () => {
-  const bodyFile = await seedInRepoWithBrief()
-  let filed = 0
+test('--bead adopts an open, unassigned bead and captures its brief from bd show', async () => {
+  await seedInRepoWithBrief()
+  const shown: string[] = []
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => {
+      shown.push(id)
+      return openBead(id, { title: 'Fix the meter', description: 'It drifts.', acceptance_criteria: 'It holds.', labels: ['ui'] })
+    },
+  }))
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, issue: 4, title: 't', bodyFile },
-    async () => { filed++; return issue318 })
+  expect(result.ok).toBe(true)
+  expect(result.text).not.toContain('(filed)')
+  expect(shown).toEqual(['hp-12'])
+  expect((await registered())[0]).toMatchObject({
+    bead: 'hp-12', brief: { title: 'Fix the meter', description: 'It drifts.', acceptance: 'It holds.', labels: ['ui'] },
+  })
+})
+
+test('brief prints the brief captured at registration', async () => {
+  await seedInRepoWithBrief()
+  await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
+    fakeBeads({ show: async (_repoKey, id) => openBead(id, { title: 'Fix the meter', description: 'It drifts.' }) }))
+
+  const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('**Fix the meter**')
+  expect(result.text).toContain('It drifts.')
+  expect(result.text).not.toContain('gh issue view')
+})
+
+test('--bead and --title together are rejected before anything is filed or read', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  const { beads, created, shown } = counting()
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-4', title: 't', bodyFile }, beads)
 
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('--issue')
+  expect(result.text).toContain('--bead')
   expect(result.text).toContain('--title')
-  expect(filed).toBe(0)
+  expect([created(), shown()]).toEqual([0, 0])
 })
 
 test('--title without a --body-file that is a file is rejected, because the body is the brief', async () => {
   await seedInRepoWithBrief()
-  let filed = 0
-  const fileIssue = async () => { filed++; return issue318 }
+  const { beads, created } = counting()
 
-  const missing = await cmdTask(ctx(), { ...unfiledTask, title: 't' }, fileIssue)
-  const absent = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'nope.md') }, fileIssue)
-  const directory = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: repoDir }, fileIssue)
+  const missing = await cmdTask(ctx(), { ...unfiledTask, title: 't' }, beads)
+  const absent = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'nope.md') }, beads)
+  const directory = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile: repoDir }, beads)
+  const acceptance = await cmdTask(ctx(),
+    { ...unfiledTask, title: 't', bodyFile: join(repoDir, 'brief.md'), acceptanceFile: join(repoDir, 'nope.md') }, beads)
 
   expect(missing.ok).toBe(false)
   expect(missing.text).toContain('--body-file')
@@ -310,65 +373,76 @@ test('--title without a --body-file that is a file is rejected, because the body
   expect(absent.text).toContain('nope.md')
   expect(directory.ok).toBe(false)
   expect(directory.text).toContain('is not a file')
-  expect(filed).toBe(0)
+  expect(acceptance.ok).toBe(false)
+  expect(acceptance.text).toContain('--acceptance-file is not a file')
+  expect(created()).toBe(0)
   expect(await registered()).toEqual([])
+})
+
+test('--body-file with --bead is refused: an existing bead already has its brief', async () => {
+  const bodyFile = await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-4', bodyFile })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('only go with --title')
 })
 
 test('a --title that swallowed the next flag files nothing', async () => {
   const bodyFile = await seedInRepoWithBrief()
-  let filed = 0
+  const { beads, created } = counting()
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: '--body-file', bodyFile },
-    async () => { filed++; return issue318 })
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: '--body-file', bodyFile }, beads)
 
   expect(result.ok).toBe(false)
   expect(result.text).toContain('the value after --title is missing')
-  expect(filed).toBe(0)
+  expect(created()).toBe(0)
 })
 
-test('a registration that fails validation files no orphan issue', async () => {
+test('a registration that fails validation files no orphan bead', async () => {
   const bodyFile = await seedInRepoWithBrief()
-  let filed = 0
-  const fileIssue = async () => { filed++; return issue318 }
+  const { beads, created } = counting()
 
-  const badSurface = await cmdTask(ctx(), { ...unfiledTask, surface: 'kore', title: 't', bodyFile }, fileIssue)
-  const badDepends = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t9'], title: 't', bodyFile }, fileIssue)
-  const cyclic = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t1'], title: 't', bodyFile }, fileIssue)
+  const badSurface = await cmdTask(ctx(), { ...unfiledTask, surface: 'kore', title: 't', bodyFile }, beads)
+  const badDepends = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t9'], title: 't', bodyFile }, beads)
+  const cyclic = await cmdTask(ctx(), { ...unfiledTask, dependsOn: ['t1'], title: 't', bodyFile }, beads)
 
   expect([badSurface.ok, badDepends.ok, cyclic.ok]).toEqual([false, false, false])
   expect(cyclic.text).toContain('cycle')
-  expect(filed).toBe(0)
+  expect(created()).toBe(0)
 })
 
-test('a registration that loses its save is retried without filing the issue again', async () => {
+test('a registration that loses its save is retried without filing the bead again', async () => {
   const bodyFile = await seedInRepoWithBrief()
   let filed = 0
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, async () => {
-    filed++
-    await supervisorWrites((run) => { run.intake_closed = true })
-    return issue318
-  })
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, fakeBeads({
+    create: async () => {
+      filed++
+      await supervisorWrites((run) => { run.intake_closed = true })
+      return { id: 'hp-318' }
+    },
+  }))
 
   expect(result.ok).toBe(true)
   expect(filed).toBe(1)
-  expect((await registered()).map((t) => t.issue)).toEqual([318])
+  expect((await registered()).map((t) => t.bead)).toEqual(['hp-318'])
 })
 
-test('a registration that fails after filing names the issue so it can be registered with --issue', async () => {
+test('a registration that fails after filing names the bead so it can be registered with --bead', async () => {
   const bodyFile = await seedInRepoWithBrief()
   let filed = 0
 
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, async () => {
-    filed++
-    await supervisorWrites((run) => { run.phase = 'done' })
-    return issue318
-  })
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, fakeBeads({
+    create: async () => {
+      filed++
+      await supervisorWrites((run) => { run.phase = 'done' })
+      return { id: 'hp-318' }
+    },
+  }))
 
   expect(result.ok).toBe(false)
   expect(filed).toBe(1)
-  expect(result.text).toContain('issue #318 was filed (https://github.com/o/r/issues/318) but no task was registered')
-  expect(result.text).toContain('--issue 318')
+  expect(result.text).toContain('bead hp-318 was filed but no task was registered')
+  expect(result.text).toContain('--bead hp-318')
   expect(await registered()).toEqual([])
 })
 
@@ -376,36 +450,140 @@ test('a failure after the registration landed says so, and does not invite a sec
   const bodyFile = await seedInRepoWithBrief()
   const noPrompts = mkdtempSync(join(tmpdir(), 'clicmd-noprompts-'))
 
-  const result = await cmdTask({ ...ctx(), pluginRoot: noPrompts }, { ...unfiledTask, title: 't', bodyFile },
-    async () => issue318)
+  const result = await cmdTask({ ...ctx(), pluginRoot: noPrompts }, { ...unfiledTask, title: 't', bodyFile })
   rmSync(noPrompts, { recursive: true, force: true })
 
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('task t1 is registered with issue #318')
-  expect(result.text).toContain('hpipe brief --task t1')
-  expect(result.text).not.toContain('--issue 318')
-  expect((await registered()).map((t) => t.issue)).toEqual([318])
+  expect(result.text).toContain('task t1 is registered with bead hp-318')
+  expect(result.text).toContain(`${hpipeCommand(noPrompts)} brief --task t1`)
+  expect(hpipeCommand(noPrompts)).not.toBe('hpipe')
+  expect(result.text).not.toContain('--bead hp-318')
+  expect((await registered()).map((t) => t.bead)).toEqual(['hp-318'])
 })
 
-test('a failed gh issue create registers nothing and passes gh\'s error through', async () => {
+test('a failed bd create registers nothing and passes bd\'s error through', async () => {
   const bodyFile = await seedInRepoWithBrief()
 
   const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
-    async () => ({ error: 'HTTP 410: Issues are disabled for this repo' }))
+    fakeBeads({ create: async () => ({ reason: 'exit', error: 'Error: database is locked' }) }))
 
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('gh issue create failed')
-  expect(result.text).toContain('HTTP 410: Issues are disabled for this repo')
+  expect(result.text).toContain('bd create failed')
+  expect(result.text).toContain('Error: database is locked')
   expect(await registered()).toEqual([])
 })
 
-test('with neither --issue nor --title the error names both ways in', async () => {
+test('a failed bd show registers nothing and passes bd\'s error through', async () => {
   await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
+    fakeBeads({ show: async () => ({ reason: 'busy', error: 'Beads is busy, retry' }) }))
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('bd show hp-12 failed')
+  expect(result.text).toContain('Beads is busy, retry')
+  expect(await registered()).toEqual([])
+})
 
-  const result = await cmdTask(ctx(), unfiledTask, async () => issue318)
+test('--bead refuses a closed, assigned, blocked or parent bead, and registers nothing', async () => {
+  await seedInRepoWithBrief()
+  const cases: Array<[Partial<BeadDetail>, string]> = [
+    [{ status: 'closed' }, 'bead hp-12 is closed'],
+    [{ assignee: 'alice' }, 'bead hp-12 is assigned to alice'],
+    [{ dependencies: [{ id: 'hp-2', title: 'x', status: 'open', dependency_type: 'blocks' }] }, 'is blocked by open hp-2'],
+    [{ dependents: [{ id: 'hp-9', title: 'child', status: 'in_progress', dependency_type: 'parent-child' }] },
+      'has open child beads (hp-9)'],
+  ]
+  for (const [over, expected] of cases) {
+    const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
+      fakeBeads({ show: async (_repoKey, id) => openBead(id, over) }))
+    expect(result.ok, expected).toBe(false)
+    expect(result.text).toContain(expected)
+  }
+  expect(await registered()).toEqual([])
+})
+
+test('--bead adopts past a closed blocker and a closed dependent', async () => {
+  await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => openBead(id, {
+      dependencies: [{ id: 'hp-2', title: 'x', status: 'closed', dependency_type: 'blocks' }],
+      dependents: [{ id: 'hp-9', title: 'y', status: 'closed', dependency_type: 'parent-child' }],
+    }),
+  }))
+  expect(result.ok).toBe(true)
+})
+
+test('--bead refuses a bead another session\'s live run holds', async () => {
+  await seedInRepoWithBrief()
+  const other = newRun({ session: 'work', socketPath: '/s', repoKey: 'k2', repoRoot: '/elsewhere', title: 'b' })
+  other.tasks = [mkTask({ task_id: 't4', bead: 'hp-12', phase: 'implement' })]
+  await saveRun(dir, other)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('bead hp-12 is already held by t4 (implement)')
+  expect(result.text).toContain('session work')
+  expect(await registered()).toEqual([])
+})
+
+test('--bead adopts a bead that blocks others or was discovered from it: only children refuse', async () => {
+  await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => openBead(id, {
+      dependents: [
+        { id: 'hp-20', title: 'next', status: 'open', dependency_type: 'blocks' },
+        { id: 'hp-21', title: 'found', status: 'open', dependency_type: 'discovered-from' },
+      ],
+    }),
+  }))
+  expect(result.ok).toBe(true)
+  expect((await registered()).map((t) => t.bead)).toEqual(['hp-12'])
+})
+
+test('--bead refuses a bead with an open child', async () => {
+  await seedInRepoWithBrief()
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' }, fakeBeads({
+    show: async (_repoKey, id) => openBead(id, {
+      dependents: [{ id: 'hp-30', title: 'child', status: 'open', dependency_type: 'parent-child' }],
+    }),
+  }))
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('bead hp-12 has open child beads (hp-30)')
+  expect(await registered()).toEqual([])
+})
+
+test('a leftover run of another schema neither takes a registration nor makes it ambiguous', async () => {
+  const old = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'old' })
+  old.schema_version = 2
+  await saveRun(dir, old)
+  const current = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'new' })
+  await saveRun(dir, current)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' })
+
+  expect(result.ok).toBe(true)
+  const runs = await listRuns(dir, 'personal')
+  expect(runs.find((r) => r.run_id === current.run_id)?.tasks.map((t) => t.bead)).toEqual(['hp-12'])
+  expect(runs.find((r) => r.run_id === old.run_id)?.tasks).toEqual([])
+})
+
+test('a leftover run of another schema alone is no run to register into', async () => {
+  const old = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'old' })
+  old.schema_version = 2
+  await saveRun(dir, old)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' })
 
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('--issue must be a positive issue number')
+  expect((await listRuns(dir, 'personal'))[0]?.tasks).toEqual([])
+})
+
+test('with neither --bead nor --title the error names both ways in', async () => {
+  await seedInRepoWithBrief()
+
+  const result = await cmdTask(ctx(), unfiledTask)
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('--bead <id>')
   expect(result.text).toContain('--title')
 })
 
@@ -429,7 +607,7 @@ test('registering a task after dispatch --done reopens intake', async () => {
   expect(closed?.intake_closed).toBe(true)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/reopen-again', issue: 9, surface: 'core', notes: '',
+    branch: 'feat/reopen-again', bead: 'hp-9', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -453,14 +631,14 @@ test('rewind clears the whole counter map rather than spending a pass', async ()
 })
 
 const MERGED_PR_STATE: Partial<Task> = {
-  pr: 5, ci: 'pass', head_sha_at_entry: 'aaa', merged_at_ms: 9_000, issue_closed_at_entry: true,
+  pr: 5, ci: 'pass', head_sha_at_entry: 'aaa', merged_at_ms: 9_000, bead_closed_at_ms: 9_500,
 }
 
-test('rewind to implement or earlier forgets the PR, so a merged one cannot finish the task', async () => {
+test('rewind to implement or earlier forgets the PR and the bead close, so neither can finish the task', async () => {
   // `merge` is a level: a sticky pr pointing at an already-merged PR would carry
   // the reworked task straight through merge on the old PR's mergedAt.
   for (const phase of ['implement', 'blocked-on-files', 'plan', 'research'] as const) {
-    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+    const run = runWithTasks([{ task_id: 't1', bead: `hp-${phase}`, phase: 'done', ...MERGED_PR_STATE }])
     await saveRun(dir, run)
 
     expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
@@ -469,7 +647,7 @@ test('rewind to implement or earlier forgets the PR, so a merged one cannot fini
     expect(task?.pr, phase).toBeNull()
     expect(task?.ci, phase).toBeNull()
     expect(task?.merged_at_ms, phase).toBeNull()
-    expect(task?.issue_closed_at_entry, phase).toBe(false)
+    expect(task?.bead_closed_at_ms, phase).toBeNull()
   }
 })
 
@@ -499,7 +677,6 @@ test('a task resumed into implement with its PR still open waits for a new push'
     fileSettleMs: 0,
     prForBranch: async () => 5,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: head }),
-    issueView: async () => null,
     verdictFor: async () => null,
     removeWorktree: async () => 'removed' as const,
     removeCheckout: async () => ({ removed: true as const }),
@@ -516,17 +693,33 @@ test('a task resumed into implement with its PR still open waits for a new push'
   expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
 })
 
-test('rewind onto a phase that works the current PR keeps it', async () => {
-  for (const phase of ['pr-review-intent', 'ci', 'merge', 'close'] as const) {
-    const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
-    await saveRun(dir, run)
+test('rewind after a merge onto a phase that works the current PR keeps the PR but forgets the merge and the close', async () => {
+  // Kept, the merge would hold the bead closed through the rework, and the old
+  // close would clear `close` the instant the task merged again.
+  for (const phase of ['pr-review', 'pr-review-intent', 'ci', 'merge'] as const) {
+    for (const from of ['close', 'teardown', 'done'] as const) {
+      const run = runWithTasks([{ task_id: 't1', bead: `hp-${from}-${phase}`, phase: from, ...MERGED_PR_STATE, merge_commit: 'm3rg3' }])
+      await saveRun(dir, run)
 
-    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
+      expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok).toBe(true)
 
-    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]
-    expect(task?.pr, phase).toBe(5)
-    expect(task?.merged_at_ms, phase).toBe(9_000)
+      const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+      expect(task.pr, `${from} → ${phase}`).toBe(5)
+      expect(task.merged_at_ms, `${from} → ${phase}`).toBeNull()
+      expect(task.merge_commit, `${from} → ${phase}`).toBeNull()
+      expect(task.bead_closed_at_ms, `${from} → ${phase}`).toBeNull()
+      expect(desiredBead(task, run).status, `${from} → ${phase}`).not.toBe('closed')
+    }
   }
+})
+
+test('rewind onto close keeps the merge and the PR', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'done', ...MERGED_PR_STATE }])
+  await saveRun(dir, run)
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'close', taskId: 't1' })).ok).toBe(true)
+  const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+  expect(task.pr).toBe(5)
+  expect(task.merged_at_ms).toBe(9_000)
 })
 
 test('rewind clears a pending answer and records the discard', async () => {
@@ -593,19 +786,18 @@ test('dispatch --done finds the active run when no id is given', async () => {
   expect(saved?.intake_closed).toBe(true)
 })
 
-test('task registration refuses a missing issue number', async () => {
-  // Live-run finding: the argv parser defaults --issue to 0, so a mistyped
-  // command minted a ghost task into a running run.
+test('task registration refuses a task with no bead at all', async () => {
+  // Live-run finding: a mistyped command once minted a ghost task into a running run.
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 0, surface: 'core', notes: '',
+    branch: 'feat/x', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
   expect(result.ok).toBe(false)
-  expect(result.text).toContain('--issue')
+  expect(result.text).toContain('--bead')
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.tasks).toHaveLength(0)
@@ -616,7 +808,7 @@ test('task registration refuses an empty branch', async () => {
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: '   ', issue: 7, surface: 'core', notes: '',
+    branch: '   ', bead: 'hp-7', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -628,7 +820,7 @@ test('brief renders a worker brief without mutating the run', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
   await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 11, surface: 'core', notes: 'land first',
+    branch: 'feat/x', bead: 'hp-11', surface: 'core', notes: 'land first',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -659,7 +851,7 @@ test('the brief states the path contract without promising a recovery', async ()
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
   await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-11', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -681,7 +873,7 @@ test('task registers into this repo run, not another repo run that sorts first',
   await saveRun(dir, mine)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-21', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: '/repos/zzz', runId: null,
   })
@@ -699,7 +891,7 @@ test('task names the candidates rather than choosing between two live runs', asy
   await saveRun(dir, b)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-21', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false,
     repoKey: 'k', runId: null,
   })
@@ -719,26 +911,26 @@ test('brief renders the live run brief when a finished run holds the same task i
   await saveRun(dir, live)
 
   await cmdTask(ctx(), {
-    branch: 'feat/live', issue: 36, surface: 'core', notes: '',
+    branch: 'feat/live', bead: 'hp-36', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   // Give the finished run a t1 too, so both hold the id being asked for.
   const withTask = (await listRuns(dir, 'personal')).find((r) => r.run_id === live.run_id)!
   const stale = (await listRuns(dir, 'personal')).find((r) => r.run_id === done.run_id)!
-  stale.tasks.push({ ...withTask.tasks[0]!, issue: 9, branch: 'fix/9-artifact-paths' })
+  stale.tasks.push({ ...withTask.tasks[0]!, bead: 'hp-9', branch: 'fix/9-artifact-paths' })
   await saveRun(dir, stale)
 
   const result = await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
   expect(result.ok).toBe(true)
-  expect(result.text).toContain('issue #36')
-  expect(result.text).not.toContain('issue #9')
+  expect(result.text).toContain('hp-36')
+  expect(result.text).not.toContain('hp-9')
 })
 
 test('brief renders a finished run brief when that run is named', async () => {
   const done = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'finished' })
   await saveRun(dir, done)
   await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 36, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-36', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   const saved = (await listRuns(dir, 'personal'))[0]!
@@ -833,6 +1025,7 @@ test('rewind to a terminal phase abandons an open decision', async () => {
   task.decisions.push({
     id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
     answer: null, answered_by: null, answered_at: null, prompted_at: null,
+    escalated_at: null, orchestrator_recommendation: null,
   })
   await saveRun(dir, run)
 
@@ -849,6 +1042,7 @@ test('rewind to a live phase leaves an open decision alone', async () => {
   run.tasks[0]!.decisions.push({
     id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
     answer: null, answered_by: null, answered_at: null, prompted_at: null,
+    escalated_at: null, orchestrator_recommendation: null,
   })
   await saveRun(dir, run)
 
@@ -865,6 +1059,7 @@ test('a terminal rewind keeps the undelivered-answer history entry', async () =>
   run.tasks[0]!.decisions.push({
     id: 'd1', asked_at: 1, from_phase: 'plan', question: 'q', recommendation: 'r',
     answer: 'do X', answered_by: 'human', answered_at: 2, prompted_at: null,
+    escalated_at: null, orchestrator_recommendation: null,
   })
   await saveRun(dir, run)
 
@@ -879,7 +1074,7 @@ test('the worker brief names the run it was rendered from', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
   await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-11', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
 
@@ -895,7 +1090,7 @@ test('a run excluded for its phase is not described as finished', async () => {
   await saveRun(dir, late)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 21, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-21', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   expect(result.ok).toBe(false)
@@ -938,7 +1133,7 @@ test('an empty --run names the flag rather than searching for a run called ""', 
   for (const result of [
     await cmdBrief(ctx(), { taskId: 't1', repoKey: 'k', runId: '' }),
     await cmdTask(ctx(), {
-      branch: 'feat/x', issue: 1, surface: 'core', notes: '',
+      branch: 'feat/x', bead: 'hp-1', surface: 'core', notes: '',
       dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: '',
     }),
     await cmdDispatchDone(ctx(), { runId: '', repoKey: 'k' }),
@@ -949,7 +1144,7 @@ test('an empty --run names the flag rather than searching for a run called ""', 
 })
 
 test('a rewind onto a review row does not re-issue a path an earlier review holds', async () => {
-  const occupant = 'docs/superpowers/reviews/issue-1-spec-review-0.md'
+  const occupant = 'docs/superpowers/reviews/hp-1-spec-review-0.md'
   mkdirSync(join(repoDir, 'docs', 'superpowers', 'reviews'), { recursive: true })
   writeFileSync(join(repoDir, occupant), 'VERDICT: CLEAR\n')
 
@@ -958,12 +1153,12 @@ test('a rewind onto a review row does not re-issue a path an earlier review hold
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'spec-review', taskId: 't1' })
   expect(result.ok).toBe(true)
-  expect(result.text).toContain('issue-1-spec-review-1.md')
+  expect(result.text).toContain('hp-1-spec-review-1.md')
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id) as Run
   expect(artifactPathFor(saved, saved.tasks[0] as Task)).not.toBe(occupant)
   expect(artifactPathFor(saved, saved.tasks[0] as Task))
-    .toBe('docs/superpowers/reviews/issue-1-spec-review-1.md')
+    .toBe('docs/superpowers/reviews/hp-1-spec-review-1.md')
 })
 
 test('a rewind to a producer row reserves nothing and does not reset verdict_seq', async () => {
@@ -975,7 +1170,7 @@ test('a rewind to a producer row reserves nothing and does not reset verdict_seq
     verdict_seq: { 'spec-review': 2 },
     artifacts: {
       research: null, spec: null, plan: null,
-      verdicts: { 'spec-review-1': 'docs/superpowers/reviews/issue-1-spec-review-1.md' },
+      verdicts: { 'spec-review-1': 'docs/superpowers/reviews/hp-1-spec-review-1.md' },
     },
   }])
   await saveRun(dir, run)
@@ -988,7 +1183,7 @@ test('a rewind to a producer row reserves nothing and does not reset verdict_seq
   expect(saved?.tasks[0]?.passes).toEqual({})
   expect(saved?.tasks[0]?.verdict_seq).toEqual({ 'spec-review': 2 })
   expect(saved?.tasks[0]?.artifacts.verdicts)
-    .toEqual({ 'spec-review-1': 'docs/superpowers/reviews/issue-1-spec-review-1.md' })
+    .toEqual({ 'spec-review-1': 'docs/superpowers/reviews/hp-1-spec-review-1.md' })
 })
 
 test('a rewind onto branch-review reserves a run-level path under the run id', async () => {
@@ -1025,7 +1220,7 @@ test('task echoes the repo bootstrap on the dispatched return', async () => {
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
+    branch: 'feat/boot', bead: 'hp-1', surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
 
@@ -1041,9 +1236,9 @@ test('the dispatched return keeps every header line above the one blank line', a
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/boot', issue: 1, surface: 'core', notes: 'core work',
+    branch: 'feat/boot', bead: 'hp-1', surface: 'core', notes: 'core work',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase, async () => [])
+  }, undefined, fetchedBase)
 
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
@@ -1064,7 +1259,7 @@ test('the dispatched return keeps every header line above the one blank line', a
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
   // so nothing meant for the worker may land among them.
-  expect(rest.join('\n\n')).toStartWith('# feat/boot — issue #1')
+  expect(rest.join('\n\n')).toStartWith('# feat/boot — hp-1')
 })
 
 test('a non-executable declaration is reported to the orchestrator, not hidden', async () => {
@@ -1073,7 +1268,7 @@ test('a non-executable declaration is reported to the orchestrator, not hidden',
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/notexec', issue: 3, surface: 'core', notes: '',
+    branch: 'feat/notexec', bead: 'hp-3', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
 
@@ -1085,9 +1280,9 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   await saveRun(dir, run)
 
   const result = await cmdTask(ctx(), {
-    branch: 'feat/quiet', issue: 2, surface: 'core', notes: '',
+    branch: 'feat/quiet', bead: 'hp-2', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
-  }, undefined, fetchedBase, async () => [])
+  }, undefined, fetchedBase)
 
   // Spec item 13 is "bootstrap: none AND still satisfies test 12" — the undeclared
   // path is the one every repo hits today, so it gets the shape contract too.
@@ -1099,7 +1294,7 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
   expect(lines.join('\n')).toContain('-- --dangerously-skip-permissions')
-  expect(rest.join('\n\n')).toStartWith('# feat/quiet — issue #2')
+  expect(rest.join('\n\n')).toStartWith('# feat/quiet — hp-2')
 })
 
 test('task echoes the repo bootstrap on the queued return as well', async () => {
@@ -1111,11 +1306,11 @@ test('task echoes the repo bootstrap on the queued return as well', async () => 
   await saveRun(dir, run)
 
   await cmdTask(ctx(), {
-    branch: 'feat/first', issue: 1, surface: 'core', notes: '',
+    branch: 'feat/first', bead: 'hp-1', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   const gated = await cmdTask(ctx(), {
-    branch: 'feat/second', issue: 2, surface: 'core', notes: '',
+    branch: 'feat/second', bead: 'hp-2', surface: 'core', notes: '',
     dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
 
@@ -1128,7 +1323,7 @@ test('show prints the recorded task without touching the ledger', async () => {
   const run = runWithTasks([
     { task_id: 't1', phase: 'done' },
     {
-      task_id: 't2', branch: 'feat/show', issue: 17, surface: 'core',
+      task_id: 't2', branch: 'feat/show', bead: 'hp-17', surface: 'core',
       files: ['src/cli.ts', 'README.md'], depends_on: ['t1'],
       phase: 'implement', phase_entered_at: Date.now() - 42 * 60000,
       pr: 58, ci: 'pending', checkout_path: '/wt/show',
@@ -1146,7 +1341,7 @@ test('show prints the recorded task without touching the ledger', async () => {
   expect(result.ok).toBe(true)
   for (const line of [
     `run:        ${run.run_id}`,
-    'branch:     feat/show', 'issue:      #17', 'surface:    core',
+    'branch:     feat/show', 'bead:       hp-17', 'surface:    core',
     'files:      src/cli.ts, README.md', 'depends on: t1', 'phase:      implement (42m)',
     'research:   docs/r.md', 'spec:       docs/s.md', 'plan:       docs/p.md',
     'spec-review-0: docs/superpowers/reviews/x-spec-review-0.md',
@@ -1208,7 +1403,7 @@ async function registerReadyTask(): Promise<void> {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
   await cmdTask(ctx(), {
-    branch: 'feat/x', issue: 11, surface: 'core', notes: '',
+    branch: 'feat/x', bead: 'hp-11', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
 }
@@ -1404,11 +1599,11 @@ test('dispatch --task refuses a task whose gate has not opened', async () => {
   const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
   await saveRun(dir, run)
   await cmdTask(ctx(), {
-    branch: 'feat/first', issue: 1, surface: 'core', notes: '',
+    branch: 'feat/first', bead: 'hp-1', surface: 'core', notes: '',
     dependsOn: [], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   await cmdTask(ctx(), {
-    branch: 'feat/second', issue: 2, surface: 'core', notes: '',
+    branch: 'feat/second', bead: 'hp-2', surface: 'core', notes: '',
     dependsOn: ['t1'], files: [], keepWorktree: false, repoKey: 'k', runId: null,
   })
   const { sent, send } = recordingSend()
@@ -1429,13 +1624,13 @@ test('dispatch --task refuses a task whose worker is already past its first phas
   await saveRun(dir, run!)
   const { sent, send } = recordingSend()
 
-  const result = await cmdDispatchTask(ctx(), {
+  const result = await cmdDispatchTask({ ...ctx(), pluginRoot: UNLINKED_ROOT }, {
     taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
   }, send)
 
   expect(result.ok).toBe(false)
   expect(result.text).toContain('already in implement')
-  expect(result.text).toContain('brief --task t1')
+  expect(result.text).toContain(`\`${UNLINKED_HPIPE} brief --task t1\``)
   expect(sent).toEqual([])
 })
 
@@ -1503,7 +1698,7 @@ test('a task rewind owes its worker the phase prompt, in the same save', async (
   const task = saved.tasks[0] as Task
   expect(saved.outbox).toHaveLength(1)
   expect(saved.outbox?.[0]).toMatchObject({ to: 'worker', task_id: 't1', entered_at: task.phase_entered_at })
-  expect(saved.outbox?.[0]?.text).toContain('# Implement — b (#1)')
+  expect(saved.outbox?.[0]?.text).toContain('# Implement — b (hp-1)')
   // A live agent already holds the brief; only the phase is sent.
   expect(saved.outbox?.[0]?.text).not.toContain('Your task id is')
   expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])
@@ -1517,12 +1712,12 @@ test('a rewind onto a review row prompts with the one path it printed, reserved 
   await saveRun(dir, run)
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'pr-review-quality', taskId: 't1' })
-  expect(result.text).toContain('issue-1-pr-review-quality-0.md')
+  expect(result.text).toContain('hp-1-pr-review-quality-0.md')
 
   const saved = await savedRun(run.run_id)
   expect(saved.tasks[0]?.verdict_seq?.['pr-review-quality']).toBe(1)
   expect(saved.outbox?.[0]?.text)
-    .toContain(join(repoDir, 'docs/superpowers/reviews/issue-1-pr-review-quality-0.md'))
+    .toContain(join(repoDir, 'docs/superpowers/reviews/hp-1-pr-review-quality-0.md'))
 })
 
 test('a rewind into research with no worker owes nothing: the dispatched brief carries it', async () => {
@@ -1552,7 +1747,7 @@ test('a rewind past research with no worker holds the prompt until one is bound'
   const text = saved.outbox?.[0]?.text ?? ''
   expect(text).toContain('Your task id is `t1`')
   expect(text).not.toContain('## Phase 1 — research')
-  expect(text.indexOf('Your task id is `t1`')).toBeLessThan(text.indexOf('# Implement — b (#1)'))
+  expect(text.indexOf('Your task id is `t1`')).toBeLessThan(text.indexOf('# Implement — b (hp-1)'))
   expect(outboxPending(saved)).toEqual([])
   ;(saved.tasks[0] as Task).pane_id = 'w7:p1'
   expect(outboxPending(saved).map((p) => p.paneId)).toEqual(['w7:p1'])
@@ -1639,18 +1834,20 @@ async function seedInRepo(): Promise<void> {
   await saveRun(dir, newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' }))
 }
 
-const existingIssue = {
-  branch: 'feat/tiered', issue: 12, surface: 'core', notes: '',
+const existingBead = {
+  branch: 'feat/tiered', bead: 'hp-12', surface: 'core', notes: '',
   dependsOn: [] as string[], files: [] as string[], keepWorktree: false,
   repoKey: 'k', runId: null,
 }
+
+const labelled = (...labels: string[]) => fakeBeads({ show: async (_repoKey, id) => openBead(id, { labels }) })
 
 const headLines = (text: string): string[] => text.split('\n\n')[0]!.split('\n')
 
 test('a pipeline:tier label beats --tier, and the tier line says what --tier said', async () => {
   await seedInRepo()
-  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'standard', callerPane: 'w1:p1' },
-    undefined, fetchedBase, async () => ['bug', 'pipeline:tier-light'])
+  const result = await cmdTask(ctx(), { ...existingBead, tier: 'standard', callerPane: 'w1:p1' },
+    labelled('bug', 'pipeline:tier-light'), fetchedBase)
 
   expect(result.ok).toBe(true)
   expect(headLines(result.text).slice(0, 2)).toEqual([
@@ -1666,30 +1863,21 @@ test('a pipeline:tier label beats --tier, and the tier line says what --tier sai
 
 test('--tier with no tier label is recorded as the flag', async () => {
   await seedInRepo()
-  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase, async () => ['bug'])
+  const result = await cmdTask(ctx(), { ...existingBead, tier: 'heavy' }, labelled('bug'), fetchedBase)
   expect(headLines(result.text)).toContain('tier: heavy (--tier)')
   expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
 })
 
 test('with neither a label nor --tier the task is standard', async () => {
   await seedInRepo()
-  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => [])
+  const result = await cmdTask(ctx(), existingBead, labelled(), fetchedBase)
   expect(headLines(result.text)).toContain('tier: standard (default)')
   expect((await registered())[0]!.tier).toBe('standard')
 })
 
-test('unreadable labels fall back to --tier and still register', async () => {
-  await seedInRepo()
-  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'heavy' }, undefined, fetchedBase,
-    async () => ({ error: 'HTTP 401: Bad credentials' }))
-  expect(result.ok).toBe(true)
-  expect(headLines(result.text)).toContain('tier: heavy (--tier; labels unreadable: HTTP 401: Bad credentials)')
-})
-
 test('two tier labels refuse the registration and record nothing', async () => {
   await seedInRepo()
-  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase,
-    async () => ['pipeline:tier-light', 'pipeline:tier-heavy'])
+  const result = await cmdTask(ctx(), existingBead, labelled('pipeline:tier-light', 'pipeline:tier-heavy'), fetchedBase)
   expect(result.ok).toBe(false)
   expect(result.text).toContain('pipeline:tier-light, pipeline:tier-heavy')
   expect(await registered()).toEqual([])
@@ -1697,56 +1885,53 @@ test('two tier labels refuse the registration and record nothing', async () => {
 
 test('an unknown tier label refuses the registration', async () => {
   await seedInRepo()
-  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => ['pipeline:tier-huge'])
+  const result = await cmdTask(ctx(), existingBead, labelled('pipeline:tier-huge'), fetchedBase)
   expect(result.ok).toBe(false)
   expect(result.text).toContain('unknown tier label pipeline:tier-huge')
   expect(await registered()).toEqual([])
 })
 
-test('an unknown --tier files no issue', async () => {
+test('an unknown --tier files no bead', async () => {
   const bodyFile = await seedInRepoWithBrief()
-  let filed = 0
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile, tier: 'huge' },
-    async () => { filed++; return issue318 })
+  const { beads, created } = counting()
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile, tier: 'huge' }, beads)
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
-  expect(filed).toBe(0)
+  expect(created()).toBe(0)
 })
 
-test('an unknown --tier is refused before the label read', async () => {
+test('an unknown --tier is refused before the bead is read', async () => {
   await seedInRepo()
-  let reads = 0
-  const result = await cmdTask(ctx(), { ...existingIssue, tier: 'huge' }, undefined, fetchedBase,
-    async () => { reads++; return [] })
+  const { beads, shown } = counting()
+  const result = await cmdTask(ctx(), { ...existingBead, tier: 'huge' }, beads, fetchedBase)
   expect(result.ok).toBe(false)
   expect(result.text).toContain('--tier must be one of light, standard, heavy, got: huge')
-  expect(reads).toBe(0)
+  expect(shown()).toBe(0)
 })
 
-test('a filed issue has no labels to read, so --title skips the read', async () => {
+test('a filed bead has no labels to read, so --title reads nothing', async () => {
   const bodyFile = await seedInRepoWithBrief()
-  let reads = 0
-  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile },
-    async () => issue318, fetchedBase, async () => { reads++; return ['pipeline:tier-heavy'] })
+  const { beads, shown } = counting()
+  const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, beads, fetchedBase)
   expect(result.ok).toBe(true)
-  expect(reads).toBe(0)
-  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'issue: #318 (filed)'])
+  expect(shown()).toBe(0)
+  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'bead: hp-318 (filed)'])
 })
 
-test('a registration that loses its save reads the labels once', async () => {
+test('a registration that loses its save reads the bead once', async () => {
   await seedInRepo()
   let reads = 0
-  const result = await cmdTask(ctx(), existingIssue, undefined, fetchedBase, async () => {
-    reads++
-    await supervisorWrites((run) => { run.intake_closed = true })
-    return ['pipeline:tier-heavy']
-  })
+  const result = await cmdTask(ctx(), existingBead, fakeBeads({
+    show: async (_repoKey, id) => {
+      reads++
+      await supervisorWrites((run) => { run.intake_closed = true })
+      return openBead(id, { labels: ['pipeline:tier-heavy'] })
+    },
+  }), fetchedBase)
   expect(result.ok).toBe(true)
   expect(reads).toBe(1)
   expect((await registered()).map((t) => t.tier)).toEqual(['heavy'])
 })
-
-// ——— hpipe tier ———
 
 async function seedTiered(over: Partial<Task> = {}): Promise<Run> {
   const run = runWithTasks([{
@@ -1863,4 +2048,423 @@ test('rewind onto ci forgets the last CI result, so the next round waits for a f
   expect(task?.phase).toBe('ci')
   expect(task?.pr).toBe(5)
   expect(task?.ci).toBeNull()
+})
+
+test('dispatch --task claims the task\'s bead before it sends the brief', async () => {
+  await registerReadyTask()
+  const order: string[] = []
+  const send = async () => { order.push('send'); return { ok: true } }
+
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send,
+    undefined, async (repoKey, bead) => { order.push(`claim ${repoKey} ${bead}`); return { ok: true } })
+
+  expect(result.ok).toBe(true)
+  expect(order).toEqual(['claim k hp-11', 'send'])
+})
+
+test('a refused claim refuses the dispatch with bd\'s message and sends nothing', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send,
+    undefined, async () => ({ reason: 'exit', error: 'hp-11 is already claimed by bob' }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('hp-11 is already claimed by bob')
+  expect(result.text).toContain('nothing was sent')
+  expect(sent).toEqual([])
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.pane_id).toBeNull()
+})
+
+const mergedInClose = (): Run =>
+  runWithTasks([{ task_id: 't1', phase: 'close', pr: 7, merged_at_ms: 9_000, merge_commit: 'm3rg3' }])
+
+test('close closes the task\'s bead with the merge as its reason, and writes no ledger field', async () => {
+  await saveRun(dir, mergedInClose())
+  const before = JSON.stringify((await listRuns(dir, 'personal'))[0])
+  const asked: Array<[string, string, string, boolean]> = []
+
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async (repoKey, bead, reason, force) => { asked.push([repoKey, bead, reason, force]); return { ok: true } })
+
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('closed hp-1')
+  expect(asked).toEqual([['k', 'hp-1', 'merged in PR #7 (m3rg3)', false]])
+  expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('close --force forces; a refusal passes bd\'s words through and offers --force only when not forced', async () => {
+  await saveRun(dir, mergedInClose())
+  const forced: boolean[] = []
+  const refuse = async (_k: string, _b: string, _r: string, force: boolean) => {
+    forced.push(force)
+    return { reason: 'exit' as const, error: 'cannot close hp-1: assignee is "bob", actor is "hpipe"' }
+  }
+
+  const plain = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false }, refuse)
+  const strong = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: true }, refuse)
+
+  expect(forced).toEqual([false, true])
+  expect(plain.ok).toBe(false)
+  expect(plain.text).toContain('assignee is "bob"')
+  expect(plain.text).toContain('--force')
+  expect(strong.text).not.toContain('--force overrides')
+})
+
+test('close refuses a task with no merge recorded, and names the rewind that records it', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'close', merged_at_ms: null }])
+  await saveRun(dir, run)
+  let calls = 0
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: true },
+    async () => { calls++; return { ok: true } })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`rewind ${run.run_id} merge --task t1`)
+  expect(calls).toBe(0)
+})
+
+test('close of a bead whose close is already recorded calls nothing and says so', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1', phase: 'close', pr: 7, merged_at_ms: 9_000, bead_closed_at_ms: 9_500 }]))
+  let calls = 0
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async () => { calls++; return { ok: true } })
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('already closed')
+  expect(result.text).not.toContain('--force')
+  expect(calls).toBe(0)
+})
+
+async function seedAskedDecision(): Promise<Run> {
+  const run = runWithTasks([{ task_id: 't1', phase: 'blocked-on-decision', decision_from: 'plan' }])
+  openDecision(run.tasks[0]!, { question: 'Which store?', recommendation: 'sqlite' })
+  await saveRun(dir, run)
+  return run
+}
+
+const escalation = (over: Partial<Parameters<typeof cmdEscalate>[1]> = {}): Parameters<typeof cmdEscalate>[1] => ({
+  taskId: 't1', decisionId: 'd1', recommendation: 'sqlite, for the tests', repoKey: 'k', runId: null, ...over,
+})
+
+const savedTask = async (): Promise<Task> => (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+
+test('escalate hands the open decision to the human with the orchestrator\'s recommendation', async () => {
+  await seedAskedDecision()
+  const result = await cmdEscalate({ ...ctx(), pluginRoot: UNLINKED_ROOT }, escalation())
+  expect(result.ok).toBe(true)
+  expect(result.text).toContain('d1 on t1 is now with the human')
+  expect(result.text).toContain(`\`${UNLINKED_HPIPE} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
+  const task = await savedTask()
+  expect(task.decisions[0]!.escalated_at).toBeGreaterThan(0)
+  expect(task.decisions[0]!.orchestrator_recommendation).toBe('sqlite, for the tests')
+  expect(escalatedUnanswered(task)?.id).toBe('d1')
+})
+
+test('escalate refuses a bare escalation, an unknown decision, and a task not blocked on one', async () => {
+  await seedAskedDecision()
+  expect((await cmdEscalate(ctx(), escalation({ recommendation: ' ' }))).text).toContain('--recommend is required')
+  const noDecision = await cmdEscalate(ctx(), escalation({ decisionId: '' }))
+  expect(noDecision.ok).toBe(false)
+  expect(noDecision.text).toContain('--decision is required')
+  expect((await cmdEscalate(ctx(), escalation({ decisionId: 'd9' }))).text).toContain('no such decision: d9')
+  expect((await savedTask()).decisions[0]!.escalated_at).toBeNull()
+
+  await cmdRewind(ctx(), { runId: (await listRuns(dir, 'personal'))[0]!.run_id, phase: 'plan', taskId: 't1' })
+  expect((await cmdEscalate(ctx(), escalation())).text).toContain('is not blocked on a decision')
+})
+
+test('a second escalate changes nothing', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  const first = (await savedTask()).decisions[0]!.escalated_at
+  const again = await cmdEscalate(ctx(), escalation({ recommendation: 'something else' }))
+  expect(again.ok).toBe(true)
+  expect(again.text).toContain('already with the human')
+  expect(again.text).toContain('the original recommendation was kept')
+  expect((await savedTask()).decisions[0]).toMatchObject({ escalated_at: first, orchestrator_recommendation: 'sqlite, for the tests' })
+})
+
+test('a repeated escalate with the same recommendation does not mention keeping one', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  const again = await cmdEscalate(ctx(), escalation())
+  expect(again.text).toContain('already with the human')
+  expect(again.text).not.toContain('recommendation was kept')
+})
+
+test('an answer by the human ends the escalation', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  await cmdAnswer(ctx(), { task: 't1', decision: 'd1', answer: 'sqlite', by: 'human', repoKey: 'k', runId: null })
+  expect(escalatedUnanswered(await savedTask())).toBeNull()
+})
+
+test('an answer by the orchestrator ends the escalation too', async () => {
+  await seedAskedDecision()
+  await cmdEscalate(ctx(), escalation())
+  await cmdAnswer(ctx(), { task: 't1', decision: 'd1', answer: 'sqlite', by: 'orchestrator', repoKey: 'k', runId: null })
+  expect(escalatedUnanswered(await savedTask())).toBeNull()
+})
+
+test('bead show prints the bead bd shows, and passes a failure through', async () => {
+  const shown = await cmdBeadShow(ctx(), { repoKey: 'k', id: 'hp-3' },
+    async (_repoKey, id) => openBead(id, { title: 'Fix the meter' }))
+  expect(shown.ok).toBe(true)
+  expect(shown.text).toStartWith('hp-3 [open] Fix the meter')
+
+  const failed = await cmdBeadShow(ctx(), { repoKey: 'k', id: 'hp-404' },
+    async () => ({ reason: 'exit', error: 'Error: issue hp-404 not found' }))
+  expect(failed.ok).toBe(false)
+  expect(failed.text).toContain('Error: issue hp-404 not found')
+
+  expect((await cmdBeadShow(ctx(), { repoKey: 'k', id: '' })).text).toContain('usage: hpipe bead show <id>')
+})
+
+async function seedWorkingTask(): Promise<Run> {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  await saveRun(dir, run)
+  return run
+}
+
+const discovery = (title: string, body: string) => {
+  const bodyFile = join(repoDir, `${title.replace(/\W+/g, '-')}.md`)
+  writeFileSync(bodyFile, body)
+  return { taskId: 't1', title, bodyFile, repoKey: 'k', runId: null }
+}
+
+test('discover records the work and keeps a copy of its body beside the run', async () => {
+  const run = await seedWorkingTask()
+  const first = await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  const second = await cmdDiscover(ctx(), discovery('Dead helper', 'nothing calls it\n'))
+
+  expect(first.ok).toBe(true)
+  expect(first.text).toContain('t1/x1')
+  expect(second.text).toContain('t1/x2')
+  const task = (await listRuns(dir, 'personal'))[0]!.tasks[0]!
+  expect(task.discoveries.map((d) => [d.id, d.title, d.filed_bead])).toEqual([
+    ['x1', 'Flaky clock test', null], ['x2', 'Dead helper', null],
+  ])
+  const copy = task.discoveries[0]!.body_path
+  expect(copy.startsWith(join(dir, 'runs', 'personal', `${run.run_id}.discoveries`, 't1-x1-'))).toBe(true)
+  expect(readFileSync(copy, 'utf8')).toBe('It fails at midnight.\n')
+})
+
+test('discover refuses an empty title or a body that is not a file, recording nothing', async () => {
+  await seedWorkingTask()
+  expect((await cmdDiscover(ctx(), { ...discovery('x', 'b'), title: ' ' })).ok).toBe(false)
+  expect((await cmdDiscover(ctx(), { ...discovery('y', 'b'), bodyFile: join(repoDir, 'nope.md') })).text)
+    .toContain('--body-file is not a file')
+  expect((await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries).toEqual([])
+})
+
+test('discoveries lists each one with whether it is filed', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  const listed = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: false })
+  expect(listed.ok).toBe(true)
+  expect(listed.text).toContain('t1/x1 unfiled — Flaky clock test')
+})
+
+test('discoveries --file files each unfiled one as a discovered bead, once', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))
+  await cmdDiscover(ctx(), discovery('Dead helper', 'nothing calls it\n'))
+  const filed: BeadCreateInput[] = []
+  const fileBead = async (_repoKey: string, input: BeadCreateInput, _label: string) => {
+    filed.push(input)
+    return { id: `hp-${10 + filed.length}` }
+  }
+
+  const first = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, fileBead)
+  const again = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, fileBead)
+
+  expect(first.ok).toBe(true)
+  expect(first.text).toContain('t1/x1 filed as hp-11 — Flaky clock test')
+  expect(first.text).toContain('t1/x2 filed as hp-12 — Dead helper')
+  expect(again.ok).toBe(true)
+  expect(filed).toEqual([
+    { title: 'Flaky clock test', body: 'It fails at midnight.\n', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' },
+    { title: 'Dead helper', body: 'nothing calls it\n', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' },
+  ])
+})
+
+test('a failed filing stops there, keeps what was filed, and says which one failed', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('One', 'a\n'))
+  await cmdDiscover(ctx(), discovery('Two', 'b\n'))
+  let calls = 0
+  const result = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, async () => {
+    calls++
+    return calls === 1 ? { id: 'hp-11' } : { reason: 'exit', error: 'Error: database is locked' }
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('filing t1/x2 failed')
+  expect(result.text).toContain('Error: database is locked')
+  const discoveries = (await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries
+  expect(discoveries.map((d) => d.filed_bead)).toEqual(['hp-11', null])
+})
+
+test('two discovers racing on one save both land, each keeping its own body', async () => {
+  await seedWorkingTask()
+  const [first, second] = await Promise.all([
+    cmdDiscover(ctx(), discovery('Alpha', 'alpha body\n')),
+    cmdDiscover(ctx(), discovery('Beta', 'beta body\n')),
+  ])
+  expect([first.ok, second.ok]).toEqual([true, true])
+  const discoveries = (await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries
+  expect(discoveries.map((d) => d.id).sort()).toEqual(['x1', 'x2'])
+  expect(discoveries.map((d) => [d.title, readFileSync(d.body_path, 'utf8')]).sort()).toEqual([
+    ['Alpha', 'alpha body\n'], ['Beta', 'beta body\n'],
+  ])
+})
+
+test('a body copy that has gone missing fails the filing instead of throwing', async () => {
+  await seedWorkingTask()
+  await cmdDiscover(ctx(), discovery('One', 'a\n'))
+  rmSync((await listRuns(dir, 'personal'))[0]!.tasks[0]!.discoveries[0]!.body_path)
+  let created = false
+  const result = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: true }, async () => {
+    created = true
+    return { id: 'hp-11' }
+  })
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain('body copy is missing')
+  expect(created).toBe(false)
+})
+
+test('fileUnlessFiled adopts a bead already carrying the discovery label and creates nothing', async () => {
+  const created: BeadCreateInput[] = []
+  const bd = {
+    refreshExport: async () => ({ ok: true as const }),
+    readExport: () => [
+      { id: 'hp-5', title: 'other', status: 'open', labels: ['discovered'] },
+      { id: 'hp-9', title: 'One', status: 'open', labels: ['discovered', 'discovery:r1:t1:x1'] },
+    ],
+    create: async (input: BeadCreateInput) => { created.push(input); return { id: 'hp-20' } },
+  }
+  const input = { title: 'One', body: 'a', labels: ['discovered'], depsDiscoveredFrom: 'hp-1' }
+  expect(await fileUnlessFiled(bd, input, 'discovery:r1:t1:x1')).toEqual({ id: 'hp-9' })
+  expect(created).toEqual([])
+  expect(await fileUnlessFiled(bd, input, 'discovery:r1:t1:x2')).toEqual({ id: 'hp-20' })
+  expect(created[0]!.labels).toEqual(['discovered', 'discovery:r1:t1:x2'])
+})
+
+async function leftoverV2RunHoldingT1(phase: Task['phase']): Promise<Run> {
+  const old = runWithTasks([{ task_id: 't1', phase, decision_from: 'plan' }])
+  old.schema_version = 2
+  await saveRun(dir, old)
+  return old
+}
+
+const taskIn = async (runId: string): Promise<Task> =>
+  (await listRuns(dir, 'personal')).find((r) => r.run_id === runId)!.tasks[0]!
+
+test('a leftover v2 run holding t1 does not make dispatch ambiguous: it reaches the v3 task', async () => {
+  await registerReadyTask()
+  const current = (await listRuns(dir, 'personal'))[0]!
+  await leftoverV2RunHoldingT1('queued')
+  const { send } = recordingSend()
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null }, send)
+  expect(result.ok).toBe(true)
+  expect((await taskIn(current.run_id)).pane_id).toBe('w1-2')
+})
+
+test('a leftover v2 run holding t1 does not make close ambiguous: it closes the v3 task\'s bead', async () => {
+  const current = mergedInClose()
+  await saveRun(dir, current)
+  await leftoverV2RunHoldingT1('close')
+  const asked: string[] = []
+  const result = await cmdClose(ctx(), { taskId: 't1', repoKey: 'k', runId: null, force: false },
+    async (_repoKey, bead) => { asked.push(bead); return { ok: true } })
+  expect(result.ok).toBe(true)
+  expect(asked).toEqual(['hp-1'])
+})
+
+test('a leftover v2 run holding t1 does not make escalate ambiguous: it escalates the v3 decision', async () => {
+  const current = await seedAskedDecision()
+  await leftoverV2RunHoldingT1('blocked-on-decision')
+  const result = await cmdEscalate(ctx(), escalation())
+  expect(result.ok).toBe(true)
+  expect((await taskIn(current.run_id)).decisions[0]!.escalated_at).toBeGreaterThan(0)
+})
+
+test('a leftover v2 run holding t1 does not make discover or discoveries ambiguous', async () => {
+  const current = await seedWorkingTask()
+  await leftoverV2RunHoldingT1('implement')
+  expect((await cmdDiscover(ctx(), discovery('Flaky clock test', 'It fails at midnight.\n'))).ok).toBe(true)
+  expect((await taskIn(current.run_id)).discoveries).toHaveLength(1)
+  const listed = await cmdDiscoveries(ctx(), { repoKey: 'k', runId: null, file: false })
+  expect(listed.ok).toBe(true)
+  expect(listed.text).toContain('t1/x1 unfiled — Flaky clock test')
+})
+
+async function otherSessionHolding(bead: string): Promise<Run> {
+  const other = newRun({ session: 'work', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'b' })
+  other.tasks = [mkTask({ task_id: 't4', bead, phase: 'implement' })]
+  await saveRun(dir, other)
+  return other
+}
+
+test('resume refuses while another run has adopted a bead one of its tasks would hold again', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const other = await otherSessionHolding('hp-1')
+
+  const result = await cmdResume(ctx(), { runId: run.run_id })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-1 (t1) is now held by t4 (implement) in run ${other.run_id}, session work`)
+  expect(result.text).toContain(`abort ${other.run_id}`)
+  expect((await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.phase).toBe('done')
+})
+
+test('resume goes ahead when the only other claimant of its bead has released it', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'implement' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const other = await otherSessionHolding('hp-1')
+  other.tasks[0]!.phase = 'failed'
+  await saveRun(dir, other)
+
+  expect((await cmdResume(ctx(), { runId: run.run_id })).ok).toBe(true)
+})
+
+test('rewind out of failed refuses while another run has adopted the task\'s bead', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'failed' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const other = await otherSessionHolding('hp-1')
+
+  const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' })
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-1 (t1) is now held by t4 (implement) in run ${other.run_id}, session work`)
+  expect((await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)?.tasks[0]?.phase).toBe('failed')
+})
+
+test('rewind between phases that do not hold the bead is not refused over another run\'s hold', async () => {
+  const run = runWithTasks([{ task_id: 't1', bead: 'hp-1', phase: 'failed' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await otherSessionHolding('hp-1')
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'done', taskId: 't1' })).ok).toBe(true)
+})
+
+test('--bead still assigned to hpipe by a run that released it names that run and the supervisor it waits on', async () => {
+  await seedInRepoWithBrief()
+  const released = newRun({ session: 'work', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'b' })
+  released.tasks = [mkTask({ task_id: 't4', bead: 'hp-12', phase: 'implement', registered_at: 5 })]
+  released.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  released.escalated_from = 'execute'
+  released.phase = 'done'
+  await saveRun(dir, released)
+
+  const result = await cmdTask(ctx(), { ...unfiledTask, bead: 'hp-12' },
+    fakeBeads({ show: async (_repoKey, id) => openBead(id, { assignee: 'hpipe' }) }))
+
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain(`bead hp-12 is still assigned to hpipe by t4 of run ${released.run_id} (session work)`)
+  expect(result.text).toContain('the supervisor of session work')
+  expect(await registered()).toEqual([])
 })

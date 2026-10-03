@@ -1,11 +1,10 @@
-import type { GhFailure } from './gh'
 import { isTier, TIERS } from './phases'
 import type { Run, Tier, TierChange } from './types'
 
 export const TIER_LABEL_PREFIX = 'pipeline:tier-'
 
-/** `null` when nothing was read: an issue `hpipe task` just filed has no labels yet. */
-export type LabelRead = string[] | GhFailure | null
+/** `null` when nothing was read: a bead `hpipe task` just filed carries no labels yet. */
+export type LabelRead = string[] | null
 
 export interface ChosenTier {
   ok: true
@@ -15,11 +14,6 @@ export interface ChosenTier {
 }
 
 export type RegistrationTier = ChosenTier | { ok: false; error: string }
-
-// One line, because it lands inside the one `tier:` line `hpipe task` prints.
-function firstLine(text: string): string {
-  return text.trim().split('\n')[0] ?? ''
-}
 
 export function registrationTier(flagValue: string | undefined, labels: LabelRead): RegistrationTier {
   let flagTier: Tier | undefined
@@ -34,13 +28,12 @@ export function registrationTier(flagValue: string | undefined, labels: LabelRea
     ? { ok: true, tier: 'standard', source: 'default', why: 'default' }
     : { ok: true, tier: flagTier, source: 'flag', why: '--tier' }
   if (labels === null) return fallback
-  if ('error' in labels) return { ...fallback, why: `${fallback.why}; labels unreadable: ${firstLine(labels.error)}` }
 
   const tierLabels = labels.filter((label) => label.startsWith(TIER_LABEL_PREFIX))
   if (tierLabels.length > 1) {
     return {
       ok: false,
-      error: `the issue carries ${tierLabels.length} tier labels (${tierLabels.join(', ')}); ` +
+      error: `the bead carries ${tierLabels.length} tier labels (${tierLabels.join(', ')}); ` +
         'remove all but one, then register it again',
     }
   }

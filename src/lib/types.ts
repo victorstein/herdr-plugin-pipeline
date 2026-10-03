@@ -42,6 +42,10 @@ export interface Decision {
   answered_by: 'orchestrator' | 'human' | 'abandoned' | null
   answered_at: number | null
   prompted_at: number | null
+  /** Set by `hpipe escalate` when the question goes to the human; the bead shows blocked until it is answered. */
+  escalated_at: number | null
+  /** What the orchestrator recommended when it escalated, posted on the bead beside the worker's. */
+  orchestrator_recommendation: string | null
 }
 
 /**
@@ -125,10 +129,37 @@ export interface OutboxEntry {
   last_attempt_at?: number
 }
 
+/** The worker's brief for the life of the run: captured at registration, never re-read from the bead. */
+export interface BeadBrief {
+  title: string
+  description: string
+  acceptance: string
+  labels: string[]
+  captured_at_ms: number
+}
+
+/** `failures` is monotone; a converged write clears `last_error` and resets `streak`. */
+export interface BeadSync {
+  failures: number
+  /** Failures since the last converged write: what "out of sync" is judged on. */
+  streak: number
+  last_error: string | null
+  last_ok_at_ms: number | null
+}
+
+/** Out-of-scope work a worker recorded with `hpipe discover`, filed as a bead only by the orchestrator. */
+export interface Discovery {
+  id: string
+  title: string
+  body_path: string
+  filed_bead: string | null
+}
+
 export interface Task {
   task_id: string
   branch: string
-  issue: number
+  bead: string
+  brief: BeadBrief
   surface: string
   depends_on: string[]
   files: string[]
@@ -163,8 +194,13 @@ export interface Task {
    * contain. Optional because runs written before it existed lack it.
    */
   merge_commit?: string | null
-  /** True when the issue was already closed at `merge` completion. */
-  issue_closed_at_entry: boolean
+  /**
+   * Set only by a reconciler pass that saw the bead closed after `merged_at_ms`
+   * was recorded, and cleared with the merge by a rewind: the close row's edge.
+   */
+  bead_closed_at_ms: number | null
+  bead_sync: BeadSync
+  discoveries: Discovery[]
   passes: Partial<Record<TaskPhase, number>>
   /**
    * Reviews commissioned per phase, and therefore the key of the current one.

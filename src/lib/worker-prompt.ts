@@ -2,7 +2,17 @@ import { briefNote, repoBootstrap } from './bootstrap'
 import { taskRow } from './phases'
 import { renderPrompt } from './render'
 import { tierPromptVars } from './tier-prompt'
-import type { Run, Task } from './types'
+import type { BeadBrief, Run, Task } from './types'
+
+export function renderBrief(brief: BeadBrief): string {
+  const acceptance = brief.acceptance.trim() === '' ? '(none recorded)' : brief.acceptance.trim()
+  return [`**${brief.title}**`, '', brief.description.trim(), '', '**Acceptance**', '', acceptance].join('\n')
+}
+
+/** Spread into every task render site, so no template can render without either token. */
+export function beadPromptVars(task: Task): { bead: string; brief: string } {
+  return { bead: task.bead, brief: renderBrief(task.brief) }
+}
 
 /**
  * The brief plus the `research` row's own prompt. A task enters `research` at
@@ -20,7 +30,7 @@ export async function renderWorkerPrompt(
     ...tierPromptVars(task),
     run_id: run.run_id,
     branch: task.branch,
-    issue: String(task.issue),
+    ...beadPromptVars(task),
     surface: task.surface,
     batch_context: batchContext(task.notes),
     research_path: task.artifacts.research ?? '',
@@ -37,7 +47,7 @@ export async function renderWorkerPrompt(
 }
 
 function batchContext(notes: string): string {
-  return notes.trim() === '' ? '' : `Batch context the public issue does not carry: ${notes}`
+  return notes.trim() === '' ? '' : `Batch context the bead does not carry: ${notes}`
 }
 
 // An optional section renders to '' on a line of its own and would leave a

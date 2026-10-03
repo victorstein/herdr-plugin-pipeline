@@ -1,4 +1,4 @@
-# Adversarial review of your spec — {{branch}} (#{{issue}}), pass {{pass}}
+# Adversarial review of your spec — {{branch}} ({{bead}}), pass {{pass}}
 
 Your spec at `{{spec_path}}` is ready for review. You do not review it yourself. Hand the brief below
 to a subagent with a fresh context, verbatim, and route its output — the plugin owns every word of
@@ -20,7 +20,7 @@ is lost at teardown and invisible to every later review that has to read what wa
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review `{{spec_path}}` adversarially against issue #{{issue}} (`gh issue view {{issue}}`) and the
+Review `{{spec_path}}` adversarially against the brief for `{{bead}}` (`{{hpipe}} brief --task {{task_id}}`) and the
 research note at `{{research_path}}`.
 
 Be evidence-first: verify every claim against the code, the installed packages, the live `--help`

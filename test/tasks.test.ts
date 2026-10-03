@@ -13,18 +13,19 @@ import { dispatchSequence } from '../src/lib/unstarted'
 import { ciTransitions } from '../src/supervisor/ci'
 import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
+import { beadTaskFields } from './helpers/bead-fields'
 
 afterEach(cleanupFixtures)
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'idle',
   phase: 'queued', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -45,7 +46,6 @@ const deps = (over: Partial<Parameters<typeof advanceTasks>[1]> = {}) => ({
   fileSettleMs: 0,
   prForBranch: async () => null,
   prView: async () => null,
-  issueView: async () => null,
   verdictFor: async () => null,
   removeWorktree: async () => 'removed' as const,
   removeCheckout: async () => ({ removed: true as const }),
@@ -257,13 +257,13 @@ test('a PR merged while the orchestrator pane has no agent is noticed (#144)', a
     liveIdle: async () => false,
     hasLiveAgent: (pane: string) => pane !== 'w1:p1',
     prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
-    issueView: async () => ({ closed: false, closedAtMs: null }),
   }))
   expect(run.tasks[0]?.phase).toBe('close')
-  expect(prompts.find((p) => p.taskId === 't1')?.paneId).toBe('w1:p1')
+  expect(run.tasks[0]?.merged_at_ms).toBe(2_000)
+  expect(prompts.find((p) => p.taskId === 't1')).toBeUndefined()
 })
 
-test('a merged PR advances to close, and a closed issue to teardown', async () => {
+test('a merged PR advances to close, and a recorded bead close to teardown', async () => {
   const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
   await advanceTasks(run, deps({
     prView: async () => ({ merged: true, mergedAtMs: 2_000, mergeCommit: 'm3rg3', headSha: 'x' }),
@@ -271,42 +271,21 @@ test('a merged PR advances to close, and a closed issue to teardown', async () =
   expect(run.tasks[0]?.phase).toBe('close')
   expect(run.tasks[0]?.merge_commit).toBe('m3rg3')
 
-  run.tasks[0]!.phase_entered_at = 1_000
-  await advanceTasks(run, deps({ issueView: async () => ({ closed: true, closedAtMs: 2_000 }) }))
-  expect(run.tasks[0]?.phase).toBe('teardown')
-})
-
-test('an issue closed before the merge still lets close advance', async () => {
-  const mergedAtMs = 10_000
-  const view = {
-    prView: async () => ({ merged: true, mergedAtMs, headSha: 'x' }),
-    issueView: async () => ({ closed: true, closedAtMs: mergedAtMs - 30_000 }),
-  }
-  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
-
-  await advanceTasks(run, deps(view))
+  await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('close')
-  expect(run.tasks[0]?.issue_closed_at_entry).toBe(true)
 
-  await advanceTasks(run, deps(view))
+  run.tasks[0]!.bead_closed_at_ms = 3_000
+  await advanceTasks(run, deps())
   expect(run.tasks[0]?.phase).toBe('teardown')
 })
 
 test('a rewind into merge rescues a close whose merge was never recorded', async () => {
-  const mergedAtMs = 10_000
-  const view = {
-    prView: async () => ({ merged: true, mergedAtMs, headSha: 'x' }),
-    issueView: async () => ({ closed: true, closedAtMs: mergedAtMs + 2_000 }),
-  }
   const run = mkRun([mkTask({ phase: 'close', pr: 42, merged_at_ms: null })])
-  await advanceTasks(run, deps(view))
+  await advanceTasks(run, deps({ prView: async () => ({ merged: true, mergedAtMs: 10_000, headSha: 'x' }) }))
   expect(run.tasks[0]?.phase).toBe('close')
 
   Object.assign(run.tasks[0]!, { phase: 'merge', phase_entered_at: Date.now() })
-  await advanceTasks(run, deps(view))
-  expect(run.tasks[0]?.phase).toBe('close')
-  await advanceTasks(run, deps(view))
-  expect(run.tasks[0]?.phase).toBe('teardown')
+  expect(await advanceTasks(run, deps())).toHaveLength(0)
 })
 
 test('teardown removes the worktree and completes the task', async () => {
@@ -384,18 +363,15 @@ test('a phase that advances nothing yields no prompt', async () => {
   expect(await advanceTasks(run, deps())).toHaveLength(0)
 })
 
-test('close prompts only when the issue is still open', async () => {
-  const open = mkRun([mkTask({ phase: 'close', pr: 42 })])
-  expect(await promptForTaskPhase(open, open.tasks[0]!, deps(), 'merge')).not.toBe('')
-
-  const closed = mkRun([mkTask({ phase: 'close', pr: 42, issue_closed_at_entry: true })])
-  expect(await promptForTaskPhase(closed, closed.tasks[0]!, deps(), 'merge')).toBe('')
+test('close renders no prompt: the supervisor closes the bead itself', async () => {
+  const run = mkRun([mkTask({ phase: 'close', pr: 42 })])
+  expect(await promptForTaskPhase(run, run.tasks[0]!, deps(), 'merge')).toBe('')
 })
 
 const designArtifacts = (): Task['artifacts'] => ({
-  research: join('docs/superpowers/research', '2026-01-01-issue-1-research.md'),
-  spec: join('docs/superpowers/specs', '2026-01-01-issue-1-design.md'),
-  plan: join('docs/superpowers/plans', '2026-01-01-issue-1-plan.md'),
+  research: join('docs/superpowers/research', '2026-01-01-hp-1-research.md'),
+  spec: join('docs/superpowers/specs', '2026-01-01-hp-1-design.md'),
+  plan: join('docs/superpowers/plans', '2026-01-01-hp-1-plan.md'),
   verdicts: {},
 })
 
@@ -749,7 +725,7 @@ test('a review row reserves its verdict path before the prompt names it', async 
 
   expect(task.verdict_seq?.['spec-review']).toBe(1)
   expect(watched)
-    .toBe('/r/.worktrees/feat-x/docs/superpowers/reviews/issue-1-spec-review-0.md')
+    .toBe('/r/.worktrees/feat-x/docs/superpowers/reviews/hp-1-spec-review-0.md')
   expect(text).toContain(watched as string)
 })
 
@@ -779,8 +755,8 @@ test('re-entering pr-review-intent after a quality blocker does not reuse the fi
   const second = absoluteArtifactPath(run, task)
 
   expect(counterFor(task, 'pr-review-intent')).toBe(0)
-  expect(first).toContain('issue-1-pr-review-intent-0.md')
-  expect(second).toContain('issue-1-pr-review-intent-1.md')
+  expect(first).toContain('hp-1-pr-review-intent-0.md')
+  expect(second).toContain('hp-1-pr-review-intent-1.md')
   expect(second).not.toBe(first)
 })
 
@@ -801,7 +777,7 @@ test('the dispatch prompt names the repo bootstrap above the blank line', async 
   // the first blank line is the orchestrator's, everything after is the worker's.
   const head = text.split('\n\n')[0]!
   expect(head).toContain('bootstrap: .claude/pipeline-bootstrap')
-  expect(text.split('\n\n').slice(1).join('\n\n')).toStartWith('# feat/x — issue #1')
+  expect(text.split('\n\n').slice(1).join('\n\n')).toStartWith('# feat/x — hp-1')
 })
 
 const dirtyTree = (paths: string[] | null) => {

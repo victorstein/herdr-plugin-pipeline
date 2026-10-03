@@ -13,6 +13,7 @@ import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
 import { enqueue, owedByRecipient } from '../src/lib/outbox'
 import type { Run, RunPhase, Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 const ORCHESTRATOR_PANE = 'w1:p1'
 
@@ -73,14 +74,14 @@ test('a phase within the threshold is not a candidate', () => {
 })
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
   phase: 'implement', phase_entered_at: LONG_AGO, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: '/r/.worktrees/feat-x', registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -273,10 +274,10 @@ test('a run verdict row resolves against the repo root, not a worktree', () => {
 
 test('a pr row names the PR, never a path — the defect the issue addendum raised', () => {
   const run = runAt('execute', LONG_AGO)
-  const task = mkTask({ phase: 'implement', branch: 'fix/x', issue: 38 })
+  const task = mkTask({ phase: 'implement', branch: 'fix/x', bead: 'hp-38' })
   run.tasks = [task]
   const a = stallAwaiting(run, task, 'hp')
-  expect(a.clause).toBe('This phase is waiting for a pushed PR for fix/x (#38).')
+  expect(a.clause).toBe('This phase is waiting for a pushed PR for fix/x (hp-38).')
   expect(a.clause).not.toContain('appeared at')
   expect(a.clause).not.toContain('path above')
 })
@@ -973,18 +974,33 @@ test('a merge row names the PR and does not assert it is unmerged — #19', () =
 })
 
 
-test('a close row names the issue and does not assert it is still open — #19', () => {
-  const run = runWithTask({ phase: 'close' })
+test('a close row with no merge recorded names the rewind into merge — #19', () => {
+  const run = runWithTask({ phase: 'close', merged_at_ms: null })
   const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
-  expect(a.short).toBe('issue #1 to close')
-  expect(a.clause).toContain('gh issue view 1 --json closed,state')
-  expect(a.clause).toContain('closing keyword')
-  // A task rewound into `close` from before `merge` has no `merged_at_ms`, so
-  // machine.ts:178-181 can never fire however closed the issue is.
-  expect(a.clause).toContain('already closed, this phase cannot see it')
+  expect(a.short).toBe('bead hp-1 to be closed by the supervisor')
+  expect(a.clause).toContain('No merge is recorded for t1')
   expect(a.clause).toContain(`hp rewind ${run.run_id} merge --task t1`)
-  expect(a.clause).not.toContain('never clear')
-  expect(a.clause).not.toContain('whatever clears')
+})
+
+test('a close row the reconciler is still retrying says so and asks for nothing', () => {
+  const run = runWithTask({
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 6, streak: 2, last_error: 'Error: database is locked', last_ok_at_ms: 1 },
+  })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.clause).toContain('waiting on the Beads close of hp-1')
+  expect(a.clause).not.toContain('hp close')
+})
+
+test('a close row past five failures quotes bd verbatim and names hpipe close and --force', () => {
+  const refusal = 'cannot close hp-1: assignee is "bob", actor is "hpipe"'
+  const run = runWithTask({
+    phase: 'close', merged_at_ms: 5, bead_sync: { failures: 5, streak: 5, last_error: refusal, last_ok_at_ms: null },
+  })
+  const a = stallAwaiting(run, run.tasks[0] as Task, 'hp')
+  expect(a.clause).toContain(refusal)
+  expect(a.clause).toContain('The last 5 of the supervisor\'s Beads calls for hp-1 have failed in a row')
+  expect(a.clause).toContain('`hp close --task t1`')
+  expect(a.clause).toContain('`--force`')
 })
 
 test('a teardown row states the fact and diagnoses no cause — #19', () => {
@@ -1013,7 +1029,7 @@ test('the escalation text describes the phase being left, not escalated — #19'
     await applyStalls(taskStallCandidates([run], now, 45, 3), { ...deps, now: () => now })
     now += 45 * 60_000
   }
-  expect(seen).toEqual(['implement|a pushed PR for feat/x (#1)'])
+  expect(seen).toEqual(['implement|a pushed PR for feat/x (hp-1)'])
   expect(task.phase).toBe('escalated')
 })
 

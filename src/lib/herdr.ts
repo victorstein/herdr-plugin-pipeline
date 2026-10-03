@@ -59,6 +59,16 @@ function parseEnvelope<T>(text: string): Envelope<T> | null {
   }
 }
 
+export interface PaneOpenOptions {
+  cwd?: string
+  env?: Record<string, string>
+}
+
+/** herdr 0.9.1 returns the new pane, id included; measured in the beads spikes. */
+export interface PluginPaneOpened {
+  plugin_pane?: { pane?: { pane_id?: string } }
+}
+
 export class Herdr {
   constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
 
@@ -199,11 +209,17 @@ export class Herdr {
   }
 
   async pluginPaneOpen(
-    pluginId: string, entrypoint: string, workspaceId: string,
-  ): Promise<CallResult<unknown>> {
+    pluginId: string, entrypoint: string, workspaceId: string, options: PaneOpenOptions = {},
+  ): Promise<CallResult<PluginPaneOpened>> {
     return this.call([
       'plugin', 'pane', 'open', '--plugin', pluginId, '--entrypoint', entrypoint,
       '--workspace', workspaceId, '--placement', 'tab', '--no-focus',
+      ...(options.cwd === undefined ? [] : ['--cwd', options.cwd]),
+      ...Object.entries(options.env ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]),
     ])
+  }
+
+  async paneRename(paneId: string, label: string): Promise<CallResult<unknown>> {
+    return this.call(['pane', 'rename', paneId, label])
   }
 }

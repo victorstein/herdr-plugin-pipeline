@@ -1,4 +1,4 @@
-# `pr-review` — PR #{{pr}}, {{branch}} (#{{issue}}), pass {{pass}}
+# `pr-review` — PR #{{pr}}, {{branch}} ({{bead}}), pass {{pass}}
 
 PR #{{pr}} is open. This one review asks both questions the heavy tier splits across two stages:
 does the PR do what was asked, completely, and nothing it was not asked to do — and is it written the
@@ -25,13 +25,13 @@ with no remediation done.
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) against issue #{{issue}}
-(`gh issue view {{issue}}`) and the spec the PR itself carries at `{{spec_path}}`. The review has two
+Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) against the brief for `{{bead}}`
+(`{{hpipe}} brief --task {{task_id}}`) and the spec the PR itself carries at `{{spec_path}}`. The review has two
 mandatory sections, in this order.
 
 ### Intent
 
-Check: every acceptance criterion in the issue met; every spec requirement implemented, not just the
+Check: every acceptance criterion in the brief met; every spec requirement implemented, not just the
 easy half; no silent scope reduction; no scope expansion beyond what was asked; tests that exercise
 the behaviour rather than restating the implementation; and no divergence from `{{plan_path}}` that
 the PR does not explain. {{plan_review_note}}

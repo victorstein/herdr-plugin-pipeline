@@ -1,6 +1,6 @@
 # Live smoke runbook — worker-owned pipeline
 
-One real herdr session, one real repo, two real GitHub issues, two real worker agents. Budget
+One real herdr session, one real repo, two real Beads beads, two real worker agents. Budget
 45–90 minutes: the workers do actual research/spec/plan work and you wait on them.
 
 > **A step whose observed behaviour differs from what is written here is a FINDING to bring back,
@@ -14,11 +14,13 @@ design found two startup/gating defects that dependency-injected fakes had passe
 
 ## What you need
 
-- herdr 0.9.0+, `bun`, `gh` authenticated against a repo you may open and close throwaway issues in.
+- herdr 0.9.0+, `bun`, `bd` 1.3.1+ (`brew install beads`), and `gh` authenticated against a repo you may
+  open and close throwaway PRs in. `bv` 0.25.2+ is needed only for §8; you install and run it yourself.
 - A target repo with at least one `.claude/agents/<surface>-dev.md`. `hpipe task --surface <s>`
   is rejected when `.claude/agents/<s>-dev.md` does not exist, so check first:
   `ls <repo>/.claude/agents/`.
-- Two branch names and two issues you are happy to throw away.
+- Two branch names you are happy to throw away. The beads are filed by `hpipe task --title`; they live in
+  the plugin's state dir, not in the repo.
 
 ## The one gotcha that invalidates the whole run
 
@@ -84,20 +86,20 @@ hpipe status
 shows `supervisor: live (pid N)`, one run in `[intake]`, and an `orchestrator:` line naming this
 pane.
 
-Now let the orchestrator do intake for real: two tasks, each backed by a GitHub issue. The first is
-filed with `gh issue create` and registered with `--issue`; the second is filed *by* `hpipe task
---title … --body-file …`, which is the only live check of that path. The registration must give the two tasks **overlapping `--files`** — that is the
-setup for §3 and the whole reason this run uses two tasks.
+Now let the orchestrator do intake for real: two tasks, each backed by a bead. The first is filed up
+front and adopted with `--bead`; the second is filed *by* `hpipe task --title … --body-file …`, which is
+the only live check of that path. The registration must give the two tasks **overlapping `--files`** —
+that is the setup for §3 and the whole reason this run uses two tasks.
 
 First, one deliberately malformed registration, **typed by hand, before the orchestrator registers
 anything** — this is the check that `--files` is validated at all, and it is supposed to fail:
 
 ```bash
-hpipe task --branch smoke/bad --issue 999 --surface <surface> --files "src/lib src/lib/config.ts"
+hpipe task --branch smoke/bad --bead nobead-999 --surface <surface> --files "src/lib src/lib/config.ts"
 ```
 
-`--issue 999` never reaches GitHub — `hpipe task` only requires a positive integer — so this step needs
-no issue of its own and must not borrow one of the two below.
+`--files` is validated before `bd` is asked about the bead, so `nobead-999` is never looked up and this
+step needs no bead of its own.
 
 **Expect:** exit 1, `--files is comma-separated; this entry contains whitespace: "src/lib
 src/lib/config.ts"`, and a `→ --files src/lib,src/lib/config.ts` suggestion. Nothing is registered.
@@ -113,32 +115,35 @@ Second, a `--title` registration that fails validation, also typed by hand — i
 ```bash
 printf 'Smoke: must never be filed.\n' > /tmp/smoke-orphan.md
 hpipe task --branch smoke/orphan --title "smoke orphan" --body-file /tmp/smoke-orphan.md --surface nope
-gh issue list --search "smoke orphan in:title" --state all   # assert: empty
+grep -c "smoke orphan" "$STATE"/beads/*/.beads/issues.jsonl   # assert: 0 for the repo's store
 ```
 
-**Expect:** exit 1, `no agent definition at …/nope-dev.md`, and no issue. **Failure looks like:** an
-issue titled `smoke orphan` exists — the gh call ran before validation. Close it and report it.
+**Expect:** exit 1, `no agent definition at …/nope-dev.md`, and no bead (the grep counts `0`).
+**Failure looks like:** a bead titled `smoke orphan` exists — `bd create` ran before validation. Report
+it; the bead can stay, the run is not affected.
 
-Now the two real registrations, which the orchestrator runs. The second files its own issue from a
-body file written like any issue body:
+Now the two real registrations, which the orchestrator runs. Both file their own bead: `hpipe` is the
+store's only writer, so no bead exists before a first task files one. `--bead` (adoption) is exercised in §8.
 
 ```bash
-hpipe task --branch smoke/one --issue <n1> --surface <surface> --files src/lib --tier heavy
-hpipe task --branch smoke/two --title "<title>" --body-file <brief.md> --surface <surface> \
+hpipe task --branch smoke/one --title "<title one>" --body-file <brief1.md> --surface <surface> \
+           --files src/lib --tier heavy
+hpipe task --branch smoke/two --title "<title two>" --body-file <brief2.md> --surface <surface> \
            --files src/lib/config.ts --tier heavy
 ```
 
 Both are pinned to `--tier heavy`, the tier that runs every review row, so §3–§6 exercise the same
-route every task took before tiers existed. The lighter tiers have their own section, §7. `<n1>` must
-carry no `pipeline:tier-*` label: a tier label on the issue overrides `--tier`.
+route every task took before tiers existed. The lighter tiers have their own section, §7.
 
-**Observe on the second:** a line `issue: #<n2> (filed)` right after `task_id: t2` and its `tier:`
-line, a real issue
-`#<n2>` in the target repo (`gh issue view <n2>` shows the body file's text), exactly one such issue
-(a retried registration must never file twice), and a brief headed `smoke/two — issue #<n2>`. If gh
-fails — no auth, or a fork with several remotes and no `gh repo set-default` — the command must exit 1
-with `gh issue create failed in <repo>` and register nothing. If registration fails *after* filing,
-the output must name the filed issue and say `register it with --issue <n2>`; do exactly that.
+**Observe on each:** `task_id: tN`, then its `tier: heavy (--tier)` line, then `bead: <prefix>-<n>
+(filed)`, exactly one bead per registration (a retried registration must never file twice — `grep -c
+"<title one>" "$STATE"/beads/*/.beads/issues.jsonl` counts `1`), and `hpipe brief --task tN` printing the
+title, body and `**Acceptance**` you wrote. `hpipe bead show <bead>` shows it `[open]`. If `bd` fails the
+command must exit 1 with `bd create failed; nothing was filed or registered` and register nothing. If
+registration fails *after* filing, the output must name the filed bead and say `register it with --bead
+<id>`; do exactly that.
+
+Write down both bead ids as `<b1>` and `<b2>`.
 
 `src/lib/config.ts` starts with `src/lib`, so `filesOverlap` is true in both directions. Any
 prefix-overlapping pair works; do not use `--depends-on` here, which would serialize the tasks for
@@ -290,17 +295,17 @@ watch -n 2 'hpipe status'
 
 **What to look for, at the moment both tasks read `[spec]`:**
 
-- In **worker one's pane**: exactly one prompt, headed for *its* branch and *its* issue number,
-  naming *its* spec path (`docs/superpowers/specs/<date>-issue-<n1>-design.md`).
-- In **worker two's pane**: exactly one prompt, naming `<n2>` and its own spec path.
-- In **neither pane**: a prompt containing the *other* task's issue number, or two prompts
+- In **worker one's pane**: exactly one prompt, headed for *its* branch and *its* bead id (`<b1>`),
+  naming *its* spec path.
+- In **worker two's pane**: exactly one prompt, naming `<b2>` and its own spec path.
+- In **neither pane**: a prompt containing the *other* task's bead id, or two prompts
   separated by a `---` rule. `deliveriesFor` joins same-pane prompts with `\n\n---\n\n`; that rule
   is correct when both fragments belong to that pane, and is the signature of the bug when the
   fragments name two different branches.
 - In the **orchestrator's pane**: a digest, not a worker prompt. Worker prompts go to worker panes;
   the orchestrator only gets `[pipeline] run <id> …` digests and the dispatch/merge/close/decision
   prompts that are its own. Every event line in that digest must carry, in this order, the task id,
-  the branch and issue, a bracketed phase box with the age in that phase — `[spec 12m]`, or a
+  the branch and bead id, a bracketed phase box with the age in that phase — `[spec 12m]`, or a
   transition box `[research → spec]` on the tick a phase advances — and an action clause naming
   whose move it is: `YOUR move: …`, `worker's move: waiting for …`, `needs a human: <rewind cmd>`,
   `dead end`, or `nothing for you …`. A move clause always names what it waits for — `YOUR move:
@@ -436,7 +441,7 @@ than one candidate, pass `--run <run-id>`; the brief names the run in its first 
    that renders footers, and a footer line about the very task the prompt is about would say less
    than the prompt does (#93). The task then reaches the next digest anyway, because the worker
    ends its turn after `hpipe decide` and that idle is a pane event: an event line
-   `- tN <branch> (#n) [blocked-on-decision 0m] agent:done — YOUR move: waiting for an answer to
+   `- tN <branch> (<bead>) [blocked-on-decision 0m] agent:done — YOUR move: waiting for an answer to
    the open decision`. If the worker's idle was missed, the same clause appears in that digest's
    `also waiting on you:` footer instead. Either way, a `YOUR move` with nothing after it is a
    finding (#95).
@@ -448,7 +453,7 @@ than one candidate, pass `--run <run-id>`; the brief names the run in its first 
 
    Check this *before* answering. If `hpipe status` does not show it, the question is invisible to
    the human and that is a finding on its own.
-4. The orchestrator answers it from the repo — issue, `CLAUDE.md`, the surface agent file, an
+4. The orchestrator answers it from the repo — the bead (`hpipe bead show`), `CLAUDE.md`, the surface agent file, an
    existing call site — without asking you:
 
    ```bash
@@ -531,7 +536,7 @@ Nine rows are probed but **never** escalated: `blocked-on-files`, `blocked-on-de
 mile (`ci`, `merge`, `close`, `teardown`), a task already in `escalated`, and the run's `dispatch`
 and `execute`. They are waiting correctly — on a sibling task, on GitHub, or on you — and escalating
 them would cascade their dependents to `blocked-on-failure`. Their probe says so, and names what it
-is waiting for: the PR to merge, the issue to close, `gh pr checks <pr>`, or the `rewind` that
+is waiting for: the PR to merge, the bead to be closed by the supervisor, `gh pr checks <pr>`, or the `rewind` that
 resumes an escalated task.
 
 If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
@@ -731,8 +736,10 @@ clears to `done`.
 
 **Along the way, assert:**
 
-- The PR body ends with a real `Closes #<n>` keyword. `close` waits on `gh issue view --json
-  closed`, and "Implements #n" does not auto-close.
+- The PR body ends with `Refs <bead id>`; there is no GitHub issue and no `Closes` keyword. After the
+  merge, `close` waits for the supervisor to close the bead: within a tick or two
+  `hpipe bead show <bead id>` shows `[closed]` with the reason `merged in PR #<n> (<sha>)`, and only then
+  does the task move to `teardown`. Nobody is prompted to close it.
 - After a review BLOCKER, the task's `head_sha_at_entry` in `$STATE/runs/$SMOKE/<run_id>.json` is the
   PR head at the send-back (`hpipe show` does not print it), and `.history` shows no `implement` exit
   before the worker's fix push appears on the PR.
@@ -790,29 +797,29 @@ reaching `pr-review-intent` is that, not a routing bug.
 
 ### 7a. Batch A — one task per tier
 
-Three throwaway issues, with **disjoint** `--files` and no `--depends-on`, so no collision or gate
-staggers them. File the light one with a tier label; it is the only live check of the label read:
+Three beads, with **disjoint** `--files` and no `--depends-on`, so no collision or gate
+staggers them. A bead the task files carries no labels, so the tier-label read is checked in §8e, where a
+bead exists before its task; here the light task is registered `--tier light` and the tier log reads
+`(--tier)`:
 
 ```bash
-gh label create pipeline:tier-light 2>/dev/null   # once per repo
-gh issue create --title "smoke tier light" --body "…" --label pipeline:tier-light   # <a1>
-hpipe task --branch smoke/tier-light    --issue <a1> --surface <surface> --files <p1> --tier standard --keep-worktree
-hpipe task --branch smoke/tier-standard --issue <a2> --surface <surface> --files <p2> --keep-worktree
-hpipe task --branch smoke/tier-heavy    --issue <a3> --surface <surface> --files <p3> --tier heavy --keep-worktree
+hpipe task --branch smoke/tier-light    --title "smoke tier light"    --body-file <body.md> --surface <surface> --files <p1> --tier light --keep-worktree
+hpipe task --branch smoke/tier-standard --title "smoke tier standard" --body-file <body.md> --surface <surface> --files <p2> --keep-worktree
+hpipe task --branch smoke/tier-heavy    --title "smoke tier heavy"    --body-file <body.md> --surface <surface> --files <p3> --tier heavy --keep-worktree
 ```
 
 `--keep-worktree` is there because each task's verdict files live in its checkout, which `teardown`
 otherwise removes before you can read them.
 
 **Observe at registration:** the line after `task_id:` reads, in order,
-`tier: light (label pipeline:tier-light; --tier said standard)`, `tier: standard (default)` and
+`tier: light (--tier)`, `tier: standard (default)` and
 `tier: heavy (--tier)`. Every `hpipe status` task line carries the tier after its phase box —
 `[research 2m] light …`.
 
 **Assert, for each task once it reaches `done`:**
 
 1. `hpipe show --task <id>` prints `tier:` with the task's tier, a `tier log:` holding only its
-   registration entry (`<time> — → light (label pipeline:tier-light; --tier said standard)`), and a
+   registration entry (`<time> — → light (--tier)`), and a
    `visited:` line that walks the table above:
 
    ```
@@ -848,10 +855,10 @@ task spent from `implement` to `ci`.
 
 ### 7b. Batch B — a raise mid-run, and one task landing
 
-One throwaway issue, registered light:
+One throwaway bead, registered light:
 
 ```bash
-hpipe task --branch smoke/tier-raise --issue <b1> --surface <surface> --files <p1> --tier light
+hpipe task --branch smoke/tier-raise --title "smoke tier raise" --body-file <body.md> --surface <surface> --files <p1> --tier light
 ```
 
 Once `research` has cleared and the task reads `[spec …]`, raise it from your own pane, inside the
@@ -894,6 +901,193 @@ pane`. If you want the live check of that guard, have the orchestrator run `hpip
 
 ---
 
+## 8. Beads — the issue store
+
+**Required versions: `bd` ≥ 1.3.1 (Homebrew core `beads`) and `bv` ≥ 0.25.2.** Check both first:
+
+```bash
+bd version && bv --version
+hpipe status   # assert: no `tools:` line — it appears only when a tool is missing or too old
+```
+
+**Human-only steps.** bv's licence rider forbids Anthropic-related parties from executing it (see the
+README's licence note). Every step below marked **(human)** runs `bv` or looks at its board; you do them
+yourself, and no agent runs them, reads their output on your behalf, or drives the board pane. The
+`bd`-only steps are also yours: `bd` is read here, and written only where a step says so with no run live.
+
+Use a scratch repo with a GitHub remote and CI, as in Setup, a fresh herdr session, and no live run
+(finish or `hpipe abort` the earlier sections' runs first). `$STORE` below is
+`$STATE/beads/<repo>-<hash>`.
+
+### 8a. Setup
+
+```bash
+hpipe start "beads smoke" --prefix bsm
+```
+
+**Expect:** `beads: created $STORE with prefix bsm`, then the intake prompt. If the repo's store already
+exists from §1 the line reads `beads: prefix <p>, store …` and `--prefix` is ignored; use that prefix
+wherever `bsm` appears below.
+
+**Check:** `ls -A "$STORE"` holds `.beads` and `project.json`; `$STORE/.beads/issues.jsonl` exists;
+`git -C "$STATE" status` shows nothing new if the state dir sits in a repo. **(human)** a `Board: <repo>
+<hash>` tab appears in the pipeline workspace within a tick or two and runs `bv`.
+
+### 8b. One task, open to closed
+
+```bash
+printf 'Add a NOTES.md line saying hello.\n' > /tmp/bsm-body.md
+printf 'NOTES.md contains hello.\n' > /tmp/bsm-acc.md
+hpipe task --branch smoke/bsm-1 --title "Say hello" --body-file /tmp/bsm-body.md \
+  --acceptance-file /tmp/bsm-acc.md --surface <surface> --files NOTES.md --tier light
+```
+
+**Expect:** `task_id: t1`, `tier: light (--tier)`, `bead: bsm-1 (filed)`. Within a tick or two
+`hpipe bead show bsm-1` reads `bsm-1 [open] Say hello`, label `queued`, assignee
+`none`, `run: <run-id>`, then the description and `Acceptance` text you wrote.
+
+Run the printed `dispatch, in order:` block. After `hpipe dispatch --task t1`, `hpipe bead show bsm-1`
+reads `[in_progress]`, assignee `hpipe`, label `research`. **(human)** On the board (press `b`)
+the card moves to the in-progress column and its phase label follows the task through `spec`,
+`plan` and `implement` as `hpipe status` shows each.
+
+Merge the PR when prompted. **Expect**, within a tick or two: `hpipe bead show bsm-1` reads `[closed]`
+with the close reason `merged in PR #<n> (<sha>)`; `hpipe status` moves the task `close → teardown →
+done` and never asked anyone to close anything; **(human)** the card moves to the closed column.
+
+### 8c. `hpipe next` and the dependency graph
+
+```bash
+hpipe task --branch smoke/bsm-2 --title "Second" --body-file /tmp/bsm-body.md --surface <surface> --files NOTES.md
+hpipe next
+```
+
+**Expect** (`bv` is run by `hpipe` on your machine, so this is **(human)**): any `warning:` lines, then
+`now (parallel when their --files are disjoint):` — which does **not** list `bsm-2`, because task `t2` holds
+it — or, with nothing else open, `nothing to pick up: every open bead is held, blocked or filtered out`.
+`hpipe next --limit 1` prints at most one pick.
+
+### 8d. Abort releases, resume re-claims
+
+```bash
+hpipe abort <run-id>
+```
+
+Within a tick or two: `hpipe bead show bsm-2` reads `[open]`, assignee `none`, label `aborted`,
+and `hpipe next` **(human)** now offers `bsm-2`.
+
+```bash
+hpipe resume <run-id>
+```
+
+Within a tick or two: `bsm-2` reads `[in_progress]`, assignee `hpipe`, its `<phase>` label again,
+and `hpipe next` **(human)** no longer offers it.
+
+### 8e. Adopting an existing bead (`--bead`)
+
+Abort the run (`hpipe abort <run-id>`). With **no live run**, file the beads by hand in the store —
+the only time you run `bd` against it. `bd` finds the store through its environment:
+
+```bash
+export BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads"
+bd create "Adopt me" -l pipeline:tier-light --json --actor smoke   # note the id as <adopt>
+bd create "Epic" --json --actor smoke                              # <epic>
+bd create "Child of epic" --parent <epic> --json --actor smoke     # <child>
+unset BEADS_DIR GIT_CEILING_DIRECTORIES
+```
+
+(`bd create --help` is authoritative if a flag differs.) Then `hpipe start "adopt smoke"` and, from the
+orchestrator pane:
+
+```bash
+hpipe task --branch smoke/adopt --bead <adopt> --surface <surface> --files NOTES.md
+hpipe task --branch smoke/epic  --bead <epic>  --surface <surface> --files NOTES.md
+hpipe task --branch smoke/dup   --bead <adopt> --surface <surface> --files NOTES.md
+```
+
+**Expect:** the first registers with `tier: light (label pipeline:tier-light)` and no `bead: … (filed)`
+line — this is the only live check of the tier-label read; the second exits 1 with `bead <epic> has
+open child beads (<child>) — an epic or parent bead cannot be adopted; adopt its children instead` and
+registers nothing; the third exits 1 with `bead <adopt> is already held by t1 …`.
+
+### 8f. Teardown
+
+`hpipe abort <run-id>`; close the scratch PRs and delete the smoke branches; `rm -rf "$STORE"` only if the
+store was created for this smoke (it is the only copy of its beads).
+
+### Findings — Beads
+
+| Step | Result | Notes |
+|---|---|---|
+| 8a setup, `$STORE` layout, board tab appears | | |
+| 8b `--title` files one bead, brief matches | | |
+| 8b claim on dispatch, phase labels on the board | | |
+| 8b close on merge, teardown follows, no prompt | | |
+| 8c `hpipe next` hides the held bead | | |
+| 8d abort releases, resume re-claims | | |
+| 8e adoption, tier label, refusals | | |
+
+### Deferred checks — confirm on the real tools
+
+None of these could be verified without running the real `bd`, `bv` or herdr. For each, record what you
+saw in the table at the end of this section; a result that differs from "look for" is a finding to bring
+back, not something to patch mid-run.
+
+1. **bv board legibility (human).** Run a task as in 8b with the board tab open and press `b`.
+   *Look for:* the phase labels (`research`, `spec-review`) and the `hpipe:` labels are legible on the kanban
+   cards (not truncated). Then give a bead a non-built-in status, with no live run:
+   `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd update <id> -s deferred`, and
+   refresh the board. *Look for:* a `deferred` column exists, or the card is dropped — record which.
+2. **Linked-bead field names.** On a bead that has both a `blocks` dependent and a `parent-child` child:
+   `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd show <id> --include-comments --include-dependents --json`.
+   *Look for:* every entry under `dependencies` and `dependents` carries `dependency_type` (`blocks` or
+   `parent-child`) and `status`. The adoption refusal in 8e reads exactly those two names; if either is
+   called something else, adoption silently lets an epic through.
+3. **bd's stderr warning outside git.** Provoke a failing bd write, for example
+   `hpipe task --branch smoke/x --bead no-such-bead --surface <surface> --files NOTES.md` (or a `--title`
+   run with an unreadable body). *Look for:* hpipe's error shows only bd's real error. Then capture the
+   raw text with `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd create "x" --json --actor smoke 2>&1 >/dev/null | cat -A`
+   (delete the `x` bead afterwards) and compare it to exactly these lines, spacing included, since hpipe
+   filters them by prefix:
+
+   ```
+   warning: beads.role not configured (GH#2950).
+     Fix: git config beads.role …
+     Or:  git config beads.role …
+   ```
+
+   (`Fix:` has one space after it, `Or:` has two.) If a line differs, the filter lets it into hpipe's output.
+4. **Ctrl-C leaves no bd behind.** In a pane, run a slow bd-backed command (`hpipe task --title …` or
+   `hpipe dispatch --task t2`) and press Ctrl-C while it runs; immediately `pgrep -fl 'bd '` and, in
+   a second pane, repeat the command. *Look for:* no `bd` process remains once hpipe has exited, the
+   second command is not refused as locked after a second or two, and there is no stale lock file in
+   `$STORE`. bd runs in its own process group, so a terminal Ctrl-C does not reach it directly.
+5. **herdr restart and the board tab (human).** With a live run and the board open, note the pane id
+   (`herdr --session "$SMOKE" pane list --workspace <pipeline workspace>`), then
+   `herdr --session "$SMOKE" server stop` and start it again. *Look for:* whether the board tab comes
+   back with the same pane id, and that a stale `Board: <repo> <hash>` tab is closed and replaced by one
+   live board within a few ticks — never two boards for the repo.
+6. **`hpipe next` on a real backlog (human).** In a store with 20+ beads (file them with `hpipe task
+   --title` into a throwaway run, or point at a store you already use): `hpipe next`. *Look for:* output
+   stays compact — a screenful, at most 5 ids per line then `+N more` — and any `warning:` line is one you
+   can act on, not recurring noise.
+7. **A whole task, end to end.** Run one task from dispatch to merge as in 8b, then abort and resume a
+   second (8d). *Look for:* the bead goes `open → in_progress → closed`; **(human)** the phase label on
+   the board updates at each phase; an abort releases the bead (`open`, no assignee) and a resume
+   re-claims it.
+
+| Deferred check | Result | Notes |
+|---|---|---|
+| 1 board labels, `deferred` column | | |
+| 2 `dependency_type` / `status` on linked beads | | |
+| 3 stderr warning text and filtering | | |
+| 4 Ctrl-C leaves no bd | | |
+| 5 board after herdr restart | | |
+| 6 `hpipe next` compact | | |
+| 7 full task lifecycle | | |
+
+---
+
 ## What to do when a step fails
 
 The ledger is at `$STATE/runs/$SMOKE/<run_id>.json` — read it, never hand-edit it. All of these run
@@ -905,7 +1099,7 @@ from the orchestrator pane.
 | A task is stuck in `blocked-on-files` behind a holder that will never finish | Get the holder terminal first (`hpipe rewind … --task <holder>` to a phase it can finish, or let it fail), then `hpipe release --task <holder>`. `release` refuses while the holder is in flight, and only accepts a terminal or `escalated` task. |
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which clears every pass counter on that record and, for a review phase, prints the fresh verdict path it reserved. |
-| A phase was escalated by the stall ladder | `hpipe status` lists the task under `waiting on you:` as `tN <branch> (#n) [escalated Nm] — needs a human: <rewind command> resumes it, <rewind … failed command> abandons it` (a run shows `⚠ run escalated from <phase> … needs a human`). Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. To drop an escalated task instead, `hpipe rewind <run_id> failed --task <id>`: until one of the two is run the run stays in `execute`, the task's dependents stay `queued`, and the run gives up its orchestrator pane to any other run driven from it. |
+| A phase was escalated by the stall ladder | `hpipe status` lists the task under `waiting on you:` as `tN <branch> (<bead>) [escalated Nm] — needs a human: <rewind command> resumes it, <rewind … failed command> abandons it` (a run shows `⚠ run escalated from <phase> … needs a human`). Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. To drop an escalated task instead, `hpipe rewind <run_id> failed --task <id>`: until one of the two is run the run stays in `execute`, the task's dependents stay `queued`, and the run gives up its orchestrator pane to any other run driven from it. |
 | The whole run is wrong and you want out | `hpipe abort <run_id>` — leaves worktrees and branches alone, releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was. |
 | The orchestrator pane died or changed id | `hpipe status` flags it (`⚠ orchestrator pane … is gone`). Run the plugin's `claim` action from the pane that should drive the run. |
 | The supervisor died | `hpipe status` reports `supervisor: none\|stale`. Reopen with `herdr plugin action invoke stein.pipeline.supervisor`. Nothing advances until it is back; no state is lost. |
@@ -934,5 +1128,6 @@ herdr plugin list          # assert: back to empty
 herdr session list         # assert: only the sessions that were there before
 ```
 
-Close the two throwaway GitHub issues (`<n1>`, and `<n2>` filed by `--title`) and delete the smoke branches and PRs. If the run merged
+The beads live in `$STATE/beads/<repo>-<hash>/`; delete that directory only if the store was created for
+this run (§8f). Close the throwaway PRs and delete the smoke branches. If the run merged
 anything into `main` of a real repo, revert it — nothing in this runbook is work you want to keep.

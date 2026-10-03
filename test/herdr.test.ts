@@ -112,3 +112,28 @@ test('liveAgentIn: an agentless or missing pane has no live agent, and an empty 
   expect(live('w9:p9')).toBe(false)
   expect(liveAgentIn([])('w1:p1')).toBe(true)
 })
+
+test('a plugin pane opens with its cwd and env when given them', async () => {
+  const bin = await makeFakeBin(dir, { 'plugin pane open': { result: {} } })
+  await new Herdr(bin).pluginPaneOpen('stein.pipeline', 'board', 'w1', {
+    cwd: '/state/beads/meter-abc123', env: { HPIPE_BEADS_SLUG: 'meter-abc123' },
+  })
+  expect((await Bun.file(join(dir, 'calls.log')).text()).trim()).toBe(
+    'plugin pane open --plugin stein.pipeline --entrypoint board --workspace w1 --placement tab --no-focus ' +
+      '--cwd /state/beads/meter-abc123 --env HPIPE_BEADS_SLUG=meter-abc123',
+  )
+})
+
+test('an opened plugin pane reports its new pane id', async () => {
+  const bin = await makeFakeBin(dir, {
+    'plugin pane open': { result: { plugin_pane: { pane: { pane_id: 'w1A:p2', label: 'Board' } }, type: 'plugin_pane_opened' } },
+  })
+  const opened = await new Herdr(bin).pluginPaneOpen('stein.pipeline', 'board', 'w1A')
+  expect(opened.result?.plugin_pane?.pane?.pane_id).toBe('w1A:p2')
+})
+
+test('paneRename renames the pane to the label it is given', async () => {
+  const bin = await makeFakeBin(dir, { 'pane rename': { result: {} } })
+  expect((await new Herdr(bin).paneRename('w1:p3', 'Board: meter abc123')).ok).toBe(true)
+  expect((await Bun.file(join(dir, 'calls.log')).text()).trim()).toBe('pane rename w1:p3 Board: meter abc123')
+})

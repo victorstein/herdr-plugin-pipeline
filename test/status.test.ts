@@ -3,6 +3,7 @@ import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } 
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
+import { beadTaskFields } from './helpers/bead-fields'
 
 // Deliberately not `hpipe`: a GitHub install has no such binary on PATH, so
 // every command status prints must be the rendered invocation it was handed.
@@ -12,14 +13,14 @@ const mkRun = (): Run =>
   newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'chat meter' })
 
 const mkTask = (over: Partial<Task>): Task => ({
-  task_id: 't1', branch: 'feat/x', issue: 1, surface: 'core',
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core',
   depends_on: [], files: [], keep_worktree: false,
   workspace_id: 'w7', pane_id: 'w7:p1', agent_status: 'working',
   phase: 'implement', phase_entered_at: 0, escalated_from: null,
   head_sha_at_entry: null, pr: null, ci: null,
   checkout_path: null, registered_at: Date.now(), adopted_at: Date.now(),
   artifacts: { research: null, spec: null, plan: null, verdicts: {} },
-  merged_at_ms: null, issue_closed_at_entry: false, passes: {}, decisions: [],
+  merged_at_ms: null, ...beadTaskFields(), passes: {}, decisions: [],
   decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '',
   ...over,
 })
@@ -69,6 +70,7 @@ test('names an orchestrator pane left with no agent, and the decision held for i
     decisions: [{
       id: 'd2', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
       answer: null, answered_by: null, answered_at: null, prompted_at: null,
+      escalated_at: null, orchestrator_recommendation: null,
     }],
   })]
   const holds = { 'w2:p1': { since: 0, failures: 7, code: 'agent_not_found' } }
@@ -94,6 +96,7 @@ test('status lists an open decision with its age and question', () => {
       id: 'd1', asked_at: Date.now() - 42 * 60_000, from_phase: 'implement',
       question: 'which cache?', recommendation: 'redis',
       answer: null, answered_by: null, answered_at: null, prompted_at: null,
+      escalated_at: null, orchestrator_recommendation: null,
     }],
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
@@ -110,6 +113,7 @@ test('status names an answered-but-undelivered decision', () => {
       id: 'd1', asked_at: Date.now() - 60_000, from_phase: 'implement',
       question: 'which cache?', recommendation: 'redis',
       answer: 'redis', answered_by: 'human', answered_at: Date.now(), prompted_at: Date.now(),
+      escalated_at: null, orchestrator_recommendation: null,
     }],
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
@@ -172,14 +176,16 @@ test('a healthy run produces none of the four new warning lines', () => {
   expect(text).not.toContain('dispatch --done')
 })
 
-test('status tells the human to abort a run from an earlier plugin version', () => {
+test('a run from an earlier plugin version is listed as ignored, with no task lines', () => {
   const run = mkRun()
-  ;(run as { schema_version?: number }).schema_version = undefined
+  run.schema_version = 2
+  run.tasks = [{ task_id: 't1', branch: 'feat/old', issue: 7, phase: 'implement' } as unknown as Task]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
-  expect(text).toContain(
-    `run ${run.run_id} was started by an earlier plugin version and cannot be advanced ` +
-    `— ${HP} abort ${run.run_id} to release the repo.`,
-  )
+  expect(text).toContain(`run ${run.run_id} was started by an earlier plugin version and is ignored here`)
+  expect(text).toContain('Finish it on the release that started it.')
+  expect(text).not.toContain('abort')
+  expect(text).not.toContain('feat/old')
+  expect(text).not.toContain('undefined')
 })
 
 test('a healthy holder is reported as finishing, not as needing release', () => {
@@ -211,7 +217,7 @@ test('an escalated task is called out as needing a human', () => {
                         phase_entered_at: Date.now() - 47 * 60_000 })]
   const out = formatStatus([run], { state: 'live' }, 'personal', HP)
   expect(out).toContain(
-    `t1 feat/x (#1) [escalated 47m] — needs a human: \`${HP} rewind ${run.run_id} implement --task t1\``,
+    `t1 feat/x (hp-1) [escalated 47m] — needs a human: \`${HP} rewind ${run.run_id} implement --task t1\``,
   )
   expect(out).not.toMatch(/(^|[^/])hpipe /m)
 })
@@ -260,21 +266,21 @@ test('every task line carries how long it has sat in its phase', () => {
     mkTask({ task_id: 't2', phase: 'implement', phase_entered_at: now - 2 * 60_000 }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
-  expect(text).toContain('  t1 feat/x #1 [research 780m] heavy working')
-  expect(text).toContain('  t2 feat/x #1 [implement 2m] heavy working')
+  expect(text).toContain('  t1 feat/x hp-1 [research 780m] heavy working')
+  expect(text).toContain('  t2 feat/x hp-1 [implement 2m] heavy working')
 })
 
 test('a PR parked in merge is named under waiting on you, not left among the rest', () => {
   const now = 100_000_000
   const run = mkRun()
   run.tasks = [
-    mkTask({ task_id: 't1', branch: 'fix/a', issue: 30, phase: 'merge', pr: 41,
+    mkTask({ task_id: 't1', branch: 'fix/a', bead: 'hp-30', phase: 'merge', pr: 41,
              phase_entered_at: now - 297 * 60_000 }),
-    mkTask({ task_id: 't2', branch: 'fix/b', issue: 31, phase: 'implement' }),
+    mkTask({ task_id: 't2', branch: 'fix/b', bead: 'hp-31', phase: 'implement' }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const section = text.slice(text.indexOf('waiting on you:'))
-  expect(section).toContain('t1 fix/a (#30) [merge 297m] — YOUR move: waiting for PR #41 to be merged')
+  expect(section).toContain('t1 fix/a (hp-30) [merge 297m] — YOUR move: waiting for PR #41 to be merged')
   expect(section).not.toContain('t2')
 })
 
@@ -290,7 +296,7 @@ test('a started worker that has not been briefed names dispatch, not a missing a
   const out = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const section = out.slice(out.indexOf('waiting on you:'))
   expect(section).toContain(
-    't1 feat/x (#1) [research 9m] — YOUR move: its agent in w7:p1 has not been handed the brief — ' +
+    't1 feat/x (hp-1) [research 9m] — YOUR move: its agent in w7:p1 has not been handed the brief — ' +
     `\`${HP} dispatch --task t1 --pane w7:p1\``,
   )
   expect(out).not.toContain('with nothing at')
@@ -313,7 +319,7 @@ test('waiting on you speaks the same clause as the digest for every task it list
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   for (const task of run.tasks) {
-    expect(text).toContain(`${task.task_id} feat/x (#1) [${task.phase} `)
+    expect(text).toContain(`${task.task_id} feat/x (hp-1) [${task.phase} `)
     expect(text).toContain(`] — ${actionFor(run, task, HP)}`)
   }
 })
@@ -338,7 +344,7 @@ test('an idle worker sitting on uncommitted work is waiting on you, not thinking
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain(
-    '    t1 feat/x (#1) [implement 30m] — YOUR move: worker idle with 4 uncommitted paths ' +
+    '    t1 feat/x (hp-1) [implement 30m] — YOUR move: worker idle with 4 uncommitted paths ' +
     '(src/a.ts, src/b.ts, src/c.ts, …) — have it commit and push',
   )
 })
@@ -389,7 +395,7 @@ test('waiting on you is ordered by task id, as the digest footer is', () => {
   const run = mkRun()
   run.tasks = [
     mkTask({ task_id: 't2', phase: 'merge' }),
-    mkTask({ task_id: 't1', phase: 'close' }),
+    mkTask({ task_id: 't1', phase: 'merge' }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   const section = text.slice(text.indexOf('waiting on you:'))
@@ -407,7 +413,7 @@ test('an idle worker with no artifact is waiting on you, with its phase, age and
   const out = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const section = out.slice(out.indexOf('waiting on you:'))
   expect(section).toContain(
-    't1 feat/x (#1) [research 12m] — YOUR move: worker idle with nothing at ' +
+    't1 feat/x (hp-1) [research 12m] — YOUR move: worker idle with nothing at ' +
     '/wt/docs/research/r.md (its branch added no document to adopt)',
   )
 })
@@ -460,7 +466,7 @@ test('status lists a worktree with no agent detected in it as waiting on you —
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain('waiting on you:')
-  expect(text).toContain('t1 feat/x (#1) [research 12m] — YOUR move: no agent detected in its worktree')
+  expect(text).toContain('t1 feat/x (hp-1) [research 12m] — YOUR move: no agent detected in its worktree')
   expect(text).toContain('herdr pane list --workspace w23')
   expect(text).toContain(`\`${HP} dispatch --task t1 --pane <pane>\``)
 })
@@ -484,7 +490,7 @@ test('a task rewound into a worker row with no worktree is waiting on you at onc
   run.history.push({ at: now, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' })
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain('waiting on you:')
-  expect(text).toContain('t1 feat/x (#1) [research 0m] — YOUR move: no worktree and no agent')
+  expect(text).toContain('t1 feat/x (hp-1) [research 0m] — YOUR move: no worktree and no agent')
   expect(text).toContain("herdr worktree create --cwd '/r' --branch feat/x --base <commit>")
   expect(text).toContain('herdr agent start')
   expect(text).toContain(`\`${HP} dispatch --task t1 --pane <root pane>\``)
@@ -650,7 +656,7 @@ test('a worker whose phase prompt is held by stuck input is not called idle with
   })
   expect(text).not.toContain('with nothing at')
   expect(text).toContain(
-    't1 feat/x (#1) [spec 1m] — YOUR move: its spec prompt is held by text in the input box of w3:p1',
+    't1 feat/x (hp-1) [spec 1m] — YOUR move: its spec prompt is held by text in the input box of w3:p1',
   )
   expect(text).toContain('⚠ stuck input in w3:p1')
 })
@@ -688,7 +694,7 @@ test('the status task line carries the tier right after the phase bracket', () =
   const run = mkRun()
   run.tasks = [mkTask({ task_id: 't2', phase: 'implement', tier: 'light', phase_entered_at: now - 5 * 60_000 })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now))
-    .toContain('  t2 feat/x #1 [implement 5m] light working')
+    .toContain('  t2 feat/x hp-1 [implement 5m] light working')
 })
 
 test('visitedPhases lists every phase entered, drops repeats and marks rewinds', () => {
@@ -743,4 +749,32 @@ test('hpipe show on a task from before tiers reads heavy, with no log, and nothi
   expect(text).toContain('tier:       heavy')
   expect(text).toContain('tier log:   none')
   expect(text).toContain('visited:    none')
+})
+
+test('a tools problem is printed right under the supervisor line, and nothing when there is none', () => {
+  const line = 'tools: bv did not run (ENOENT) — brew install dicklesworthstone/tap/bv'
+  const text = formatStatus([], { state: 'live', pid: 1 }, 'personal', HP, new Set(), Date.now(), {}, line)
+  expect(text.split('\n').slice(0, 3)).toEqual(['session: personal', 'supervisor: live (pid 1)', line])
+  expect(formatStatus([], { state: 'live', pid: 1 }, 'personal', HP)).not.toContain('tools:')
+})
+
+test('a bead out of sync for five consecutive failed calls is flagged with bd\'s last error', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'implement', bead_sync: { failures: 7, streak: 5, last_error: 'Error: database is locked', last_ok_at_ms: null } })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP))
+    .toContain('⚠ t1 bead hp-1 is out of sync after 5 consecutive failed Beads calls: Error: database is locked')
+})
+
+test('a decision put to the human is listed under waiting on you with the command that records the ruling', () => {
+  const now = 10_000_000
+  const run = mkRun()
+  run.tasks = [mkTask({ phase: 'blocked-on-decision', decision_from: 'plan', decisions: [{
+    id: 'd1', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
+    answer: null, answered_by: null, answered_at: null, prompted_at: 1,
+    escalated_at: now - 5 * 60_000, orchestrator_recommendation: 'r2',
+  }] })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('waiting on you:')
+  expect(text).toContain(`decision d1 was put to the human 5m ago — record their ruling with ` +
+    `\`${HP} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
 })

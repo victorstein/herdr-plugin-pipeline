@@ -1,8 +1,8 @@
 # Intake — {{title}} ({{run_id}})
 
-You are the orchestrator. Intake is yours: understand the problem, cut it into tasks, file one issue
-per task, and register them. You do **not** write specs or plans — each worker researches, specs and
-plans its own issue.
+You are the orchestrator. Intake is yours: understand the problem, cut it into tasks, back each task
+with one bead, and register them. You do **not** write specs or plans — each worker researches, specs
+and plans its own bead.
 
 1. **Understand the problem first.** If the user handed you a report, verify it against the code
    before you decompose: the files that actually own the behaviour, what already exists, what is
@@ -13,42 +13,54 @@ plans its own issue.
    first lands) or with `--depends-on` when the second genuinely needs the first's result. App tasks
    depend on the `core` task that builds what they consume.
 
-3. **Back every task with one GitHub issue, no exceptions** — file it with `gh issue create`, or let
-   `{{hpipe}} task --title … --body-file …` file it in step 4. The issue body is the worker's entire
-   brief: the goal, the acceptance criteria, the constraints, and `file:line` pointers to where the
-   work belongs. The worker reads the issue, never your message. Write it once, properly; it is
-   durable and reviewable long after this run is gone.
+3. **Back every task with one bead, no exceptions.** Start from the backlog: `{{hpipe}} next` shows
+   bv's top 10 recommendations among this repo's open beads that no live task holds — first the
+   picks claimable now (capped by `--limit`, default 5), then one line per later dependency layer,
+   each waiting on the one before it. Adopt one that fits with `--bead <id>`. A bead it omits may
+   still exist, so before filing what looks like known work, raise `--limit`, read the bead with
+   `{{hpipe}} bead show <id>` when you know its id, or ask the user. Adoption refuses a bead that is closed, assigned, held by
+   a live task in any session, blocked by an open bead, or the parent of open child beads. A new
+   bead's body is the worker's entire brief: the goal, the constraints, and `file:line` pointers to
+   where the work belongs, with the acceptance criteria in a file of their own. The brief is captured
+   when the task is registered — the worker reads that snapshot, never your message and never a later
+   edit to the bead. Never run `bd` or `bv` yourself.
 
 4. **Register each one:**
 
-       {{hpipe}} task --branch <branch> --issue <n> --surface <surface> \
+       {{hpipe}} task --branch <branch> --bead <id> --surface <surface> \
                   [--tier light|standard|heavy] \
                   [--depends-on <id,id>] [--files <prefix,prefix>] \
-                  [--notes "<batch context that does not belong in a public issue>"]
+                  [--notes "<batch context that does not belong in the bead>"]
 
-   Not filed yet? `--title "<title>" --body-file <path>` in place of `--issue <n>` files the issue
-   with that body and registers it in one step, and prints `issue: #<n> (filed)`. The body file is
-   the same brief step 3 asks for — write it just as carefully.
+   Not in the backlog yet? `--title "<title>" --body-file <path> [--acceptance-file <path>]` in
+   place of `--bead <id>` files the bead with that brief and registers it in one step, and prints
+   `bead: <id> (filed)`. The body file is the same brief step 3 asks for — write it just as carefully.
+
+   The picks `{{hpipe}} next` lists under `now` can run in parallel, but bv and Beads know nothing
+   about files: two tasks that touch the same files still serialize with `--files`. A bead in a
+   later layer is blocked by an open bead and cannot be adopted until that bead closes: adopt the
+   blocker in this batch and leave the rest for a later one.
 
    `--tier` decides which reviews the task runs. `light` skips `plan-review` and gets one combined
    PR review; `standard` keeps `plan-review` and the combined PR review; `heavy` runs every review,
-   with the PR reviewed in two separate stages. Pick it from the issue:
+   with the PR reviewed in two separate stages. Pick it from the brief:
 
-   - **light** — one surface, a handful of files, and the issue already pins down the exact change:
+   - **light** — one surface, a handful of files, and the brief already pins down the exact change:
      no API, contract or schema decision left open.
    - **heavy** — changes a contract another surface consumes, migrates data, touches security or
      auth, concurrency, or state-machine code; or you are not sure.
    - **standard** — everything else.
 
    When unsure, pick the higher tier: under-review is the costly mistake. With no `--tier` a task is
-   `standard`, and an issue labelled `pipeline:tier-<name>` overrides `--tier`. Never lower a tier
+   `standard`, and a bead labelled `pipeline:tier-<name>` overrides `--tier`. Never lower a tier
    once the task is running; a worker or a decision that finds it too low raises it.
 
    `--surface` routes the worker to `.claude/agents/<surface>-dev.md` and is rejected if no such file
    exists. `--files` and `--depends-on` are **comma-separated**: a value containing whitespace is
    rejected, and repeating either flag adds to it rather than replacing it. `{{hpipe}} task` prints the
-   task id, then a `tier:` line naming the tier it recorded and why, then a `files:` line echoing
-   exactly what it recorded (or `files: none`) — check both say what you meant — and then either the
+   task id, then a `tier:` line naming the tier it recorded and why, then `bead: <id> (filed)` when it
+   filed one, then a `files:` line echoing exactly what it recorded (or `files: none`) — check `tier:`
+   and `files:` say what you meant — then a `bootstrap:` line, and then either the
    worker brief to dispatch or `queued: waiting on …`, which is correct, and you will be told when
    that task is ready. A brief to dispatch comes with a `base: <commit> (…)` line: cut that task's
    worktree from that commit (`herdr worktree create … --base <commit>`), never from your local

@@ -399,7 +399,7 @@ export function taskOutcomesFor(run: Run): string {
   const unlanded = run.tasks.filter((t) => t.phase !== 'done')
   if (unlanded.length === 0) return `Every task in **${run.title}** is merged and torn down.`
   const lines = unlanded.map((t) =>
-    `- \`${t.task_id}\` (#${t.issue}, \`${t.branch}\`) stopped at \`${t.phase}\`` +
+    `- \`${t.task_id}\` (${t.bead}, \`${t.branch}\`) stopped at \`${t.phase}\`` +
     ` — ${t.phase === 'blocked-on-failure' ? neverStarted(run, t) : UNLANDED_MEANING[t.phase] ?? 'it did not finish'}`)
   return [
     `Not every task in **${run.title}** landed. Every task is merged and torn down except:`,
@@ -462,7 +462,7 @@ function runDoneNotice(run: Run): string {
   const why = run.history.findLast((h) => h.task_id === undefined && h.to === 'done')?.why
   return [
     `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
-    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (#${t.issue}): ${t.phase}`),
+    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}`),
   ].join('\n')
 }
 

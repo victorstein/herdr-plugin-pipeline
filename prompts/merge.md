@@ -1,4 +1,4 @@
-# Ready to merge — {{branch}} (#{{issue}}), PR #{{pr}}
+# Ready to merge — {{branch}} ({{bead}}), PR #{{pr}}
 
 {{review_count}} and CI is green on PR #{{pr}}.
 

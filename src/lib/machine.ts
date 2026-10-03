@@ -164,8 +164,6 @@ export interface TaskSignals {
   merged: boolean
   mergedAtMs?: number
   mergeCommit?: string
-  issueClosed: boolean
-  closedAtMs?: number
   filesClear: boolean
   ciBucket: CiBucket | null
   maxPasses: number
@@ -233,21 +231,15 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       if (!s.merged || s.mergedAtMs === undefined) return null
       task.merged_at_ms = s.mergedAtMs
       task.merge_commit = s.mergeCommit ?? null
-      task.issue_closed_at_entry = s.issueClosed
       return enterTaskPhase(run, task, 'close', 'PR merged')
     }
 
+    // An edge although it reads a field: only a reconciler pass that saw the bead
+    // closed after this merge was recorded sets it, and every rewind that clears
+    // the merge clears it too.
     case 'close': {
-      if (!s.issueClosed) return null
-      // The edge is "closed by the merge that should have caused it", NOT "closed
-      // after this phase began". GitHub auto-closes on merge, so closedAt always
-      // predates phase entry and the v4 comparison was unsatisfiable.
-      const closedByMerge =
-        task.merged_at_ms !== null &&
-        s.closedAtMs !== undefined &&
-        s.closedAtMs >= task.merged_at_ms
-      if (!task.issue_closed_at_entry && !closedByMerge) return null
-      return enterTaskPhase(run, task, 'teardown', `issue #${task.issue} closed`)
+      if (task.bead_closed_at_ms === null) return null
+      return enterTaskPhase(run, task, 'teardown', `bead ${task.bead} closed`)
     }
 
     case 'blocked-on-files': {

@@ -1,4 +1,4 @@
-# `pr-review-intent` — stage 1 on PR #{{pr}}, {{branch}} (#{{issue}}), pass {{pass}}
+# `pr-review-intent` — stage 1 on PR #{{pr}}, {{branch}} ({{bead}}), pass {{pass}}
 
 PR #{{pr}} is open. Stage 1 asks one question: does it do what was asked, completely, and nothing it
 was not asked to do? Code quality is stage 2 and is not this reviewer's concern.
@@ -24,10 +24,10 @@ with no remediation done.
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) for **intent** against two documents: issue
-#{{issue}} (`gh issue view {{issue}}`) and the spec the PR itself carries at `{{spec_path}}`.
+Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) for **intent** against two documents:
+`{{bead}}`'s brief (`{{hpipe}} brief --task {{task_id}}`) and the spec the PR itself carries at `{{spec_path}}`.
 
-Check: every acceptance criterion in the issue met; every spec requirement implemented, not just the
+Check: every acceptance criterion in the brief met; every spec requirement implemented, not just the
 easy half; no silent scope reduction; no scope expansion beyond what was asked; tests that exercise
 the behaviour rather than restating the implementation; and no divergence from `{{plan_path}}` that
 the PR does not explain. {{plan_review_note}}

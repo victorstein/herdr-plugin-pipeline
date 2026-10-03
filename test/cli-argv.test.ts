@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { makeFakeBin } from './helpers/fake-bin'
+import { makeFakeBin, makeFakeBinSync } from './helpers/fake-bin'
 import { cleanupFixtures, git, tempDir } from './helpers/git-worktree'
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts')
@@ -12,24 +12,43 @@ afterEach(cleanupFixtures)
 interface Fixture { repo: string; stateDir: string; env: Record<string, string> }
 
 /**
- * Registering with `--issue` reads the issue's labels through `gh`, and this bin
- * stands in so the suite never shells out to the real `gh` on the machine
- * running it. It answers only the label read, with no labels, so any other gh
- * call a change adds fails loudly; a test exercising the label read replaces
- * `f.env.GH_BIN` with its own fake bin.
+ * Nothing in the CLI calls gh any more; this bin stands in so a change that
+ * starts calling gh never reaches the real `gh` on the machine running the suite.
+ * It answers nothing, so such a call fails loudly.
  */
 function defaultGhBin(): string {
   const dir = tempDir('hpipe-argv-gh-default-')
   const path = join(dir, 'fake-gh')
   writeFileSync(path, `#!/usr/bin/env bun
-const argv = process.argv.slice(2).join(' ')
-if (/^issue view \\d+ --json labels$/.test(argv)) { console.log(JSON.stringify({ labels: [] })); process.exit(0) }
-console.error('unstubbed: ' + argv)
+console.error('unstubbed: ' + process.argv.slice(2).join(' '))
 process.exit(1)
 `)
   chmodSync(path, 0o755)
   return path
 }
+
+const ARGV_BEAD = {
+  title: 'Argv fixture bead', description: 'Exercise the argv path.', acceptance_criteria: 'It registers.',
+  status: 'open', labels: [] as string[], dependencies: [], dependents: [], comments: [],
+}
+
+/**
+ * `hpipe start` checks bd and bv and sets up a Beads store, so the suite stands
+ * in for both rather than touching the machine's own. Any bd call a change adds
+ * that is not stubbed here fails loudly; a test exercising more of bd replaces
+ * `f.env.BD_BIN` with its own fake bin.
+ */
+const BD_RESPONSES: Record<string, unknown> = {
+  version: 'bd version 1.3.1 (Homebrew)\n',
+  '--json --actor hpipe init': {},
+  '--json --actor hpipe config set issue_id_mode counter': {},
+  '--json --actor hpipe export': {},
+  '--json --actor hpipe show argv-1': [{ id: 'argv-1', ...ARGV_BEAD }],
+  '--json --actor hpipe show argv-2': [{ id: 'argv-2', ...ARGV_BEAD, labels: ['pipeline:tier-light'] }],
+  '--json --actor hpipe create': { id: 'argv-77' },
+  '--json --actor hpipe update': {},
+}
+const BV_RESPONSES: Record<string, unknown> = { '--version': 'bv v0.25.2\n' }
 
 /**
  * A real git repo and a scratch ledger. `cmdTask` needs `git rev-parse
@@ -52,6 +71,8 @@ function fixture(): Fixture {
     HERDR_SESSION: 'argv-fixture',
     HERDR_SOCKET_PATH: '',
     GH_BIN: defaultGhBin(),
+    BD_BIN: makeFakeBinSync(tempDir('hpipe-argv-bd-'), BD_RESPONSES),
+    BV_BIN: makeFakeBinSync(tempDir('hpipe-argv-bv-'), BV_RESPONSES),
   }
   return { repo, stateDir, env }
 }
@@ -69,7 +90,7 @@ function started(): Fixture {
   return f
 }
 
-const TASK = ['task', '--branch', 'smoke/one', '--issue', '1', '--surface', 'core']
+const TASK = ['task', '--branch', 'smoke/one', '--bead', 'argv-1', '--surface', 'core']
 
 test('a comma-separated --files reaches the ledger as separate entries', () => {
   const f = started()
@@ -101,7 +122,7 @@ test('a space-separated --files is rejected and registers nothing', () => {
 
 test('a valueless --files swallows the next flag and is rejected, though --surface was well-formed', () => {
   const f = started()
-  const r = hpipe(['task', '--branch', 'smoke/one', '--issue', '1', '--files', '--surface', 'core'], f)
+  const r = hpipe(['task', '--branch', 'smoke/one', '--bead', 'argv-1', '--files', '--surface', 'core'], f)
 
   expect(r.code).toBe(1)
   expect(r.out).toContain('--files got a flag where a path prefix belongs: "--surface"')
@@ -157,7 +178,7 @@ test('a resolving command outside a git repo names --run, and --run works from t
     cwd: outside, env: f.env, stdout: 'pipe', stderr: 'pipe',
   })
   expect(named.exitCode).toBe(0)
-  expect(named.stdout.toString()).toContain('issue #1')
+  expect(named.stdout.toString()).toContain('— argv-1')
 })
 
 test('decide from another repo does not reach the first repo run', () => {
@@ -171,7 +192,7 @@ test('decide from another repo does not reach the first repo run', () => {
   git(['init', '-q'], b.repo)
   mkdirSync(join(b.repo, '.claude', 'agents'), { recursive: true })
   writeFileSync(join(b.repo, '.claude', 'agents', 'core-dev.md'), '# core-dev\n')
-  expect(hpipe(['start', 'repo b'], b).code).toBe(0)
+  expect(hpipe(['start', 'repo b', '--prefix', 'repob'], b).code).toBe(0)
 
   const r = hpipe(['decide', '--task', 't1', '--question', 'q', '--recommend', 'r'], b)
   expect(r.code).toBe(1)
@@ -201,7 +222,8 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
 
 const SUBCOMMANDS = [
   'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
-  'decide', 'answer', 'tier', 'resume', 'abort', 'forget',
+  'decide', 'answer', 'escalate', 'tier', 'resume', 'abort', 'forget', 'close', 'bead', 'next',
+  'discover', 'discoveries',
 ]
 
 test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
@@ -283,7 +305,7 @@ test('a help flag in an identifier slot is a help request and registers nothing'
   // Round 2 of #64: `task --branch -h` registered a real task on branch `-h`.
   const f = started()
   for (const helpFlag of ['-h', '--help']) {
-    const r = hpipe(['task', '--branch', helpFlag, '--issue', '1', '--surface', 'core'], f)
+    const r = hpipe(['task', '--branch', helpFlag, '--bead', 'argv-1', '--surface', 'core'], f)
     expect(r.code).toBe(0)
     expect(r.out).toContain('usage: hpipe task')
   }
@@ -293,8 +315,8 @@ test('a help flag in an identifier slot is a help request and registers nothing'
 test('an identifier flag whose value looks like a flag is a usage error', () => {
   const f = started()
   for (const args of [
-    ['task', '--branch', '-x', '--issue', '1', '--surface', 'core'],
-    ['task', '--branch', '--issue', '1', '--surface', 'core'],
+    ['task', '--branch', '-x', '--bead', 'argv-1', '--surface', 'core'],
+    ['task', '--branch', '--bead', 'argv-1', '--surface', 'core'],
   ]) {
     const r = hpipe(args, f)
     expect(r.code, args.join(' ')).toBe(1)
@@ -303,35 +325,34 @@ test('an identifier flag whose value looks like a flag is a usage error', () => 
   expect(registeredTasks(f)).toEqual([])
 })
 
-test('task --title --body-file files the issue through gh and registers it', async () => {
+const bdCalls = (f: Fixture): string => {
+  const log = join(f.env.BD_BIN!.replace(/fake-bin$/, ''), 'calls.log')
+  return existsSync(log) ? readFileSync(log, 'utf8') : ''
+}
+
+test('task --title --body-file files the bead through bd and registers it with its brief', () => {
   const f = started()
-  const binDir = tempDir('hpipe-argv-gh-')
-  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue create': 'https://github.com/o/r/issues/77\n' })
   writeFileSync(join(f.repo, 'brief.md'), 'Relabel the settings tile.\n')
 
   const r = hpipe(['task', '--branch', 'feat/tile', '--title', '-relabel the tile',
     '--body-file', 'brief.md', '--surface', 'core'], f)
 
   expect(r.code).toBe(0)
-  expect(r.out).toContain('issue: #77 (filed)')
-  expect(r.out).toContain('# feat/tile — issue #77')
-  expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain(
-    `issue create --title -relabel the tile --body-file ${join(realpathSync(f.repo), 'brief.md')}`,
-  )
-  expect(registeredTasks(f)).toMatchObject([{ issue: 77 }])
+  expect(r.out).toContain('bead: argv-77 (filed)')
+  expect(r.out).toContain('# feat/tile — argv-77')
+  expect(bdCalls(f)).toContain('--json --actor hpipe create --title -relabel the tile --body-file ')
+  expect(registeredTasks(f)).toMatchObject([{ bead: 'argv-77', brief: { description: 'Relabel the settings tile.\n' } }])
 })
 
-test('task --title with its value missing does not file an issue named after the next flag', async () => {
+test('task --title with its value missing does not file a bead named after the next flag', () => {
   const f = started()
-  const binDir = tempDir('hpipe-argv-gh-')
-  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue create': 'https://github.com/o/r/issues/78\n' })
   writeFileSync(join(f.repo, 'brief.md'), 'Relabel the settings tile.\n')
 
   const r = hpipe(['task', '--branch', 'feat/t', '--title', '--body-file', 'brief.md', '--surface', 'core'], f)
 
   expect(r.code).toBe(1)
   expect(r.out).toContain('the value after --title is missing')
-  expect(existsSync(join(binDir, 'calls.log'))).toBe(false)
+  expect(bdCalls(f)).not.toContain(' create ')
   expect(registeredTasks(f)).toEqual([])
 })
 
@@ -351,8 +372,9 @@ test('dispatch --task submits the brief through herdr agent prompt and waits for
   expect(r.code).toBe(0)
   expect(r.out).toContain('brief for t1 delivered to w1-2')
   const calls = await Bun.file(log).text()
-  expect(calls).toStartWith('agent prompt w1-2 # smoke/one — issue #1')
+  expect(calls).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
   expect(calls).toContain('--wait --until working --until blocked --timeout')
+  expect(bdCalls(f)).toContain('--json --actor hpipe update argv-1 --claim')
 })
 
 test('dispatch --task carries herdr\'s own error code through a real failure envelope', async () => {
@@ -387,22 +409,17 @@ test('dispatch needs exactly one of --task and --done', async () => {
   expect(run.intake_closed).toBe(false)
 })
 
-test('task --tier reaches registration, and a pipeline:tier label read through gh overrides it', async () => {
+test('task --tier reaches registration, and a pipeline:tier label read through bd overrides it', () => {
   const f = started()
-  const binDir = tempDir('hpipe-argv-gh-')
-  f.env.GH_BIN = await makeFakeBin(binDir, {
-    'issue view 1': { labels: [{ name: 'pipeline:tier-light' }] },
-    'issue view 2': { labels: [] },
-  })
 
-  const labelled = hpipe([...TASK, '--tier', 'heavy'], f)
+  const labelled = hpipe(['task', '--branch', 'smoke/two', '--bead', 'argv-2', '--surface', 'core', '--tier', 'heavy'], f)
   expect(labelled.code).toBe(0)
   expect(labelled.out).toContain('tier: light (label pipeline:tier-light; --tier said heavy)')
 
-  const flagged = hpipe(['task', '--branch', 'smoke/two', '--issue', '2', '--surface', 'core', '--tier', 'heavy'], f)
+  const flagged = hpipe([...TASK, '--tier', 'heavy'], f)
   expect(flagged.code).toBe(0)
   expect(flagged.out).toContain('tier: heavy (--tier)')
-  expect(await Bun.file(join(binDir, 'calls.log')).text()).toContain('issue view 1 --json labels')
+  expect(bdCalls(f)).toContain('--json --actor hpipe show argv-2 --include-comments --include-dependents')
 })
 
 test('task records the caller pane from HERDR_PANE_ID in its first tier change', () => {
@@ -422,8 +439,6 @@ test('task --tier with its value missing is a usage error', () => {
 test('tier reads its positional tier and --why, and the caller pane from HERDR_PANE_ID', async () => {
   const f = fixture()
   f.env.HERDR_PANE_ID = 'w1:p1'
-  const binDir = tempDir('hpipe-argv-gh-')
-  f.env.GH_BIN = await makeFakeBin(binDir, { 'issue view': { labels: [] } })
   expect(hpipe(['start', 'argv fixture'], f).code).toBe(0)
   expect(hpipe([...TASK], f).out).toContain('tier: standard (default)')
 
@@ -435,4 +450,45 @@ test('tier reads its positional tier and --why, and the caller pane from HERDR_P
   const lowered = hpipe(['tier', '--task', 't1', 'light', '--why', 'smaller than it looked'], f)
   expect(lowered.code).toBe(1)
   expect(lowered.out).toContain('lowering a tier needs a human; run this from your own pane')
+})
+
+test('start sets up a Beads store once, and --prefix names its prefix without joining the title', () => {
+  const f = fixture()
+  const r = hpipe(['start', 'argv', 'fixture', '--prefix', 'argv'], f)
+  expect(r.code).toBe(0)
+  expect(r.out).toContain('beads: created')
+  expect(r.out).toContain('with prefix argv')
+
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  const run = JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8')) as { title: string }
+  expect(run.title).toBe('argv fixture')
+  const slugs = readdirSync(join(f.stateDir, 'beads'))
+  expect(slugs).toHaveLength(1)
+  expect(JSON.parse(readFileSync(join(f.stateDir, 'beads', slugs[0]!, 'project.json'), 'utf8')))
+    .toMatchObject({ prefix: 'argv' })
+})
+
+test('start refuses on a bd older than 1.3.1 and opens no run', () => {
+  const f = fixture()
+  f.env.BD_BIN = makeFakeBinSync(tempDir('hpipe-argv-oldbd-'), { version: 'bd version 1.0.4 (Homebrew)\n' })
+  const r = hpipe(['start', 'argv fixture'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('bd 1.0.4 is older than 1.3.1')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
+})
+
+test('start with a --prefix that has no value refuses and opens no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', 'argv fixture', '--prefix'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--prefix needs a value')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
+})
+
+test('start with a flag where the --prefix value belongs refuses and opens no run', () => {
+  const f = fixture()
+  const r = hpipe(['start', 't', '--prefix', '--x'], f)
+  expect(r.code).toBe(1)
+  expect(r.out).toContain('--prefix needs a value')
+  expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
 })
