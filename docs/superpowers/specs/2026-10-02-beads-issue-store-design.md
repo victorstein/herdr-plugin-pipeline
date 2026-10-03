@@ -429,7 +429,9 @@ task's `pr`) instead of `gh pr list --search "<issues>"`.
 `herdr-plugin.toml:81`).
 
 **Open.** `herdr plugin pane open --plugin <id> --entrypoint board --placement tab --no-focus
---workspace <pipeline workspace id> --cwd $STATE/beads/<slug> --env HPIPE_BEADS_SLUG=<slug>`.
+--workspace <pipeline workspace id> --env HPIPE_BEADS_SLUG=<slug>` — no `--cwd`: the pane command runs
+`src/board.ts` relative to the plugin root (a store cwd broke it live, round 6), and `board.ts` gives bv the
+store as its cwd itself.
 The open's output carries the new pane id, which the supervisor records at once. `src/board.ts`
 records `{slug: {pane_id, shell_pid}}` in `$STATE/boards.<session>.json`, then renames its own pane
 (`HERDR_PANE_ID`) to `Board: <basename> <hash6>` — record first, so a renamed board is always

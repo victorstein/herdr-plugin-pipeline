@@ -1,4 +1,4 @@
-import { beadsHome, beadsSlug } from '../lib/beads-project'
+import { beadsSlug } from '../lib/beads-project'
 import {
   BOARD_OPEN_GRACE_MS, type BoardRecord, isRenamedBoardLabel, readBoards, recordedBoardPanes, sameBoard,
   updateBoards,
@@ -35,8 +35,10 @@ export async function openBoard(
   })
   if (!claimed) return false
 
+  // No --cwd: the pane command runs `src/board.ts` relative to the plugin root, and
+  // board.ts gives bv the store as its own cwd.
   const opened = await deps.herdr.pluginPaneOpen(deps.pluginId, 'board', deps.workspaceId, {
-    cwd: beadsHome(deps.stateDir, slug), env: { HPIPE_BEADS_SLUG: slug },
+    env: { HPIPE_BEADS_SLUG: slug },
   })
   if (!opened.ok) {
     console.error(`[pipeline] could not open the board for ${slug}: ${opened.code} ${opened.message}`)

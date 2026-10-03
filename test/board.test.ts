@@ -56,7 +56,7 @@ function deps(herdr: BoardDeps['herdr'], over: Partial<BoardDeps> = {}): BoardDe
   }
 }
 
-const OPEN = (): string => `open stein.pipeline board w9 ${beadsHome(dir, SLUG)} {"HPIPE_BEADS_SLUG":"${SLUG}"}`
+const OPEN = (): string => `open stein.pipeline board w9 undefined {"HPIPE_BEADS_SLUG":"${SLUG}"}`
 const SUPERVISOR_PANE: PaneInfo = { pane_id: 'w9:p1', label: 'Pipeline supervisor' }
 const BOARD_PANE: PaneInfo = { pane_id: 'w9:p4', label: boardLabel(SLUG) }
 
