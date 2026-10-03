@@ -19,7 +19,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
 import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
-import { SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
+import { type LockContention, SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { syncBoards } from './boards'
 import {
   deliveriesFor, evaluateRun, type PendingPrompt, promptForRunPhase,
@@ -154,7 +154,8 @@ async function main(): Promise<void> {
   }
 
   const session = sessionKey()
-  const beadLockNotices = new Map<string, string>()
+  const beadPassNotices = new Map<string, string>()
+  const beadLockContention = new Map<string, LockContention>()
   const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
   const claimed = await claimSupervisor(stateDir, herdr, {
@@ -457,7 +458,8 @@ async function main(): Promise<void> {
           claimants: () => beadClaimants(stateDir),
           persist: async (run, effect) => { await saveOrReapply(stateDir, run, [effect]) },
           log: (message) => console.error(`[pipeline] ${message}`),
-          lockNotices: beadLockNotices,
+          passNotices: beadPassNotices,
+          lockContention: beadLockContention,
           slugCursor: beadSyncCursor,
         })],
         ['board upkeep', async () => {

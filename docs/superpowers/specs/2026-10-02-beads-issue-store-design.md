@@ -328,7 +328,9 @@ shows no comment carrying it.
 before each call, and resumes next tick. A lock it cannot take ends only that repo's share of the
 pass; the next repo still runs. Each pass starts one repo later than the last, so a repo whose
 calls use up the budget every tick cannot starve the others. The supervisor's `bd` calls time out
-after 5 s, not the CLI's 30 s, so one hung `bd` cannot hold the serial tick for long. The lock is
+after 15 s, not the CLI's 30 s, so one hung `bd` cannot hold the serial tick for long; 15 s rather
+than less because a call that takes under half a second alone can spend seconds in bd's own backoff
+on a Dolt lock another `bd` holds, and 5 s killed one such call live. The lock is
 per call (§2), so a CLI command waits at most one call. One export per repo closes the pass. A
 registration burst therefore spreads over a few ticks instead of stalling one.
 
@@ -468,8 +470,8 @@ is one keypress away (`b`).
 | a reconciler call fails | `bead_sync.failures`/`streak`/`last_error` recorded; next task proceeds; retried next tick; shown in `status` at 5 in a row; blocks only the close row |
 | close keeps failing | stall clause at 5 consecutive failures → `hpipe close --task tN [--force]` with bd's error verbatim |
 | CLI cannot get the lock in 10 s | "Beads is busy, retry" (at most one call ahead of it) |
-| supervisor cannot get the lock | ends this tick's pass; resumes next tick |
-| `bd` hangs | killed at 30 s → `BdFailure{timeout}` |
+| supervisor cannot get the lock | ends this tick's pass; resumes next tick; logged only once held 30 s without a pass that took it, then once more when it frees |
+| `bd` hangs | killed at 30 s (15 s for the supervisor) → `BdFailure{timeout}` |
 | an outside process holds Dolt (a human's `bd`) | bd fails fast "database is locked" → `BdFailure`, handled as above; the README tells humans to use `hpipe bead show` |
 | export fails | `export.dirty`; re-export on next hold; board and reconciler view lag, then catch up |
 | `bv` missing | board tab shows the install hint; `hpipe next` errors with it; pipeline unaffected |

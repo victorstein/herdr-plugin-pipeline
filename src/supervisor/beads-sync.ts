@@ -8,9 +8,22 @@ import type { Run, Task } from '../lib/types'
 export const SYNC_BUDGET_MS = 2_000
 /**
  * The budget is only checked between calls, so a hung bd would hold the serial
- * tick for its whole timeout; the CLI's 30 s is too long for that.
+ * tick for its whole timeout; the CLI's 30 s is too long for that. A call that
+ * takes ~0.4 s alone can still spend several seconds in bd's own backoff on a
+ * Dolt lock another bd process holds; live, 5 s killed one such call.
  */
-export const SYNC_BD_TIMEOUT_MS = 5_000
+export const SYNC_BD_TIMEOUT_MS = 15_000
+/**
+ * Two sessions' supervisors sharing one store take each other's lock routinely
+ * and for moments at a time; only a lock held this long is worth a line.
+ */
+export const LOCK_CONTENTION_NOTICE_MS = 30_000
+
+/** One run of passes on a slug that each ended on a lock not taken. */
+export interface LockContention {
+  since: number
+  logged: boolean
+}
 
 export type BeadCall =
   | { kind: 'reopen' }
@@ -34,10 +47,12 @@ export interface SyncDeps {
   persist: (run: Run, effect: RunEffect) => Promise<void>
   log: (message: string) => void
   /**
-   * Per slug, the last pass-level notice logged (a lock not taken, an export that
-   * could not be refreshed), kept across passes so a lasting problem is reported once.
+   * Per slug, the last pass-level notice logged (an export that could not be
+   * refreshed), kept across passes so a lasting problem is reported once.
    */
-  lockNotices: Map<string, string>
+  passNotices: Map<string, string>
+  /** Per slug, kept across passes: a held lock is reported only once it has lasted. */
+  lockContention: Map<string, LockContention>
   /**
    * Which repo the next pass starts at. It moves on every pass, so a repo whose
    * calls use up the budget each tick cannot starve the repos after it.
@@ -189,11 +204,25 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
   const drivers = beadDrivers(runs, elsewhere)
 
   const noticeOnce = (slug: string, notice: string): void => {
-    if (deps.lockNotices.get(slug) !== notice) deps.log(`beads ${slug}: ${notice}`)
-    deps.lockNotices.set(slug, notice)
+    if (deps.passNotices.get(slug) !== notice) deps.log(`beads ${slug}: ${notice}`)
+    deps.passNotices.set(slug, notice)
   }
-  const lockNotTakenAt = (slug: string, where: string, failure: BdFailure): void =>
-    noticeOnce(slug, `pass ended ${where}: ${failure.error}`)
+  const lockNotTakenAt = (slug: string, where: string, failure: BdFailure): void => {
+    const contention = deps.lockContention.get(slug) ?? { since: deps.now(), logged: false }
+    deps.lockContention.set(slug, contention)
+    const heldMs = deps.now() - contention.since
+    if (contention.logged || heldMs < LOCK_CONTENTION_NOTICE_MS) return
+    contention.logged = true
+    deps.log(`beads ${slug}: lock held for ${Math.round(heldMs / 1_000)}s; pass ended ${where}: ${failure.error}`)
+  }
+  const lockTaken = (slug: string): void => {
+    const contention = deps.lockContention.get(slug)
+    if (contention === undefined) return
+    deps.lockContention.delete(slug)
+    if (contention.logged) {
+      deps.log(`beads ${slug}: Beads lock free again after ${Math.round((deps.now() - contention.since) / 1_000)}s`)
+    }
+  }
 
   const failureOf = (slug: string, effects: RunEffect[]) => (task: Task, error: string): void => {
     effects.push(recordSyncFailure(task.task_id, error))
@@ -230,6 +259,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     if (overBudget()) break
     const slugRuns = bySlug.get(slug)!
     let stopped = false
+    let lockLost = false
     if (!(await deps.hasStore(slug))) {
       await failWaitingOnClose(slug, slugRuns, (run) =>
         `no Beads store for ${run.repo_key}; run the 'Set up Beads for this repo' action or \`hpipe start\` in that repo`)
@@ -243,12 +273,13 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
       if (lockNotTaken(refreshed)) {
         lockNotTakenAt(slug, 'before reading the export', refreshed)
       } else {
+        lockTaken(slug)
         noticeOnce(slug, `export is stale and could not be refreshed (${refreshed.error}); skipped this tick`)
         await failWaitingOnClose(slug, slugRuns, () => `the Beads export could not be refreshed: ${refreshed.error}`)
       }
       continue
     }
-    deps.lockNotices.delete(slug)
+    deps.passNotices.delete(slug)
     const actual = new Map(bd.readExport().map((b) => [b.id, b]))
     let wrote = false
 
@@ -291,6 +322,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         }
         if (failure !== null && lockNotTaken(failure)) {
           stopped = true
+          lockLost = true
           lockNotTakenAt(slug, `at ${task.task_id} (${task.bead})`, failure)
         } else if (failure !== null) fail(task, failure.error)
         else if (!stopped) effects.push(recordSyncOk(task.task_id, deps.now()))
@@ -298,6 +330,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
       }
       await save(slug, run, effects)
     }
+    if (!lockLost) lockTaken(slug)
 
     if (wrote) {
       const exported = await bd.exportNow()

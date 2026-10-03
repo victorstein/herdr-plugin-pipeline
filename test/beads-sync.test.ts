@@ -8,7 +8,9 @@ import { beadsSlug } from '../src/lib/beads-project'
 import { beadClaimants } from '../src/lib/held'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
-import { callsFor, closeReason, type SyncBd, type SyncDeps, syncBeads } from '../src/supervisor/beads-sync'
+import {
+  callsFor, closeReason, LOCK_CONTENTION_NOTICE_MS, type SyncBd, type SyncDeps, syncBeads,
+} from '../src/supervisor/beads-sync'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const mkTask = (over: Partial<Task> = {}): Task => ({
@@ -104,7 +106,8 @@ function deps(store: ReturnType<typeof fakeStore>, over: Partial<SyncDeps> = {})
     now: () => 1_000,
     budgetMs: 2_000,
     claimants: async () => [],
-    lockNotices: new Map(),
+    passNotices: new Map(),
+    lockContention: new Map(),
     slugCursor: { index: 0 },
     persist: async (run) => { persisted.push(structuredClone(run)) },
     log: () => {},
@@ -397,14 +400,92 @@ test('a lock taken mid-pass ends it without a failure', async () => {
   expect(task.bead_sync.failures).toBe(0)
 })
 
-test('a lock that stays held is logged once, not every tick', async () => {
-  const store = fakeStore([bead('hp-1')], () => ({ reason: 'busy', error: 'Beads is busy, retry' }))
+function contendedStore() {
+  let busy = true
+  const store = fakeStore([bead('hp-1')], () => (busy ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  return { store, free: () => { busy = false }, take: () => { busy = true } }
+}
+
+function loggingDeps(store: ReturnType<typeof fakeStore>) {
   const logged: string[] = []
-  const d = deps(store, { log: (message) => { logged.push(message) } })
+  let clock = 0
+  const d = deps(store, { log: (message) => { logged.push(message) }, now: () => clock })
+  return { d, logged, at: (ms: number) => { clock = ms } }
+}
+
+test('a lock held by another session only briefly logs nothing', async () => {
+  const { store, free } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  for (const ms of [0, 1_000, 10_000, LOCK_CONTENTION_NOTICE_MS - 1]) {
+    at(ms)
+    await syncBeads([run], d)
+  }
+  free()
+  at(LOCK_CONTENTION_NOTICE_MS + 1_000)
+  await syncBeads([run], d)
+  expect(logged).toEqual([])
+})
+
+test('a lock that stays held past the threshold is logged once for the whole episode', async () => {
+  const { store } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  for (const ms of [0, 10_000, LOCK_CONTENTION_NOTICE_MS, LOCK_CONTENTION_NOTICE_MS + 1_000, 5 * LOCK_CONTENTION_NOTICE_MS]) {
+    at(ms)
+    await syncBeads([run], d)
+  }
+  expect(logged).toHaveLength(1)
+  expect(logged[0]).toContain('Beads is busy, retry')
+})
+
+test('the end of a logged episode is logged once, and the next episode starts its own threshold', async () => {
+  const { store, free, take } = contendedStore()
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  at(0)
+  await syncBeads([run], d)
+  at(LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  free()
+  at(LOCK_CONTENTION_NOTICE_MS + 1_000)
+  await syncBeads([run], d)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(2)
+  expect(logged[1]).toContain('Beads lock free again')
+
+  take()
+  at(LOCK_CONTENTION_NOTICE_MS + 2_000)
+  await syncBeads([run], d)
+  at(2 * LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(2)
+})
+
+test('a lock taken mid-pass counts toward the same episode as one taken before the export', async () => {
+  let failing: 'refreshExport' | 'update' = 'refreshExport'
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === failing ? { reason: 'busy', error: 'Beads is busy, retry' } : null))
+  const { d, logged, at } = loggingDeps(store)
+  const run = runWith(mkTask({ phase: 'implement' }))
+  at(0)
+  await syncBeads([run], d)
+  failing = 'update'
+  at(LOCK_CONTENTION_NOTICE_MS)
+  await syncBeads([run], d)
+  expect(logged).toHaveLength(1)
+})
+
+test('an export that stays stale is still logged at once, and once', async () => {
+  const store = fakeStore([bead('hp-1')], (_id, kind) =>
+    (kind === 'refreshExport' ? { reason: 'exit', error: 'disk full' } : null))
+  const { d, logged } = loggingDeps(store)
   const run = runWith(mkTask({ phase: 'implement' }))
   await syncBeads([run], d)
   await syncBeads([run], d)
-  expect(logged).toHaveLength(1)
+  expect(logged).toEqual([
+    `beads ${beadsSlug(run.repo_key)}: export is stale and could not be refreshed (disk full); skipped this tick`,
+  ])
 })
 
 test('any existing edge between the pair stands for the blocks edge, since bd refuses a second type', () => {
