@@ -25,6 +25,7 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
+import { REVIEW_EFFORT } from './lib/models'
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue } from './lib/outbox'
 import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
@@ -34,6 +35,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { effortSummary } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
 import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
@@ -554,7 +556,7 @@ async function registerTask(
   const bootLine = bootstrapLine(bootstrap)
 
   const header = [
-    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`,
+    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`, `effort: ${effortSummary(task)}`,
     ...(filed ? [`bead: ${bead} (filed)`] : []), filesLine, bootLine,
   ].join('\n')
 
@@ -1303,7 +1305,8 @@ async function tier(ctx: Ctx, input: {
     at: Date.now(), from, to, source: 'hpipe-tier', pane: input.callerPane, why: input.why,
   }]
   await saveRun(ctx.stateDir, run)
-  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}.`)
+  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}. ` +
+    `Its reviews now run at effort ${REVIEW_EFFORT[to]}; the worker keeps the effort it was started with.`)
 }
 export const cmdTier = retryingOnStale(tier)
 

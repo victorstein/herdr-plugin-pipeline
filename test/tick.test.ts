@@ -413,7 +413,7 @@ test('actionFor answers whose move it is, by rung', () => {
   // flagged; with no worktree yet the steps left start at the worktree.
   expect(at('research', { awaiting_brief: true, pane_id: null }))
     .toBe("dispatch under way — once the repo's bootstrap has run in its checkout, " +
-      '`herdr agent start <name> --kind claude --pane <root pane> -- --dangerously-skip-permissions`, ' +
+      '`herdr agent start <name> --kind claude --pane <root pane> -- --dangerously-skip-permissions --effort xhigh`, ' +
       'then `hp dispatch --task t1 --pane <root pane>`')
   const justDispatched = {
     awaiting_brief: true as const, pane_id: null, workspace_id: null, checkout_path: null, phase_entered_at: Date.now(),

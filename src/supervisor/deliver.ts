@@ -8,7 +8,7 @@ import { runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
-import { taskTiers } from '../lib/tier-prompt'
+import { branchReviewEffort, taskTiers } from '../lib/tier-prompt'
 import {
   artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
   verdictPrefix,
@@ -437,7 +437,7 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
       return text.replace(/\n{3,}/g, '\n\n')
     }
     case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', {
-      ...common, task_outcomes: taskOutcomesFor(run),
+      ...common, task_outcomes: taskOutcomesFor(run), review_effort: branchReviewEffort(run),
     })
     case 'escalated': {
       const from = run.escalated_from ?? run.phase

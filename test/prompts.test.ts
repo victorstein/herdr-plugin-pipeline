@@ -111,7 +111,7 @@ test('the dispatch prompt shows the same agent start line both dispatch paths pr
   const base = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
   const printed = dispatchSequence(run, task, base, { kind: 'none' }, 'hp')
   const startLine = printed.split('\n').find((line) => line.includes('herdr agent start'))!.trim()
-  expect(text).toContain(startLine.replace('<.result.root_pane.pane_id>', '<root_pane_id>'))
+  expect(text).toContain(startLine.replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort xhigh', '--effort <effort>'))
 })
 
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
@@ -367,6 +367,32 @@ test('no review prompt pins a model: every reviewer inherits the worker\'s', asy
   for (const name of REVIEW_PROMPTS) {
     expect(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text(), name).not.toContain('model:')
   }
+})
+
+test('every reviewer is dispatched at the review effort, with a fallback if the effort is refused', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text, name).toContain('`effort: {{review_effort}}`')
+    expect(text, name).toContain('If the dispatch is rejected for its effort, dispatch without `effort:`')
+  }
+})
+
+test('a review is dispatched at its task\'s tier effort', async () => {
+  for (const phase of ['spec-review', 'plan-review', 'pr-review'] as const) {
+    expect(await renderPhase(phase, { tier: 'standard' }), phase).toContain('`effort: high`')
+  }
+  for (const phase of ['pr-review-intent', 'pr-review-quality'] as const) {
+    expect(await renderPhase(phase, { tier: 'heavy' }), phase).toContain('`effort: xhigh`')
+  }
+})
+
+test('the branch review runs at the effort of the heaviest task in the run', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'branch-review'
+  run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier: 'light' })]
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: high`')
+  run.tasks.push(briefTask({ task_id: 't2', phase: 'done', tier: 'heavy' }))
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: xhigh`')
 })
 
 test('both reviews that judge the plan are told when no plan review ran', async () => {

@@ -172,7 +172,7 @@ The orchestrator now creates a worktree per task and adopts its root pane:
 ```bash
 herdr worktree create --cwd <repo> --branch smoke/one --base <commit>   # the commit on the base: line
 # capture .result.root_pane.pane_id
-herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
+herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions --effort high
 hpipe dispatch --task t1 --pane <root_pane_id>
 ```
 

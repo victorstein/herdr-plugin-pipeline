@@ -7,6 +7,7 @@ import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
+import { effortSummary } from './tier-prompt'
 import type { MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
@@ -502,6 +503,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `depends on: ${listOrNone(task.depends_on)}`,
     `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
     `tier:       ${tierOf(task)}`,
+    `effort:     ${effortSummary(task)}`,
     `tier log:   ${tierLog.length > 0 ? tierLog.join(' · ') : 'none'}`,
     `visited:    ${visited.length > 0 ? visited.join(' → ') : 'none'}`,
     `agent:      ${task.agent_status}`,

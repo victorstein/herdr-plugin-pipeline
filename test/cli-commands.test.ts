@@ -1242,19 +1242,20 @@ test('the dispatched return keeps every header line above the one blank line', a
 
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 5)).toEqual([
+  expect(lines.slice(0, 6)).toEqual([
     'task_id: t1',
     'tier: standard (default)',
+    'effort: worker high, reviews high',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
-  expect(lines.slice(5)).toEqual([
+  expect(lines.slice(6)).toEqual([
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
     expect.stringMatching(/ dispatch --task t1 --pane <\.result\.root_pane\.pane_id>$/),
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
@@ -1288,8 +1289,8 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 5)).toEqual([
-    'task_id: t1', 'tier: standard (default)', 'files: none', 'bootstrap: none',
+  expect(lines.slice(0, 6)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high', 'files: none', 'bootstrap: none',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
@@ -1865,6 +1866,7 @@ test('--tier with no tier label is recorded as the flag', async () => {
   await seedInRepo()
   const result = await cmdTask(ctx(), { ...existingBead, tier: 'heavy' }, labelled('bug'), fetchedBase)
   expect(headLines(result.text)).toContain('tier: heavy (--tier)')
+  expect(headLines(result.text)).toContain('effort: worker xhigh, reviews xhigh')
   expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
 })
 
@@ -1915,7 +1917,9 @@ test('a filed bead has no labels to read, so --title reads nothing', async () =>
   const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, beads, fetchedBase)
   expect(result.ok).toBe(true)
   expect(shown()).toBe(0)
-  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'bead: hp-318 (filed)'])
+  expect(headLines(result.text).slice(0, 4)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high', 'bead: hp-318 (filed)',
+  ])
 })
 
 test('a registration that loses its save reads the bead once', async () => {
@@ -1954,6 +1958,7 @@ test('tier raises from any pane, logs the change, and writes nothing to run.hist
   const result = await cmdTier(ctx(), tierInput())
   expect(result.ok).toBe(true)
   expect(result.text).toContain('t1: light → heavy')
+  expect(result.text).toContain('Its reviews now run at effort xhigh; the worker keeps the effort it was started with.')
 
   const saved = await savedRun(run.run_id)
   expect(saved.tasks[0]?.tier).toBe('heavy')

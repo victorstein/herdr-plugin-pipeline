@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import {
-  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, startWorkerCommand,
-  UNSTARTED_GRACE_MS, unstartedWorker,
+  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, remainingDispatchSteps,
+  startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -86,7 +86,7 @@ test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, the
     'dispatch, in order:',
     "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
     '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
   ])
 })
@@ -104,12 +104,27 @@ test('a repo path is quoted for the shell it is pasted into', () => {
   expect(text).toContain(`--cwd '/My Repos/it'\\''s' --branch`)
 })
 
-test('every recovery path starts the agent with the same flag as the dispatch — #118', () => {
+test('every recovery path starts the agent with the same flags as the dispatch — #118', () => {
   for (const text of [
     startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
     dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
   ]) {
-    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions`')
+    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions --effort xhigh`')
+  }
+})
+
+test('the worker starts at its tier\'s effort on every path', () => {
+  for (const [tier, effort] of [['light', 'medium'], ['standard', 'high'], ['heavy', 'xhigh']] as const) {
+    const task = mkTask({ tier })
+    for (const text of [
+      dispatchSequence(mkRun(), task, FETCHED, { kind: 'none' }, 'hp'),
+      startWorkerCommand(mkRun(), task, 'w23', 'hp'),
+      dispatchWorkerCommand(mkRun(), { ...task, workspace_id: null }, 'hp'),
+      remainingDispatchSteps(mkRun(), task, 'hp'),
+    ]) {
+      expect(text, tier).toContain(`-- --dangerously-skip-permissions --effort ${effort}`)
+    }
   }
 })
 

@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
-import { IMPLEMENT_MODEL } from '../src/lib/models'
+import { IMPLEMENT_MODEL, REVIEW_EFFORT, WORKER_EFFORT } from '../src/lib/models'
 import { TIERS } from '../src/lib/phases'
 import { phaseLoop, taskTiers, tierPromptVars } from '../src/lib/tier-prompt'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
@@ -39,6 +39,11 @@ const HEAD = [
 
 test('only implement\'s coding subagent is pinned, to sonnet', () => {
   expect(IMPLEMENT_MODEL).toBe('sonnet')
+})
+
+test('workers and reviewers run at an effort set by tier, never at the user default', () => {
+  expect(WORKER_EFFORT).toEqual({ light: 'medium', standard: 'high', heavy: 'xhigh' })
+  expect(REVIEW_EFFORT).toEqual({ light: 'high', standard: 'high', heavy: 'xhigh' })
 })
 
 test('the light loop skips plan-review and runs one combined PR review', () => {
@@ -79,6 +84,12 @@ test('the tier variables name the tier, the task, its agent file and the impleme
   expect(tierPromptVars(mkTask()).tier).toBe('heavy')
 })
 
+test('review_effort follows the task\'s current tier, so a raised task gets the heavier review', () => {
+  expect(tierPromptVars(mkTask({ tier: 'light' })).review_effort).toBe('high')
+  expect(tierPromptVars(mkTask({ tier: 'standard' })).review_effort).toBe('high')
+  expect(tierPromptVars(mkTask({ tier: 'heavy' })).review_effort).toBe('xhigh')
+})
+
 test('the plan wording follows whether a plan review ran, not the current tier', () => {
   const raisedAfterSkipping = tierPromptVars(mkTask({ tier: 'standard' }))
   expect(raisedAfterSkipping.plan_status)
@@ -108,7 +119,7 @@ test('taskTiers names every task with its tier', () => {
 })
 
 const TIER_TOKENS =
-  '{{tier}}|{{task_id}}|{{agent_file}}|{{implement_model}}|{{plan_status}}|{{review_count}}|' +
+  '{{tier}}|{{task_id}}|{{agent_file}}|{{implement_model}}|{{review_effort}}|{{plan_status}}|{{review_count}}|' +
   '{{plan_review_note}}|{{phase_loop}}'
 
 const COMMON_PROMPTS = [
@@ -122,7 +133,7 @@ function probeRoot(): string {
   for (const name of [...COMMON_PROMPTS, 'worker-brief', 'decision']) {
     writeFileSync(join(root, 'prompts', `${name}.md`), TIER_TOKENS)
   }
-  writeFileSync(join(root, 'prompts', 'branch-review.md'), '{{task_tiers}}')
+  writeFileSync(join(root, 'prompts', 'branch-review.md'), '{{task_tiers}}|{{review_effort}}')
   return root
 }
 
@@ -133,7 +144,7 @@ function runWithOne(task: Task): Run {
   return run
 }
 
-const PROBED = 'heavy|t1|.claude/agents/core-dev.md|sonnet|'
+const PROBED = 'heavy|t1|.claude/agents/core-dev.md|sonnet|xhigh|'
 
 test('every task render site carries the tier variables', async () => {
   const root = probeRoot()
@@ -164,5 +175,5 @@ test('every task render site carries the tier variables', async () => {
 
   const finished = runWithOne(mkTask({ task_id: 't1', tier: 'light' }))
   finished.phase = 'branch-review'
-  expect(await renderRunPhasePrompt(finished, root)).toBe('t1 light')
+  expect(await renderRunPhasePrompt(finished, root)).toBe('t1 light|high')
 })

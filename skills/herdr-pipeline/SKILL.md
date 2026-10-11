@@ -28,7 +28,9 @@ behaviour; this skill does.
 - `--surface <s>` needs `<repo>/.claude/agents/<s>-dev.md`. A repo may declare an executable
   `.claude/pipeline-bootstrap` to set up fresh worktrees.
 - Run Claude with Opus as the default model. The orchestrator, the workers and every reviewer
-  inherit it; only `implement`'s coding subagent is pinned, to Sonnet.
+  inherit it; only `implement`'s coding subagent is pinned, to Sonnet. Effort is pinned by tier
+  instead: the `agent start` line in the dispatch block carries the worker's `--effort`, so run it as
+  printed, and never drop the flag.
 
 ## Running a batch
 

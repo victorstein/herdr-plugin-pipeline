@@ -2,7 +2,8 @@
 
 {{task_outcomes}}
 
-Dispatch a fresh subagent to review the **whole** body of work, not task by task.
+Dispatch a fresh subagent with `effort: {{review_effort}}` to review the **whole** body of work, not
+task by task. If the dispatch is rejected for its effort, dispatch without `effort:`.
 
 There is no run-level spec to review against: each task carried its own, on its own branch. Start
 from this run's merged PRs — `{{hpipe}} show --task <id>` prints each task's `pr:` — and read each

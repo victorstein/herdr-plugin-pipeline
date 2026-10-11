@@ -718,7 +718,7 @@ test('visitedPhases lists every phase entered, drops repeats and marks rewinds',
 test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {
   const run = mkRun()
   const task = mkTask({
-    task_id: 't1', phase: 'spec', tier: 'standard',
+    task_id: 't1', phase: 'spec', tier: 'standard', adopted_at: Date.UTC(2026, 8, 25, 10, 30),
     tier_history: [
       { at: Date.UTC(2026, 8, 25, 10, 4), from: null, to: 'light', source: 'label', pane: 'w1:p1',
         why: 'label pipeline:tier-light' },
@@ -733,8 +733,9 @@ test('hpipe show prints the tier, its log and the phases visited, after the phas
   ]
   const lines = formatTaskDetail(run, task).split('\n')
   const phaseAt = lines.findIndex((line) => line.startsWith('phase:'))
-  expect(lines.slice(phaseAt + 1, phaseAt + 4)).toEqual([
+  expect(lines.slice(phaseAt + 1, phaseAt + 5)).toEqual([
     'tier:       standard',
+    'effort:     worker medium (started light; a tier change does not restart it), reviews high',
     'tier log:   2026-09-25 10:04Z — → light (label pipeline:tier-light) · ' +
       '2026-09-25 11:30Z light → standard (hpipe-tier, pane w3:p1): research found a contract change',
     'visited:    research → spec',
@@ -747,6 +748,7 @@ test('hpipe show on a task from before tiers reads heavy, with no log, and nothi
   run.tasks = [task]
   const text = formatTaskDetail(run, task)
   expect(text).toContain('tier:       heavy')
+  expect(text).toContain('effort:     worker xhigh, reviews xhigh')
   expect(text).toContain('tier log:   none')
   expect(text).toContain('visited:    none')
 })

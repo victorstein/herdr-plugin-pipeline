@@ -11,10 +11,12 @@ The reviewer writes its review to exactly this path:
 
     {{verdict_path}}
 
-Dispatch the reviewer as a subagent and **wait for it within this turn**. Do not end your turn until
-the verdict file exists at the path named above with a `VERDICT:` trailer as its last non-empty line.
-Backgrounding the subagent ends your turn and leaves this pane reading idle while the review is still
-being written, and the supervisor then treats a healthy worker as a stalled one.
+Dispatch the reviewer as a subagent with `effort: {{review_effort}}` and
+**wait for it within this turn**. Do not end your turn until the verdict file exists at the path
+named above with a `VERDICT:` trailer as its last non-empty line. Backgrounding the subagent ends your
+turn and leaves this pane reading idle while the review is still being written, and the supervisor
+then treats a healthy worker as a stalled one.
+If the dispatch is rejected for its effort, dispatch without `effort:`.
 
 Commit and push the verdict file before ending your turn. This ordering is load-bearing: if the
 verdict were pushed at the start of your next `implement` turn, that push alone would move the PR's

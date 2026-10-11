@@ -275,6 +275,19 @@ your default model, and only `implement`'s code-writing is handed to a subagent 
 Run Claude with Opus as the default model. Nothing pins the worker panes, so a Sonnet default would
 put the judgment on Sonnet too.
 
+Effort is pinned by tier, not inherited. A worker starts with `--effort` from its tier, and every
+review subagent is dispatched with an `effort:` from its task's current tier:
+
+| Tier | Worker | Reviews |
+|---|---|---|
+| `light` | `medium` | `high` |
+| `standard` | `high` | `high` |
+| `heavy` | `xhigh` | `xhigh` |
+
+The branch review runs at the heaviest task's review effort. A worker's effort is fixed when its agent
+starts, so `hpipe tier` changes only the reviews that follow; `hpipe show` prints both. Inheriting the
+default ran seven workers and every reviewer at `xhigh`, and a 5-hour usage window lasted 31 minutes.
+
 ## Upgrading
 
 Restart the supervisor after upgrading the plugin, in every session with a run in flight: close its

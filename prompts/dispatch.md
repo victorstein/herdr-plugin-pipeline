@@ -8,11 +8,14 @@ it the brief:
 
     herdr worktree create --cwd {{repo_root}} --branch <branch> --base <base>
     # capture .result.root_pane.pane_id and .result.worktree.path from that response
-    herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
+    herdr agent start <name> --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions --effort <effort>
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
 Both `{{hpipe}} task` and the `Dispatch tN …` prompt print this sequence for the task, under
-`dispatch, in order:`, with its branch, task id and base filled in — run that copy.
+`dispatch, in order:`, with its branch, task id, base and effort filled in — run that copy. The effort
+follows the tier (light `medium`, standard `high`, heavy `xhigh`): without it the worker inherits the
+user's default, and seven workers at `xhigh` used up a 5-hour usage window in 31 minutes. Measured on a
+live run.
 
 **`<base>` is the commit on the `base: <commit> (<ref> as just fetched)` line** — printed by
 `{{hpipe}} task` when it dispatches at registration, and by the `Dispatch tN …` prompt when a task
@@ -54,10 +57,10 @@ surface, the artifact paths the supervisor watches and the task id the worker ne
 captured at registration, is the brief, and anything you say here instead of in it is lost. The copy
 you were shown is for you to read; `dispatch --task` sends its own, and claims the task's bead first —
 if bd refuses the claim, nothing is sent and the refusal says why. When it came from `{{hpipe}} task`,
-the header lines above it — `task_id:`, `tier:`, `bead:` when it filed one, `files:`, `bootstrap:`,
-`base:` and the `dispatch, in order:` block — are yours: confirm the `tier:` and `files:` lines match
-what you declared, then run the block, which cuts the worktree from the `base:` commit and runs what
-`bootstrap:` names in the new checkout before `agent start`.
+the header lines above it — `task_id:`, `tier:`, `effort:`, `bead:` when it filed one, `files:`,
+`bootstrap:`, `base:` and the `dispatch, in order:` block — are yours: confirm the `tier:` and
+`files:` lines match what you declared, then run the block, which cuts the worktree from the `base:`
+commit and runs what `bootstrap:` names in the new checkout before `agent start`.
 `{{hpipe}} brief --task <id>` prints the bare brief again if you need to reread it, and
 `{{hpipe}} show --task <id>` prints what the run recorded for the task — its phase, files,
 dependencies, artifact paths, PR and CI — and, while it is unfinished, a freshly fetched `base:`
