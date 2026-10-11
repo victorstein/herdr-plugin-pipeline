@@ -2,7 +2,7 @@ import { beadsSlug, readBeadsProject } from '../lib/beads-project'
 import { readBoards } from '../lib/boards'
 import { loadConfig } from '../lib/config'
 import { Herdr } from '../lib/herdr'
-import { repoContext } from '../lib/repo'
+import { actionRepoContext } from '../lib/repo'
 import { sessionKey } from '../lib/session'
 import { ensureWorkspace } from '../startup'
 import { type BoardDeps, openBoard } from '../supervisor/boards'
@@ -59,7 +59,7 @@ if (import.meta.main) {
     stateDir,
     session,
     pluginId: process.env.HERDR_PLUGIN_ID ?? 'stein.pipeline',
-    repoKey: (await repoContext())?.repoKey ?? null,
+    repoKey: (await actionRepoContext())?.repoKey ?? null,
     workspaceId: async () =>
       ensureWorkspace(herdr, stateDir, session, (await loadConfig(configDir)).PIPELINE_WORKSPACE_LABEL),
     now: Date.now,
