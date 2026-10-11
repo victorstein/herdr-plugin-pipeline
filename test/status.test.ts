@@ -176,6 +176,21 @@ test('a healthy run produces none of the four new warning lines', () => {
   expect(text).not.toContain('dispatch --done')
 })
 
+test('finished runs from an earlier plugin version collapse to one line below the live ones — #7', () => {
+  const live = mkRun()
+  live.tasks = [mkTask({ task_id: 't1', phase: 'implement' })]
+  const legacy = Array.from({ length: 3 }, () => {
+    const run = mkRun()
+    run.schema_version = 2
+    run.phase = 'done'
+    return run
+  })
+  const text = formatStatus([...legacy, live], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('was started by an earlier plugin version')
+  expect(text).toContain('3 finished runs from an earlier plugin version not shown')
+  expect(text.indexOf(live.run_id)).toBeLessThan(text.indexOf('3 finished runs'))
+})
+
 test('a run from an earlier plugin version is listed as ignored, with no task lines', () => {
   const run = mkRun()
   run.schema_version = 2

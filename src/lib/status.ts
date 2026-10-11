@@ -398,7 +398,11 @@ export function formatStatus(
     return lines.join('\n')
   }
 
-  for (const run of runs) {
+  // A finished run from an earlier plugin version needs nothing from anyone, and
+  // nine of them pushed every live run off the screen of \`hpipe status | head\`.
+  // Measured on a live run.
+  const finishedLegacy = runs.filter((run) => !isCurrentSchemaRun(run) && run.phase === 'done')
+  for (const run of runs.filter((r) => !finishedLegacy.includes(r))) {
     lines.push('')
     const passes = counterFor(run, run.phase)
     lines.push(
@@ -453,6 +457,11 @@ export function formatStatus(
     lines.push(...waitingOnYou(run, hpipe, now, holds))
     lines.push(...taskWarnings(run, hpipe, now))
     lines.push(...deliveryWarnings(run, livePanes, now, panes))
+  }
+
+  if (finishedLegacy.length > 0) {
+    lines.push('', `${finishedLegacy.length} finished run${finishedLegacy.length === 1 ? '' : 's'} from an earlier ` +
+      'plugin version not shown: nothing advances them and they hold nothing')
   }
 
   return lines.join('\n')

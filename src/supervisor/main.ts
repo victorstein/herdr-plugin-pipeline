@@ -407,8 +407,8 @@ async function main(): Promise<void> {
         } catch (error) {
           if (isUnlandedSave(error)) {
             unsaved.add(run)
-            console.error(`[pipeline] run ${run.run_id}: this tick not saved (${error.message}); ` +
-              'its prompts are dropped and it is re-read next tick')
+            console.error(`[pipeline] run ${run.run_id}: a CLI command wrote this run mid-tick ` +
+              `(${error.message}); the tick is redone from the fresh copy next tick, prompts included`)
             continue
           }
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
