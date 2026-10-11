@@ -86,6 +86,9 @@ function fakeStore(beads: ExportedBead[], fail: (id: string, kind: string) => Bd
     depAdd: (from, to) => answer(from, `depAdd ${from} ${to}`, (b) => {
       b.dependencies = [...(b.dependencies ?? []), { depends_on_id: to, type: 'blocks' }]
     }),
+    depRemove: (from, to) => answer(from, `depRemove ${from} ${to}`, (b) => {
+      b.dependencies = (b.dependencies ?? []).filter((d) => d.depends_on_id !== to)
+    }),
     comment: (id, text) => answer(id, `comment ${id}`, (b) => { b.comments = [...(b.comments ?? []), { text }] }),
     close: (id, reason) => answer(id, `close ${id} ${reason}`, (b) => { b.status = 'closed' }),
     exportNow: async () => {
@@ -188,6 +191,33 @@ test('missing edges and comments come after the update and before the close', ()
   expect(calls.map((c) => c.kind)).toEqual(['update', 'depAdd', 'comment'])
   expect(calls[1]).toEqual({ kind: 'depAdd', dependsOn: 'hp-1' })
   expect(calls[2]).toMatchObject({ kind: 'comment', marker: '[hpipe t2/d1/asked]' })
+})
+
+test('a file wait adds its blocker edge, and the edge is removed once the wait is over — #20', () => {
+  const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'implement', files: ['src/a.ts'] })
+  const waiting = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const run = runWith(holder, waiting)
+  const unlinked = bead('hp-2', { status: 'blocked', assignee: 'hpipe', labels: ['blocked-on-files'], metadata: { 'hpipe.run': 'r1' } })
+  expect(callsFor(desiredBead(waiting, run), unlinked, closeReason(waiting)))
+    .toEqual([{ kind: 'depAdd', dependsOn: 'hp-4' }])
+
+  waiting.phase = 'implement'
+  const linked = bead('hp-2', {
+    status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r1' },
+    dependencies: [{ depends_on_id: 'hp-4', type: 'blocks' }],
+  })
+  expect(callsFor(desiredBead(waiting, run), linked, closeReason(waiting)))
+    .toEqual([{ kind: 'depRemove', dependsOn: 'hp-4' }])
+})
+
+test('only a blocks edge to another task of the run is ever removed', () => {
+  const sibling = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'done', merged_at_ms: 1 })
+  const task = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement' })
+  const actual = bead('hp-2', {
+    status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r1' },
+    dependencies: [{ depends_on_id: 'hp-4', type: 'discovered-from' }, { depends_on_id: 'hp-99', type: 'blocks' }],
+  })
+  expect(callsFor(desiredBead(task, runWith(sibling, task)), actual, closeReason(task))).toEqual([])
 })
 
 test('a closed bead that should stay closed is left alone, whoever it is assigned to', () => {

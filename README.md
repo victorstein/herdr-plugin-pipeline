@@ -200,8 +200,9 @@ Each repo's backlog is its own [Beads](https://github.com/gastownhall/beads) dat
 plugin's state dir at `$HERDR_PLUGIN_STATE_DIR/beads/<repo>-<hash>/` — never in your repo, and out of
 reach of every worker worktree. hpipe is its only writer: every write runs as actor `hpipe`, one call
 at a time under a lock, and the supervisor converges each bead to what the run's ledger says — claimed
-while its task is worked, blocked while a decision waits on you, released if the task is abandoned or
-the run aborted, closed once its PR merges. The close is the supervisor's; nobody is prompted for it.
+while its task is worked, blocked while a decision or an escalation waits on you, blocked by the
+holder's bead while it waits on another task's `--files`, released if the task is abandoned or the run
+aborted, closed once its PR merges. The close is the supervisor's; nobody is prompted for it.
 A bead's fine phase is a label naming it bare (`research`, `spec-review`, or `aborted` once a run is
 aborted); the run driving it is bead metadata `hpipe.run`, which `hpipe bead show` prints as `run:`.
 A label of your own that equals a phase name (say `plan`) on an adopted bead becomes hpipe's to swap.
