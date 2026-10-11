@@ -85,3 +85,25 @@ test('the worker note offers a recovery, it does not assert the bootstrap ran', 
 test('a non-executable declaration tells the worker how to fix it', () => {
   expect(briefNote({ kind: 'not-executable' })).toContain(`chmod +x ${BOOTSTRAP_REL}`)
 })
+test('a conventional bootstrap script that is not wired is pointed out, still on one line — #6', () => {
+  // berean-os has ./bin/bootstrap and no pipeline-bootstrap, so every task printed
+  // `bootstrap: none` and the orchestrator guessed it should run the script itself.
+  const root = repoRoot(null)
+  mkdirSync(join(root, 'bin'))
+  writeFileSync(join(root, 'bin', 'bootstrap'), '#!/bin/sh\ntrue\n')
+  chmodSync(join(root, 'bin', 'bootstrap'), 0o755)
+  const bootstrap = repoBootstrap(root)
+  expect(bootstrap).toEqual({ kind: 'none', unwired: 'bin/bootstrap' })
+  const line = bootstrapLine(bootstrap)
+  expect(line).toBe('bootstrap: none (the repo has ./bin/bootstrap, which the dispatch does not run; ' +
+    `an executable ${BOOTSTRAP_REL} that calls it would run it in every new worktree)`)
+  expect(line).not.toContain('\n')
+})
+
+test('a declared bootstrap wins over a conventional script beside it', () => {
+  const root = repoRoot(0o755)
+  mkdirSync(join(root, 'script'))
+  writeFileSync(join(root, 'script', 'bootstrap'), '#!/bin/sh\ntrue\n')
+  chmodSync(join(root, 'script', 'bootstrap'), 0o755)
+  expect(repoBootstrap(root)).toEqual({ kind: 'ready' })
+})

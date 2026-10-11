@@ -25,6 +25,12 @@ behaviour; this skill does.
 - herdr events bind panes and worktrees to tasks automatically (`worktree create`/`open` on the
   task's branch, an agent detected in its pane) — there is no bind command.
 - Never type into a worker's pane, and never use `pane send-text`/`send-keys` to hand over prompts.
+- **When Claude Code denies a command, stop and ask the user at once.** Name the command, why the run
+  needs it, and the allow rule that would cover it. A denial is Claude Code's permission check, not
+  GitHub or herdr refusing. Don't work around it or carry on with other steps first: an orchestrator
+  always has more queued, and the skipped step stalls the run. A run needs `git push`, `gh pr create`,
+  `gh pr merge`, `git pull`, `herdr worktree create`, `herdr agent start` and `hpipe`; ask for them
+  before intake.
 - `--surface <s>` needs `<repo>/.claude/agents/<s>-dev.md`. A repo may declare an executable
   `.claude/pipeline-bootstrap` to set up fresh worktrees.
 - Run Claude with Opus as the default model. The orchestrator, the workers and every reviewer
@@ -75,6 +81,7 @@ The supervisor nudges a silent task with a stall probe (workers every 45 min, th
 | You see | Do |
 |---|---|
 | Workers raise decisions with `hpipe decide`; you get a prompt naming the task and decision id (also under "waiting on you" in `hpipe status`) | — |
+| A decision you escalate to the user | Ask it on its own, never bundled with another question: the worker waits for the whole dialog |
 | A worker's decision you can settle from the repo | `hpipe answer --task <id> --decision <d> --answer "…" --by orchestrator` |
 | A decision only the owner can make (product, licence, scope) | Relay question + worker's recommendation + yours to the user, and run `hpipe escalate --task <id> --decision <d> --recommend "…"` so its bead shows blocked on them; record their reply with `--by human` |
 | "Ready to merge — PR #n" | Check for conflicts with anything merged since (rebase + re-run bootstrap if needed), then merge. Merging is yours; nothing merges automatically |

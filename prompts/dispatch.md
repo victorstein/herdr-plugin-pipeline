@@ -74,7 +74,10 @@ path as `.result.worktree.path`:
 
     (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)
 
-`bootstrap: none` means the repo declares nothing; start the worker.
+`bootstrap: none` means the repo declares nothing; start the worker. When the line goes on to name a
+script the repo has but never wired up, the dispatch does not run it: if the worker will need what it
+sets up, run it in the new checkout yourself before `agent start`, and suggest to the user that they
+wire it in as `.claude/pipeline-bootstrap`.
 
 If the script is **not present in the new checkout**, skip it and start the worker — the line is
 read from the primary checkout's working tree, which can be parked on a branch the worktree was not
