@@ -379,15 +379,32 @@ test('a stuck files block prints its release command once', () => {
   expect(text).toContain('t2 blocked on files held by t1 (failed) — it has stopped moving')
 })
 
-test('every stuck holder gets its own release command', () => {
+test('every failed holder gets its own release command', () => {
   const run = mkRun()
   run.tasks = [
     mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'] }),
     mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts', 'src/b.ts'] }),
-    mkTask({ task_id: 't3', phase: 'escalated', files: ['src/b.ts'] }),
+    mkTask({ task_id: 't3', phase: 'failed', files: ['src/b.ts'] }),
   ]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
     `— YOUR move: \`${HP} release --task t1\`, \`${HP} release --task t3\``,
+  )
+})
+
+test('an escalated holder is never offered for release: it is resumed or abandoned — #21', () => {
+  // berean-os: t4 escalated during a usage-limit pause while holding t2's files,
+  // and every digest said \`release --task t4\`. Following it would have dropped
+  // t4's lock mid-PR and let t2 implement over its files. Measured on a live run.
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't4', phase: 'escalated', escalated_from: 'pr-review', files: ['src/a.ts'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('release --task')
+  expect(text).toContain('t2 blocked on files held by t4 (escalated) — it keeps them until it is resumed or abandoned')
+  expect(actionFor(run, run.tasks[1]!, HP)).toBe(
+    'nothing for you here — t4 holds these files and is escalated; its own line says how to resume or abandon it',
   )
 })
 

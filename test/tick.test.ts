@@ -444,16 +444,24 @@ test('actionFor renders the CLI it is given, never a literal hpipe', () => {
 })
 
 test('a blocked-on-files task held by a dead task names the release command', () => {
-  // `failed` and `escalated` both hold files forever (holdsFiles: true), so
-  // filesClearFor never goes true and only `hpipe release` clears it. Telling the
-  // orchestrator "the supervisor is driving" there is false, permanently.
-  for (const holderPhase of ['failed', 'escalated'] as TaskPhase[]) {
-    const run = mkRun([])
-    const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
-    const holder = mkTask({ task_id: 't2', phase: holderPhase, files: ['src/a.ts'] })
-    run.tasks = [blocked, holder]
-    expect(actionFor(run, blocked, 'hp')).toBe('YOUR move: `hp release --task t2`')
-  }
+  // `failed` holds files forever (holdsFiles: true), so filesClearFor never goes
+  // true and only `hpipe release` clears it. Telling the orchestrator "the
+  // supervisor is driving" there is false, permanently.
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'failed', files: ['src/a.ts'] })
+  run.tasks = [blocked, holder]
+  expect(actionFor(run, blocked, 'hp')).toBe('YOUR move: `hp release --task t2`')
+})
+
+test('a blocked-on-files task held by an escalated task points at the holder, not at release — #21', () => {
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'implement', files: ['src/a.ts'] })
+  run.tasks = [blocked, holder]
+  expect(actionFor(run, blocked, 'hp')).toBe(
+    'nothing for you here — t2 holds these files and is escalated; its own line says how to resume or abandon it',
+  )
 })
 
 test('a blocked-on-files task held by a live task is still the supervisor\'s', () => {

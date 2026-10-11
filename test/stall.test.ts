@@ -126,6 +126,26 @@ test('a task stranded in blocked-on-files is probed via the orchestrator', () =>
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
 })
 
+test('a task waiting on a holder that is still moving is not probed — #22', () => {
+  // berean-os: t2, t3 and t7 drew 17 probes in four hours while t4 and t6 were
+  // implementing, every one answered "nothing to act on". Measured on a live run.
+  for (const phase of ['implement', 'pr-review', 'ci', 'merge', 'escalated'] as const) {
+    const run = runWithTasks([
+      mkTask({ task_id: 't1', phase, files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+      mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+    ])
+    expect(taskStallCandidates([run], NOW, 15, 3).map((c) => c.task?.task_id), phase).not.toContain('t2')
+  }
+})
+
+test('a task waiting on a failed holder is probed, since only a human frees those files', () => {
+  const run = runWithTasks([
+    mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+  ])
+  expect(taskStallCandidates([run], NOW, 15, 3).map((c) => c.task?.task_id)).toEqual(['t2'])
+})
+
 test('a task waiting in blocked-on-decision is probed via the orchestrator', () => {
   const run = runWithTask({ phase: 'blocked-on-decision', pane_id: 'w7:p1' })
   const out = taskStallCandidates([run], NOW, 15, 3)
