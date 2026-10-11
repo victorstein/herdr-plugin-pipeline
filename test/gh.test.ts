@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
@@ -25,14 +25,48 @@ test('an empty check list is pending, never pass', () => {
   expect(rollUpBucket([])).toBe('pending')
 })
 
-test('exit code 8 is read as pending rather than an error', async () => {
-  const bin = await makeFakeBin(dir, { 'pr checks': [{ bucket: 'pending', name: 'ci' }] }, { 'pr checks': 8 })
-  expect(await new Gh(bin, dir).prChecks(5)).toBe('pending')
+const run = (name: string, status: string, conclusion: string) => ({
+  __typename: 'CheckRun', name, status, conclusion, workflowName: 'CI (build)',
 })
 
-test('a gh failure maps to unknown, which is not terminal', async () => {
-  const bin = await makeFakeBin(dir, { 'pr checks': { message: 'gh auth required' } }, { 'pr checks': 1 })
-  expect(await new Gh(bin, dir).prChecks(5)).toBe('unknown')
+test('headCi reads the head commit\'s own checks and names the head — #16', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc123', statusCheckRollup: [run('lint-title', 'COMPLETED', 'SUCCESS')] },
+    'run list': [{ status: 'completed', conclusion: 'success' }],
+  })
+  expect(await new Gh(bin, dir).headCi(5)).toEqual({ bucket: 'pass', headSha: 'abc123' })
+})
+
+test('a workflow run still queued for the head holds CI pending, with no check of its own yet — #16', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc123', statusCheckRollup: [run('lint-title', 'COMPLETED', 'SUCCESS')] },
+    'run list': [{ status: 'queued', conclusion: '' }],
+  })
+  expect((await new Gh(bin, dir).headCi(5))?.bucket).toBe('pending')
+  expect(readFileSync(join(dir, 'calls.log'), 'utf8')).toContain('run list --commit abc123 ')
+})
+
+test('the head\'s checks bucket the way gh pr checks does', async () => {
+  const bucketOf = async (rows: unknown[]) => {
+    const bin = await makeFakeBin(dir, { 'pr view': { headRefOid: 'abc', statusCheckRollup: rows }, 'run list': [] })
+    return (await new Gh(bin, dir).headCi(5))?.bucket
+  }
+  expect(await bucketOf([run('build', 'IN_PROGRESS', '')])).toBe('pending')
+  expect(await bucketOf([run('build', 'COMPLETED', 'FAILURE')])).toBe('fail')
+  expect(await bucketOf([run('build', 'COMPLETED', 'CANCELLED')])).toBe('fail')
+  expect(await bucketOf([run('build', 'COMPLETED', 'SKIPPED'), run('test', 'COMPLETED', 'NEUTRAL')])).toBe('pass')
+  expect(await bucketOf([{ __typename: 'StatusContext', context: 'ci/legacy', state: 'PENDING' }])).toBe('pending')
+  expect(await bucketOf([{ __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR' }])).toBe('fail')
+  expect(await bucketOf([])).toBe('pending')
+})
+
+test('a gh failure on either call is no reading at all, never a verdict', async () => {
+  const noView = await makeFakeBin(dir, { 'pr view': { message: 'gh auth required' } }, { 'pr view': 1 })
+  expect(await new Gh(noView, dir).headCi(5)).toBeNull()
+  const noRuns = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc', statusCheckRollup: [] }, 'run list': { message: 'rate limited' },
+  }, { 'run list': 1 })
+  expect(await new Gh(noRuns, dir).headCi(5)).toBeNull()
 })
 
 test('prView reads merged from state and mergedAt, not a merged field', async () => {

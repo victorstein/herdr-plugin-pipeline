@@ -388,7 +388,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'merge': {
       if (task.pr === null) return base
       const view = await deps.prView(task.pr)
-      if (!view?.merged) return base
+      if (!view?.merged) return { ...base, headSha: view?.headSha ?? null }
       return {
         ...base, merged: true, mergedAtMs: view.mergedAtMs ?? undefined,
         mergeCommit: view.mergeCommit ?? undefined,

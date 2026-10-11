@@ -10,7 +10,7 @@ import { enqueue, settleOutbox } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
-import { ciTransitions } from '../src/supervisor/ci'
+import { CI_SETTLE_MS, ciTransitions } from '../src/supervisor/ci'
 import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -1199,7 +1199,9 @@ test('a second CI round waits for a fresh poll instead of failing on the last ro
   expect(task.ci).toBeNull()
   expect(counterFor(task, 'ci')).toBe(1)
 
-  await ciTransitions([run], async () => 'pass')
+  const green = async () => ({ bucket: 'pass' as const, headSha: 'aaa' })
+  await ciTransitions([run], green, 0)
+  await ciTransitions([run], green, CI_SETTLE_MS)
   await advanceTasks(run, deps())
   expect(task.phase).toBe('merge')
 })

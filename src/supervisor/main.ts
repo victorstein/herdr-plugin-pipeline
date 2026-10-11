@@ -269,7 +269,7 @@ async function main(): Promise<void> {
 
       if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
         lastCiPollMs = Date.now()
-        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
+        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).headCi(pr))
       }
 
       const advancing = pickOneAdvance(runs)

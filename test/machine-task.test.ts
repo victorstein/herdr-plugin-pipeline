@@ -105,6 +105,43 @@ test('a rewind into merge after the merge reaches teardown through close once th
   expect(advanceTask(run, task, s)?.phase).toBe('teardown')
 })
 
+test('a push after CI passed sends merge back to ci for the new head — #16', () => {
+  const { run, task } = fixture('merge')
+  task.ci = 'pass'
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  const signals = {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: false,
+    ciBucket: 'pass' as const, filesClear: false, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, signals)?.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+  expect(run.history.at(-1)?.why).toBe('head moved to bbb after CI passed on aaa')
+})
+
+test('merge stays put while the head is the one CI passed on, or no head was recorded', () => {
+  const { run, task } = fixture('merge')
+  const signals = {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false,
+    ciBucket: null, filesClear: false, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, signals)).toBeNull()
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  expect(advanceTask(run, task, signals)).toBeNull()
+  expect(advanceTask(run, task, { ...signals, headSha: null })).toBeNull()
+})
+
+test('a merged PR closes even if its head moved after CI', () => {
+  const { run, task } = fixture('merge')
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  expect(advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: true, mergedAtMs: task.phase_entered_at + 1_000,
+    ciBucket: null, filesClear: false, maxPasses: 2,
+  })?.phase).toBe('close')
+})
+
 test('merge advances when mergedAt postdates phase entry', () => {
   const { run, task } = fixture('merge')
   const next = advanceTask(run, task, {

@@ -778,3 +778,10 @@ test('a decision put to the human is listed under waiting on you with the comman
   expect(text).toContain(`decision d1 was put to the human 5m ago — record their ruling with ` +
     `\`${HP} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
 })
+
+test('hpipe show names the head CI was read on, since a green is only about that head — #16', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'merge', ci: 'pass', ci_head: { sha: '924e0aecb66cbcd7', seen_at: 0 } })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('ci:         pass (on 924e0aec)')
+})

@@ -228,10 +228,16 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       // A level for the same reason as the run's `dispatch` row: a PR merged
       // before the task entered `merge` (merging is the human's move and races
       // the CI poll), or a rewind into `merge` after it, stranded the task here.
-      if (!s.merged || s.mergedAtMs === undefined) return null
-      task.merged_at_ms = s.mergedAtMs
-      task.merge_commit = s.mergeCommit ?? null
-      return enterTaskPhase(run, task, 'close', 'PR merged')
+      if (s.merged && s.mergedAtMs !== undefined) {
+        task.merged_at_ms = s.mergedAtMs
+        task.merge_commit = s.mergeCommit ?? null
+        return enterTaskPhase(run, task, 'close', 'PR merged')
+      }
+      // The orchestrator pushed a hand-off commit after CI passed, and the green it
+      // was shown belonged to the head before it. Measured on a live run (#16).
+      const checked = task.ci_head?.sha
+      if (s.headSha === null || checked === undefined || s.headSha === checked) return null
+      return enterTaskPhase(run, task, 'ci', `head moved to ${s.headSha} after CI passed on ${checked}`)
     }
 
     // An edge although it reads a field: only a reconciler pass that saw the bead

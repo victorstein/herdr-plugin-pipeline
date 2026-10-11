@@ -178,6 +178,8 @@ export interface Task {
   head_sha_at_entry: string | null
   pr: number | null
   ci: CiBucket | null
+  /** The head `ci` was read for, and when that head was first seen; a merge on any other head is unchecked. */
+  ci_head?: { sha: string; seen_at: number }
   /** Worktree checkout path. Task artifacts resolve against this, not repo_root. */
   checkout_path: string | null
   artifacts: {

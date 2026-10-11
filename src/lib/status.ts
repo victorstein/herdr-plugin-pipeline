@@ -515,7 +515,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     verdicts.length === 0 ? 'verdicts:   none' : 'verdicts:',
     ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
     `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
-    `ci:         ${orNone(task.ci)}`,
+    `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
     `notes:      ${orNone(task.notes)}`,
   ].join('\n')
