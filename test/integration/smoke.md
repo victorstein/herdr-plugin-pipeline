@@ -1235,7 +1235,9 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 - `branch-review`'s prompt reads `git diff origin/main...origin/batch/<…>` in the batch checkout;
 - `ship` writes `$STATE/runs/$SMOKE/<run>.batch-pr.md` with one override line per landing, the
   orchestrator creates `$STATE/checkouts/<run>` and runs `hpipe batch-check` there, and opens the PR;
-  the run stays in `ship` until the PR's head is the head `batch-check` recorded;
+  the run stays in `ship` until the PR's head is the head `batch-check` recorded. The ship prompt says
+  `The merge step replaces the PR's whole description`, and the orchestrator adds nothing to the PR's
+  description on GitHub;
 - `ship-ci` stays pending until every workflow run on the PR head has finished;
 - **red CI, the fix-task route:** push a failing test to the batch: `ship-ci → ship`. `hpipe task …`
   moves the run to `execute`, `dispatch --done`, the fix lands, the run goes

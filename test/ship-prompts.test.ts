@@ -57,6 +57,16 @@ test('ship repeats the ruleset advice start gave once, for the batch\'s own patt
   expect(own).toContain('If `release/menu` has no ruleset')
 })
 
+// Smoke run 15: the orchestrator added a line to the PR on GitHub during `ship`, which
+// the merge step's `gh pr edit --body-file` would have dropped.
+test('ship warns that the merge step replaces the PR body, so additions go into the body file just before it', async () => {
+  const text = (await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  const body = join(dir, 'runs', 'personal', 'r1.batch-pr.md')
+  expect(text).toContain(`The merge step replaces the PR's whole description with \`${body}\`, so anything you add ` +
+    'to the PR on GitHub is dropped. Something worth keeping goes into that file instead, outside the override ' +
+    'block, and only just before the merge: the plugin rewrites it with every ship prompt.')
+})
+
 test('ship fetches the default branch before asking whether the batch still merges into it', async () => {
   const text = await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })
   const checkout = join(dir, 'checkouts', 'r1')
