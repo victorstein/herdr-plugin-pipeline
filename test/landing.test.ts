@@ -159,6 +159,14 @@ test('a branch moved past its reviewed head syncs, unless the move is review ver
   expect(verdicts.tasks[0]?.phase).toBe('close')
 })
 
+test('a branch head already on the batch has not moved: a tip landed in place of the reviewed head closes the task', async () => {
+  for (const phase of ['merge', 'land-queue', 'sync'] as const) {
+    const run = singlePrRun([mkTask({ task_id: 't1', phase, land_sha: 'L1', submission: submitted() })])
+    await advanceTasks(run, deps({ landingGit: fakeGit({ batchHead: 'X1', ancestors: ['L1>X1'], heads: { 't1-branch': 'X1' } }) }))
+    expect(run.tasks[0]?.phase, phase).toBe(phase === 'merge' ? 'close' : 'merge')
+  }
+})
+
 test('merge records a landing seen on the batch, and a deleted task branch does not hide it', async () => {
   const run = singlePrRun([mkTask({ task_id: 't1', phase: 'merge', land_sha: 'L1', submission: submitted() })])
   await advanceTasks(run, deps({ landingGit: fakeGit({ batchHead: 'L1', heads: { 't1-branch': null } }) }))

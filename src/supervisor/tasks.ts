@@ -241,7 +241,8 @@ async function landingFacts(run: Run, task: Task, git: LandingGit): Promise<Land
   if (landed === null || upToDate === null) return null
   const remote = await git.remoteBranchHead(run.repo_root, task.branch)
   if (!remote.ok) return null
-  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git))
+  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git)) &&
+    await git.isAncestor(run.repo_root, remote.sha, batchRef) !== true
   const submitted = task.submission?.head_sha
   const checked = submitted !== undefined && await addsOnlyReviews(run.repo_root, submitted, landSha, git)
   return { movedTo: moved ? remote.sha : null, landed, upToDate, checked, batchHead }

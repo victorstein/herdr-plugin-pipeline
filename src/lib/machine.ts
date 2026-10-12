@@ -233,7 +233,12 @@ export function noteWorkingAfterAnswer(task: Task, at: number): void {
  * branch. Only the push is the gate; these decide whom to prompt.
  */
 export interface LandingFacts {
-  /** The branch head on origin, when it moved past `land_sha` with more than review verdicts. */
+  /**
+   * The branch head on origin, when it moved past `land_sha` with more than review
+   * verdicts and the batch does not already have it. A tip landed in place of
+   * `land_sha` has nothing left to land, and a sync of it would wedge on `submit`'s
+   * "nothing to land".
+   */
   movedTo: string | null
   /** `land_sha` is contained in `origin/<batch>`. */
   landed: boolean
@@ -295,13 +300,30 @@ function enterLandQueue(run: Run, task: Task, s: TaskSignals): Task | null {
   return enterTaskPhase(run, task, 'land-queue', `cleared; reviewed head ${sha8(s.headSha)}`)
 }
 
-function recordLanding(task: Task, landSha: string, at: number): void {
-  task.merged_at_ms = at
-  task.merge_commit = landSha
+/**
+ * The record's truth: once `land_sha` is on the batch its commits ship with it, whatever
+ * the task does next, so the line is kept even when the task still has more to land.
+ */
+function noteLanded(task: Task, landSha: string, at: number): void {
   const landed = task.landed ?? []
   if (landed.at(-1)?.land_sha === landSha) return
   const title = task.submission?.title ?? landed.at(-1)?.title ?? task.brief.title
   task.landed = [...landed, { title, land_sha: landSha, at }]
+}
+
+/** The machine's: landed now, and nothing more to land, so the bead closes. */
+function recordLanding(task: Task, landSha: string, at: number): void {
+  task.merged_at_ms = at
+  task.merge_commit = landSha
+  noteLanded(task, landSha, at)
+}
+
+/** A commit pushed after the review goes through `sync`, so it lands reviewed rather than not at all. */
+function syncPastMove(run: Run, task: Task, movedTo: string, landed: boolean, landSha: string): Task {
+  const moved = `${task.branch} moved to ${sha8(movedTo)} after its reviewed head`
+  if (!landed) return enterTaskPhase(run, task, 'sync', moved)
+  noteLanded(task, landSha, Date.now())
+  return enterTaskPhase(run, task, 'sync', `${moved} ${sha8(landSha)} landed`)
 }
 
 function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
@@ -312,9 +334,7 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
   switch (task.phase) {
     case 'land-queue': {
       if (s.slotMine !== true || l === undefined) return null
-      if (l.movedTo !== null) {
-        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
-      }
+      if (l.movedTo !== null) return syncPastMove(run, task, l.movedTo, l.landed, landSha)
       if (l.landed) return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is already on ${batch}`)
       if (l.upToDate && l.checked) {
         return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is up to date with ${batch} and checked`)
@@ -346,14 +366,11 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
     }
 
     // A level, like per-task's: a landing pushed before the task entered `merge`,
-    // or a rewind into it after, is still recorded. The moved branch is read
-    // first, so a commit pushed after the review lands reviewed rather than not
-    // at all.
+    // or a rewind into it after, is still recorded, even when the branch has moved
+    // on and the task must sync the rest.
     case 'merge': {
       if (l === undefined) return null
-      if (l.movedTo !== null) {
-        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
-      }
+      if (l.movedTo !== null) return syncPastMove(run, task, l.movedTo, l.landed, landSha)
       if (l.landed) {
         recordLanding(task, landSha, Date.now())
         return enterTaskPhase(run, task, 'close', `landed on ${batch} at ${sha8(landSha)}`)

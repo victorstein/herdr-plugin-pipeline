@@ -1066,12 +1066,22 @@ None needed the owner. These answers hold over §1–§9 wherever the two disagr
 
 Where the code departs from the text above, and why.
 
-- **`merge` reads the branch head first, and `sync`'s shortcut is narrower.** Read literally, `merge`
-  sends a moved branch to `sync`, and `sync` sends a `land_sha` already on the batch to `merge`: a task
-  whose head landed while its branch moved past it would bounce between the two every tick. So `sync`
-  goes straight to `merge` only when `land_sha` is on the batch **and** the branch has not moved past
-  it. A moved branch waits for the worker's sync, whose walk meets the extra commit, so it lands
-  reviewed.
+- **A landing is always recorded, and a branch head already on the batch has not moved.** Read
+  literally, `merge` sends a moved branch to `sync`, and `sync` sends a `land_sha` already on the batch to
+  `merge`: a task whose head landed while its branch moved past it would bounce between the two every
+  tick. The first cut read the branch head first in `merge`, which dropped the landing of a head that
+  had landed, and wedged a task whose whole tip the orchestrator pushed: `sync` then had nothing to
+  merge, and `submit` refused it as "nothing to land" for good. Now:
+  - The branch counts as moved only when its head adds more than review verdicts to `land_sha` **and**
+    `origin/<batch>` does not already contain it. A tip landed in place of `land_sha` therefore closes
+    the task, its unreviewed commits on the batch as §7 accepts.
+  - Whenever `land_sha` is on the batch, `merge` (and `land-queue`, meeting the same case) appends its
+    `landed` line first. A branch that has not moved then closes the task. One that has goes to `sync`
+    with the line already recorded, and `merged_at_ms` stays unset, so the bead stays open while the
+    extra commits go through review and land as a second landing.
+  - `sync` goes straight to `merge` only when `land_sha` is on the batch and the branch has not moved,
+    so the two rows never bounce: a moved branch waits for the worker's sync, whose walk meets the extra
+    commit, so it lands reviewed.
 - **"Moved" and "checked" ignore review verdicts.** A branch head that adds only files under
   `docs/superpowers/reviews/` to `land_sha` has not moved, and a `land_sha` that adds only those to the
   submitted head is checked (the after-pass-2 rule). Both diffs run in `repo_root`'s object store; a
