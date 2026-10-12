@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   listRuns, loadRun, newRun, readOrchestrator,
-  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
+  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveIfChanged, saveRun, StaleRunError,
+  writeOrchestrator,
 } from '../src/lib/ledger'
 import { tierOf } from '../src/lib/phases'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -329,4 +330,27 @@ test('a task saved without a tier loads without one, and reading its tier writes
   await saveRun(dir, loaded)
   const raw = await Bun.file(join(dir, 'runs', 'personal', `${runId}.json`)).text()
   expect(raw).not.toContain('"tier"')
+})
+
+test('a tick that changed nothing writes nothing, and says so only while its copy is current', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  const revision = run.revision
+  expect(await saveIfChanged(dir, run, JSON.stringify(run), [])).toBe('unchanged')
+  expect((await loadRun(dir, 'p', run.run_id))?.revision).toBe(revision)
+
+  const elsewhere = (await loadRun(dir, 'p', run.run_id))!
+  elsewhere.title = 'renamed by a CLI command'
+  await saveRun(dir, elsewhere)
+  expect(await saveIfChanged(dir, run, JSON.stringify(run), [])).toBe('stale')
+})
+
+test('a tick that changed something, or carries an effect, saves as before', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  const asRead = JSON.stringify(run)
+  run.title = 'changed this tick'
+  expect(await saveIfChanged(dir, run, asRead, [])).toBe('saved')
+  expect((await loadRun(dir, 'p', run.run_id))?.title).toBe('changed this tick')
+  expect(await saveIfChanged(dir, run, JSON.stringify(run), [() => {}])).toBe('saved')
 })
