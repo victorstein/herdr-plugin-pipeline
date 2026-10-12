@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
-import { landCommand, sha8 } from './batch'
+import { landCommand, landsCleanSync, sha8 } from './batch'
 import { CHECK_REL, repoCheck } from './check'
 import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor } from './machine'
@@ -693,10 +693,9 @@ function landingDetail(task: Task, batch: Batch, now: number): string[] {
     ? 'none'
     : `${sub.title} (${sub.kind}, at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago; ` +
       `${sub.check === 'passed' ? 'check passed' : 'no check declared'})`
-  const cleanSync = sub?.kind === 'sync' && sub.merge === 'clean' && sub.head_sha === task.land_sha
   const judged = task.review_skip === undefined ? 'reviewed' : `submitted; ${reviewsSkipped(task.review_skip)}`
   const landSha = task.land_sha
-    ? `${sha8(task.land_sha)} (${cleanSync ? `clean sync of ${batch.branch}` : judged})`
+    ? `${sha8(task.land_sha)} (${landsCleanSync(task) ? `clean sync of ${batch.branch}` : judged})`
     : 'none'
   const landings = (task.landed ?? []).map((l) => `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago`)
   return [

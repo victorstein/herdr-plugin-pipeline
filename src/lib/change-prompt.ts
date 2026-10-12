@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { checkoutSteps, landCommand, mergeBatchCommand, sha8 } from './batch'
+import { checkoutSteps, landCommand, landsCleanSync, mergeBatchCommand, sha8 } from './batch'
 import { trackingRefspec } from './dispatch-base'
 import { CHECK_REL, repoCheck } from './check'
 import { modeOf } from './phases'
@@ -164,10 +164,13 @@ export function mergePromptVars(task: Task): Record<string, string> {
 export function landingPromptVars(run: Run, task: Task): Record<string, string> {
   const batch = run.batch as Batch
   const landSha = task.land_sha ?? '<no reviewed head recorded>'
-  const checked = task.submission?.check === 'passed' ? ' and checked' : ''
+  const checked = task.submission?.check === 'passed'
+  const judged = task.review_skip === undefined ? 'reviewed' : 'submitted'
+  const landHead = landsCleanSync(task)
+    ? `a clean sync of \`${batch.branch}\` on top of the ${judged} head${checked ? ', checked' : ''}`
+    : `the head that was ${judged}${checked ? ' and checked' : ''}`
   return {
-    batch: batch.branch, into: batch.into, land_sha8: sha8(landSha), checked_note: checked,
-    land_judged: task.review_skip === undefined ? 'reviewed' : 'submitted',
+    batch: batch.branch, into: batch.into, land_sha8: sha8(landSha), land_head: landHead,
     land_command: landCommand(run, landSha), repo_root: run.repo_root,
   }
 }

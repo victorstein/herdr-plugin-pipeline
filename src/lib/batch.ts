@@ -23,6 +23,11 @@ export function mergeBatchCommand(batch: Batch): string {
   return `${fetchBatchCommand(batch)} && git merge --no-edit ${shellWord(`origin/${batch.branch}`)}`
 }
 
+export function landsCleanSync(task: Task): boolean {
+  const sub = task.submission
+  return sub?.kind === 'sync' && sub.merge === 'clean' && sub.head_sha === task.land_sha
+}
+
 /** A non-force push: git refuses it unless `landSha` already contains the batch head, which is the landing gate. */
 export function landCommand(run: Run, landSha: string): string {
   const refspec = `${landSha}:refs/heads/${(run.batch as Batch).branch}`

@@ -652,6 +652,20 @@ test('merge says the PR review was skipped, and the batch landing names the head
     .toContain('Review cleared, and `abcdef12` is the head that was reviewed')
 })
 
+test('the batch landing names a clean sync as one, on top of the head that was reviewed or submitted', async () => {
+  // Smoke run 14 called a clean sync's head "the head that was reviewed".
+  const sync = { kind: 'sync' as const, title: 't', head_sha: '13f910ea0000', at: 1, check: 'passed' as const,
+    merge: 'clean' as const }
+  const reviewed = { tier: 'light' as const, verdict_seq: { 'pr-review': 1 }, land_sha: '13f910ea0000', submission: sync }
+  expect(prose(await renderPhase('merge', reviewed, 'merge', 'single-pr'))).toContain('Review cleared, and ' +
+    '`13f910ea` is a clean sync of `batch/x` on top of the reviewed head, checked. It contains every landing')
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  expect(prose(await renderPhase('merge', { ...reviewed, review_skip }, 'merge', 'single-pr')))
+    .toContain('`13f910ea` is a clean sync of `batch/x` on top of the submitted head, checked.')
+  expect(prose(await renderPhase('merge', { ...reviewed, land_sha: 'aaaa1111' }, 'merge', 'single-pr')))
+    .toContain('`aaaa1111` is the head that was reviewed and checked.')
+})
+
 test('sync tells a worker whose review was skipped that it was, not that it was reviewed', async () => {
   const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
   expect(prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc', review_skip })))
