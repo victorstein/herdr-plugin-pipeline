@@ -617,6 +617,12 @@ test('the decision prompt tells the orchestrator to raise the tier when an answe
   expect(sent[0]).toContain('Never lower a tier.')
 })
 
+test('the per-task merge prompt renders the merge command, with the way out when squash is off', async () => {
+  const text = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } })
+  expect(text).toContain('\n    gh pr merge 7 --squash\n')
+  expect(prose(text)).toContain('If this repo does not allow squash merges, merge with the method it does allow')
+})
+
 test('merge counts the review stages that actually ran', async () => {
   expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } }))
     .toContain('Both review stages cleared and CI is green on PR #7.')

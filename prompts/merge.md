@@ -10,4 +10,9 @@ checkout before you build or test there: the sibling that landed may have change
 Green is for the head CI ran on. If you push to the branch, a rebase or a commit of your own, the task
 goes back to `ci` and you are told again once the new head is green: do not merge on the old green.
 
-Then merge it. Merging is yours, not the plugin's; nothing merges automatically.
+Then merge it:
+
+    gh pr merge {{pr}} --squash
+
+If this repo does not allow squash merges, merge with the method it does allow, `--merge` or
+`--rebase`. Merging is yours, not the plugin's; nothing merges automatically.
