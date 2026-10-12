@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { forgetDispatchBases } from '../src/lib/dispatch-base'
 import { newRun, withBatch } from '../src/lib/ledger'
@@ -122,4 +123,46 @@ test('the clean-up deletes only task branches whose head landed, and names the r
   git(['push', '-q', '--force', 'origin', `${t1}:refs/heads/t1-branch`], other)
   expect((await cleanupLines(landedOnly, landedOnly.batch!)).join('\n'))
     .toContain(`git -C '${clone}' push origin --delete t1-branch`)
+})
+
+test('a shipped run names what its clean-up leaves: local task branches, the batch on origin, a stale default branch, the review', async () => {
+  const { renderRunPhasePrompt } = await import('../src/supervisor/deliver')
+  const { clone, other, t1 } = landingRepo()
+  git(['push', '-q', 'origin', `${t1}:refs/heads/batch/x`], other)
+  git(['fetch', '-q', 'origin'], clone)
+  git(['branch', 't1-branch', 'origin/t1-branch'], clone)
+  git(['branch', 't3-branch', 'origin/t3-branch'], clone)
+  const t3 = revParse(clone, 't3-branch')
+  const review = 'docs/superpowers/reviews/r1-branch-review-0.md'
+  mkdirSync(join(clone, 'docs', 'superpowers', 'reviews'), { recursive: true })
+  writeFileSync(join(clone, review), 'VERDICT: CLEAR\n')
+
+  const run = runIn(clone, [
+    mkTask({ task_id: 't1', branch: 't1-branch', phase: 'done' }), mkTask({ task_id: 't3', branch: 't3-branch', phase: 'done' }),
+  ])
+  run.phase = 'done'
+  run.batch = { ...run.batch!, pr: 51, merged_at_ms: 1, merge_commit: 'f00dfeed00000000000000000000000000000000' }
+  run.artifacts.verdicts = { 'branch-review-0': review }
+  const ROOT = join(import.meta.dir, '..')
+
+  const text = await renderRunPhasePrompt(run, ROOT)
+  expect(text).toContain(`  git -C '${clone}' branch -D t1-branch\n`)
+  expect(text).toContain(`  local t3-branch has commits that did not land: ${t3.slice(0, 8)}; review before deleting`)
+  expect(text).toContain(`  git -C '${clone}' pull --ff-only  # main predates PR #51's squash merge`)
+  expect(text).toContain(`  origin keeps batch/x, which is harmless; deleting it, \`git -C '${clone}' push origin --delete batch/x\`, ` +
+    'needs a bypass if a ruleset protects batch/*')
+  expect(text).toContain(`  ${join(clone, review)} is this run's branch review and its record: keep it or delete it, ` +
+    'but do not commit it')
+
+  git(['checkout', '-q', '-b', 'elsewhere'], clone)
+  git(['push', '-q', 'origin', '--delete', 'batch/x'], other)
+  run.batch.merge_commit = revParse(clone, 'main')
+  const later = await renderRunPhasePrompt(run, ROOT)
+  expect(later).not.toContain('pull --ff-only')
+  expect(later).not.toContain('origin keeps')
+  run.batch.merge_commit = 'f00dfeed00000000000000000000000000000000'
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain(`  git -C '${clone}' fetch origin main:main  # main predates`)
+
+  run.batch.merged_at_ms = null
+  expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
 })

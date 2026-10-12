@@ -63,16 +63,17 @@ export async function syncWalk(checkout: string, reviewed: string | null, batchR
   return { clean: true }
 }
 
+/** The pipeline's own documents: a change made of these alone is nothing to land. */
+export const landsNothing = (path: string): boolean => path.startsWith(`${ARTIFACT_ROOT}/`)
+
 /**
  * Tree-based, not ancestry-based: a branch whose only new commit is a merge of the
  * batch is not contained in it, yet it changes nothing but the task's own docs.
  */
 export async function nothingToLand(checkout: string, batchRef: string): Promise<boolean | null> {
-  const changed = await git(checkout, [
-    'diff', '--name-only', `${batchRef}...HEAD`, '--', '.', `:(exclude)${ARTIFACT_ROOT}/`,
-  ])
+  const changed = await git(checkout, ['-c', 'core.quotePath=false', 'diff', '--name-only', `${batchRef}...HEAD`])
   if (changed.code !== 0) return null
-  return changed.out.length === 0
+  return changed.out.split('\n').filter((path) => path.length > 0).every(landsNothing)
 }
 
 export async function resolveCommit(repoRoot: string, ref: string): Promise<string | null> {
@@ -102,7 +103,7 @@ export async function fileAt(repoRoot: string, ref: string, path: string): Promi
 
 /** Null when either commit is not in this object store, so the caller cannot mistake it for no change. */
 export async function changedPaths(repoRoot: string, from: string, to: string): Promise<string[] | null> {
-  const diff = await git(repoRoot, ['diff', '--name-only', '--no-renames', from, to])
+  const diff = await git(repoRoot, ['-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', from, to])
   if (diff.code !== 0) return null
   return diff.out.split('\n').filter((path) => path.length > 0)
 }

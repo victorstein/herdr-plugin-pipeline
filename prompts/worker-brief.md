@@ -12,6 +12,9 @@ Never run `bd` or `bv` yourself.
 
 Out-of-scope bugs and follow-ups you find go to
 `{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>`, not into this {{change_noun}}.
+Discoveries are follow-up work for this repo, filed into its backlog: a problem with the pipeline itself
+— `{{hpipe}}`, the supervisor, these prompts — is not one. Tell the orchestrator in your turn's last
+message instead.
 
 Read `{{agent_file}}` before your first edit — it is the scoped guide for surface `{{surface}}`, and
 the repo's root `CLAUDE.md` outranks it where they conflict. Work only on this surface, only in this

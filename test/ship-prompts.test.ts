@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newRun, withBatch } from '../src/lib/ledger'
@@ -48,6 +48,15 @@ test('ship writes the PR body beside the run and renders the commands to check a
   expect(text).not.toContain('{{')
 })
 
+test('ship repeats the ruleset advice start gave once, for the batch\'s own pattern', async () => {
+  // Printed once, above the intake prompt, it was missed. Measured on a live run.
+  const text = (await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  expect(text).toContain('If `batch/*` has no ruleset blocking force-pushes and deletion, recommend one to the user')
+  const own = (await renderRunPhasePrompt(shipping('ship', { branch: 'release/menu' }), ROOT, { stateDir: dir }))
+    .replace(/\s+/g, ' ')
+  expect(own).toContain('If `release/menu` has no ruleset')
+})
+
 test('ship fetches the default branch before asking whether the batch still merges into it', async () => {
   const text = await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })
   const checkout = join(dir, 'checkouts', 'r1')
@@ -86,6 +95,22 @@ test('re-entered from a red ship-ci, ship carries the failing checks and the thr
   expect(text).not.toContain('{{')
 })
 
+test('the red-CI patch route brings the checkout up to date the way ship does, bootstrap included', async () => {
+  const run = shipping('ship', { pr: 301 })
+  run.repo_root = join(dir, 'repo')
+  mkdirSync(join(run.repo_root, '.claude'), { recursive: true })
+  writeFileSync(join(run.repo_root, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\nbun install\n')
+  chmodSync(join(run.repo_root, '.claude', 'pipeline-bootstrap'), 0o755)
+  mkdirSync(run.batch!.checkout, { recursive: true })
+  run.passes['ship-ci'] = 1
+  run.history.push({ at: 1, from: 'ship-ci', to: 'ship', why: 'CI failed' })
+  const text = await renderRunPhasePrompt(run, ROOT, { stateDir: dir, ciDetail: async () => '- build (fail)' })
+  const checkout = run.batch!.checkout
+  expect(text).toContain(`       git -C '${checkout}' pull --ff-only\n` +
+    `       (cd '${checkout}' && ./.claude/pipeline-bootstrap)  # if the pull changed what it builds\n`)
+  expect(text).not.toContain('{{')
+})
+
 test('ship-merge renders both commands with every title shell-quoted, and writes the squash body', async () => {
   const run = shipping('ship-merge', { pr: 301 })
   const text = await renderRunPhasePrompt(run, ROOT, { stateDir: dir })
@@ -94,6 +119,14 @@ test('ship-merge renders both commands with every title shell-quoted, and writes
   expect(readFileSync(squash, 'utf8')).toBe('feat(reader): add bookmarks\n')
   expect(existsSync(join(dir, 'runs', 'personal', 'r1.batch-pr.md'))).toBe(true)
   expect(text).not.toContain('{{')
+})
+
+test('ship-merge warns that the body edit replaces the description, and that a 5xx is rerun', async () => {
+  const text = (await renderRunPhasePrompt(shipping('ship-merge', { pr: 301 }), ROOT, { stateDir: dir }))
+    .replace(/\s+/g, ' ')
+  expect(text).toContain("replaces PR #301's whole description")
+  expect(text).toContain(`add it to \`${join(dir, 'runs', 'personal', 'r1.batch-pr.md')}\` first, outside the override block`)
+  expect(text).toContain("A 5xx from `gh` is GitHub's, not yours:** run the same command again.")
 })
 
 test('the branch review of a single-PR run reads the batch diff and speaks of landings', async () => {

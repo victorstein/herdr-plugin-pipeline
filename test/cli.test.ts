@@ -321,6 +321,15 @@ test('start sets Beads up before it opens the run, and says what it set up', asy
   expect(out.text).toContain('intake')
 })
 
+test('a --prefix the existing store overrides is the first thing start says', async () => {
+  const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir, prefix: 'sm13' }, startBeads({
+    setup: async () => ({ ok: true, slug: 'k-abc123', prefix: 'sm12', created: false, notes: [], ignoredPrefix: 'sm13' }),
+  }))
+  expect(out.ok).toBe(true)
+  expect(out.text.split('\n')[0]).toBe(
+    "⚠ --prefix sm13 was ignored: this repo's Beads store already uses sm12, so this run's beads are sm12-<n>")
+})
+
 test('start refuses without a working bd, and neither sets up nor opens a run', async () => {
   let setups = 0
   const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir }, startBeads({

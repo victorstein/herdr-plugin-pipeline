@@ -186,8 +186,11 @@ that merge even though nobody pulled local `main` (`git -C <worktree> merge-base
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
 --abbrev-ref @{u}` fails with `no upstream configured`). Under that line both print the same
 `dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
-declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
-dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
+declares one, `agent start <bead> … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
+dispatched at registration is started with the flag too (#118). The `agent start` line names the agent
+by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr agent list` shows the
+agent under that name. A refusal of the name, or of a second start under it after a rewind, is a
+finding. Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
 in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
 is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
@@ -388,7 +391,10 @@ tier passes through it on the way to `implement`: a heavy or standard task enter
    you:` carrying the rendered `<hpipe> release --task t1` — once, not on both lines.
 
    The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (every
-   tier), `ci`, `merge`, `close`, `teardown` all hold files.
+   tier), `ci`, `merge`, `close`, `teardown` all hold files. `t2`'s own task line, and any digest line
+   about it, names the same holder: `— nothing for you — waiting for t1 (implement) to free the files
+   it holds`. A digest that says no task holds its files while status still prints the ⚠ line above
+   is a finding.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.
@@ -1231,7 +1237,10 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 - on a throwaway PR with no override block, check that the squash body's extra lines alone give one
   entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);
 - `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n
-  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch.
+  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch. Run every
+  clean-up line it prints, then check nothing is left: no local task branch (`git branch`), the
+  default branch at the squash commit, `git status` showing only the branch-review file the notice
+  named, and the batch branch on origin only when a ruleset kept it.
 
 ### 9j. Abort
 

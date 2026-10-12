@@ -153,11 +153,14 @@ test('both dispatch paths point the orchestrator at the base: line, never a stal
 test('the dispatch prompt shows the same agent start line both dispatch paths print — #118', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
   const run = { repo_root: '/r' } as Run
-  const task = { task_id: 't1', branch: 'feat/x' } as Task
+  const task = { task_id: 't1', branch: 'feat/x', bead: 'hp-1' } as Task
   const base = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
   const printed = dispatchSequence(run, task, base, { kind: 'none' }, 'hp')
   const startLine = printed.split('\n').find((line) => line.includes('herdr agent start'))!.trim()
-  expect(text).toContain(startLine.replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort xhigh', '--effort <effort>'))
+  expect(text).toContain(startLine.replace('start hp-1 ', 'start <name> ')
+    .replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort xhigh', '--effort <effort>'))
+  // The template is the one place the name stays a placeholder, so it says what goes there.
+  expect(text).toContain('`<name>` is')
 })
 
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
@@ -744,6 +747,9 @@ test('the worker sends out-of-scope work to discover, and the branch review file
   const brief = prose(await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text())
   expect(brief).toContain('{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>')
   expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('not into this PR')
+  // A plugin bug recorded as a discovery was filed into the repo's own backlog. Measured on a live run.
+  expect(brief).toContain('Discoveries are follow-up work for this repo')
+  expect(brief).toContain('a problem with the pipeline itself')
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')

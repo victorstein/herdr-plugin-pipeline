@@ -239,10 +239,10 @@ export function noteWorkingAfterAnswer(task: Task, at: number): void {
  */
 export interface LandingFacts {
   /**
-   * The branch head on origin, when it moved past `land_sha` with more than review
-   * verdicts and the batch does not already have it. A tip landed in place of
-   * `land_sha` has nothing left to land, and a sync of it would wedge on `submit`'s
-   * "nothing to land".
+   * The branch head on origin, when it moved past `land_sha` with more than the
+   * pipeline's own documents and the batch does not already have it. A tip landed
+   * in place of `land_sha`, or a move of documents alone, has nothing left to land,
+   * and a sync of it would wedge on `submit`'s "nothing to land".
    */
   movedTo: string | null
   /** `land_sha` is contained in `origin/<batch>`. */

@@ -256,11 +256,17 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       return notYours(`nothing for you here — ${escalated.join(', ')} ${escalated.length === 1 ? 'holds' : 'hold'} ` +
         `these files and ${escalated.length === 1 ? 'is' : 'are'} escalated; its own line says how to resume or abandon it`)
     }
-    // Every task passes through this gate. One that only passed through read in its
-    // digest exactly like one really waiting. Measured on a live run.
-    if (holders.length === 0) return notYours('nothing for you — its files are free; it implements next tick')
-    return notYours(`nothing for you — waiting for ${holders.map((t) => `${t.task_id} (${t.phase})`).join(', ')} ` +
-      'to finish with these files')
+    // Every task passes through this gate, and one that only passed through read in its
+    // digest exactly like one really waiting. Measured on a live run. No tick is promised:
+    // widening from the plan, or a sibling released first onto the same files, can still
+    // give it a holder at the gate.
+    if (holders.length === 0) {
+      return notYours("nothing for you — no task holds its files now; the supervisor's file gate passes it to " +
+        'implement unless another task takes them first')
+    }
+    const named = holders.map((t) => `${t.task_id} (${t.phase})`).join(', ')
+    const hold = holders.length === 1 ? 'it holds' : 'they hold'
+    return notYours(`nothing for you — waiting for ${named} to free the files ${hold}`)
   }
   return notYours('nothing for you — the supervisor is driving')
 }
@@ -297,7 +303,9 @@ function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move 
   }
   return {
     waitsOnYou: false,
-    clause: landingQueue(run.tasks)[0] === task ? 'nothing for you — next to land' : 'nothing for you — waiting to land',
+    clause: landingQueue(run.tasks)[0] === task
+      ? 'nothing for you yet — next to land; your land prompt comes when it reaches merge'
+      : 'nothing for you — waiting to land',
   }
 }
 

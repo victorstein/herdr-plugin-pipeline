@@ -12,6 +12,9 @@ export function defaultBatchBranch(runId: string, repoRoot: string): string {
   return `batch/${runId.startsWith(`${repoName}-`) ? runId.slice(repoName.length + 1) : runId}`
 }
 
+/** One ruleset covers every run's default-named batch; a name of the user's own is protected by name. */
+export const rulesetPattern = (branch: string): string => (branch.startsWith('batch/') ? 'batch/*' : branch)
+
 export function fetchBatchCommand(batch: Batch): string {
   return `git fetch origin ${shellWord(trackingRefspec(batch.branch))}`
 }

@@ -99,9 +99,13 @@ export function shellWord(word: string): string {
 /**
  * Workers run unattended: a permission prompt would hold one with nobody watching its pane.
  * The effort is fixed for the session's life, so a later tier change reaches only the reviews.
+ *
+ * herdr resolves a target by a unique agent name, and a bead id is unique across
+ * every repo's store, where a task id repeats in each run. Left as `<name>`, the
+ * line could not be run as printed.
  */
 function startAgentCommand(task: Task, paneId: string): string {
-  return `herdr agent start <name> --kind claude --pane ${paneId} -- --dangerously-skip-permissions ` +
+  return `herdr agent start ${shellWord(task.bead)} --kind claude --pane ${paneId} -- --dangerously-skip-permissions ` +
     `--effort ${WORKER_EFFORT[tierOf(task)]}`
 }
 
