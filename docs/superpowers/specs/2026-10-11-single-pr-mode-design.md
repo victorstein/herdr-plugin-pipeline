@@ -1131,7 +1131,8 @@ Where the code departs from the text above, and why.
   `(cd '<checkout>' && ./.claude/pipeline-bootstrap)` when the repo declares one, as §4 says, and the
   pull path adds the same line "if the pull changed what it builds", as `sync.md` does. Without it,
   `batch-check` ran the check in a tree with no dependencies installed, and `ship.md` sent a subagent to
-  fix a toolchain as though it were a defect.
+  fix a toolchain as though it were a defect. `ship-ci-red.md`'s patch route renders the same steps,
+  where it had a bare `pull --ff-only` of its own.
 - **The check runs under a 9-minute deadline, in its own process group.** `submit` and `batch-check`
   run inside the agent's 10-minute Bash timeout, which killed the CLI with nothing said and left a hung
   check's children running. At the deadline the whole group is killed and the refusal says the check did

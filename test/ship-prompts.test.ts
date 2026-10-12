@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newRun, withBatch } from '../src/lib/ledger'
@@ -92,6 +92,22 @@ test('re-entered from a red ship-ci, ship carries the failing checks and the thr
   expect(text).toContain('- build (fail) for #301')
   expect(text).toContain('A small defect — the default')
   expect(text.replace(/\s+/g, ' ')).toContain('a second red escalates the run')
+  expect(text).not.toContain('{{')
+})
+
+test('the red-CI patch route brings the checkout up to date the way ship does, bootstrap included', async () => {
+  const run = shipping('ship', { pr: 301 })
+  run.repo_root = join(dir, 'repo')
+  mkdirSync(join(run.repo_root, '.claude'), { recursive: true })
+  writeFileSync(join(run.repo_root, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\nbun install\n')
+  chmodSync(join(run.repo_root, '.claude', 'pipeline-bootstrap'), 0o755)
+  mkdirSync(run.batch!.checkout, { recursive: true })
+  run.passes['ship-ci'] = 1
+  run.history.push({ at: 1, from: 'ship-ci', to: 'ship', why: 'CI failed' })
+  const text = await renderRunPhasePrompt(run, ROOT, { stateDir: dir, ciDetail: async () => '- build (fail)' })
+  const checkout = run.batch!.checkout
+  expect(text).toContain(`       git -C '${checkout}' pull --ff-only\n` +
+    `       (cd '${checkout}' && ./.claude/pipeline-bootstrap)  # if the pull changed what it builds\n`)
   expect(text).not.toContain('{{')
 })
 

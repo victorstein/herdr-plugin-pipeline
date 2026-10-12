@@ -523,14 +523,14 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     subject: shellQuoted(squashSubject(run)), ruleset_pattern: rulesetPattern(batch.branch),
   }
   if (run.phase === 'ship-merge') return renderPrompt(pluginRoot, 'ship-merge', vars)
+  const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'
   if (cameFromRedCi && batch.pr !== null) {
     return renderPrompt(pluginRoot, 'ship-ci-red', {
-      ...vars, ci_failure: (await extras.ciDetail?.(batch.pr)) ?? '',
+      ...vars, checkout_steps: steps, ci_failure: (await extras.ciDetail?.(batch.pr)) ?? '',
       pass: String(counterFor(run, 'ship-ci')), max_passes: String(extras.maxPasses ?? 2),
     })
   }
-  const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   return renderPrompt(pluginRoot, 'ship', {
     ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
     pr_command: batch.pr === null
