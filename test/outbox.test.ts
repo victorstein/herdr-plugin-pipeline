@@ -127,6 +127,21 @@ test('a pane stuck on someone else\'s input is named even when only digests are 
   ])
 })
 
+test('a pane the usage limit stopped is named with its reset, owed something or not, and never as unattempted', () => {
+  const run = mkRun()
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'x' }, 0)
+  const holds = {
+    'w1:p1': { since: MINUTE, failures: 0, code: 'usage_limit', until: 90 * MINUTE, reset: '10:20am (America/Managua)' },
+    'w7:p1': { since: 2 * MINUTE, failures: 0, code: 'usage_limit', until: null, reset: null },
+  }
+  expect(deliveryWarnings(run, new Set(['w1:p1', 'w7:p1']), 5 * MINUTE, { holds })).toEqual([
+    "  ⚠ usage limit in w1:p1: 1 prompt for the orchestrator held 5m — Claude's usage limit resets " +
+      '10:20am (America/Managua); what is owed waits for it, nothing to do',
+    "  ⚠ usage limit in w7:p1 (t1's worker) for 3m — Claude's usage limit, whose reset could not be read; " +
+      'held until its screen moves on or `hpipe nudge` releases it',
+  ])
+})
+
 test('a stuck pane that is also owed something is named once — #145', () => {
   const run = mkRun()
   enqueue(run, { to: 'orchestrator', taskId: null, text: 'x' }, 0)

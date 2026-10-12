@@ -266,6 +266,12 @@ export function deliveryWarnings(
     const oldest = Math.min(...held.map((o) => o.since))
     const latest = held.reduce((a, b) => ((b.lastAttemptAt ?? 0) > (a.lastAttemptAt ?? 0) ? b : a))
     const count = countOf(held)
+    if (pane !== null && hold?.code === 'usage_limit') {
+      named.add(pane)
+      lines.push(`  ⚠ usage limit in ${pane}: ${count} for ${label} held ${ageMinutes(oldest, now)}m — ` +
+        usageLimitClause(hold, label))
+      continue
+    }
     if (pane !== null && (hold?.code === 'stuck_input' || latest.lastCode === 'stuck_input')) {
       named.add(pane)
       lines.push(`  ⚠ stuck input in ${pane}: ${count} for ${label} held ` +
@@ -301,6 +307,12 @@ export function deliveryWarnings(
   // for one while status printed nothing for four minutes. Measured on a live run.
   for (const { pane, label } of runPanes(run)) {
     const hold = holds[pane]
+    if (hold?.code === 'usage_limit' && !named.has(pane)) {
+      named.add(pane)
+      lines.push(`  ⚠ usage limit in ${pane} (${label}) for ${ageMinutes(hold.since, now)}m — ` +
+        usageLimitClause(hold, label))
+      continue
+    }
     if (hold?.code !== 'stuck_input' || named.has(pane)) continue
     named.add(pane)
     lines.push(`  ⚠ stuck input in ${pane}: nothing has been sent to ${label} for ` +
@@ -308,6 +320,21 @@ export function deliveryWarnings(
       'send — submit or clear that text and delivery resumes')
   }
   return lines
+}
+
+function usageLimitClause(hold: PaneHold, label: string): string {
+  if (hold.until === null || hold.until === undefined) {
+    return "Claude's usage limit, whose reset could not be read; held until its screen moves on or `hpipe nudge` " +
+      'releases it'
+  }
+  const after = label === 'the orchestrator' ? 'what is owed waits for it' : 'the supervisor resumes it then'
+  return `Claude's usage limit resets ${limitReset(hold)}; ${after}, nothing to do`
+}
+
+/** The reset as Claude printed it, or its UTC time from an older supervisor's file that has only `until`. */
+export function limitReset(hold: PaneHold): string {
+  if (hold.reset) return hold.reset
+  return hold.until ? `${new Date(hold.until).toISOString().slice(11, 16)}Z` : 'at a time that could not be read'
 }
 
 function runPanes(run: Run): { pane: string; label: string }[] {

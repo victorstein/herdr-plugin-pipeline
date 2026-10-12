@@ -693,6 +693,34 @@ test('a worker whose phase prompt is held by stuck input is not called idle with
   expect(text).toContain('⚠ stuck input in w3:p1')
 })
 
+const RESET_AT = 100_000_000 + 3_600_000
+const limitHold = (until: number | null) => ({
+  'w3:p1': {
+    since: 100_000_000 - 60_000, failures: 0, code: 'usage_limit', until,
+    reset: until === null ? null : '10:20am (America/Managua)',
+  },
+})
+
+test('a worker the usage limit paused is nobody\'s move, ahead of its held prompt and its missing artifact', () => {
+  const { run, now } = heldSpecPrompt()
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w3:p1']), now, {
+    holds: limitHold(RESET_AT),
+  })
+  expect(text).toContain("t1 feat/x hp-1 [spec 1m] heavy idle — nothing for you — paused by Claude's usage limit, " +
+    'resets 10:20am (America/Managua); the supervisor resumes it then')
+  expect(text).not.toContain('waiting on you:')
+  expect(text).toContain("⚠ usage limit in w3:p1: 1 prompt for t1's worker held 1m")
+  expect(waitsOnYou(run, run.tasks[0] as Task, now, limitHold(RESET_AT))).toBe(false)
+})
+
+test('a worker paused by a limit whose reset could not be read waits on you, and says how to resume it', () => {
+  const { run, now } = heldSpecPrompt()
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, limitHold(null))).toBe(
+    "YOUR move: paused by Claude's usage limit, whose reset could not be read — once it has reset, " +
+      `\`${HP} nudge --task t1\``,
+  )
+})
+
 test('a send refused before it went out is named stuck from the gate\'s holds, as the digest passes them — #136', () => {
   const { run, now } = heldSpecPrompt()
   const holds = { 'w3:p1': { since: now - 60_000, failures: 0, code: 'stuck_input' } }

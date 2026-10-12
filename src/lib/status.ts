@@ -5,7 +5,7 @@ import { fileHolders } from './gating'
 import { counterFor } from './machine'
 import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
-import { deliveryWarnings, type PaneObservations, queuedWorkerPrompt } from './outbox'
+import { deliveryWarnings, limitReset, type PaneObservations, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
@@ -107,6 +107,27 @@ function undeliveredPhasePrompt(run: Run, task: Task, holds: PaneHolds): Move | 
 }
 
 /**
+ * A worker Claude's usage limit stopped. The supervisor resumes it at the reset, so
+ * nothing is owed unless the reset could not be read: then only a human knows when
+ * it has passed.
+ */
+function pausedByUsageLimit(task: Task, hpipe: string, holds: PaneHolds): Move | null {
+  const hold = task.pane_id === null ? undefined : holds[task.pane_id]
+  if (hold?.code !== 'usage_limit') return null
+  if (hold.until === null || hold.until === undefined) {
+    return {
+      waitsOnYou: true,
+      clause: "YOUR move: paused by Claude's usage limit, whose reset could not be read — once it has reset, " +
+        `\`${hpipe} nudge --task ${task.task_id}\``,
+    }
+  }
+  return {
+    waitsOnYou: false,
+    clause: `nothing for you — paused by Claude's usage limit, resets ${limitReset(hold)}; the supervisor resumes it then`,
+  }
+}
+
+/**
  * The one way back from an escalation, for a run or for one of its tasks. Every
  * channel that tells an operator how to resume renders it here, so status, the
  * digest, the stall ladder and a refused CLI command cannot drift apart.
@@ -185,6 +206,9 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
         briefCommand(task, unbriefed.paneId, hpipe))
     }
+    // Ahead of the undelivered prompt, which reads any hold as "YOUR move".
+    const paused = pausedByUsageLimit(task, hpipe, holds)
+    if (paused) return paused
     const undelivered = undeliveredPhasePrompt(run, task, holds)
     if (undelivered) return undelivered
     // An idle worker that has stopped short otherwise reads exactly like a busy
