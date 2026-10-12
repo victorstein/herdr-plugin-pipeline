@@ -623,17 +623,29 @@ test('the per-task merge prompt renders the merge command, with the way out when
   expect(prose(text)).toContain('If this repo does not allow squash merges, merge with the method it does allow')
 })
 
+test('the per-task merge prompt calls CI green only when a pass is recorded', async () => {
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' }))
+    .toContain('Review cleared and CI is green on PR #7.')
+  for (const ci of [null, 'pending', 'fail'] as const) {
+    const text = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci })
+    expect(text, String(ci)).not.toContain('CI is green')
+    expect(text, String(ci)).toContain('Review cleared, but no green CI is recorded on PR #7. Check it first, and ' +
+      'merge only once every check passes:\n\n    gh pr checks 7\n')
+  }
+})
+
 test('merge counts the review stages that actually ran', async () => {
-  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } }))
+  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 }, ci: 'pass' }))
     .toContain('Both review stages cleared and CI is green on PR #7.')
-  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } }))
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' }))
     .toContain('Review cleared and CI is green on PR #7.')
 })
 
 test('merge says the PR review was skipped, and the batch landing names the head as submitted, not reviewed', async () => {
   const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
   const skipped = 'The PR review was skipped (12 lines added outside docs/, spec-review cleared first pass)'
-  expect(prose(await renderPhase('merge', { tier: 'light', review_skip }))).toContain(`${skipped} and CI is green on PR #7.`)
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, ci: 'pass' })))
+    .toContain(`${skipped} and CI is green on PR #7.`)
   expect(prose(await renderPhase('merge', { tier: 'light', review_skip, land_sha: 'abcdef1234' }, 'merge', 'single-pr')))
     .toContain(`${skipped}, and \`abcdef12\` is the head that was submitted`)
   expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, land_sha: 'abcdef1234' }, 'merge', 'single-pr'))

@@ -22,7 +22,7 @@ import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
-import { changePromptVars, landingPromptVars, syncPromptVars } from '../lib/change-prompt'
+import { changePromptVars, landingPromptVars, mergePromptVars, syncPromptVars } from '../lib/change-prompt'
 import {
   ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, reviewSkip, type SkipCandidate, skipCandidate,
 } from '../lib/review-skip'
@@ -185,7 +185,7 @@ export async function renderTaskPhasePrompt(
     case 'merge':
       return modeOf(run) === 'single-pr'
         ? renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
-        : renderPrompt(deps.pluginRoot, 'merge', common)
+        : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(task) })
     case 'sync':
       return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task) })
     case 'implement':

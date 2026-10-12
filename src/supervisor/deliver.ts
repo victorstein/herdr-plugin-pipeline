@@ -7,7 +7,7 @@ import {
 import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
-import { runChangeVars } from '../lib/change-prompt'
+import { ciCheckFirst, runChangeVars } from '../lib/change-prompt'
 import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
@@ -513,6 +513,11 @@ function intoConflictCheck(batch: Batch): string {
     `merge-tree --write-tree ${shellWord(`origin/${batch.into}`)} ${shellWord(`origin/${batch.branch}`)}`
 }
 
+function shipCiStatus(batch: Batch, pr: string): string {
+  const what = `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`.`
+  return batch.ci === 'pass' ? `CI is green on ${what} ` : `No green CI is recorded on ${what} ${ciCheckFirst(pr)}\n`
+}
+
 async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
   const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? ''
   const { body, squash } = writeShipFiles(stateDir, run)
@@ -522,7 +527,9 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     body_path: body, body_file: shellQuoted(body), squash_body_file: shellQuoted(squash),
     subject: shellQuoted(squashSubject(run)), ruleset_pattern: rulesetPattern(batch.branch),
   }
-  if (run.phase === 'ship-merge') return renderPrompt(pluginRoot, 'ship-merge', vars)
+  if (run.phase === 'ship-merge') {
+    return renderPrompt(pluginRoot, 'ship-merge', { ...vars, ci_status: shipCiStatus(batch, vars.pr) })
+  }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'
   if (cameFromRedCi && batch.pr !== null) {

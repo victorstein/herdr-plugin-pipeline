@@ -1,6 +1,6 @@
 # Merge the batch PR — run {{run_id}}, PR #{{pr}}
 
-CI is green on PR #{{pr}}, `{{batch}}` into `{{into}}`. Merge it with exactly these two commands:
+{{ci_status}}Merge it with exactly these two commands:
 
     gh pr edit {{pr}} --body-file {{body_file}}
     gh pr merge {{pr}} --squash --subject {{subject}} --body-file {{squash_body_file}}

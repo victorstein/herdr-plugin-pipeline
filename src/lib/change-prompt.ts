@@ -143,6 +143,23 @@ export function syncPromptVars(run: Run, task: Task): Record<string, string> {
   }
 }
 
+/**
+ * A rewind into a merge row arrives with no green recorded, and "CI is green" there
+ * was a claim nothing had checked. Measured on a live run.
+ */
+export function ciCheckFirst(pr: string): string {
+  return `Check it first, and merge only once every check passes:\n\n    gh pr checks ${pr}\n`
+}
+
+export function mergePromptVars(task: Task): Record<string, string> {
+  const pr = task.pr === null ? 'unknown' : String(task.pr)
+  return {
+    ci_status: task.ci === 'pass'
+      ? ` and CI is green on PR #${pr}.`
+      : `, but no green CI is recorded on PR #${pr}. ${ciCheckFirst(pr)}`,
+  }
+}
+
 /** A single-PR `merge`: the orchestrator lands the recorded head, never the branch tip. */
 export function landingPromptVars(run: Run, task: Task): Record<string, string> {
   const batch = run.batch as Batch

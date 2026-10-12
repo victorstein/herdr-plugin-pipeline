@@ -121,6 +121,20 @@ test('ship-merge renders both commands with every title shell-quoted, and writes
   expect(text).not.toContain('{{')
 })
 
+test('ship-merge calls CI green only when a pass is recorded, and otherwise has CI checked first', async () => {
+  // Smoke run 14: a rewind into ship-merge said "CI is green on PR #53" with no CI result recorded.
+  const green = await renderRunPhasePrompt(shipping('ship-merge', { pr: 301, ci: 'pass' }), ROOT, { stateDir: dir })
+  expect(green).toContain('CI is green on PR #301, `batch/x` into `main`. Merge it with exactly these two commands:')
+  expect(green).not.toContain('gh pr checks')
+
+  for (const ci of [null, 'pending', 'fail'] as const) {
+    const text = await renderRunPhasePrompt(shipping('ship-merge', { pr: 301, ci }), ROOT, { stateDir: dir })
+    expect(text, String(ci)).not.toContain('CI is green')
+    expect(text, String(ci)).toContain('No green CI is recorded on PR #301, `batch/x` into `main`. Check it first, ' +
+      'and merge only once every check passes:\n\n    gh pr checks 301\n\nMerge it with exactly these two commands:')
+  }
+})
+
 test('ship-merge warns that the body edit replaces the description, and that a 5xx is rerun', async () => {
   const text = (await renderRunPhasePrompt(shipping('ship-merge', { pr: 301 }), ROOT, { stateDir: dir }))
     .replace(/\s+/g, ' ')
