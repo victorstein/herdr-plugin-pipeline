@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
+import { fileHolders } from '../lib/gating'
 import { type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
@@ -105,6 +106,18 @@ export function stallCandidates(
 }
 
 /**
+ * A holder still moving frees the files on its own, and an escalated one has its
+ * own probes and escalation prompt, so a probe about the waiting task says nothing
+ * new: berean-os drew 17 of them in four hours, each answered "nothing to act on".
+ * Measured on a live run (#22). A task with no holder left is stranded, and a
+ * failed holder frees nothing until a human releases it; both are still probed.
+ */
+function waitsOnLiveHolders(task: Task, all: Task[]): boolean {
+  const holders = fileHolders(task, all)
+  return holders.length > 0 && holders.every((holder) => taskRow(holder.phase).terminal !== true)
+}
+
+/**
  * `unstartedThresholdMinutes` is the orchestrator's own cadence: a worktree with
  * no agent in it is the orchestrator's fault and its probe goes there, so waiting
  * out a worker's threshold would only leave the pane empty for longer.
@@ -121,6 +134,7 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
+      if (task.phase === 'blocked-on-files' && waitsOnLiveHolders(task, run.tasks)) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault

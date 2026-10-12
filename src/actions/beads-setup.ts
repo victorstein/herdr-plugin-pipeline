@@ -1,11 +1,11 @@
 import { setupBeads, setupLines } from '../lib/beads-setup'
-import { repoContext } from '../lib/repo'
+import { actionRepoContext } from '../lib/repo'
 import { bdProblem, checkBd } from '../lib/tools'
 
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
 if (!stateDir) process.exit(0)
 
-const repo = await repoContext()
+const repo = await actionRepoContext()
 if (!repo) {
   console.error('[pipeline] "Set up Beads for this repo" must be invoked from a pane inside a git repository')
   process.exit(1)

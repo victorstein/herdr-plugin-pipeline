@@ -152,10 +152,14 @@ export function gateStatus(task: Task, all: Task[]): GateState {
   return { state: 'ready' }
 }
 
-export function filesClearFor(task: Task, all: Task[]): boolean {
-  return !all.some(
+export function fileHolders(task: Task, all: Task[]): Task[] {
+  return all.filter(
     (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
   )
+}
+
+export function filesClearFor(task: Task, all: Task[]): boolean {
+  return fileHolders(task, all).length === 0
 }
 
 /**

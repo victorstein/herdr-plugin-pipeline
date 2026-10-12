@@ -176,6 +176,21 @@ test('a healthy run produces none of the four new warning lines', () => {
   expect(text).not.toContain('dispatch --done')
 })
 
+test('finished runs from an earlier plugin version collapse to one line below the live ones — #7', () => {
+  const live = mkRun()
+  live.tasks = [mkTask({ task_id: 't1', phase: 'implement' })]
+  const legacy = Array.from({ length: 3 }, () => {
+    const run = mkRun()
+    run.schema_version = 2
+    run.phase = 'done'
+    return run
+  })
+  const text = formatStatus([...legacy, live], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('was started by an earlier plugin version')
+  expect(text).toContain('3 finished runs from an earlier plugin version not shown')
+  expect(text.indexOf(live.run_id)).toBeLessThan(text.indexOf('3 finished runs'))
+})
+
 test('a run from an earlier plugin version is listed as ignored, with no task lines', () => {
   const run = mkRun()
   run.schema_version = 2
@@ -379,15 +394,32 @@ test('a stuck files block prints its release command once', () => {
   expect(text).toContain('t2 blocked on files held by t1 (failed) — it has stopped moving')
 })
 
-test('every stuck holder gets its own release command', () => {
+test('every failed holder gets its own release command', () => {
   const run = mkRun()
   run.tasks = [
     mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'] }),
     mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts', 'src/b.ts'] }),
-    mkTask({ task_id: 't3', phase: 'escalated', files: ['src/b.ts'] }),
+    mkTask({ task_id: 't3', phase: 'failed', files: ['src/b.ts'] }),
   ]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
     `— YOUR move: \`${HP} release --task t1\`, \`${HP} release --task t3\``,
+  )
+})
+
+test('an escalated holder is never offered for release: it is resumed or abandoned — #21', () => {
+  // berean-os: t4 escalated during a usage-limit pause while holding t2's files,
+  // and every digest said \`release --task t4\`. Following it would have dropped
+  // t4's lock mid-PR and let t2 implement over its files. Measured on a live run.
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't4', phase: 'escalated', escalated_from: 'pr-review', files: ['src/a.ts'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('release --task')
+  expect(text).toContain('t2 blocked on files held by t4 (escalated) — it keeps them until it is resumed or abandoned')
+  expect(actionFor(run, run.tasks[1]!, HP)).toBe(
+    'nothing for you here — t4 holds these files and is escalated; its own line says how to resume or abandon it',
   )
 })
 
@@ -779,4 +811,11 @@ test('a decision put to the human is listed under waiting on you with the comman
   expect(text).toContain('waiting on you:')
   expect(text).toContain(`decision d1 was put to the human 5m ago — record their ruling with ` +
     `\`${HP} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
+})
+
+test('hpipe show names the head CI was read on, since a green is only about that head — #16', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'merge', ci: 'pass', ci_head: { sha: '924e0aecb66cbcd7', seen_at: 0 } })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('ci:         pass (on 924e0aec)')
 })

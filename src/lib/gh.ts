@@ -10,6 +10,30 @@ export interface PrView {
   headSha: string | null
 }
 
+export interface HeadCi {
+  bucket: CiBucket
+  /** The commit the bucket was read for: a result is only ever about one head. */
+  headSha: string
+}
+
+interface RollupRow { __typename?: string; status?: string; conclusion?: string; state?: string }
+
+/** One entry of a commit's status rollup, bucketed the way `gh pr checks` buckets it. */
+function rollupBucket(row: RollupRow): string {
+  if (row.__typename === 'StatusContext') {
+    if (row.state === 'SUCCESS') return 'pass'
+    return row.state === 'FAILURE' || row.state === 'ERROR' ? 'fail' : 'pending'
+  }
+  if (row.status !== 'COMPLETED') return 'pending'
+  switch (row.conclusion) {
+    case 'SUCCESS':
+    case 'NEUTRAL': return 'pass'
+    case 'SKIPPED': return 'skipping'
+    case 'CANCELLED': return 'cancel'
+    default: return 'fail'
+  }
+}
+
 export function rollUpBucket(rows: CheckRow[]): CiBucket {
   if (rows.length === 0) return 'pending'
   if (rows.some((r) => r.bucket === 'fail')) return 'fail'
@@ -58,14 +82,26 @@ export class Gh {
     return rows?.[0]?.number ?? null
   }
 
-  /** Exit 8 means "checks pending" — a normal state, not an error. */
-  async prChecks(pr: number): Promise<CiBucket> {
-    const rows = await this.json<CheckRow[]>(
-      ['pr', 'checks', String(pr), '--json', 'bucket,name,state,link'],
-      [0, 8],
+  /**
+   * The head's rollup and its workflow runs come from the same head sha, so a push
+   * between the calls cannot pair one commit's checks with another's. A run still
+   * queued has no check of its own yet: `gh pr checks` listed only an older finished
+   * check and called the head green. Measured on a live run (#16).
+   */
+  async headCi(pr: number): Promise<HeadCi | null> {
+    const view = await this.json<{ headRefOid: string | null; statusCheckRollup: RollupRow[] | null }>(
+      ['pr', 'view', String(pr), '--json', 'headRefOid,statusCheckRollup'],
     )
-    if (rows === null) return 'unknown'
-    return rollUpBucket(rows)
+    if (!view?.headRefOid) return null
+    const runs = await this.json<{ status: string }[]>(
+      ['run', 'list', '--commit', view.headRefOid, '--json', 'status,conclusion', '--limit', '100'],
+    )
+    if (runs === null) return null
+    const rows = [
+      ...(view.statusCheckRollup ?? []).map((row) => ({ bucket: rollupBucket(row) })),
+      ...runs.filter((run) => run.status !== 'completed').map(() => ({ bucket: 'pending' })),
+    ]
+    return { bucket: rollUpBucket(rows), headSha: view.headRefOid }
   }
 
   async prChecksDetail(pr: number): Promise<string> {

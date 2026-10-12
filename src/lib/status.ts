@@ -1,7 +1,7 @@
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
-import { filesOverlap, isInFlight } from './gating'
+import { fileHolders } from './gating'
 import { counterFor } from './machine'
 import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
@@ -34,12 +34,6 @@ export function ageMinutes(sinceMs: number, now: number): number {
  */
 function hasStoppedMoving(task: Task): boolean {
   return taskRow(task.phase).terminal === true || task.phase === 'escalated'
-}
-
-function fileHolders(run: Run, task: Task): Task[] {
-  return run.tasks.filter(
-    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
-  )
 }
 
 /**
@@ -205,12 +199,18 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     return notYours(`worker's move: waiting for ${awaitedFor(task)}`)
   }
   if (task.phase === 'blocked-on-files') {
-    // This row has no escalation path of its own — `files` is not in stall.ts's
-    // ESCALATING_SIGNALS, so the ladder probes it to the cap and then goes quiet
-    // forever. A stuck holder is therefore only ever cleared by a human.
-    const stuck = fileHolders(run, task).filter(hasStoppedMoving)
-    if (stuck.length > 0) {
-      return yours(`YOUR move: ${stuck.map((t) => `\`${hpipe} release --task ${t.task_id}\``).join(', ')}`)
+    // A failed holder keeps its files until a human releases them. An escalated one
+    // is not released: it is resumed or abandoned, and the skill says so — a release
+    // would let this task implement over files the holder is still changing.
+    const holders = fileHolders(task, run.tasks)
+    const failed = holders.filter((t) => taskRow(t.phase).terminal === true)
+    if (failed.length > 0) {
+      return yours(`YOUR move: ${failed.map((t) => `\`${hpipe} release --task ${t.task_id}\``).join(', ')}`)
+    }
+    const escalated = holders.filter((t) => t.phase === 'escalated').map((t) => t.task_id)
+    if (escalated.length > 0) {
+      return notYours(`nothing for you here — ${escalated.join(', ')} ${escalated.length === 1 ? 'holds' : 'hold'} ` +
+        `these files and ${escalated.length === 1 ? 'is' : 'are'} escalated; its own line says how to resume or abandon it`)
     }
   }
   return notYours('nothing for you — the supervisor is driving')
@@ -301,12 +301,14 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
     }
 
     if (task.phase === 'blocked-on-files') {
-      for (const holder of fileHolders(run, task)) {
+      for (const holder of fileHolders(task, run.tasks)) {
         lines.push(
           `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
-          (hasStoppedMoving(holder)
-            ? 'it has stopped moving, so only a release clears it'
-            : 'waiting for it to finish'),
+          (holder.phase === 'escalated'
+            ? 'it keeps them until it is resumed or abandoned'
+            : hasStoppedMoving(holder)
+              ? 'it has stopped moving, so only a release clears it'
+              : 'waiting for it to finish'),
         )
       }
     }
@@ -397,7 +399,11 @@ export function formatStatus(
     return lines.join('\n')
   }
 
-  for (const run of runs) {
+  // A finished run from an earlier plugin version needs nothing from anyone, and
+  // nine of them pushed every live run off the screen of \`hpipe status | head\`.
+  // Measured on a live run.
+  const finishedLegacy = runs.filter((run) => !isCurrentSchemaRun(run) && run.phase === 'done')
+  for (const run of runs.filter((r) => !finishedLegacy.includes(r))) {
     lines.push('')
     const passes = counterFor(run, run.phase)
     lines.push(
@@ -452,6 +458,11 @@ export function formatStatus(
     lines.push(...waitingOnYou(run, hpipe, now, holds))
     lines.push(...taskWarnings(run, hpipe, now))
     lines.push(...deliveryWarnings(run, livePanes, now, panes))
+  }
+
+  if (finishedLegacy.length > 0) {
+    lines.push('', `${finishedLegacy.length} finished run${finishedLegacy.length === 1 ? '' : 's'} from an earlier ` +
+      'plugin version not shown: nothing advances them and they hold nothing')
   }
 
   return lines.join('\n')
@@ -517,7 +528,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     verdicts.length === 0 ? 'verdicts:   none' : 'verdicts:',
     ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
     `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
-    `ci:         ${orNone(task.ci)}`,
+    `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
     `notes:      ${orNone(task.notes)}`,
   ].join('\n')

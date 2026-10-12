@@ -90,7 +90,7 @@ command = ["bun", "run", "src/actions/board.ts"]
 id = "supervisor"
 title = "Pipeline supervisor"
 placement = "tab"
-command = ["sh", "-c", "bun run src/supervisor/main.ts; code=$?; [ $code = 3 ] || echo '[pipeline] supervisor exited — run hpipe status'; exec \"${SHELL:-/bin/sh}\""]
+command = ["sh", "-c", "bun run src/supervisor/main.ts; code=$?; [ $code = 3 ] || echo \"[pipeline] supervisor exited (code $code) — run hpipe status\"; exec \"${SHELL:-/bin/sh}\""]
 
 [[panes]]
 id = "board"

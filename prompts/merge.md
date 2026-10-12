@@ -7,4 +7,7 @@ task touched the same files, rebase this one onto the result and let CI re-run r
 a stale green. If you rebase and the repo declares `./.claude/pipeline-bootstrap`, re-run it in that
 checkout before you build or test there: the sibling that landed may have changed what it builds.
 
+Green is for the head CI ran on. If you push to the branch, a rebase or a commit of your own, the task
+goes back to `ci` and you are told again once the new head is green: do not merge on the old green.
+
 Then merge it. Merging is yours, not the plugin's; nothing merges automatically.
