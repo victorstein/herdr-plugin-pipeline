@@ -96,6 +96,14 @@ test('ship-merge renders both commands with every title shell-quoted, and writes
   expect(text).not.toContain('{{')
 })
 
+test('ship-merge warns that the body edit replaces the description, and that a 5xx is rerun', async () => {
+  const text = (await renderRunPhasePrompt(shipping('ship-merge', { pr: 301 }), ROOT, { stateDir: dir }))
+    .replace(/\s+/g, ' ')
+  expect(text).toContain("replaces PR #301's whole description")
+  expect(text).toContain(`add it to \`${join(dir, 'runs', 'personal', 'r1.batch-pr.md')}\` first, outside the override block`)
+  expect(text).toContain("A 5xx from `gh` is GitHub's, not yours:** run the same command again.")
+})
+
 test('the branch review of a single-PR run reads the batch diff and speaks of landings', async () => {
   const run = shipping('branch-review')
   run.tasks.push(mkTask({ task_id: 't3', phase: 'failed', merged_at_ms: null }))
