@@ -673,7 +673,7 @@ warnings. Its rows read:
 | No check declared | `⚠ no .claude/pipeline-check in this repo: each landing is checked only by its worker's own test run` | — |
 | `batch.fetch_error` set | `⚠ batch/x has not fetched for 12m (<reason>): landings are not being seen` | You |
 | A v4 run, with a live supervisor whose `schemas` lacks 4 | `⚠ the running supervisor (pid N) predates single-PR runs and ignores this run: close its Pipeline supervisor pane and run the plugin's supervisor action` (M4) | You |
-| A task in `land-queue` | `… [land-queue 6m] … — nothing for you — waiting to land; t4 holds the landing slot (sync)`, or `— next to land` | Nobody |
+| A task in `land-queue` | `… [land-queue 6m] … — nothing for you — waiting to land; t4 holds the landing slot (sync)`, or `— nothing for you yet — next to land; your land prompt comes when it reaches merge` | Nobody |
 | A task in `sync` | `… [sync 3m] … — worker's move: waiting for batch/x merged into t4-branch, checked and resubmitted` | The worker |
 | A task in `merge` | Under "waiting on you": `YOUR move: land t4 — git -C '<repo>' push origin 9e06c261:refs/heads/batch/x` | The orchestrator |
 | `ship` | `· final PR: not opened` and `YOUR move: check the batch and open its PR (the ship prompt has the commands)` | The orchestrator |

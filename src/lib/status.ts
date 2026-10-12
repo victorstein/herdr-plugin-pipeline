@@ -291,7 +291,9 @@ function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move 
   }
   return {
     waitsOnYou: false,
-    clause: landingQueue(run.tasks)[0] === task ? 'nothing for you — next to land' : 'nothing for you — waiting to land',
+    clause: landingQueue(run.tasks)[0] === task
+      ? 'nothing for you yet — next to land; your land prompt comes when it reaches merge'
+      : 'nothing for you — waiting to land',
   }
 }
 
