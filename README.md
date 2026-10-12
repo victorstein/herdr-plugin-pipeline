@@ -254,8 +254,15 @@ kanban. The supervisor closes it once the repo has no live run, and a stale `Boa
 herdr restart is closed and replaced. The **Open board** action reopens it. It is read-only by
 construction. **Never install `br` alongside `bv`**: bv's edit path shells out to `br`, which would
 write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
-The board shows a red `History load failed: … not a git repository` line because the store lives
-outside git; it is expected and harmless, and bv has no way to turn it off.
+
+**The store's history.** bv's history view reads git, so each store is its own git repo: after every
+change hpipe commits the export, `.beads/issues.jsonl`, as `hpipe <hpipe@localhost>` — one commit per
+CLI write and one per supervisor pass that wrote. Nothing else is tracked (the Dolt data stays out),
+the repo has no remote, and your git config, hooks and signing never apply to it. A store made by an
+earlier release becomes a repo at its next change or the next time its board opens; a board already
+open from before the upgrade keeps showing `History load failed` until you reopen it with **Open
+board**. A commit that fails is logged once and never fails the write. Do not commit to the repo
+yourself, and do not take it for a backup: it holds the export, not the database.
 
 **bv's licence.** bv is MIT-licensed with a rider. Its
 [LICENSE](https://github.com/Dicklesworthstone/beads_viewer/blob/main/LICENSE) says, among other

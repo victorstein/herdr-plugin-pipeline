@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -339,4 +339,74 @@ process.stdout.write(JSON.stringify(result))
   expect(result.reason).toBe('unavailable')
   expect(existsSync(join(home(), 'hpipe.lock'))).toBe(false)
   expect(existsSync(join(dir, 'bd.log'))).toBe(false)
+})
+
+/** Writes a different export on every `export -o`, so each one is a change to record. */
+function exportingBd(): string {
+  return scriptBd(`
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+const argv = process.argv.slice(2)
+appendFileSync(${JSON.stringify(join(dir, 'bd.log'))}, 'argv: ' + argv.join(' ') + '\\n')
+if (argv[3] === 'export') {
+  const counter = ${JSON.stringify(join(dir, 'exports'))}
+  const n = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) + 1 : 1
+  writeFileSync(counter, String(n))
+  const exportPath = argv[argv.indexOf('-o') + 1]
+  mkdirSync(dirname(exportPath), { recursive: true })
+  writeFileSync(exportPath, JSON.stringify({ _type: 'issue', id: 'hp-1', title: 'One', n }) + '\\n')
+}
+process.stdout.write('{}')
+`)
+}
+
+function historySubjects(): string[] {
+  const proc = Bun.spawnSync(['git', 'log', '--format=%an|%s'], {
+    cwd: home(), stdout: 'pipe', stderr: 'pipe',
+    env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CEILING_DIRECTORIES: dir },
+  })
+  if (!proc.success) throw new Error(proc.stderr.toString())
+  return proc.stdout.toString().trim().split('\n').reverse()
+}
+
+test('every export is committed to the store\'s own history, named after what changed', async () => {
+  const bin = exportingBd()
+  const cli = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin })
+  expect(await cli.initStore('hp')).toEqual({ ok: true })
+  expect(await cli.claim('hp-1')).toEqual({ ok: true })
+  expect(await cli.depAdd('hp-2', 'hp-1')).toEqual({ ok: true })
+  expect(await cli.close('hp-1', 'merged', { force: false })).toEqual({ ok: true })
+
+  const supervisor = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, exportAfterWrites: false, bin })
+  expect(await supervisor.reopen('hp-1')).toEqual({ ok: true })
+  expect(await supervisor.exportNow()).toEqual({ ok: true })
+
+  expect(historySubjects()).toEqual([
+    'hpipe|init', 'hpipe|update hp-1', 'hpipe|dep add hp-2 hp-1', 'hpipe|close hp-1', 'hpipe|sync',
+  ])
+})
+
+test('a store made before its history began gets one from recordHistory, which spawns no bd', async () => {
+  mkdirSync(join(home(), '.beads'), { recursive: true })
+  writeFileSync(beadsExportPath(dir, SLUG), '{"_type":"issue","id":"hp-1","title":"One"}\n')
+  writeFileSync(join(home(), 'export.dirty'), '1\n')
+  const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, exportAfterWrites: false, bin: recordingBd() })
+  expect(await bd.recordHistory()).toEqual({ ok: true })
+  expect(historySubjects()).toEqual(['hpipe|catch up'])
+  expect(existsSync(join(dir, 'bd.log'))).toBe(false)
+})
+
+test('a git failure leaves the write a success and is logged', async () => {
+  mkdirSync(home(), { recursive: true })
+  writeFileSync(join(home(), '.git'), 'not a repository\n')
+  const logged = spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, bin: exportingBd() })
+    expect(await bd.claim('hp-1')).toEqual({ ok: true })
+    expect(logged.mock.calls.map((call) => String(call[0]))).toEqual([
+      expect.stringContaining(`beads ${SLUG}: history not recorded`),
+    ])
+  } finally {
+    logged.mockRestore()
+  }
 })

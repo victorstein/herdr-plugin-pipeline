@@ -252,6 +252,7 @@ function paneDeps(over: Partial<BoardPaneDeps> = {}) {
     renamePane: async (paneId, label) => { renamed.push(`${paneId} ${label}`) },
     updateBoards,
     which: (bin) => (bin === 'fake-bv' ? '/bin/fake-bv' : null),
+    recordHistory: async () => {},
     runBv: async (argv, { cwd, env }) => { spawned.push({ argv, cwd, env }); return 0 },
     error: (message) => { errors.push(message) },
     ...over,
@@ -340,6 +341,36 @@ test('bv quitting at once on an empty export sends the pane back to waiting, the
   expect(await runBoardPane(d)).toBe(0)
   expect(launches).toBe(2)
   expect(sleeps).toBe(1)
+})
+
+test('the board pane brings the store\'s history up to date before each bv launch', async () => {
+  let clock = 100_000
+  let exportText = ISSUE_LINE
+  const events: string[] = []
+  const { paneDeps: d } = paneDeps({
+    now: () => clock,
+    readExport: async () => exportText,
+    sleep: async () => { exportText = ISSUE_LINE },
+    recordHistory: async (stateDir, slug) => { events.push(`history ${stateDir === dir} ${slug}`) },
+    runBv: async () => {
+      const firstLaunch = !events.includes('bv')
+      events.push('bv')
+      if (firstLaunch) exportText = ''
+      clock += firstLaunch ? 300 : 60_000
+      return 0
+    },
+  })
+  expect(await runBoardPane(d)).toBe(0)
+  expect(events).toEqual([`history true ${SLUG}`, 'bv', `history true ${SLUG}`, 'bv'])
+})
+
+test('a history the board cannot record still lets bv start', async () => {
+  const { paneDeps: d, spawned, errors } = paneDeps({
+    recordHistory: async () => { throw new Error('EACCES: permission denied') },
+  })
+  expect(await runBoardPane(d)).toBe(0)
+  expect(spawned).toHaveLength(1)
+  expect(errors.join('\n')).toContain('EACCES')
 })
 
 test('bv exiting after a long session ends the pane with its exit code', async () => {

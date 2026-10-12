@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { recordBeadsHistory } from './beads-history'
 import { beadsExportPath, beadsHome, beadsSpawnEnv } from './beads-project'
 import { processStartedAtMs } from './pidfile'
 import { type Bounded, runBounded } from './spawn'
@@ -155,9 +156,10 @@ function jsonError(text: string): string | null {
 }
 
 /**
- * bd 1.3.1 warns on stderr even when it succeeds outside git: a three-line
- * `beads.role` block and, on init, the repository-ID line. Its refusals are
- * plain text on stderr after them.
+ * bd 1.3.1 warns on stderr even when it succeeds: a three-line `beads.role`
+ * block, in the store's repo as outside one, and, on init (which runs before
+ * the store is a repo), the repository-ID line. Its refusals are plain text on
+ * stderr after them.
  */
 const BENIGN_WARNING_PREFIXES = [
   'warning: beads.role not configured',
@@ -172,6 +174,12 @@ function failureText(out: Bounded): string {
     .filter((line) => line.trim() !== '' && !isBenignWarning(line))
     .join('\n').trim()
   return jsonError(out.stdout) ?? jsonError(stderr) ?? (stderr || out.stdout.trim() || `bd exited ${out.code}`)
+}
+
+/** The command and its positional arguments — `update hp-7`, `dep add hp-7 hp-1` — to name a history commit. */
+function commandOf(args: string[]): string {
+  const firstFlag = args.findIndex((arg) => arg.startsWith('-'))
+  return (firstFlag === -1 ? args : args.slice(0, firstFlag)).join(' ')
 }
 
 const isHolder = (token: string) => (current: unknown): boolean =>
@@ -209,7 +217,7 @@ export class Bd {
         const out = await this.#call(args)
         if (isBdFailure(out)) return out
       }
-      return this.#export()
+      return this.#export('init')
     })
   }
 
@@ -275,11 +283,22 @@ export class Bd {
   }
 
   async exportNow(): Promise<Done | BdFailure> {
-    return this.#hold(() => this.#export())
+    return this.#hold(() => this.#export('sync'))
   }
 
   async refreshExport(): Promise<Done | BdFailure> {
-    return this.#hold(async () => (existsSync(this.#dirtyPath) ? this.#export() : DONE))
+    return this.#hold(async () => (existsSync(this.#dirtyPath) ? this.#export('refresh') : DONE))
+  }
+
+  /**
+   * For a reader that writes nothing, such as the board: commits an export the
+   * history lacks, which starts the history of a store made before it had one.
+   */
+  async recordHistory(): Promise<Done | BdFailure> {
+    return this.#hold(async () => {
+      await recordBeadsHistory(this.#options.stateDir, this.#options.slug, 'catch up')
+      return DONE
+    })
   }
 
   /** No spawn and no lock: bd writes the export through an atomic rename (`cmd/bd/export.go`, `atomicfile`). */
@@ -309,7 +328,7 @@ export class Bd {
     const token = await this.#acquire(startedAtMs)
     if (token === null) return { reason: 'busy', error: 'Beads is busy, retry' }
     try {
-      if (this.#exportAfterWrites && existsSync(this.#dirtyPath)) await this.#export()
+      if (this.#exportAfterWrites && existsSync(this.#dirtyPath)) await this.#export('refresh')
       return await work()
     } finally {
       removeJsonIf(this.#lockPath, isHolder(token))
@@ -327,7 +346,7 @@ export class Bd {
       this.#markDirty()
       const out = await this.#call(args)
       if (isBdFailure(out)) return out
-      if (this.#exportAfterWrites) await this.#export()
+      if (this.#exportAfterWrites) await this.#export(commandOf(args))
       return parse(out) ?? {
         reason: 'output',
         error: `bd ${args[0]} exited 0 but printed no usable JSON; ${ifUnparsed}: ${out.trim().slice(0, 200)}`,
@@ -345,13 +364,14 @@ export class Bd {
     return out.stdout
   }
 
-  async #export(): Promise<Done | BdFailure> {
+  async #export(historyMessage: string): Promise<Done | BdFailure> {
     const out = await this.#call(['export', '-o', this.#exportPath])
     if (isBdFailure(out)) {
       this.#markDirty()
       return out
     }
     rmSync(this.#dirtyPath, { force: true })
+    await recordBeadsHistory(this.#options.stateDir, this.#options.slug, historyMessage)
     return DONE
   }
 
