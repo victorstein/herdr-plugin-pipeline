@@ -341,6 +341,11 @@ export interface Batch {
   merge_commit: string | null
   /** Set when a fetch of the batch branch fails, cleared by the next good one. */
   fetch_error?: { reason: string; since: number } | null
+  /**
+   * GitHub's answer at `start`: a ruleset refuses force-pushes and deletion on the
+   * branch. Absent when it said no or could not say, so the advice is still given.
+   */
+  ruleset_protected?: true
 }
 
 export interface Run {

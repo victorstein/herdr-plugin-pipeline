@@ -513,6 +513,17 @@ function intoConflictCheck(batch: Batch): string {
     `merge-tree --write-tree ${shellWord(`origin/${batch.into}`)} ${shellWord(`origin/${batch.branch}`)}`
 }
 
+/**
+ * Start's answer, not a fresh one: a ship prompt is also rendered by a rewind, inside
+ * a save's stale-retry, where a gh call could outlast every retry.
+ */
+function rulesetAdvice(batch: Batch): string {
+  if (batch.ruleset_protected === true) return ''
+  return ` If \`${rulesetPattern(batch.branch)}\` has no ruleset blocking force-pushes and deletion, recommend ` +
+    'one to the user (GitHub → Settings → Rules → Rulesets): without it, a `--force` push gets past the ' +
+    'landing gate.'
+}
+
 function shipCiStatus(batch: Batch, pr: string): string {
   const what = `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`.`
   return batch.ci === 'pass' ? `CI is green on ${what} ` : `No green CI is recorded on ${what} ${ciCheckFirst(pr)}\n`
@@ -525,7 +536,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     run_id: run.run_id, batch: batch.branch, into: batch.into, pr: String(batch.pr ?? 'unknown'),
     checkout: batch.checkout, checkout_quoted: shellQuoted(batch.checkout), implement_model: IMPLEMENT_MODEL,
     body_path: body, body_file: shellQuoted(body), squash_body_file: shellQuoted(squash),
-    subject: shellQuoted(squashSubject(run)), ruleset_pattern: rulesetPattern(batch.branch),
+    subject: shellQuoted(squashSubject(run)),
   }
   if (run.phase === 'ship-merge') {
     return renderPrompt(pluginRoot, 'ship-merge', { ...vars, ci_status: shipCiStatus(batch, vars.pr) })
@@ -540,6 +551,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   }
   return renderPrompt(pluginRoot, 'ship', {
     ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
+    ruleset_advice: rulesetAdvice(batch),
     pr_command: batch.pr === null
       ? `gh pr create --base ${shellWord(batch.into)} --head ${shellWord(batch.branch)} ` +
         `--title ${shellQuoted(suggestedPrTitle(run))} ` +

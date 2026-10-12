@@ -57,6 +57,14 @@ test('ship repeats the ruleset advice start gave once, for the batch\'s own patt
   expect(own).toContain('If `release/menu` has no ruleset')
 })
 
+test('ship gives no ruleset advice when start found a ruleset protecting the batch', async () => {
+  const run = shipping('ship', { ruleset_protected: true })
+  const text = (await renderRunPhasePrompt(run, ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  expect(text).toContain("Never force-push, rebase or squash `batch/x`: its history is every landing's record.")
+  expect(text).not.toContain('ruleset')
+  expect(text).not.toContain('{{')
+})
+
 // Smoke run 15: the orchestrator added a line to the PR on GitHub during `ship`, which
 // the merge step's `gh pr edit --body-file` would have dropped.
 test('ship warns that the merge step replaces the PR body, so additions go into the body file just before it', async () => {

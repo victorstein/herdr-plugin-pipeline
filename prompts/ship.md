@@ -34,6 +34,4 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
    PR on GitHub is dropped. Something worth keeping goes into that file instead, outside the override
    block, and only just before the merge: the plugin rewrites it with every ship prompt.
 
-Never force-push, rebase or squash `{{batch}}`: its history is every landing's record. If
-`{{ruleset_pattern}}` has no ruleset blocking force-pushes and deletion, recommend one to the user
-(GitHub → Settings → Rules → Rulesets): without it, a `--force` push gets past the landing gate.
+Never force-push, rebase or squash `{{batch}}`: its history is every landing's record.{{ruleset_advice}}

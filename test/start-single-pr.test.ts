@@ -96,6 +96,25 @@ test('start confirms a ruleset already protecting the batch branch instead of re
   expect(out.text).not.toContain('protect batch/* from')
 })
 
+// Smoke run 15: the ship prompt recommended the ruleset start had just confirmed.
+test('start records on the batch that a ruleset protects it, so ship need not ask again', async () => {
+  const { clone } = cloneOfRemote('main')
+  const out = await cmdStart(ctx(), input(clone, { batchBranch: 'batch/menu' }), startBeads(), startBatch({
+    rulesetProtects: async () => true,
+  }))
+  expect(out.ok).toBe(true)
+  const [run] = await savedRuns()
+  expect(run?.batch?.ruleset_protected).toBe(true)
+})
+
+test('start records nothing about a ruleset GitHub did not confirm', async () => {
+  const { clone } = cloneOfRemote('main')
+  const out = await cmdStart(ctx(), input(clone, { batchBranch: 'batch/menu' }))
+  expect(out.ok).toBe(true)
+  const [run] = await savedRuns()
+  expect(run?.batch).not.toHaveProperty('ruleset_protected')
+})
+
 test('a retry after a start whose save failed adopts the branch it already pushed', async () => {
   const { remote, clone } = cloneOfRemote('main')
   const head = revParse(clone, 'origin/main')

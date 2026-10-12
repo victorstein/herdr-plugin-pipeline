@@ -333,6 +333,7 @@ export async function cmdStart(ctx: Ctx, input: {
       branch: plan.branch, into: plan.into, base_commit: plan.commit,
       checkout: join(resolve(ctx.stateDir), 'checkouts', run.run_id),
       pr: null, head_sha_at_entry: null, ci: null, merged_at_ms: null, merge_commit: null,
+      ...(protectedAlready ? { ruleset_protected: true } : {}),
     })
   }
   run.orchestrator_pane = input.paneId

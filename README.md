@@ -210,9 +210,10 @@ and never changes: abort and start again, which costs nothing before the first d
   after a failed start goes through.
 
 It prints a `batch:` line, a `check:` line, and a recommendation: protect `batch/*` against
-force-pushes and deletion with a GitHub ruleset, unless GitHub says a ruleset already does. Landing is
-gated by git refusing a push that is not a fast-forward; a `--force` push gets through unless a ruleset
-forbids it.
+force-pushes and deletion with a GitHub ruleset, unless GitHub says a ruleset already does. The `ship`
+prompt repeats the recommendation unless start recorded that answer as yes; it does not ask GitHub
+again. Landing is gated by git refusing a push that is not a fast-forward; a `--force` push gets
+through unless a ruleset forbids it.
 
 **`hpipe submit`.** A single-PR worker ends `implement` with
 
@@ -468,7 +469,9 @@ PR-review skip adds one optional task field, `review_skip`, which an earlier rel
 supervisor still on it reviews every PR, as before.
 
 Single-PR runs are written as `schema_version: 4`, and per-task runs stay at 3, so every run in
-flight carries on across the upgrade and a rollback still reads them. A supervisor that predates
+flight carries on across the upgrade and a rollback still reads them. A batch started with a ruleset
+already protecting it carries the optional `ruleset_protected` field, which an earlier release ignores;
+a batch started before it repeats the ruleset advice at `ship`. A supervisor that predates
 single-PR runs ignores a v4 run rather than driving it as a per-task one, and `hpipe start --single-pr`
 refuses while this session's live supervisor is that old: restart it first.
 
