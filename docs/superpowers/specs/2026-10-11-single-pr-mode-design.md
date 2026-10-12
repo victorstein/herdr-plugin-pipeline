@@ -1097,6 +1097,11 @@ Where the code departs from the text above, and why.
   `main.ts` a prompt with no pane to drop.
 - **`hpipe task --branch` refuses the batch and default names in a single-PR run only.** The run
   records both; refusing the default name per-task would need a network lookup on every registration.
+- **Phase labels are managed per mode.** The reconciler removes every managed label a bead's task does
+  not want, and deriving the set from every `TASK_ROWS` phase made `sync` and `land-queue` managed in a
+  per-task run too, so a human's `sync` label was stripped from any bead such a run claimed. A run now
+  manages only the phase names of rows its mode enters, so a per-task run manages exactly the labels it
+  did before, and §6's "on v4 runs' beads only" holds for removing the labels as well as adding them.
 - **The worker brief keeps its per-task wording.** "Not into this PR" became `{{change_noun}}` rather
   than a fixed "change", so a per-task run renders exactly today's text, as the edited prompts must.
   The `handoff-pr`/`handoff-batch` fragments carry the paragraph after step 4 too, since it names the

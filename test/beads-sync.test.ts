@@ -6,11 +6,12 @@ import type { BdFailure, BeadUpdate, Done, ExportedBead } from '../src/lib/bd'
 import { desiredBead } from '../src/lib/bead-desired'
 import { beadsSlug } from '../src/lib/beads-project'
 import { beadClaimants } from '../src/lib/held'
-import { newRun } from '../src/lib/ledger'
+import { newRun, withBatch } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 import {
   callsFor, closeReason, LOCK_CONTENTION_NOTICE_MS, type SyncBd, type SyncDeps, syncBeads,
 } from '../src/supervisor/beads-sync'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const mkTask = (over: Partial<Task> = {}): Task => ({
@@ -124,7 +125,7 @@ function deps(store: ReturnType<typeof fakeStore>, over: Partial<SyncDeps> = {})
 test('a dispatched task\'s open bead gets one update folding status, assignee and labels; foreign labels stay', () => {
   const task = mkTask({ phase: 'implement' })
   const actual = bead('hp-1', { metadata: { 'hpipe.run': 'r1' }, labels: ['research', 'ui'] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([{
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([{
     kind: 'update',
     change: { status: 'in_progress', assignee: 'hpipe', addLabels: ['implement'], removeLabels: ['research'] },
   }])
@@ -133,7 +134,7 @@ test('a dispatched task\'s open bead gets one update folding status, assignee an
 test('a bead labelled phase:research by an earlier build swaps it for the bare phase name', () => {
   const task = mkTask({ phase: 'plan' })
   const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['phase:research', 'ui'] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([
     { kind: 'update', change: { addLabels: ['plan'], removeLabels: ['phase:research'] } },
   ])
 })
@@ -141,7 +142,7 @@ test('a bead labelled phase:research by an earlier build swaps it for the bare p
 test('a bead labelled hpipe:run= by an earlier build loses that label and gets the run id as metadata', () => {
   const task = mkTask({ phase: 'implement' })
   const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', labels: ['hpipe:run=r1', 'implement', 'ui'] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([
     { kind: 'update', change: { removeLabels: ['hpipe:run=r1'], setMetadata: { 'hpipe.run': 'r1' } } },
   ])
 })
@@ -151,7 +152,7 @@ test('a bead carrying another run\'s id in metadata is overwritten with the driv
   const actual = bead('hp-1', {
     status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r0', owner: 'ana' },
   })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([
     { kind: 'update', change: { setMetadata: { 'hpipe.run': 'r1' } } },
   ])
 })
@@ -159,13 +160,13 @@ test('a bead carrying another run\'s id in metadata is overwritten with the driv
 test('a bead already as desired needs no call', () => {
   const task = mkTask({ phase: 'implement' })
   const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['implement'] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([])
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([])
 })
 
 test('a closed bead the ledger wants open again is reopened before its update', () => {
   const task = mkTask({ phase: 'implement' })
   const actual = bead('hp-1', { status: 'closed', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: [] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([
     { kind: 'reopen' },
     { kind: 'update', change: { status: 'in_progress', addLabels: ['implement'] } },
   ])
@@ -174,7 +175,7 @@ test('a closed bead the ledger wants open again is reopened before its update', 
 test('a merged task\'s bead is relabelled, then closed last with the merge as its reason', () => {
   const task = mkTask({ phase: 'close', merged_at_ms: 5 })
   const actual = bead('hp-1', { status: 'in_progress', assignee: 'hpipe', metadata: { 'hpipe.run': 'r1' }, labels: ['merge'] })
-  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task))).toEqual([
+  expect(callsFor(desiredBead(task, runWith(task)), actual, closeReason(task), 'per-task')).toEqual([
     { kind: 'update', change: { removeLabels: ['merge'] } },
     { kind: 'close', reason: 'merged in PR #7 (m3rg3)' },
   ])
@@ -187,7 +188,7 @@ test('missing edges and comments come after the update and before the close', ()
     id: 'd1', asked_at: 0, from_phase: 'plan', question: 'q', recommendation: 'r',
     answer: null, answered_by: null, answered_at: null, prompted_at: 1, escalated_at: 2, orchestrator_recommendation: 'o',
   }]
-  const calls = callsFor(desiredBead(second, runWith(first, second)), bead('hp-2'), closeReason(second))
+  const calls = callsFor(desiredBead(second, runWith(first, second)), bead('hp-2'), closeReason(second), 'per-task')
   expect(calls.map((c) => c.kind)).toEqual(['update', 'depAdd', 'comment'])
   expect(calls[1]).toEqual({ kind: 'depAdd', dependsOn: 'hp-1' })
   expect(calls[2]).toMatchObject({ kind: 'comment', marker: '[hpipe t2/d1/asked]' })
@@ -198,7 +199,7 @@ test('a file wait adds its blocker edge, and the edge is removed once the wait i
   const waiting = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const run = runWith(holder, waiting)
   const unlinked = bead('hp-2', { status: 'blocked', assignee: 'hpipe', labels: ['blocked-on-files'], metadata: { 'hpipe.run': 'r1' } })
-  expect(callsFor(desiredBead(waiting, run), unlinked, closeReason(waiting)))
+  expect(callsFor(desiredBead(waiting, run), unlinked, closeReason(waiting), 'per-task'))
     .toEqual([{ kind: 'depAdd', dependsOn: 'hp-4' }])
 
   waiting.phase = 'implement'
@@ -206,7 +207,7 @@ test('a file wait adds its blocker edge, and the edge is removed once the wait i
     status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r1' },
     dependencies: [{ depends_on_id: 'hp-4', type: 'blocks' }],
   })
-  expect(callsFor(desiredBead(waiting, run), linked, closeReason(waiting)))
+  expect(callsFor(desiredBead(waiting, run), linked, closeReason(waiting), 'per-task'))
     .toEqual([{ kind: 'depRemove', dependsOn: 'hp-4' }])
 })
 
@@ -217,12 +218,12 @@ test('only a blocks edge to another task of the run is ever removed', () => {
     status: 'in_progress', assignee: 'hpipe', labels: ['implement'], metadata: { 'hpipe.run': 'r1' },
     dependencies: [{ depends_on_id: 'hp-4', type: 'discovered-from' }, { depends_on_id: 'hp-99', type: 'blocks' }],
   })
-  expect(callsFor(desiredBead(task, runWith(sibling, task)), actual, closeReason(task))).toEqual([])
+  expect(callsFor(desiredBead(task, runWith(sibling, task)), actual, closeReason(task), 'per-task')).toEqual([])
 })
 
 test('a closed bead that should stay closed is left alone, whoever it is assigned to', () => {
   const task = mkTask({ phase: 'done', merged_at_ms: 5 })
-  expect(callsFor(desiredBead(task, runWith(task)), bead('hp-1', { status: 'closed', metadata: { 'hpipe.run': 'r1' }, labels: [] }), closeReason(task)))
+  expect(callsFor(desiredBead(task, runWith(task)), bead('hp-1', { status: 'closed', metadata: { 'hpipe.run': 'r1' }, labels: [] }), closeReason(task), 'per-task'))
     .toEqual([])
 })
 
@@ -239,6 +240,25 @@ test('a pass converges every task and exports once', async () => {
     'depAdd hp-2 hp-1',
   ])
   expect(store.exports()).toBe(1)
+})
+
+test('a per-task run leaves a human\'s sync and land-queue labels alone: it never enters those rows', async () => {
+  const task = mkTask({ phase: 'implement' })
+  const store = fakeStore([bead('hp-1', { labels: ['research', 'sync', 'land-queue'] })])
+  await syncBeads([runWith(task)], deps(store))
+  expect(store.calls).toEqual([
+    'update hp-1 {"status":"in_progress","assignee":"hpipe","addLabels":["implement"],"removeLabels":["research"],"setMetadata":{"hpipe.run":"r1"}}',
+  ])
+})
+
+test('a single-PR run manages its own rows\' labels, so a task leaving sync loses that label', async () => {
+  const task = mkTask({ phase: 'merge', pr: null, land_sha: 'L1' })
+  const run = withBatch(runWith(task), batchFixture())
+  const store = fakeStore([bead('hp-1', { labels: ['sync'], metadata: { 'hpipe.run': 'r1' } })])
+  await syncBeads([run], deps(store))
+  expect(store.calls).toEqual([
+    'update hp-1 {"status":"in_progress","assignee":"hpipe","addLabels":["merge"],"removeLabels":["sync"]}',
+  ])
 })
 
 test('a pass with nothing to change neither writes, exports nor saves', async () => {
@@ -553,7 +573,7 @@ test('any existing edge between the pair stands for the blocks edge, since bd re
   const actual = bead('hp-2', {
     metadata: { 'hpipe.run': 'r1' }, labels: ['queued'], dependencies: [{ depends_on_id: 'hp-1', type: 'discovered-from' }],
   })
-  expect(callsFor(desiredBead(second, runWith(first, second)), actual, closeReason(second))).toEqual([])
+  expect(callsFor(desiredBead(second, runWith(first, second)), actual, closeReason(second), 'per-task')).toEqual([])
 })
 
 test('a write whose export failed is re-exported before the next diff, so no comment is posted twice', async () => {

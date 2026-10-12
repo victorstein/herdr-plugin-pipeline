@@ -4,7 +4,7 @@ import {
 } from '../src/lib/bead-desired'
 import { escalatedUnanswered, openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
-import { TASK_ROWS } from '../src/lib/phases'
+import { rowRunsIn, TASK_ROWS } from '../src/lib/phases'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -183,18 +183,30 @@ test('every row records the run id in metadata rather than a label, which would 
   }
 })
 
-test('hpipe manages its hpipe: labels, every bare task phase name and aborted; a human\'s labels stay theirs', () => {
-  const taskPhases = TASK_ROWS.map((row) => row.phase)
-  for (const label of [...taskPhases, 'aborted', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
-    expect(isManagedLabel(label), label).toBe(true)
-  }
-  for (const label of ['frontend', 'pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) {
-    expect(isManagedLabel(label), label).toBe(false)
+test('hpipe manages its hpipe: labels, every bare phase name of the run\'s mode and aborted; a human\'s labels stay theirs', () => {
+  for (const mode of ['per-task', 'single-pr'] as const) {
+    const taskPhases = TASK_ROWS.filter((row) => rowRunsIn(row, mode)).map((row) => row.phase)
+    for (const label of [...taskPhases, 'aborted', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
+      expect(isManagedLabel(label, mode), `${mode} ${label}`).toBe(true)
+    }
+    for (const label of ['frontend', 'pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) {
+      expect(isManagedLabel(label, mode), `${mode} ${label}`).toBe(false)
+    }
   }
 })
 
+test('a per-task run does not manage the single-PR rows\' labels, which are ordinary words a human may use', () => {
+  for (const label of ['sync', 'land-queue']) {
+    expect(isManagedLabel(label, 'per-task'), label).toBe(false)
+    expect(isManagedLabel(label, 'single-pr'), label).toBe(true)
+  }
+  expect(isManagedLabel('ci', 'single-pr')).toBe(false)
+})
+
 test('a phase: label from an earlier build stays managed, so the reconciler migrates it away', () => {
-  for (const label of ['phase:research', 'phase:aborted', 'phase:retired-phase']) expect(isManagedLabel(label), label).toBe(true)
+  for (const label of ['phase:research', 'phase:aborted', 'phase:retired-phase']) {
+    expect(isManagedLabel(label, 'per-task'), label).toBe(true)
+  }
 })
 
 test('the phase label is the bare phase name, short enough to survive a bv card', () => {
