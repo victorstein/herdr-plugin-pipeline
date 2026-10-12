@@ -48,6 +48,9 @@ judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed
 trailer at the **start of the line** — not indented, and not inside a code fence. An indented or
 fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 
+On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle, the way the end of
+this prompt has you patch a BLOCKER: nothing later asks for them.
+
 The supervisor reads the review from disk once you are idle. Leave it uncommitted: it is the run's record, not
 part of the work, and committing it would ship a review file with the work.
 

@@ -23,6 +23,9 @@ verdict were pushed at the start of your next `implement` turn, that push alone 
 head off the sha recorded when `implement` began, and an unfixed {{change_noun}} would advance past its own review
 with no remediation done.
 
+On a `CLEAR`, fix the MAJORs and MINORs it lists in this same turn, as `implement` does, and commit and
+push the fixes with the verdict file before you end it: nothing later asks for them.{{clear_fix_note}}
+
 ## The reviewer's brief
 
 Open the review with the line `Tier: {{tier}}`.

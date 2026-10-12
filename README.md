@@ -301,7 +301,8 @@ Every task review ranks its findings the same way. Only a **BLOCKER** sends the 
 pass, and a BLOCKER is a defect that would ship or a product or scope decision only the owner can make.
 A **MAJOR** changes shipped behaviour or a verification outcome and is fixed inline; a process question
 (a shared file, a flagged departure from the spec, a base that moved) is at most a MAJOR, fixed inline
-or put to the orchestrator with `hpipe decide`. A review reports at most five MINORs.
+or put to the orchestrator with `hpipe decide`. A review reports at most five MINORs. On a `CLEAR`,
+the worker fixes the MAJORs and MINORs it lists in the same turn and pushes the fixes with the verdict.
 
 **A small, well-planned change skips its PR review.** When a light or standard task leaves
 `implement`, the supervisor sizes the change with `git diff --numstat` from its merge base with the

@@ -404,6 +404,29 @@ async function renderPhase(
   return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
 }
 
+// Smoke run 14: a CLEAR carried a MINOR, the worker pushed only the verdict, and the
+// MINOR shipped while the land prompt said "Review cleared".
+test('every task review tells the worker to fix a CLEAR\'s findings this turn and push them with the verdict', async () => {
+  const PUSHED_LATER = 'Pushed later, a fix moves the branch off the head the `CLEAR` recorded, and sends the ' +
+    'change through `sync` and another review.'
+  for (const phase of TASK_REVIEW_PROMPTS as TaskPhase[]) {
+    for (const mode of MODES) {
+      const workerPart = prose(await renderPhase(phase, { tier: 'standard' }, phase, mode))
+        .split("## The reviewer's brief")[0]!
+      expect(workerPart, `${phase} ${mode}`).toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists in this ' +
+        'same turn')
+      expect(workerPart, `${phase} ${mode}`).toContain('commit and push the fixes with the verdict file before you ' +
+        'end it')
+      const landsNext = phase.startsWith('pr-review') && mode === 'single-pr'
+      expect(workerPart.includes(PUSHED_LATER), `${phase} ${mode}`).toBe(landsNext)
+    }
+  }
+  const run = runIn('single-pr')
+  run.phase = 'branch-review'
+  expect(prose(await renderRunPhasePrompt(run, ROOT)))
+    .toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle')
+})
+
 test('every task reviewer brief opens its review with the task\'s tier', async () => {
   for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
     expect(await renderPhase(phase, { tier: 'light' }), phase)

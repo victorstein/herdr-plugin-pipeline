@@ -92,6 +92,13 @@ function resyncNote(batch: Batch, task: Task): string {
     'for each merge in it: a conflict resolution is code no reviewer has seen.'
 }
 
+/**
+ * The last review's CLEAR records the branch head that lands, so a fix pushed after
+ * that tick is new code on top of it, and `sync`'s walk sends it back to review.
+ */
+const CLEAR_FIX_PUSHED_LATER = ' Pushed later, a fix moves the branch off the head the `CLEAR` recorded, and ' +
+  'sends the change through `sync` and another review.'
+
 export async function changePromptVars(
   pluginRoot: string, hpipe: string, run: Run, task: Task,
 ): Promise<Record<string, string>> {
@@ -101,6 +108,7 @@ export async function changePromptVars(
     return {
       subject: `PR #${pr}`, the_change: 'the PR', change_noun: 'PR', whose_head: "the PR's",
       diff_command: `gh pr diff ${pr}`, review_context: '', sync_step: '', reply_place: 'the PR body',
+      clear_fix_note: '',
       handoff: await fragment(pluginRoot, 'handoff-pr', { bead: task.bead }),
       handoff_rule: prHandoffRule(task.bead),
     }
@@ -117,6 +125,7 @@ export async function changePromptVars(
       resyncNote(batch, task),
     sync_step: syncStep(batch),
     reply_place: 'the message of an empty commit on the branch',
+    clear_fix_note: CLEAR_FIX_PUSHED_LATER,
     handoff: await fragment(pluginRoot, 'handoff-batch', {
       task_id: task.task_id, batch: batch.branch, into: batch.into, check_note: check.note,
     }),

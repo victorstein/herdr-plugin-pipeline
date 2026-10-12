@@ -18,6 +18,9 @@ If the dispatch is rejected for its effort, dispatch without `effort:`.
 Commit and push the verdict file before ending your turn. A verdict that lives only in this worktree
 is lost at teardown and invisible to every later review that has to read what was already decided.
 
+On a `CLEAR`, fix the MAJORs and MINORs it lists in this same turn, and commit and push the fixes with
+the verdict file before you end it: nothing later asks for them.
+
 ## The reviewer's brief
 
 Open the review with the line `Tier: {{tier}}`.
