@@ -5,7 +5,7 @@ import { escalatedUnanswered, openDecisionFor } from './decisions'
 import { landCommand, landsCleanSync, sha8 } from './batch'
 import { CHECK_REL, repoCheck } from './check'
 import { fileHolders, landingQueue, landingSlotHolder } from './gating'
-import { counterFor } from './machine'
+import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
 import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
@@ -667,6 +667,10 @@ export function visitedPhases(run: Run, task: Task): string[] {
   let previous: string | undefined
   for (const entry of run.history) {
     if (entry.task_id !== task.task_id) continue
+    const passedTheGate = entry.from === 'blocked-on-files' && entry.why === FILES_FREE_ON_ARRIVAL
+    if (passedTheGate && visited.at(-1) === 'blocked-on-files') {
+      visited[visited.length - 1] = 'blocked-on-files (passed through)'
+    }
     // A rewind onto the phase the task is already in is still a rewind worth showing.
     if (entry.from !== 'rewind' && entry.to === previous) continue
     previous = entry.to

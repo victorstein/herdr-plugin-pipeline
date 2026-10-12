@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, noteWorkingAfterAnswer,
+  advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, FILES_FREE_ON_ARRIVAL,
+  noteWorkingAfterAnswer,
 } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
 import type { ReviewSkip, Run, Task, TaskPhase, Tier } from '../src/lib/types'
@@ -339,6 +340,26 @@ test('blocked-on-files advances only when no sibling holds overlapping files', (
   }
   expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
   expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
+})
+
+test('the file gate\'s exit says whether a tick ever held the task back', () => {
+  const base = {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: null, headSha: null,
+    merged: false, ciBucket: null, filesClear: true, maxPasses: 2,
+  }
+  const passed = fixture('blocked-on-files')
+  advanceTask(passed.run, passed.task, base)
+  expect(passed.run.history.at(-1)?.why).toBe(FILES_FREE_ON_ARRIVAL)
+
+  const waited = fixture('blocked-on-files')
+  waited.task.files_waited_at = waited.task.phase_entered_at
+  advanceTask(waited.run, waited.task, base)
+  expect(waited.run.history.at(-1)?.why).toBe('no overlapping files in flight')
+
+  const earlierStay = fixture('blocked-on-files')
+  earlierStay.task.files_waited_at = earlierStay.task.phase_entered_at - 1
+  advanceTask(earlierStay.run, earlierStay.task, base)
+  expect(earlierStay.run.history.at(-1)?.why).toBe(FILES_FREE_ON_ARRIVAL)
 })
 
 // ——— resuming from a decision — #115 ———

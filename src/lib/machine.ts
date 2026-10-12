@@ -461,6 +461,12 @@ function advanceLoopingRow(
   return task
 }
 
+/**
+ * Every task enters `blocked-on-files`, so one no tick ever held back read in
+ * `visited:` exactly like one that waited on a sibling. Measured on a live run.
+ */
+export const FILES_FREE_ON_ARRIVAL = 'no task held its files'
+
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
   if (modeOf(run) === 'single-pr' && LANDING_PHASES.has(task.phase)) {
     return advanceLanding(run, task, s)
@@ -533,7 +539,8 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
 
     case 'blocked-on-files': {
       if (!s.filesClear) return null
-      return enterTaskPhase(run, task, 'implement', 'no overlapping files in flight')
+      const waited = task.files_waited_at === task.phase_entered_at
+      return enterTaskPhase(run, task, 'implement', waited ? 'no overlapping files in flight' : FILES_FREE_ON_ARRIVAL)
     }
 
     default:

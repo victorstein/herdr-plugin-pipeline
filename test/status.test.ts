@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
+import { FILES_FREE_ON_ARRIVAL } from '../src/lib/machine'
 import type { ReviewSkip, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 import { parkedFooter } from '../src/supervisor/tick'
@@ -799,6 +800,20 @@ test('visitedPhases lists every phase entered, drops repeats and marks rewinds',
   ]
   expect(visitedPhases(run, task))
     .toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research', '↺research'])
+})
+
+// Smoke run 14: every task's visited line named blocked-on-files though no task held its files.
+test('visitedPhases marks a file gate the task passed straight through', () => {
+  const run = mkRun()
+  const task = mkTask({ task_id: 't1' })
+  run.history = [
+    { at: 1, task_id: 't1', from: 'plan', to: 'blocked-on-files', why: 'actor idle + artifact fresh' },
+    { at: 2, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: FILES_FREE_ON_ARRIVAL },
+    { at: 3, task_id: 't1', from: 'rewind', to: 'blocked-on-files', why: 'manual rewind' },
+    { at: 4, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: 'no overlapping files in flight' },
+  ]
+  expect(visitedPhases(run, task))
+    .toEqual(['blocked-on-files (passed through)', 'implement', '↺blocked-on-files', 'implement'])
 })
 
 test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {

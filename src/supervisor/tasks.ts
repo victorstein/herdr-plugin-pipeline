@@ -594,12 +594,12 @@ async function gatherSignals(
     // no files can enter one that does mid-tick (a design row escalating, say),
     // and a snapshot taken before that would release an overlapping sibling onto
     // files now in flight.
-    case 'blocked-on-files':
+    case 'blocked-on-files': {
       await widenFromPlan(run, task)
-      return {
-        ...base,
-        filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),
-      }
+      const filesClear = releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id)
+      if (!filesClear) task.files_waited_at = task.phase_entered_at
+      return { ...base, filesClear }
+    }
     case 'ci':
       return task.ci === 'fail' ? withSendBackHead(base, run, task, deps) : base
     default:

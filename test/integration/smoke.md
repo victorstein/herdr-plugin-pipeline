@@ -846,7 +846,8 @@ otherwise removes before you can read them.
    heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
    ```
 
-   A returned review shows as a repeat (`… → spec-review → spec → spec-review → …`) and a decision as
+   A gate no task held reads `blocked-on-files (passed through)`. A returned review shows as a repeat
+   (`… → spec-review → spec → spec-review → …`) and a decision as
    `blocked-on-decision` between two entries of the same phase; both are fine. A row the tier skips
    appearing, or one it runs missing, is a finding.
 2. **The implement subagent ran on Sonnet.** While a task is in `implement`, read its pane

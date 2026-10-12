@@ -77,6 +77,24 @@ test('advanceTasks releases a blocked-on-files task once its sibling settles', a
   expect(run.tasks[1]?.phase).toBe('implement')
 })
 
+test('a task the file gate held back for a tick is marked as having waited; one it never held is not', async () => {
+  const holder = mkTask({ task_id: 't1', phase: 'implement', files: ['a/'] })
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'], phase_entered_at: 5 })
+  const free = mkTask({ task_id: 't3', phase: 'blocked-on-files', files: ['b/'], phase_entered_at: 6 })
+  const run = mkRun([holder, waiter, free])
+  await advanceTasks(run, deps())
+  expect(waiter.files_waited_at).toBe(5)
+  expect(free.phase).toBe('implement')
+  expect(free.files_waited_at).toBeUndefined()
+
+  holder.phase = 'done'
+  await advanceTasks(run, deps())
+  expect(waiter.phase).toBe('implement')
+  expect(run.history.filter((h) => h.from === 'blocked-on-files').map((h) => [h.task_id, h.why])).toEqual([
+    ['t3', 'no task held its files'], ['t2', 'no overlapping files in flight'],
+  ])
+})
+
 function checkoutWithPlan(planText: string): { checkout_path: string; artifacts: Task['artifacts'] } {
   const checkout = tempDir('hpipe-plan-files-')
   const plan = 'docs/superpowers/plans/plan.md'

@@ -289,6 +289,12 @@ export interface Task {
   /** Optional: ledgers written before #14 lack it. */
   uncommitted_work?: UncommittedWork
   /**
+   * The `phase_entered_at` of a `blocked-on-files` stay in which a tick held the
+   * task back, so the gate's exit can tell a wait from a pass-through. Keyed like
+   * `StallState`, so a re-entry retires it without anyone clearing it.
+   */
+  files_waited_at?: number
+  /**
    * Set when the gate opens and cleared once the worker has the brief. Marks the
    * pending state rather than stamping the briefed one so that a ledger written
    * before #89, which lacks it, reads as already briefed.
