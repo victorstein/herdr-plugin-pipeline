@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cmdBatchCheck, cmdSubmit } from '../src/cli'
@@ -229,6 +229,10 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   const verdictPath = absoluteArtifactPath(toReview.run, null)!
   mkdirSync(join(verdictPath, '..'), { recursive: true })
   writeFileSync(verdictPath, 'VERDICT: CLEAR\n')
+  // A verdict is fresh only when written after the phase entry; written in the same millisecond, as
+  // a fast test can, it reads as stale. A reviewer takes minutes.
+  const writtenAfterEntry = new Date(toReview.run.phase_entered_at + 1_000)
+  utimesSync(verdictPath, writtenAfterEntry, writtenAfterEntry)
 
   const toShip = await evaluate()
   expect(toShip.run.phase).toBe('ship')
