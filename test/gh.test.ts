@@ -73,17 +73,19 @@ test('prView reads merged from state and mergedAt, not a merged field', async ()
   const bin = await makeFakeBin(dir, {
     'pr view': {
       state: 'MERGED', mergedAt: '2026-09-13T10:00:00Z', mergeCommit: { oid: 'm3rg3' }, headRefOid: 'abc123',
+      baseRefName: 'main',
     },
   })
   const view = await new Gh(bin, dir).prView(5)
   expect(view).toEqual({
     merged: true, mergedAtMs: Date.parse('2026-09-13T10:00:00Z'), mergeCommit: 'm3rg3', headSha: 'abc123',
+    baseRef: 'main',
   })
 })
 
 test('an open PR is not merged and has no mergedAt', async () => {
   const bin = await makeFakeBin(dir, { 'pr view': { state: 'OPEN', mergedAt: null, headRefOid: 'abc' } })
-  expect(await new Gh(bin, dir).prView(5)).toMatchObject({ merged: false, mergedAtMs: null, mergeCommit: null })
+  expect(await new Gh(bin, dir).prView(5)).toMatchObject({ merged: false, mergedAtMs: null, mergeCommit: null, baseRef: null })
 })
 
 test('prForBranch returns the first PR number or null', async () => {

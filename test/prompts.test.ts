@@ -598,6 +598,24 @@ test('merge counts the review stages that actually ran', async () => {
     .toContain('Review cleared and CI is green on PR #7.')
 })
 
+test('merge says the PR review was skipped, and the batch landing names the head as submitted, not reviewed', async () => {
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  const skipped = 'The PR review was skipped (12 lines added outside docs/, spec-review cleared first pass)'
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip }))).toContain(`${skipped} and CI is green on PR #7.`)
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, land_sha: 'abcdef1234' }, 'merge', 'single-pr')))
+    .toContain(`${skipped}, and \`abcdef12\` is the head that was submitted`)
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, land_sha: 'abcdef1234' }, 'merge', 'single-pr'))
+    .toContain('Review cleared, and `abcdef12` is the head that was reviewed')
+})
+
+test('sync tells a worker whose review was skipped that it was, not that it was reviewed', async () => {
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  expect(prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc', review_skip })))
+    .toContain('Your change skipped its PR review as a small change, and it is next in line to land')
+  expect(prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc' })))
+    .toContain('Your change was reviewed, and it is next in line to land')
+})
+
 test('intake explains the tiers and registers with --tier', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
   expect(text).toContain('[--tier light|standard|heavy]')
@@ -796,4 +814,17 @@ test('the README, the skill and intake give heavy the same one combined PR revie
   expect(intake).toContain('Every tier gets one combined PR review')
   expect(intake).not.toContain('two separate stages')
   expect(await Bun.file(join(ROOT, 'prompts', 'pr-review.md')).text()).not.toContain('the heavy tier splits')
+})
+
+test('the README and the skill name the PR review skip, its threshold and the always-review file', async () => {
+  const readme = prose(await Bun.file(join(ROOT, 'README.md')).text())
+  for (const needle of [
+    'A small, well-planned change skips its PR review.', 'fewer than 150 lines outside `docs/`',
+    '`PR_REVIEW_SKIP_BELOW_ADDED_LINES`', '`.claude/pipeline-always-review`', 'Heavy never skips',
+  ]) {
+    expect(readme, needle).toContain(needle)
+  }
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('`pr-review skipped`')
+  expect(skill).toContain('`.claude/pipeline-always-review`')
 })

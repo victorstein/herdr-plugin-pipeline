@@ -183,6 +183,20 @@ export interface Submission {
   dirty_at?: string
 }
 
+/**
+ * Why a task's last `implement` exit went past its PR review. It describes only
+ * that exit: entering `implement` or any review row clears it.
+ */
+export interface ReviewSkip {
+  at: number
+  /** The PR review rows the route would have run. */
+  skipped: TaskPhase[]
+  /** Lines the change adds outside `docs/`, from `git diff --numstat` against its base. */
+  added_lines: number
+  /** The design reviews on the route, every one cleared on its first pass. */
+  cleared: TaskPhase[]
+}
+
 /** One landing on the batch branch, and so one line of the batch PR's release notes. */
 export interface Landing {
   title: string
@@ -287,6 +301,8 @@ export interface Task {
   land_sha?: string | null
   /** Single-PR only, append-only: no rewind clears it, because no rewind takes work off the batch branch. */
   landed?: Landing[]
+  /** Absent unless the last `implement` exit skipped the PR review; older ledgers never carry it. */
+  review_skip?: ReviewSkip
   notes: string
 }
 

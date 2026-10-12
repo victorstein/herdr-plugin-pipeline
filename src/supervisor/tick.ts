@@ -2,6 +2,7 @@ import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
+import { reviewsSkipped } from '../lib/review-skip'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
@@ -35,10 +36,16 @@ export interface WakeLine {
   detail?: string
 }
 
-function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number): string {
+function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number, skipped = ''): string {
   return phaseAtEvent === phase
     ? `${phase} ${ageMinutes(enteredAt, now)}m`
-    : `${phaseAtEvent} → ${phase}`
+    : `${phaseAtEvent} → ${phase}${skipped}`
+}
+
+/** Only on the transition out of `implement`: that is the moment the skip happened. */
+function skippedOnTheWay(task: Task, phaseAtEvent: string): string {
+  const skip = task.review_skip
+  return skip === undefined || phaseAtEvent !== 'implement' ? '' : `, ${reviewsSkipped(skip)}`
 }
 
 /**
@@ -56,7 +63,8 @@ export function describeWake(
     return `${run.run_id} [${box}] ${line.event}`
   }
 
-  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
+  const skipped = skippedOnTheWay(task, line.phaseAtEvent)
+  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now, skipped)
   const head = `${task.task_id} ${task.branch} (${task.bead}) [${box}] ` +
     `${line.event} — ${actionFor(run, task, hpipe, now, holds)}`
   if (line.detail === undefined || line.detail.length === 0) return head

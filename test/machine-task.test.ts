@@ -3,7 +3,7 @@ import {
   advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, noteWorkingAfterAnswer,
 } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
-import type { Run, Task, TaskPhase, Tier } from '../src/lib/types'
+import type { ReviewSkip, Run, Task, TaskPhase, Tier } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
 function fixture(phase: TaskPhase): { run: Run; task: Task } {
@@ -479,4 +479,43 @@ test('a task from a ledger without a tier routes as heavy and is not written bac
   expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review')
   expect('tier' in task).toBe(false)
   expect(task.tier_history).toBeUndefined()
+})
+
+const SKIP: ReviewSkip = { at: 1, skipped: ['pr-review'], added_lines: 42, cleared: ['spec-review', 'plan-review'] }
+
+test('an implement exit carrying a review skip goes past the PR review to ci, and says why', () => {
+  const { run, task } = tiered('implement', 'standard')
+  const next = advanceTask(run, task, { ...clearedSignals, reviewSkip: SKIP })
+  expect(next?.phase).toBe('ci')
+  expect(task.pr).toBe(5)
+  expect(task.review_skip).toEqual(SKIP)
+  expect(run.history.at(-1)?.why).toBe(
+    'PR #5 at bbb; pr-review skipped: 42 lines added outside docs/, spec-review and plan-review cleared first pass')
+})
+
+test('a skipped review spends no pass and reserves no verdict', () => {
+  const { run, task } = tiered('implement', 'light')
+  advanceTask(run, task, { ...clearedSignals, reviewSkip: SKIP })
+  expect(task.passes).toEqual({})
+  expect(task.verdict_seq).toBeUndefined()
+  expect(task.artifacts.verdicts).toEqual({})
+})
+
+test('an implement exit that is not ready ignores a review skip', () => {
+  const { run, task } = tiered('implement', 'standard')
+  expect(advanceTask(run, task, { ...clearedSignals, headSha: 'aaa', reviewSkip: SKIP })).toBeNull()
+  expect(task.review_skip).toBeUndefined()
+})
+
+test('entering implement or any review row forgets a review skip, and nothing else does', () => {
+  for (const phase of ['implement', 'pr-review', 'spec-review'] as const) {
+    const { run, task } = tiered('ci', 'standard')
+    task.review_skip = SKIP
+    enterTaskPhase(run, task, phase, 'test')
+    expect(task.review_skip, phase).toBeUndefined()
+  }
+  const { run, task } = tiered('ci', 'standard')
+  task.review_skip = SKIP
+  enterTaskPhase(run, task, 'merge', 'test')
+  expect(task.review_skip).toEqual(SKIP)
 })

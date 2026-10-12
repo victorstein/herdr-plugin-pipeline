@@ -1284,3 +1284,104 @@ test('a send-back with no PR found, or no head on it, waits a tick rather than r
   expect(noHead.phase).toBe('pr-review-intent')
   expect(counterFor(noHead, 'pr-review-intent')).toBe(0)
 })
+
+// ——— skipping the PR review on a small, well-planned change ———
+
+const DESIGN_CLEARED = (taskId = 't1'): Run['history'] => [
+  { at: 1, task_id: taskId, from: 'spec-review', to: 'plan', why: 'cleared' },
+  { at: 2, task_id: taskId, from: 'plan-review', to: 'blocked-on-files', why: 'cleared' },
+]
+
+interface SkipReads {
+  fetched: string[]
+  sized: string[]
+  numstat: string | null
+  listed: { ok: true; text: string | null } | { ok: false }
+  fetchFails: boolean
+}
+
+function skipReads(over: Partial<SkipReads> = {}) {
+  const reads: SkipReads = { fetched: [], sized: [], numstat: '40\t3\tsrc/a.ts\0', listed: { ok: true, text: null },
+    fetchFails: false, ...over }
+  const landingGit = {
+    isAncestor: async () => true,
+    remoteBranchHead: async () => ({ ok: true as const, sha: 'new' }),
+    resolve: async (_root: string, ref: string) => ref,
+    changedPaths: async () => [],
+    fetch: async (_root: string, refspec: string) => {
+      reads.fetched.push(refspec)
+      return reads.fetchFails ? 'unreachable' : null
+    },
+  }
+  const changeGit = {
+    numstat: async (_root: string, base: string, head: string) => {
+      reads.sized.push(`${base}...${head}`)
+      return reads.numstat
+    },
+    fileAt: async () => reads.listed,
+  }
+  return { reads, landingGit, changeGit }
+}
+
+async function leaveImplement(over: Partial<Task>, reads = skipReads(), baseRef: string | null = 'main') {
+  const run = mkRun([mkTask({ phase: 'implement', head_sha_at_entry: 'old', pr: 42, tier: 'standard', ...over })])
+  run.history = DESIGN_CLEARED()
+  const prompts = await advanceTasks(run, deps({
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new', baseRef }),
+    landingGit: reads.landingGit, changeGit: reads.changeGit,
+  }))
+  return { run, task: run.tasks[0]!, prompts, reads: reads.reads }
+}
+
+test('a small standard change whose spec and plan cleared first time skips its PR review for ci', async () => {
+  const { run, task, prompts, reads } = await leaveImplement({})
+  expect(task.phase).toBe('ci')
+  expect(task.review_skip).toMatchObject({ skipped: ['pr-review'], added_lines: 40 })
+  expect(run.history.at(-1)?.why)
+    .toBe('PR #42 at new; pr-review skipped: 40 lines added outside docs/, spec-review and plan-review cleared first pass')
+  expect(reads.fetched).toEqual(['+refs/heads/main:refs/remotes/origin/main', '+refs/heads/feat/x:refs/remotes/origin/feat/x'])
+  expect(reads.sized).toEqual(['refs/remotes/origin/main...new'])
+  expect(prompts).toHaveLength(0)
+})
+
+test('the PR review runs on a change at the threshold, or one the always-review list names', async () => {
+  for (const [label, reads] of [
+    ['150 lines', skipReads({ numstat: '150\t0\tsrc/a.ts\0' })],
+    ['listed', skipReads({ listed: { ok: true, text: 'src/\n' } })],
+  ] as const) {
+    const { task } = await leaveImplement({}, reads)
+    expect(task.phase, label).toBe('pr-review')
+    expect(task.review_skip, label).toBeUndefined()
+  }
+})
+
+test('a measurement that fails anywhere means the PR review runs', async () => {
+  for (const [label, reads, baseRef] of [
+    ['fetch', skipReads({ fetchFails: true }), 'main'],
+    ['numstat', skipReads({ numstat: null }), 'main'],
+    ['always-review list', skipReads({ listed: { ok: false } }), 'main'],
+    ['PR base', skipReads(), null],
+  ] as const) {
+    const { task } = await leaveImplement({}, reads, baseRef)
+    expect(task.phase, label).toBe('pr-review')
+  }
+})
+
+test('heavy, a sent-back spec, or an exit that is not ready never fetches to measure', async () => {
+  const heavy = await leaveImplement({ tier: 'heavy' })
+  expect(heavy.task.phase).toBe('pr-review')
+  expect(heavy.reads.fetched).toEqual([])
+
+  const reads = skipReads()
+  const run = mkRun([mkTask({ phase: 'implement', head_sha_at_entry: 'old', pr: 42, tier: 'light' })])
+  run.history = [{ at: 1, task_id: 't1', from: 'spec-review', to: 'spec', why: 'returned (pass 1)' }, ...DESIGN_CLEARED()]
+  await advanceTasks(run, deps({
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new', baseRef: 'main' }),
+    landingGit: reads.landingGit, changeGit: reads.changeGit,
+  }))
+  expect(run.tasks[0]?.phase).toBe('pr-review')
+
+  const unchanged = await leaveImplement({ head_sha_at_entry: 'new' })
+  expect(unchanged.task.phase).toBe('implement')
+  expect([...reads.reads.fetched, ...unchanged.reads.fetched]).toEqual([])
+})

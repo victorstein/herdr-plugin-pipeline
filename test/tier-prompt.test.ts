@@ -149,6 +149,12 @@ test('review_count says both stages only when pr-review-quality ran', () => {
     .toBe('Review cleared')
 })
 
+test('review_count says the PR review was skipped, and why, when it was', () => {
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 42, cleared: ['spec-review', 'plan-review'] as TaskPhase[] }
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'standard', review_skip })).review_count)
+    .toBe('The PR review was skipped (42 lines added outside docs/, spec-review and plan-review cleared first pass)')
+})
+
 test('taskTiers names every task with its tier', () => {
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   expect(taskTiers(run)).toBe('none')

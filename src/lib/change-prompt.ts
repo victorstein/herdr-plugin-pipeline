@@ -124,7 +124,10 @@ export async function changePromptVars(
 export function syncPromptVars(run: Run, task: Task): Record<string, string> {
   const batch = run.batch as Batch
   const check = checkWording(task.checkout_path ?? run.repo_root)
-  return { batch: batch.branch, merge_batch: mergeBatchCommand(batch), check_note: check.note, check_until: check.until }
+  return {
+    batch: batch.branch, merge_batch: mergeBatchCommand(batch), check_note: check.note, check_until: check.until,
+    cleared_as: task.review_skip === undefined ? 'was reviewed' : 'skipped its PR review as a small change',
+  }
 }
 
 /** A single-PR `merge`: the orchestrator lands the recorded head, never the branch tip. */
@@ -134,6 +137,7 @@ export function landingPromptVars(run: Run, task: Task): Record<string, string> 
   const checked = task.submission?.check === 'passed' ? ' and checked' : ''
   return {
     batch: batch.branch, into: batch.into, land_sha8: sha8(landSha), checked_note: checked,
+    land_judged: task.review_skip === undefined ? 'reviewed' : 'submitted',
     land_command: landCommand(run, landSha), repo_root: run.repo_root,
   }
 }

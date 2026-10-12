@@ -8,6 +8,8 @@ export interface PrView {
   /** The commit the merge put on the base branch; null until merged. */
   mergeCommit?: string | null
   headSha: string | null
+  /** The branch the PR merges into, which a change is sized against. */
+  baseRef?: string | null
 }
 
 export interface HeadCi {
@@ -129,8 +131,9 @@ export class Gh {
   async prView(pr: number): Promise<PrView | null> {
     const view = await this.json<{
       state: string; mergedAt: string | null; mergeCommit: { oid: string } | null; headRefOid: string | null
+      baseRefName?: string | null
     }>(
-      ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeCommit,headRefOid'],
+      ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeCommit,headRefOid,baseRefName'],
     )
     if (!view) return null
     return {
@@ -138,6 +141,7 @@ export class Gh {
       mergedAtMs: view.mergedAt ? Date.parse(view.mergedAt) : null,
       mergeCommit: view.mergeCommit?.oid ?? null,
       headSha: view.headRefOid,
+      baseRef: view.baseRefName ?? null,
     }
   }
 }

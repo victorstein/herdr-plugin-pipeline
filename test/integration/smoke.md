@@ -794,7 +794,10 @@ review rows it visits:
 | `heavy` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
 
 §1–§6 pin both tasks heavy, so none of that routing is exercised there. These two batches are its only
-live check. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
+live check. The smoke repo's changes are small, so a light or standard task whose design reviews
+cleared first time goes `implement → ci` and skips its `pr-review` (§10). To walk the rows this table
+names, commit `.claude/pipeline-always-review` on `main` listing the batch's `--files` before
+registering, and remove it afterwards. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
 `export SMOKE=pipesmoke<N>` and the next unused `N`, so neither batch's ledger mixes with another's.
 
 **Upgrade first.** The supervisor is long-lived and keeps the code it started with. If any session
@@ -1123,6 +1126,8 @@ bare local origin, but GitHub, release-please and live agents are only proven he
 
 ### 9a. Setup, before the session boots
 
+- `.claude/pipeline-always-review` on `main` listing every path these tasks touch: the steps below
+  need each task's review to run, and a small change would otherwise skip it (§10). Remove it after.
 - release-please configured on `hpipe-smoke` (`release-please-config.json` with `changelog-sections`,
   and the release workflow): step 9i is pass/fail on the release it cuts.
 - A ruleset on `batch/*` blocking force-pushes and deletion (Settings → Rules → Rulesets). The landing
@@ -1181,7 +1186,7 @@ back if needed. **Assert:**
 ### 9e. A reviewer's inline fix, checked before it lands
 
 Have a task's last reviewer fix a MAJOR inline (a code change, committed and pushed with its verdict).
-**Assert:** with the slot, the task goes to `sync`, not `merge` (`… was not checked since its review`
+**Assert:** with the slot, the task goes to `sync`, not `merge` (`… was not checked since it was reviewed`
 in `hpipe show`'s visited list or the history), the worker's submit runs the check on that head, and
 only then does it land.
 
@@ -1236,6 +1241,63 @@ commands; `hpipe status` shows `not shipped: batch/<…> holds 1 landed task (t1
 
 Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
 one does not fit, and that is a finding.
+
+---
+
+## 10. Skipping the PR review on a small, well-planned change
+
+A light or standard task leaving `implement` goes past its PR review when its change adds fewer than
+150 lines outside `docs/`, its `spec-review` (and `plan-review`, where its tier runs one) cleared on
+the first pass, no PR review sent it back, and it touches nothing listed in
+`.claude/pipeline-always-review` on its base. The unit suite drives this against a bare local origin;
+GitHub's PR base and a live supervisor's fetches are only proven here. Fresh `pipesmokeN` session,
+`victorstein/hpipe-smoke`, no always-review file on `main` to start with.
+
+### 10a. A per-task skip, and a heavy task beside it
+
+Register t1 (`--tier standard`) and t2 (`--tier heavy`), each a change of a few lines, with disjoint
+`--files`. **Assert**, once both are past `implement`:
+
+- t1 went `implement → ci` and its pane received no `pr-review` prompt; t2 entered `pr-review`.
+- `hpipe status`'s t1 line reads `standard pr-review skipped`; `hpipe show --task t1` prints
+  `skipped:    pr-review (<N> lines added outside docs/, spec-review and plan-review cleared first pass)`,
+  its `visited:` line has no `pr-review`, and `verdicts:` holds no `pr-review-0`.
+- `<N>` is the added column of `git diff --numstat origin/main...origin/<t1 branch>`, summed over paths
+  outside `docs/`.
+- The orchestrator's digest line for t1's transition reads `[implement → ci, pr-review skipped]`, and
+  t1's merge prompt opens `The PR review was skipped (…) and CI is green on PR #<n>.`
+- The ledger records why:
+
+  ```bash
+  jq '.history | map(select(.task_id == "t1" and .from == "implement")) | last | .why' "$STATE/runs/$SMOKE/<run_id>.json"
+  ```
+
+  reads `PR #<n> at <sha>; pr-review skipped: <N> lines added outside docs/, …`.
+
+### 10b. What keeps the review
+
+In the same run, register three more small standard tasks:
+
+- t3, after committing `.claude/pipeline-always-review` on `main` with a line naming t3's file. It
+  enters `pr-review`.
+- t4, whose change also adds a line naming its own file to `.claude/pipeline-always-review` on its
+  branch. It still skips: the list is read from the base, so a change cannot put itself on it, or
+  take itself off.
+- t5 with a change of 200 added lines outside `docs/`. It enters `pr-review`.
+- If any task in the run had a `spec-review` or `plan-review` send-back, it entered `pr-review` however
+  small its change was. Record whether one did.
+
+### 10c. A single-PR skip
+
+In a `--single-pr` run with one small standard task. **Assert:** it goes `implement → land-queue`;
+`hpipe show` prints `land sha:   <sha8> (submitted; pr-review skipped)`, at the head `submit`
+recorded; it lands as a fast-forward when up to date and checked, and the landing prompt reads `The PR
+review was skipped (…), and <sha8> is the head that was submitted and checked`. A head pushed past
+the submission before the skip lands only through `sync`; the unit suite covers that, since a live
+run cannot time a push into the one tick between `submit` and the skip.
+
+**Record:** each task's change size, whether it skipped, and the wall-clock time from `implement` to
+`ci` (or `land-queue`) for a skipping task against a reviewed one.
 
 ---
 

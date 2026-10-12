@@ -80,6 +80,26 @@ export async function resolveCommit(repoRoot: string, ref: string): Promise<stri
   return resolved.code === 0 ? resolved.out : null
 }
 
+/**
+ * Every path `head` changes since its merge base with `base`, one `added\tdeleted\tpath`
+ * record per NUL. Null when git could not compare them, never an empty change.
+ */
+export async function numstat(repoRoot: string, base: string, head: string): Promise<string | null> {
+  const diff = await git(repoRoot, ['diff', '--numstat', '-z', '--no-renames', `${base}...${head}`])
+  return diff.code === 0 ? diff.out : null
+}
+
+export type FileAtRef = { ok: true; text: string | null } | { ok: false }
+
+/** A file's text at `ref`; `text: null` when `ref` has no such file, and not ok when git could not say. */
+export async function fileAt(repoRoot: string, ref: string, path: string): Promise<FileAtRef> {
+  const listed = await git(repoRoot, ['ls-tree', '--name-only', ref, '--', path])
+  if (listed.code !== 0) return { ok: false }
+  if (listed.out.length === 0) return { ok: true, text: null }
+  const shown = await git(repoRoot, ['show', `${ref}:${path}`])
+  return shown.code === 0 ? { ok: true, text: shown.out } : { ok: false }
+}
+
 /** Null when either commit is not in this object store, so the caller cannot mistake it for no change. */
 export async function changedPaths(repoRoot: string, from: string, to: string): Promise<string[] | null> {
   const diff = await git(repoRoot, ['diff', '--name-only', '--no-renames', from, to])

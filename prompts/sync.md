@@ -1,6 +1,6 @@
 # Sync — {{branch}} ({{bead}}) with `{{batch}}`
 
-Your change was reviewed, and it is next in line to land on `{{batch}}`. It may land only once it
+Your change {{cleared_as}}, and it is next in line to land on `{{batch}}`. It may land only once it
 contains every landing before it, so bring `{{batch}}` in, check, and submit again. Nothing else is
 asked of you here.
 

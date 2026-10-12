@@ -19,7 +19,7 @@ import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/d
 import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
-import type { AgentStatus, Run, Task } from '../src/lib/types'
+import type { AgentStatus, Run, Task, TaskPhase } from '../src/lib/types'
 import type { LimitReading } from '../src/supervisor/usage-limits'
 import { beadTaskFields } from './helpers/bead-fields'
 import { hpipeCommand } from '../src/lib/render'
@@ -649,6 +649,17 @@ test('rewind to implement or earlier forgets the PR and the bead close, so neith
     expect(task?.ci, phase).toBeNull()
     expect(task?.merged_at_ms, phase).toBeNull()
     expect(task?.bead_closed_at_ms, phase).toBeNull()
+  }
+})
+
+test('a rewind into the PR review or before it forgets a review skip, and one past it keeps it', async () => {
+  const skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 42, cleared: ['spec-review'] as TaskPhase[] }
+  for (const [phase, kept] of [['pr-review', false], ['implement', false], ['spec', false], ['ci', true], ['merge', true]] as const) {
+    const run = runWithTasks([{ task_id: 't1', bead: `hp-skip-${phase}`, phase: 'merge', pr: 5, review_skip: skip }])
+    await saveRun(dir, run)
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok, phase).toBe(true)
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+    expect(task.review_skip !== undefined, phase).toBe(kept)
   }
 })
 

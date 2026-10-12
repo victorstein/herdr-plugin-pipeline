@@ -1151,6 +1151,8 @@ async function rewind(ctx: Ctx, input: {
       task.ci = null
       delete task.land_sha
     }
+    // As `enterTaskPhase` forgets it: the work is judged afresh from here.
+    if (PHASES_BEFORE_A_PR.has(task.phase) || taskRow(task.phase).signal === 'verdict') delete task.review_skip
     // A standing merge keeps the bead closed through the rework, and a standing
     // close would clear `close` the instant `merge` records the merge again.
     if (PHASES_BEFORE_A_MERGE.has(task.phase)) {

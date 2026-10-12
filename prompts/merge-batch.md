@@ -1,6 +1,6 @@
 # Land {{branch}} ({{bead}}) on `{{batch}}`
 
-{{review_count}}, and `{{land_sha8}}` is the head that was reviewed{{checked_note}}. It contains every
+{{review_count}}, and `{{land_sha8}}` is the head that was {{land_judged}}{{checked_note}}. It contains every
 landing before it, so it lands as a fast-forward. Land it with exactly this command:
 
     {{land_command}}

@@ -12,7 +12,7 @@ import {
 import type { RunEffect } from '../lib/ledger'
 import type { PrView } from '../lib/gh'
 import {
-  advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, type LandingFacts, landsWithoutSync,
+  advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
 } from '../lib/machine'
 import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
@@ -20,12 +20,15 @@ import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/pre
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { changePromptVars, landingPromptVars, syncPromptVars } from '../lib/change-prompt'
+import {
+  ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, reviewSkip, type SkipCandidate, skipCandidate,
+} from '../lib/review-skip'
 import { tierPromptVars } from '../lib/tier-prompt'
-import { changedPaths, isAncestor, resolveCommit } from '../lib/sync-walk'
+import { changedPaths, fileAt, type FileAtRef, isAncestor, numstat, resolveCommit } from '../lib/sync-walk'
 import { artifactBase, REVIEWS_DIR, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
-import type { Run, Task, TaskPhase } from '../lib/types'
+import type { ReviewSkip, Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import type { CheckSubmission } from './courier'
 import { runTeardown, type TeardownDeps } from './teardown'
@@ -67,7 +70,16 @@ export interface TaskDeps extends TeardownDeps {
   landingGit?: LandingGit
   /** How long a `sync` holder may go without submitting while another task waits to land. */
   syncYieldMs?: number
+  /** Sizing a change for the PR review skip; the real ones read `repo_root`. */
+  changeGit?: ChangeGit
 }
+
+export interface ChangeGit {
+  numstat: (repoRoot: string, base: string, head: string) => Promise<string | null>
+  fileAt: (repoRoot: string, ref: string, path: string) => Promise<FileAtRef>
+}
+
+export const LOCAL_CHANGE_GIT: ChangeGit = { numstat, fileAt }
 
 export interface LandingGit {
   isAncestor: (repoRoot: string, ancestor: string, of: string) => Promise<boolean | null>
@@ -449,7 +461,7 @@ async function gatherSignals(
 
   switch (task.phase) {
     case 'implement': {
-      if (singlePr) return base
+      if (singlePr) return implementReady(run, task, base) ? withSinglePrSkip(base, run, task, deps) : base
       // GitHub's PR head lags a push, so a send-back can record the head from
       // before the reviewer's verdict commit, and that commit then reads as the
       // worker's push. Until the prompt lands the worker has pushed nothing, so
@@ -461,7 +473,9 @@ async function gatherSignals(
       // re-queries gh for a PR we already know about.
       task.pr = pr
       const view = await deps.prView(pr)
-      return { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+      const signals = { ...base, prNumber: pr, headSha: view?.headSha ?? null }
+      if (!implementReady(run, task, signals)) return signals
+      return { ...signals, reviewSkip: await perTaskSkip(run, task, view?.baseRef ?? null, signals.headSha, deps) }
     }
     case 'research':
     case 'spec':
@@ -622,6 +636,57 @@ async function withReviewedHead<S extends { headSha: string | null }>(
   }
   if (contains === null) return null
   return { ...signals, headSha: remote.sha, headContainsSubmission: contains }
+}
+
+/**
+ * Sized against its base as just fetched, with the always-review list read there
+ * rather than on the branch, so a change cannot take itself off the list. Any read
+ * that fails means the review runs.
+ */
+async function sizedSkip(
+  run: Run, candidate: SkipCandidate, baseRef: string, head: string, deps: TaskDeps,
+): Promise<ReviewSkip | null> {
+  const changes = deps.changeGit ?? LOCAL_CHANGE_GIT
+  const counted = await changes.numstat(run.repo_root, baseRef, head)
+  const listed = await changes.fileAt(run.repo_root, baseRef, ALWAYS_REVIEW_REL)
+  const alwaysReview = !listed.ok ? null : listed.text === null ? [] : alwaysReviewPrefixes(listed.text)
+  return reviewSkip(candidate, counted === null ? null : changeSize(counted), alwaysReview, Date.now())
+}
+
+async function fetchedAll(run: Run, branches: string[], git: LandingGit): Promise<boolean> {
+  for (const branch of branches) {
+    if (await git.fetch(run.repo_root, trackingRefspec(branch)) !== null) return false
+  }
+  return true
+}
+
+/** The ledger's rules first, so a heavy or sent-back task costs no fetch. */
+async function perTaskSkip(
+  run: Run, task: Task, baseRef: string | null, head: string | null, deps: TaskDeps,
+): Promise<ReviewSkip | null> {
+  const candidate = skipCandidate(run, task)
+  if (candidate === null || baseRef === null || head === null) return null
+  if (!(await fetchedAll(run, [baseRef, task.branch], deps.landingGit ?? LOCAL_LANDING_GIT))) return null
+  return sizedSkip(run, candidate, `refs/remotes/origin/${baseRef}`, head, deps)
+}
+
+/**
+ * The head that would land is read, and must contain the submission, before it is
+ * sized: the skip judges exactly what `land-queue` then records.
+ */
+async function withSinglePrSkip<S extends { headSha: string | null }>(
+  signals: S, run: Run, task: Task, deps: TaskDeps,
+): Promise<S | (S & { reviewSkip: ReviewSkip; headContainsSubmission: true })> {
+  const candidate = skipCandidate(run, task)
+  const submitted = task.submission?.head_sha
+  if (candidate === null || submitted === undefined || run.batch === undefined) return signals
+  const git = deps.landingGit ?? LOCAL_LANDING_GIT
+  const remote = await git.remoteBranchHead(run.repo_root, task.branch)
+  if (!remote.ok || remote.sha === null) return signals
+  if (!(await fetchedAll(run, [run.batch.branch, task.branch], git))) return signals
+  if (await git.isAncestor(run.repo_root, submitted, remote.sha) !== true) return signals
+  const skip = await sizedSkip(run, candidate, batchRefOf(run), remote.sha, deps)
+  return skip === null ? signals : { ...signals, reviewSkip: skip, headSha: remote.sha, headContainsSubmission: true }
 }
 
 /** Only once the holder is past its window with nothing submitted: before that it is working, and costs no read. */

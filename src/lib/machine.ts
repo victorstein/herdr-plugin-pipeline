@@ -1,6 +1,7 @@
 import { modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
-import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
+import { describeReviewSkip, prReviewsOn } from './review-skip'
+import type { AgentStatus, CiBucket, ReviewSkip, Run, RunPhase, Submission, Task, TaskPhase } from './types'
 
 interface HasPasses { passes: Record<string, number | undefined> }
 
@@ -188,6 +189,7 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   // Whatever implement produces is reviewed afresh, so the head the last review
   // cleared is no longer what lands.
   if (phase === 'implement') delete task.land_sha
+  if (phase === 'implement' || taskRow(phase).signal === 'verdict') delete task.review_skip
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
@@ -264,6 +266,8 @@ export interface TaskSignals {
   /** Single-PR `sync`: tasks in `land-queue` that could take the slot this one holds. */
   yieldTo?: string[]
   yieldAfterMs?: number
+  /** Set only on an `implement` exit the supervisor measured small enough to skip its PR review. */
+  reviewSkip?: ReviewSkip | null
 }
 
 const sha8 = (sha: string): string => sha.slice(0, 8)
@@ -281,18 +285,54 @@ const batchBranch = (run: Run): string => run.batch?.branch ?? 'the batch'
  * same tick. It must contain what was submitted, or the branch lost that work
  * during review — a force-push, say — and what would land is not what was checked.
  */
-function enterLandQueue(run: Run, task: Task, s: TaskSignals): Task | null {
+function enterLandQueue(
+  run: Run, task: Task, s: TaskSignals, why = 'cleared; reviewed head', since = 'during review',
+): Task | null {
   if (s.headSha === null) return null
   const submitted = task.submission?.head_sha
   if (submitted !== undefined && s.headContainsSubmission !== true) {
     if (s.headContainsSubmission !== false) return null
     enterTaskPhase(run, task, 'implement',
-      `${task.branch} no longer contains its submitted head ${sha8(submitted)}: it lost work during review`)
+      `${task.branch} no longer contains its submitted head ${sha8(submitted)}: it lost work ${since}`)
     task.head_sha_at_entry = s.headSha
     return task
   }
   task.land_sha = s.headSha
-  return enterTaskPhase(run, task, 'land-queue', `cleared; reviewed head ${sha8(s.headSha)}`)
+  return enterTaskPhase(run, task, 'land-queue', `${why} ${sha8(s.headSha)}`)
+}
+
+/** An `implement` submission this entry has not yet cleared on: newer than the entry, and not the rejected head. */
+function freshSubmission(task: Task): Submission | null {
+  const sub = task.submission
+  const fresh = sub?.kind === 'implement' && sub.at >= task.phase_entered_at && sub.head_sha !== task.head_sha_at_entry
+  return fresh ? sub : null
+}
+
+/**
+ * Whether `implement` clears on these signals. The supervisor asks before it
+ * measures a review skip, so the fetch that costs is paid once, on the exit.
+ */
+export function implementReady(
+  run: Run, task: Task, s: Pick<TaskSignals, 'actorIdle' | 'prNumber' | 'headSha'>,
+): boolean {
+  if (!s.actorIdle) return false
+  if (modeOf(run) === 'single-pr') return freshSubmission(task) !== null
+  return s.prNumber !== null && s.headSha !== null && s.headSha !== task.head_sha_at_entry
+}
+
+/**
+ * Straight to what follows the PR review on the route. Single-PR records the head
+ * that lands exactly as the last review's CLEAR would, so `land-queue` sends it
+ * through `sync` when the check never ran on it.
+ */
+function skipPrReview(run: Run, task: Task, s: TaskSignals, skip: ReviewSkip, why: string): Task | null {
+  const { next } = prReviewsOn(routeOf(run, task))
+  const skipped = `${why}; ${describeReviewSkip(skip)}`
+  const entered = next === 'land-queue'
+    ? enterLandQueue(run, task, s, `${skipped}; landing head`, 'since it was submitted')
+    : enterTaskPhase(run, task, next, skipped)
+  if (task.phase === next) task.review_skip = skip
+  return entered
 }
 
 function recordLanding(task: Task, landSha: string, at: number): void {
@@ -308,20 +348,21 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
   const landSha = task.land_sha
   if (!landSha) return null
   const batch = batchBranch(run)
+  const judged = task.review_skip === undefined ? 'reviewed' : 'submitted'
   const l = s.landing
   switch (task.phase) {
     case 'land-queue': {
       if (s.slotMine !== true || l === undefined) return null
       if (l.movedTo !== null) {
-        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
+        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its ${judged} head`)
       }
       if (l.landed) return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is already on ${batch}`)
       if (l.upToDate && l.checked) {
         return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is up to date with ${batch} and checked`)
       }
       return enterTaskPhase(run, task, 'sync', l.upToDate
-        ? `${sha8(landSha)} is up to date with ${batch} but was not checked since its review`
-        : `${batch} moved to ${sha8(l.batchHead)} since ${sha8(landSha)} was reviewed`)
+        ? `${sha8(landSha)} is up to date with ${batch} but was not checked since it was ${judged}`
+        : `${batch} moved to ${sha8(l.batchHead)} since ${sha8(landSha)} was ${judged}`)
     }
 
     case 'sync': {
@@ -352,7 +393,7 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'merge': {
       if (l === undefined) return null
       if (l.movedTo !== null) {
-        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
+        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its ${judged} head`)
       }
       if (l.landed) {
         recordLanding(task, landSha, Date.now())
@@ -402,20 +443,14 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     // The single-PR edge reads only the ledger: `hpipe submit` already checked the
     // work, and a submission older than this entry cannot clear it.
     case 'implement': {
-      if (modeOf(run) === 'single-pr') {
-        const sub = task.submission
-        const fresh = sub?.kind === 'implement' && sub.at >= task.phase_entered_at &&
-          sub.head_sha !== task.head_sha_at_entry
-        if (!s.actorIdle || !fresh) return null
-        return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')),
-          `submitted ${sha8(sub.head_sha)} as "${sub.title}"`)
-      }
-      const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
-      if (!s.actorIdle || s.prNumber === null || !moved) return null
-      task.pr = s.prNumber
-      return enterTaskPhase(
-        run, task, nextPhase(routeOf(run, task), taskRow('implement')), `PR #${s.prNumber} at ${s.headSha}`,
-      )
+      if (!implementReady(run, task, s)) return null
+      const submitted = modeOf(run) === 'single-pr' ? freshSubmission(task) : null
+      if (submitted === null) task.pr = s.prNumber
+      const why = submitted === null
+        ? `PR #${s.prNumber} at ${s.headSha}`
+        : `submitted ${sha8(submitted.head_sha)} as "${submitted.title}"`
+      if (s.reviewSkip) return skipPrReview(run, task, s, s.reviewSkip, why)
+      return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')), why)
     }
 
     case 'spec-review':

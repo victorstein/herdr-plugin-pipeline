@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
-import type { Run, Task } from '../src/lib/types'
+import type { ReviewSkip, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 import { parkedFooter } from '../src/supervisor/tick'
 
@@ -862,4 +862,28 @@ test('hpipe show names the head CI was read on, since a green is only about that
   const task = mkTask({ phase: 'merge', ci: 'pass', ci_head: { sha: '924e0aecb66cbcd7', seen_at: 0 } })
   run.tasks = [task]
   expect(formatTaskDetail(run, task)).toContain('ci:         pass (on 924e0aec)')
+})
+
+const SKIPPED: ReviewSkip = { at: 1, skipped: ['pr-review'], added_lines: 42, cleared: ['spec-review'] }
+
+test('a task whose PR review was skipped says so on its status line', () => {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    phase: 'ci', phase_entered_at: Date.now(), tier: 'light', pr: 7, ci: 'pending',
+    review_skip: SKIPPED,
+  })]
+  const line = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n').find((l) => l.startsWith('  t1 '))
+  expect(line).toContain('[ci 0m] light pr-review skipped working PR #7 ci:pending')
+})
+
+test('hpipe show says which review was skipped and why, right after the phases visited', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'ci', tier: 'light', review_skip: SKIPPED })
+  run.tasks = [task]
+  const lines = formatTaskDetail(run, task).split('\n')
+  const visitedAt = lines.findIndex((line) => line.startsWith('visited:'))
+  expect(lines[visitedAt + 1]).toBe('skipped:    pr-review (42 lines added outside docs/, spec-review cleared first pass)')
+  run.tasks = [mkTask({ phase: 'ci' })]
+  expect(formatTaskDetail(run, run.tasks[0]!)).not.toContain('skipped:')
 })

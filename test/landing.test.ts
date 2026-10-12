@@ -251,3 +251,62 @@ test('a reviewed head not yet in this object store is fetched before it is read,
   expect(fetched).toBe(true)
   expect(run.tasks[0]?.phase).toBe('land-queue')
 })
+
+// ——— a single-PR change small enough to skip its PR review ———
+
+function skippingTick(over: { numstat?: string; heads?: Record<string, string | null>; ancestors?: string[] } = {}) {
+  const sized: string[] = []
+  const changeGit = {
+    numstat: async (_root: string, base: string, head: string) => {
+      sized.push(`${base}...${head}`)
+      return over.numstat ?? '12\t0\tsrc/menu.ts\0'
+    },
+    fileAt: async () => ({ ok: true as const, text: null }),
+  }
+  const landingGit = fakeGit({ heads: over.heads ?? { 't1-branch': 'S1' }, ancestors: over.ancestors ?? [] })
+  return { sized, deps: deps({ landingGit, changeGit }) }
+}
+
+function submittedLight(): { run: Run; task: Task } {
+  const task = mkTask({
+    phase: 'implement', tier: 'light', phase_entered_at: 10, submission: submitted({ head_sha: 'S1', at: 20 }),
+  })
+  const run = singlePrRun([task])
+  run.history = [{ at: 1, task_id: 't1', from: 'spec-review', to: 'plan', why: 'cleared' }]
+  return { run, task }
+}
+
+test('a small single-PR change skips its review into land-queue, landing the head it measured', async () => {
+  const { run, task } = submittedLight()
+  const tick = skippingTick()
+  const prompts = await advanceTasks(run, tick.deps)
+  expect(task.phase).toBe('land-queue')
+  expect(task.land_sha).toBe('S1')
+  expect(task.review_skip).toMatchObject({ added_lines: 12, cleared: ['spec-review'] })
+  expect(tick.sized).toEqual([`${BATCH_REF}...S1`])
+  expect(prompts.filter((p) => p.paneId === 'w7:p1')).toHaveLength(0)
+})
+
+test('a single-PR branch that lost its submission, or a change too big, is reviewed', async () => {
+  for (const [label, tick] of [
+    ['lost', skippingTick({ heads: { 't1-branch': 'X9' } })],
+    ['too big', skippingTick({ numstat: '400\t0\tsrc/menu.ts\0' })],
+  ] as const) {
+    const { run, task } = submittedLight()
+    await advanceTasks(run, tick.deps)
+    expect(task.phase, label).toBe('pr-review')
+    expect(task.land_sha, label).toBeUndefined()
+  }
+})
+
+test('a skip onto a head pushed past the submission lands only through sync, which checks it', async () => {
+  const { run, task } = submittedLight()
+  await advanceTasks(run, skippingTick({ heads: { 't1-branch': 'X9' }, ancestors: ['S1>X9'] }).deps)
+  expect(task.phase).toBe('land-queue')
+  expect(task.land_sha).toBe('X9')
+  await advanceTasks(run, deps({
+    landingGit: fakeGit({ heads: { 't1-branch': 'X9' }, ancestors: ['b0>X9', 'S1>X9'], changed: { 'S1..X9': ['src/menu.ts'] } }),
+  }))
+  expect(task.phase).toBe('sync')
+  expect(run.history.at(-1)?.why).toContain('not checked since it was submitted')
+})

@@ -9,6 +9,7 @@ import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAb
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
+import { reviewsSkipped, skipReason } from './review-skip'
 import { effortSummary } from './tier-prompt'
 import type { Batch, MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
@@ -540,6 +541,7 @@ export function formatStatus(
         task.bead,
         `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
         tierOf(task),
+        ...(task.review_skip === undefined ? [] : [reviewsSkipped(task.review_skip)]),
         task.agent_status,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
@@ -641,8 +643,9 @@ function landingDetail(task: Task, batch: Batch, now: number): string[] {
     : `${sub.title} (${sub.kind}, at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago; ` +
       `${sub.check === 'passed' ? 'check passed' : 'no check declared'})`
   const cleanSync = sub?.kind === 'sync' && sub.merge === 'clean' && sub.head_sha === task.land_sha
+  const judged = task.review_skip === undefined ? 'reviewed' : `submitted; ${reviewsSkipped(task.review_skip)}`
   const landSha = task.land_sha
-    ? `${sha8(task.land_sha)} (${cleanSync ? `clean sync of ${batch.branch}` : 'reviewed'})`
+    ? `${sha8(task.land_sha)} (${cleanSync ? `clean sync of ${batch.branch}` : judged})`
     : 'none'
   const landings = (task.landed ?? []).map((l) => `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago`)
   return [
@@ -672,6 +675,9 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `effort:     ${effortSummary(task)}`,
     `tier log:   ${tierLog.length > 0 ? tierLog.join(' · ') : 'none'}`,
     `visited:    ${visited.length > 0 ? visited.join(' → ') : 'none'}`,
+    ...(task.review_skip === undefined ? [] : [
+      `skipped:    ${task.review_skip.skipped.join(' and ')} (${skipReason(task.review_skip)})`,
+    ]),
     `agent:      ${task.agent_status}`,
     `workspace:  ${orNone(task.workspace_id)}`,
     `pane:       ${orNone(task.pane_id)}` +

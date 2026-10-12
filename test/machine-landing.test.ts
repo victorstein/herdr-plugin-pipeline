@@ -49,6 +49,26 @@ test('implement clears on a fresh implement submission once the worker is idle',
   expect(advanceTask(run, task, signals())?.phase).toBe('pr-review')
 })
 
+const SKIP = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+
+test('a submission that skips its review goes to land-queue on the measured head, as a CLEAR would', () => {
+  const { run, task } = fixture('implement', { tier: 'light', submission: submitted() })
+  const next = advanceTask(run, task, signals({ reviewSkip: SKIP, headSha: 'aaaa1111', headContainsSubmission: true }))
+  expect(next?.phase).toBe('land-queue')
+  expect(task.land_sha).toBe('aaaa1111')
+  expect(task.review_skip).toEqual(SKIP)
+  expect(run.history.at(-1)?.why).toBe('submitted aaaa1111 as "feat(menu): close on escape"; ' +
+    'pr-review skipped: 12 lines added outside docs/, spec-review cleared first pass; landing head aaaa1111')
+})
+
+test('a skip whose branch lost the submission goes back to implement and records no skip', () => {
+  const { run, task } = fixture('implement', { tier: 'light', submission: submitted() })
+  const next = advanceTask(run, task, signals({ reviewSkip: SKIP, headSha: 'cccc3333', headContainsSubmission: false }))
+  expect(next?.phase).toBe('implement')
+  expect(task.review_skip).toBeUndefined()
+  expect(task.land_sha).toBeUndefined()
+})
+
 test('implement ignores a submission older than its entry, one that names the head the review rejected, or a sync', () => {
   for (const submission of [
     submitted({ at: ENTERED - 1 }), submitted({ head_sha: 'rejected' }), submitted({ kind: 'sync' }),
@@ -114,7 +134,7 @@ test('with the slot, a landed task or one up to date and checked goes to merge',
 test('with the slot, a task behind the batch, or up to date but unchecked, goes to sync', () => {
   for (const [landing, why] of [
     [facts({ upToDate: false }), 'batch/x moved to b0b0b0b0 since aaaa1111 was reviewed'],
-    [facts({ checked: false }), 'not checked since its review'],
+    [facts({ checked: false }), 'not checked since it was reviewed'],
   ] as const) {
     const { run, task } = fixture('land-queue', { land_sha: 'aaaa1111' })
     expect(advanceTask(run, task, signals({ slotMine: true, landing }))?.phase).toBe('sync')

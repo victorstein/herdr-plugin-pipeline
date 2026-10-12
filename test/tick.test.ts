@@ -600,6 +600,18 @@ test('a phase that moved this tick renders as a transition and drops the age', (
     .toBe("t1 feat/x (hp-1) [research → spec] agent:idle — worker's move: waiting for its spec artifact")
 })
 
+test('a digest line that crossed a skipped PR review says so in its transition', () => {
+  const now = 1_000_000
+  const line = wakeLine({
+    phaseAtEvent: 'implement',
+    task: mkTask({
+      phase: 'ci', phase_entered_at: now, pr: 7,
+      review_skip: { at: now, skipped: ['pr-review'], added_lines: 9, cleared: ['spec-review'] },
+    }),
+  })
+  expect(describeWake(line, now, 'hp')).toStartWith('t1 feat/x (hp-1) [implement → ci, pr-review skipped] agent:idle — ')
+})
+
 test('a blocked line indents its pane tail four spaces under the bullet', () => {
   const now = 1_000_000
   const line = wakeLine({

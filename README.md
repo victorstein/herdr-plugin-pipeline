@@ -297,6 +297,31 @@ A **MAJOR** changes shipped behaviour or a verification outcome and is fixed inl
 (a shared file, a flagged departure from the spec, a base that moved) is at most a MAJOR, fixed inline
 or put to the orchestrator with `hpipe decide`. A review reports at most five MINORs.
 
+**A small, well-planned change skips its PR review.** When a light or standard task leaves
+`implement`, the supervisor sizes the change with `git diff --numstat` from its merge base with the
+base as just fetched (the PR's base per-task, the batch branch single-PR) to the pushed head. The task
+goes straight to `ci` (`land-queue` in a single-PR run) when all of these hold:
+
+- it adds fewer than 150 lines outside `docs/` (`PR_REVIEW_SKIP_BELOW_ADDED_LINES` in
+  `src/lib/review-skip.ts`);
+- its `spec-review`, and its `plan-review` where the tier runs one, each cleared on the first pass,
+  and no PR review has sent it back;
+- it touches no path on the repo's always-review list.
+
+Heavy never skips, and a git read that fails means the review runs. The history records why, as
+`pr-review skipped: 42 lines added outside docs/, spec-review and plan-review cleared first pass`;
+`hpipe status` marks the task `pr-review skipped`, `hpipe show` prints a `skipped:` line, the digest
+shows `[implement → ci, pr-review skipped]`, and the merge prompt says the review was skipped. In a
+single-PR run the head that lands is recorded exactly as a clearing review records it, so a push
+after `submit` still goes through `sync` and the check. A run's final `branch-review`, when it runs,
+reads every change either way. On berean-os, none of the 13 tasks with a sound plan and a change under ~150 lines drew a
+behavioural PR finding; the one real PR-stage defect after a sound plan came on a 784-line diff.
+
+**`.claude/pipeline-always-review`** lists what is always reviewed: one path prefix per line, `#`
+starts a comment, and a glob is cut to the prefix before its first wildcard. It is read from the
+base the change is sized against, not from the task's branch, so a change cannot take itself off the
+list. No file means an empty list.
+
 A run in which at most one task landed skips the final `branch-review` and finishes. Either way,
 the orchestrator is sent a short notice when its run reaches `done`, saying where each task ended.
 
@@ -425,7 +450,9 @@ discoveries do not see them.
 The combined-PR-review release keeps the `pr-review-intent` and `pr-review-quality` rows but routes
 no task into them. A heavy task already in one when you upgrade finishes that review and goes on to
 `ci` (or `land-queue` in a single-PR run), skipping the second stage; a BLOCKER from it sends the task
-back to `implement`, which then opens the combined `pr-review`. No ledger format changes.
+back to `implement`, which then opens the combined `pr-review`. No ledger format changes. The
+PR-review skip adds one optional task field, `review_skip`, which an earlier release ignores: a
+supervisor still on it reviews every PR, as before.
 
 Single-PR runs are written as `schema_version: 4`, and per-task runs stay at 3, so every run in
 flight carries on across the upgrade and a rollback still reads them. A supervisor that predates

@@ -150,6 +150,14 @@ test('show tells a single-PR task\'s submission, reviewed head and landings, and
   expect(detail).toContain('ci:         n/a — CI runs once, on the batch PR')
 })
 
+test('show calls a land sha whose review was skipped submitted, not reviewed', () => {
+  const task = mkTask({
+    phase: 'land-queue', land_sha: '4b1d0e2a99',
+    review_skip: { at: NOW, skipped: ['pr-review'], added_lines: 8, cleared: ['spec-review'] },
+  })
+  expect(formatTaskDetail(singlePr([task]), task, NOW)).toContain('land sha:   4b1d0e2a (submitted; pr-review skipped)')
+})
+
 test('a landed task\'s bead closes naming the batch, and what ships it', () => {
   const task = mkTask({ phase: 'close', merged_at_ms: 1, merge_commit: '4b1d0e2a99', land_sha: '4b1d0e2a99' })
   expect(closeReason(task, singlePr([task]))).toBe('landed on batch/x (4b1d0e2a); ships with the batch PR into main')

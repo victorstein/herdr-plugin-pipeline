@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { IMPLEMENT_MODEL, REVIEW_EFFORT, reviewEffort, WORKER_EFFORT } from './models'
 import { nextPhase, routeOf, type RunMode, taskRow, TIERS, tierOf } from './phases'
+import { skipReason } from './review-skip'
 import type { Run, Task, TaskPhase, Tier } from './types'
 
 // The worker's part of the loop ends where landing begins: every row from here on
@@ -62,9 +63,14 @@ export function tierPromptVars(run: Pick<Run, 'batch'>, task: Task): Record<stri
     plan_status: planReviewed
       ? 'cleared review'
       : 'was not reviewed — read it critically, and fix it first if it is wrong',
-    review_count: reviewRan(task, 'pr-review-quality') ? 'Both review stages cleared' : 'Review cleared',
+    review_count: reviewCount(task),
     plan_review_note: planReviewed ? '' : 'No plan review ran; judge the plan\'s soundness from the diff as well.',
   }
+}
+
+function reviewCount(task: Task): string {
+  if (task.review_skip !== undefined) return `The PR review was skipped (${skipReason(task.review_skip)})`
+  return reviewRan(task, 'pr-review-quality') ? 'Both review stages cleared' : 'Review cleared'
 }
 
 export function taskTiers(run: Run): string {
