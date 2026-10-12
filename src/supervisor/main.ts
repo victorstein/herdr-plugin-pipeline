@@ -340,7 +340,7 @@ async function main(): Promise<void> {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
           const runGh = ghFor(run.repo_root)
-          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle)
+          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle, { stateDir })
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
@@ -383,7 +383,7 @@ async function main(): Promise<void> {
 
           const enteredRunPhase = run.phase === runPhaseBefore
             ? ''
-            : await promptForRunPhase(run, config)
+            : await promptForRunPhase(run, config, { stateDir })
 
           await refreshBadges(run, herdr, pluginId)
           const covered = briefHolds.heldTasks(run)

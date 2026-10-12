@@ -363,6 +363,7 @@ const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
 
 export async function evaluateRun(
   run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
+  extras: RunRenderExtras = {},
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
@@ -399,7 +400,7 @@ export async function evaluateRun(
   })
   if (!advanced) return stay
 
-  const nextPrompt = await promptForRunPhase(run, config, { ciDetail: (pr) => gh.prChecksDetail(pr) })
+  const nextPrompt = await promptForRunPhase(run, config, { ciDetail: (pr) => gh.prChecksDetail(pr), ...extras })
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
 }
 
