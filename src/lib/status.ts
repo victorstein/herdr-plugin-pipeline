@@ -12,7 +12,7 @@ import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queu
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
 import { effortSummary } from './tier-prompt'
-import type { Batch, MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
+import type { Batch, MissingArtifact, Run, SessionKey, Task, TaskPhase, TierChange, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
   remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
@@ -617,13 +617,27 @@ function batchLineage(run: Run, batch: Batch): string {
   return checkouts.find((path): path is string => path !== null && existsSync(path)) ?? run.repo_root
 }
 
+const PAST_ITS_LAST_LANDING: ReadonlySet<string> = new Set<TaskPhase>(['close', 'teardown', 'done'])
+
+/**
+ * A task counts from its first landing, so one taking a later commit back through
+ * review is named: "3 of 3 landed" alone read as nothing left. Measured on a live run.
+ */
+function landedCount(run: Run): string {
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0)
+  const more = landed
+    .filter((t) => !PAST_ITS_LAST_LANDING.has(t.phase) && taskRow(t.phase).terminal !== true)
+    .map((t) => t.task_id)
+  const still = more.length === 0 ? '' : `, ${more.join(', ')} ${more.length === 1 ? 'has' : 'have'} more to land`
+  return `${landed.length} of ${run.tasks.length} landed${still}`
+}
+
 function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number): string[] {
-  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).length
   const holder = landingSlotHolder(run.tasks)
   const next = landingQueue(run.tasks).map((t) => t.task_id)
   const header = [
     `  ships as one PR: ${batch.branch} → ${batch.into}`,
-    `${landed} of ${run.tasks.length} landed`,
+    landedCount(run),
     ...(holder === null ? [] : [`landing: ${holder.task_id} (${holder.phase})`]),
     ...(next.length === 0 ? [] : [`next: ${next.join(', ')}`]),
   ].join(' · ')

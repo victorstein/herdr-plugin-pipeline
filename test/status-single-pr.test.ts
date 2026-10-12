@@ -42,6 +42,20 @@ test('the run header says how it ships, how many landed, who holds the slot and 
   expect(text).toContain('  ships as one PR: batch/x → main · 1 of 5 landed · landing: t4 (sync) · next: t5, t6')
 })
 
+test('a task that landed and still has commits to land is named in the landed count', () => {
+  // Smoke run 14 read "3 of 3 landed" while t2 took an extra commit through sync and pr-review.
+  const run = singlePr([
+    mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 1, landed: [landed('aaa')] }),
+    mkTask({ task_id: 't2', phase: 'pr-review', landed: [landed('bbb')] }),
+    mkTask({ task_id: 't3', phase: 'teardown', merged_at_ms: 1, landed: [landed('ccc')] }),
+  ])
+  const text = formatStatus([run], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
+  expect(text).toContain('  ships as one PR: batch/x → main · 3 of 3 landed, t2 has more to land')
+  run.tasks.push(mkTask({ task_id: 't4', phase: 'sync', landed: [landed('ddd')] }))
+  expect(formatStatus([run], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW))
+    .toContain('4 of 4 landed, t2, t4 have more to land · landing: t4 (sync)')
+})
+
 test('a repo with no check is flagged: every landing is unverified', () => {
   const text = formatStatus([singlePr([])], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
   expect(text).toContain("⚠ no .claude/pipeline-check in this repo: each landing is checked only by its worker's own test run")
