@@ -23,6 +23,10 @@ Give them, in a few lines: the question, the worker's recommendation, your own r
 option you recommend, named. Never hand over a bare question: forming the recommendation is the work,
 and passing it up unformed is exactly the cost this pipeline exists to remove.
 
+Ask it on its own, never in one dialog with another question. The worker stays blocked until this one
+is answered, and while a question dialog is open in your pane nothing else the supervisor sends can
+reach you: a decision bundled with an unrelated question waited for both. Measured on a live run.
+
 Then hand it over, so the bead shows it blocked on them and `{{hpipe}} status` lists it under
 "waiting on you":
 

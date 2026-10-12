@@ -103,7 +103,9 @@ executable `.claude/pipeline-bootstrap` at the repo root:
 The orchestrator is told to run it in each new checkout before starting the worker, and the worker's
 brief names it as the recovery if a build fails on a missing dependency. It runs from the worktree
 root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
-the file; every dispatch then reports `bootstrap: none`.
+the file; every dispatch then reports `bootstrap: none`. If the repo has a conventional setup script
+(`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no `.claude/pipeline-bootstrap`, the
+line names it: point a `.claude/pipeline-bootstrap` at it to have it run.
 
 It is also where a sibling package's build step belongs. If your apps consume another package's
 built `dist` rather than its source, build it here (`pnpm install && pnpm turbo build
@@ -114,6 +116,19 @@ fetched just before the task is dispatched — the `base:` line `hpipe task` and
 not your local `main` has been pulled. A repo with no `origin` remote falls back to local `main`,
 and a failed fetch says so on that line. The merge prompt asks the orchestrator to re-run the
 bootstrap after it rebases a branch.
+
+### Permissions the orchestrator needs
+
+The orchestrator pushes, opens and merges PRs, and starts workers. Allow these in the Claude Code
+session it runs in before you start a run, or the permission check (and auto mode's classifier) will
+stop it partway through, once per command:
+
+    git push · git pull · gh pr create · gh pr merge
+    herdr worktree create · herdr agent start · hpipe
+
+For example, `Bash(gh pr merge:*)` under `permissions.allow` in the repo's
+`.claude/settings.local.json`. Workers run with `--dangerously-skip-permissions` in their own
+worktrees and need nothing.
 
 ## Use
 
