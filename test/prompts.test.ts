@@ -88,6 +88,48 @@ test('no review prompt still demands a finding', async () => {
   }
 })
 
+const TASK_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality']
+
+// Eight of the eighteen berean-os BLOCKER verdicts prevented no defect: they were
+// BLOCKERs by rule — a missing FILES: line, a sound reversal, a question the
+// orchestrator answered in a minute — and each cost a full re-review.
+test('every task review ranks a BLOCKER as a shipping defect or an owner\'s call, never a process question', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text())
+    expect(text, name).toContain(
+      'A **BLOCKER** is a defect that would ship, or a product or scope decision only the owner can make.')
+    expect(text, name).toContain(
+      'A **MAJOR** changes shipped behaviour or a verification outcome; a wrong rationale behind a correct ' +
+      'conclusion, comment drift or citation drift is **MINOR**.')
+    expect(text, name).toContain('is at most a MAJOR, fixed inline or raised with `{{hpipe}} decide`, ' +
+      'and never a reason for another review pass.')
+    expect(text, name).toContain('`BLOCKER` means at least one BLOCKER finding.')
+    expect(text, name).not.toContain('any MAJOR that reverses a decision')
+  }
+})
+
+test('every task review reports at most five MINORs and skips drift that misleads nobody', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    expect(prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()), name).toContain(
+      'Report at most five MINORs, most consequential first; skip wording and line-citation drift unless it ' +
+      'would mislead the implementer or the tester.')
+  }
+})
+
+test('every BLOCKER trailer a task review shows carries at least one BLOCKER', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    const shown = /^ {4}VERDICT: BLOCKER\n {4}BLOCKERS: (\d+)$/m.exec(text)
+    expect(Number(shown?.[1] ?? 0), name).toBeGreaterThan(0)
+  }
+})
+
+test('a file missing from FILES: is a MAJOR the plan review fixes inline, not a BLOCKER', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'plan-review.md')).text())
+  expect(text).toContain('a touched file missing from them is a MAJOR, fixed inline by adding it')
+  expect(text).not.toContain('missing from them is a BLOCKER')
+})
+
 test('the dispatch prompt pins the worktree to the run repo, not the focused workspace', async () => {
   // Live-run finding: without --cwd, herdr resolves the repo from the focused
   // workspace — the supervisor's own on a cold start — and the worker is

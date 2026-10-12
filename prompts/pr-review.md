@@ -48,6 +48,16 @@ are well designed rather than merely present; nothing was duplicated that alread
 After both sections, one list of findings across them: evidence-first, `file:line` citations, ranked
 **BLOCKER** / **MAJOR** / **MINOR**, most severe first.
 
+A **BLOCKER** is a defect that would ship, or a product or scope decision only the owner can make. A
+**MAJOR** changes shipped behaviour or a verification outcome; a wrong rationale behind a correct
+conclusion, comment drift or citation drift is **MINOR**. A process question — permission to edit a
+shared file, a departure from the spec the worker already flagged, rebasing onto a base that moved —
+is at most a MAJOR, fixed inline or raised with `{{hpipe}} decide`, and never a reason for another
+review pass.
+
+Report at most five MINORs, most consequential first; skip wording and line-citation drift unless it
+would mislead the implementer or the tester.
+
 Rank honestly. Do not pad a review to look thorough, and do not soften a real finding to be
 agreeable. The verdict gates the pipeline, so a manufactured finding costs as much as a missed one —
 if the work is genuinely sound, `CLEAR` is the correct and useful answer.
@@ -62,8 +72,7 @@ or
     BLOCKERS: 1
     MAJORS: 0
 
-`BLOCKER` means any BLOCKER finding, or any MAJOR that reverses a decision, changes scope, or needs a
-judgment only the human can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline.
+`BLOCKER` means at least one BLOCKER finding. Otherwise `CLEAR`, with MAJORs and MINORs fixed inline.
 
 Write the trailer at the **start of the line** — not indented, and not inside a code fence. An
 indented or fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may

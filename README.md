@@ -287,6 +287,12 @@ phase the task is in always completes; only the next step follows the new tier, 
 back for a review already skipped (`hpipe rewind` does). `hpipe show --task <id>` prints the tier, its
 log, and every phase the task visited.
 
+Every task review ranks its findings the same way. Only a **BLOCKER** sends the work back for another
+pass, and a BLOCKER is a defect that would ship or a product or scope decision only the owner can make.
+A **MAJOR** changes shipped behaviour or a verification outcome and is fixed inline; a process question
+(a shared file, a flagged departure from the spec, a base that moved) is at most a MAJOR, fixed inline
+or put to the orchestrator with `hpipe decide`. A review reports at most five MINORs.
+
 A run in which at most one task landed skips the final `branch-review` and finishes. Either way,
 the orchestrator is sent a short notice when its run reaches `done`, saying where each task ended.
 

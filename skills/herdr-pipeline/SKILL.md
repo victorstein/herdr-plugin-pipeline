@@ -93,6 +93,7 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | Workers raise decisions with `hpipe decide`; you get a prompt naming the task and decision id (also under "waiting on you" in `hpipe status`) | — |
 | A decision you escalate to the user | Ask it on its own, never bundled with another question: the worker waits for the whole dialog |
 | A worker's decision you can settle from the repo | `hpipe answer --task <id> --decision <d> --answer "…" --by orchestrator` |
+| A review's process question reaches you as a decision (a shared file, a flagged departure from the spec, rebasing onto a base that moved) | Settle it from the repo, as above. A review sends work back only for a BLOCKER — a defect that would ship, or a call only the owner can make — so these never cost another review pass |
 | A decision only the owner can make (product, licence, scope) | Relay question + worker's recommendation + yours to the user, and run `hpipe escalate --task <id> --decision <d> --recommend "…"` so its bead shows blocked on them; record their reply with `--by human` |
 | "Ready to merge — PR #n" | Check for conflicts with anything merged since (rebase + re-run bootstrap if needed), then merge. Merging is yours; nothing merges automatically |
 | Workers recorded out-of-scope work (`hpipe discover`) | At branch review: `hpipe discoveries` lists it, `hpipe discoveries --file` files it as beads labelled `discovered` (in order; a failure stops it, and a retry carries on without duplicates) |
