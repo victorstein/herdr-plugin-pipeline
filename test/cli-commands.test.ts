@@ -19,7 +19,8 @@ import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/d
 import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
-import type { Run, Task } from '../src/lib/types'
+import type { AgentStatus, Run, Task } from '../src/lib/types'
+import type { LimitReading } from '../src/supervisor/usage-limits'
 import { beadTaskFields } from './helpers/bead-fields'
 import { hpipeCommand } from '../src/lib/render'
 import { desiredBead } from '../src/lib/bead-desired'
@@ -2486,10 +2487,14 @@ test('--bead still assigned to hpipe by a run that released it names that run an
   expect(await registered()).toEqual([])
 })
 
+const limitedReading = (status: AgentStatus = 'done'): LimitReading => ({
+  status, boxSeen: true, autoContinue: false,
+  line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+})
 const nudgeDeps = (over: Partial<NudgeDeps> = {}) => {
   const released: string[] = []
   const deps: NudgeDeps = {
-    agentStatus: async () => 'done',
+    readPane: async () => limitedReading(),
     holds: async () => ({ 'w7:p1': { since: 0, failures: 0, code: 'usage_limit', until: 1, reset: '10:20am' } }),
     release: async (pane) => { released.push(pane) },
     ...over,
@@ -2530,7 +2535,10 @@ test('nudge refuses a task it cannot help, saying why, and sends nothing', async
   const cases: Array<[string, Partial<Task>, Partial<NudgeDeps>, string]> = [
     ['orchestrator row', { phase: 'merge' }, {}, 'which does not wait on its worker'],
     ['no pane', { pane_id: null }, {}, 'has no agent pane'],
-    ['working', {}, { agentStatus: async () => 'working' }, "t1's agent is working; nothing to nudge"],
+    ['working', {}, { readPane: async () => limitedReading('working') }, "t1's agent is working; nothing to nudge"],
+    ['no sign of a limit', {}, {
+      readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}),
+    }, 'shows no usage-limit message and the supervisor holds nothing for it'],
   ]
   for (const [why, over, depsOver, message] of cases) {
     rmSync(join(dir, 'runs'), { recursive: true, force: true })
@@ -2565,7 +2573,7 @@ test('nudge --all resumes every idle worker and lists the ones it skipped', asyn
   ])
   run.phase = 'execute'
   await saveRun(dir, run)
-  const { deps, released } = nudgeDeps({ agentStatus: async (pane) => (pane === 'w8:p1' ? 'working' : 'idle') })
+  const { deps, released } = nudgeDeps({ readPane: async (pane) => limitedReading(pane === 'w8:p1' ? 'working' : 'idle') })
   const result = await cmdNudge(ctx(), { taskId: null, all: true, repoKey: 'k', runId: null }, deps)
   expect(result.text.split('\n')).toEqual([
     "t1: resume queued for w7:p1 (pr-review); the supervisor's usage-limit hold on it is released",
@@ -2581,4 +2589,12 @@ test('nudge needs exactly one of --task and --all', async () => {
     expect(result.ok).toBe(false)
     expect(result.text).toContain('usage: hpipe nudge')
   }
+})
+
+test('nudge resumes a worker the supervisor holds for a limit even when its screen no longer shows it', async () => {
+  const run = runWithTasks([worker()])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps({ readPane: async () => ({ ...limitedReading(), line: null }) })
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(true)
 })

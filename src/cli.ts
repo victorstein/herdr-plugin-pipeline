@@ -44,7 +44,7 @@ import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
-import type { AgentStatus, BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
+import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
 import { isAgentReady } from './lib/machine'
 import { type LimitReading, readLimit, resetText } from './supervisor/usage-limits'
 
@@ -1056,7 +1056,7 @@ async function release(ctx: Ctx, input: {
 export const cmdRelease = retryingOnStale(release)
 
 export interface NudgeDeps {
-  agentStatus: (paneId: string) => Promise<AgentStatus>
+  readPane: ReadPaneLimit
   /** The live supervisor's holds, to say when a usage-limit hold is being released. */
   holds: () => Promise<Record<string, PaneHold>>
   /** Tells the supervisor to drop its usage-limit hold on the pane. */
@@ -1064,7 +1064,7 @@ export interface NudgeDeps {
 }
 
 const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
-  agentStatus: (paneId) => new Herdr().agentStatus(paneId),
+  readPane: cliReadPaneLimit,
   holds: async () => {
     const state = await supervisorState(ctx.stateDir, ctx.session)
     return readPaneHolds(ctx.stateDir, ctx.session, state.state === 'live' ? state.info.pid : undefined)
@@ -1079,7 +1079,15 @@ const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
 /** Why a task is not nudged; `quiet` ones are left out of `--all`'s output, which lists them by id. */
 interface NudgeRefusal { why: string; short: string }
 
-async function nudgeRefusal(run: Run, task: Task, hpipe: string, deps: NudgeDeps): Promise<NudgeRefusal | null> {
+/**
+ * Only a worker Claude's usage limit stopped: its pane still shows the line, or
+ * the supervisor holds it. An idle review worker waiting on its background
+ * reviewer reads `done` too, and told the limit cut its subagent off it would
+ * dispatch a second reviewer.
+ */
+async function nudgeRefusal(
+  run: Run, task: Task, hpipe: string, deps: NudgeDeps, holds: Record<string, PaneHold>,
+): Promise<NudgeRefusal | null> {
   const row = taskRow(task.phase)
   if (row.actor !== 'worker') {
     return { why: `${task.task_id} is in ${task.phase}, which does not wait on its worker; nothing to nudge`, short: task.phase }
@@ -1097,8 +1105,16 @@ async function nudgeRefusal(run: Run, task: Task, hpipe: string, deps: NudgeDeps
   if (queuedWorkerPrompt(run, task) !== null) {
     return { why: `${task.task_id}'s ${task.phase} prompt is queued and restarts it; nothing to nudge`, short: 'prompt queued' }
   }
-  if (await deps.agentStatus(task.pane_id) === 'working') {
+  const reading = await deps.readPane(task.pane_id)
+  if (reading?.status === 'working') {
     return { why: `${task.task_id}'s agent is working; nothing to nudge`, short: 'working' }
+  }
+  if (reading?.line == null && holds[task.pane_id]?.code !== 'usage_limit') {
+    return {
+      why: `${task.task_id}'s pane ${task.pane_id} shows no usage-limit message and the supervisor holds nothing for ` +
+        `it; nudge only resumes a worker Claude's usage limit stopped — \`${hpipe} status\` says what it waits for`,
+      short: 'no limit',
+    }
   }
   return null
 }
@@ -1133,10 +1149,11 @@ async function nudge(ctx: Ctx, input: {
     candidates = run.tasks.filter((t) => !taskPhaseIsTerminal(t.phase))
   }
 
+  const holds = await deps.holds()
   const nudged: Task[] = []
   const skipped: Array<[Task, NudgeRefusal]> = []
   for (const task of candidates) {
-    const refusal = await nudgeRefusal(run, task, hpipe, deps)
+    const refusal = await nudgeRefusal(run, task, hpipe, deps, holds)
     if (refusal === null) nudged.push(task)
     else skipped.push([task, refusal])
   }
@@ -1155,7 +1172,6 @@ async function nudge(ctx: Ctx, input: {
   }
   await saveRun(ctx.stateDir, run)
 
-  const holds = await deps.holds()
   const lines: string[] = []
   for (const task of nudged) {
     const pane = task.pane_id as string
