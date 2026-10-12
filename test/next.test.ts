@@ -123,7 +123,7 @@ test('a layer with nothing claimable says so, and an empty triage says nothing i
     triage: { recommendations_by_track: [{ track_id: 'track-A', reason: '', recommendations: [rec('hp-8', { claimable: false })] }] },
   }
   expect(formatNext(blocked, new Set(), ALL)).toBe('now: nothing claimable\n  not claimable: hp-8')
-  expect(formatNext({ triage: {} }, new Set(), ALL)).toBe('nothing to pick up: every open bead is held, blocked or filtered out')
+  expect(formatNext({ triage: {} }, new Set(), ALL)).toBe('nothing to pick up: no open bead is claimable — the backlog is empty, or every open bead is held, blocked or filtered out')
 })
 
 test('real bv output: routine skipped and approx metrics stay quiet, a timeout warns', () => {

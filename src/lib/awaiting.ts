@@ -20,9 +20,10 @@ export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
     case 'verdict':
       return 'its review verdict'
     case 'pr':
-      return batch === undefined
-        ? `a pushed PR for ${task.branch} (${task.bead})`
-        : `a submission for ${task.branch} (${task.bead})`
+      if (batch !== undefined) return `a submission for ${task.branch} (${task.bead})`
+      // A send-back re-enters implement with its PR still open, and "a pushed PR" beside
+      // `PR #48` on the same line read as a contradiction. Measured on a live run.
+      return task.pr === null ? `a pushed PR for ${task.branch} (${task.bead})` : `a new push to PR #${task.pr}`
     case 'ci':
       return task.pr === null ? UNRECORDED_PR : `CI on PR #${task.pr}`
     case 'merged':

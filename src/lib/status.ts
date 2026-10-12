@@ -256,6 +256,11 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       return notYours(`nothing for you here — ${escalated.join(', ')} ${escalated.length === 1 ? 'holds' : 'hold'} ` +
         `these files and ${escalated.length === 1 ? 'is' : 'are'} escalated; its own line says how to resume or abandon it`)
     }
+    // Every task passes through this gate. One that only passed through read in its
+    // digest exactly like one really waiting. Measured on a live run.
+    if (holders.length === 0) return notYours('nothing for you — its files are free; it implements next tick')
+    return notYours(`nothing for you — waiting for ${holders.map((t) => `${t.task_id} (${t.phase})`).join(', ')} ` +
+      'to finish with these files')
   }
   return notYours('nothing for you — the supervisor is driving')
 }
@@ -338,14 +343,26 @@ function taskLineMove(run: Run, task: Task, hpipe: string, now: number, holds: P
  * in `merge` for five hours rendered as one more ordinary line on the berean-os
  * run of 2026-09-16. Measured on a live run.
  */
+/**
+ * A run phase that is the orchestrator's own work. Without it, a run in
+ * `branch-review` listed nothing under "waiting on you" while it waited on nobody
+ * else. Measured on a live run.
+ */
+function runMove(run: Run): string | null {
+  if (run.phase !== 'branch-review') return null
+  return 'YOUR move: the whole-branch review — the branch-review prompt names its verdict path'
+}
+
 function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
-  const lines = byId.flatMap((task) => {
+  const own = runMove(run)
+  const runLine = own === null ? [] : [`    run [${run.phase} ${ageMinutes(run.phase_entered_at, now)}m] — ${own}`]
+  const lines = [...runLine, ...byId.flatMap((task) => {
     const move = moveFor(run, task, hpipe, now, holds)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
     return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
-  })
+  })]
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
 }
 
@@ -669,6 +686,12 @@ function landingDetail(task: Task, batch: Batch, now: number): string[] {
   ]
 }
 
+/** Teardown keeps the path on the record, so `show` printed it as if it were still there. */
+function checkoutGone(task: Task): boolean {
+  const finished = task.phase === 'done' || taskRow(task.phase).terminal === true
+  return finished && task.checkout_path !== null && !existsSync(task.checkout_path)
+}
+
 export function formatTaskDetail(run: Run, task: Task, now: number = Date.now()): string {
   const verdicts = Object.entries(task.artifacts.verdicts)
   const open = openDecisionFor(task)
@@ -694,7 +717,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `workspace:  ${orNone(task.workspace_id)}`,
     `pane:       ${orNone(task.pane_id)}` +
       (task.pane_id === null && task.last_pane_id ? ` (last: ${task.last_pane_id})` : ''),
-    `checkout:   ${orNone(task.checkout_path)}`,
+    `checkout:   ${orNone(task.checkout_path)}${checkoutGone(task) ? ' (removed)' : ''}`,
     `research:   ${orNone(task.artifacts.research)}`,
     `spec:       ${orNone(task.artifacts.spec)}`,
     `plan:       ${orNone(task.artifacts.plan)}`,

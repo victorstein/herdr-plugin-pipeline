@@ -50,11 +50,11 @@ export function buildDigest(input: DigestInput): string {
   // Each non-empty tail part brings exactly one blank line with it, so the output
   // is byte-identical to the old fixed-slot join whenever there is no footer.
   const tail = [input.nextPrompt, input.footer ?? ''].filter((part) => part.length > 0)
+  // A prompt with no events under it read as "0 events:" and nothing more.
+  const events = input.eventLines.length === 0 ? [] : ['', `${input.eventLines.length} events:`, ...input.eventLines]
   return [
     `[pipeline] run ${input.run.run_id}${input.phaseNote}`,
-    '',
-    `${input.eventLines.length} events:`,
-    ...input.eventLines,
+    ...events,
     ...tail.flatMap((part) => ['', part]),
   ].join('\n').trimEnd()
 }

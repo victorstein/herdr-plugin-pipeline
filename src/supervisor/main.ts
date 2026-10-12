@@ -12,7 +12,7 @@ import {
 import { drain } from '../lib/queue'
 import {
   allOrchestratorPanes, CURRENT_SCHEMAS, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
-  saveOrReapply, saveRun,
+  saveIfChanged, saveOrReapply, saveRun,
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -336,6 +336,7 @@ async function main(): Promise<void> {
           })
         }
         const effects: RunEffect[] = []
+        const asRead = JSON.stringify(run)
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
@@ -398,6 +399,11 @@ async function main(): Promise<void> {
           // on the same pane still produces a digest — which is the tick a task
           // advances off the CI poll rather than a pane event. `deliveriesFor`
           // renders it once.
+          // A task whose own prompt rides in this digest is covered by it: the merge
+          // prompt was followed by "also waiting on you" naming the same merge.
+          for (const prompt of taskPrompts) {
+            if (prompt.paneId === run.orchestrator_pane) covered.add(prompt.taskId)
+          }
           const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds())
           footers.set(run, footer)
 
@@ -417,7 +423,8 @@ async function main(): Promise<void> {
           // so a prompt about a transition the ledger then refused is refused with
           // it, and one that is saved is sent until it lands.
           const eventsOnly = queuePending(run, runPending, tickNow)
-          if (await saveOrReapply(stateDir, run, effects) === 'saved') {
+          const saved = await saveIfChanged(stateDir, run, asRead, effects)
+          if (saved === 'saved' || saved === 'unchanged') {
             pending.push(...eventsOnly)
             deliverFrom.add(run)
           } else {
