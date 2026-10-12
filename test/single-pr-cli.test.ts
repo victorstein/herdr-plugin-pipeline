@@ -333,6 +333,20 @@ test('batch-check refuses a red check, a checkout behind the batch, and a missin
   expect(missing.text).toContain('worktree add --track -B batch/x')
 })
 
+test('batch-check records its head against a live supervisor, running the check once', async () => {
+  const { run, clone } = await shippingRun('#!/bin/sh\nsleep 1\nexit 0\n')
+  let checks = 0
+  const supervisor = liveSupervisor(run)
+  const out = await cmdBatchCheck(ctx(), { repoKey: null, runId: run.run_id }, async (checkout, log) => {
+    checks++
+    const { runCheck } = await import('../src/lib/check')
+    return runCheck(checkout, log)
+  }).finally(() => supervisor.stop())
+  expect(out.ok, out.text).toBe(true)
+  expect(checks).toBe(1)
+  expect((await saved(run)).batch?.checked?.head_sha).toBe(revParse(clone, 'refs/remotes/origin/batch/x'))
+})
+
 test('with no check declared, batch-check still records the head, as unchecked', async () => {
   const { run } = await shippingRun(null)
   const out = await cmdBatchCheck(ctx(), { repoKey: null, runId: run.run_id })
