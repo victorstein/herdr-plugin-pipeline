@@ -12,7 +12,9 @@ import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queu
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
 import { effortSummary } from './tier-prompt'
-import type { Batch, MissingArtifact, Run, SessionKey, Task, TaskPhase, TierChange, UncommittedWork } from './types'
+import type {
+  Batch, MissingArtifact, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
+} from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
   remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
@@ -687,12 +689,23 @@ const orNone = (value: string | number | null | undefined): string =>
 const listOrNone = (values: readonly string[]): string =>
   values.length > 0 ? values.join(', ') : 'none'
 
+/**
+ * A sync carries the change's title forward from its first submission, so the title
+ * beside a sync's sha read as that commit's own. Measured on a live run.
+ */
+function submittedLine(sub: Submission, batch: Batch, now: number): string {
+  const checked = sub.check === 'passed' ? 'check passed' : 'no check declared'
+  const at = `at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago`
+  if (sub.kind !== 'sync') return `${sub.title} (${sub.kind}, ${at}; ${checked})`
+  const merge = sub.merge === 'clean'
+    ? `a clean merge of ${batch.branch}`
+    : `not a clean merge of ${batch.branch}, at ${sha8(sub.dirty_at ?? sub.head_sha)}`
+  return `sync ${at} (${merge}; ${checked})`
+}
+
 function landingDetail(task: Task, batch: Batch, now: number): string[] {
   const sub = task.submission
-  const submitted = sub === undefined
-    ? 'none'
-    : `${sub.title} (${sub.kind}, at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago; ` +
-      `${sub.check === 'passed' ? 'check passed' : 'no check declared'})`
+  const submitted = sub === undefined ? 'none' : submittedLine(sub, batch, now)
   const judged = task.review_skip === undefined ? 'reviewed' : `submitted; ${reviewsSkipped(task.review_skip)}`
   const landSha = task.land_sha
     ? `${sha8(task.land_sha)} (${landsCleanSync(task) ? `clean sync of ${batch.branch}` : judged})`

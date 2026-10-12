@@ -180,6 +180,23 @@ test('show tells a single-PR task\'s submission, reviewed head and landings, and
   expect(detail).toContain('ci:         n/a — CI runs once, on the batch PR')
 })
 
+test('show tells a sync submission by its own kind and sha, without the change\'s title', () => {
+  // Smoke run 14 paired the original change's title with a later sync's sha.
+  const sync = (merge: 'clean' | 'dirty') => mkTask({
+    phase: 'pr-review', land_sha: '4b1d0e2a99',
+    submission: { kind: 'sync', title: 'feat(math): remap', head_sha: '3ad9911f00', at: NOW - 33 * 60_000,
+      check: 'passed', merge, ...(merge === 'dirty' ? { dirty_at: '3ad9911f00' } : {}) },
+  })
+  const dirty = sync('dirty')
+  const detail = formatTaskDetail(singlePr([dirty]), dirty, NOW)
+  expect(detail).toContain('submitted:  sync at 3ad9911f, 33m ago (not a clean merge of batch/x, at 3ad9911f; ' +
+    'check passed)')
+  expect(detail).not.toContain('feat(math): remap')
+  const clean = sync('clean')
+  expect(formatTaskDetail(singlePr([clean]), clean, NOW))
+    .toContain('submitted:  sync at 3ad9911f, 33m ago (a clean merge of batch/x; check passed)')
+})
+
 test('show calls a land sha whose review was skipped submitted, not reviewed', () => {
   const task = mkTask({
     phase: 'land-queue', land_sha: '4b1d0e2a99',
