@@ -356,21 +356,32 @@ test('a tick that changed nothing writes nothing, and says so only while its cop
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   await saveRun(dir, run)
   const revision = run.revision
-  expect(await saveIfChanged(dir, run, JSON.stringify(run), [])).toBe('unchanged')
+  expect(await saveIfChanged(dir, run, [])).toBe('unchanged')
   expect((await loadRun(dir, 'p', run.run_id))?.revision).toBe(revision)
 
   const elsewhere = (await loadRun(dir, 'p', run.run_id))!
   elsewhere.title = 'renamed by a CLI command'
   await saveRun(dir, elsewhere)
-  expect(await saveIfChanged(dir, run, JSON.stringify(run), [])).toBe('stale')
+  expect(await saveIfChanged(dir, run, [])).toBe('stale')
 })
 
 test('a tick that changed something, or carries an effect, saves as before', async () => {
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   await saveRun(dir, run)
-  const asRead = JSON.stringify(run)
   run.title = 'changed this tick'
-  expect(await saveIfChanged(dir, run, asRead, [])).toBe('saved')
+  expect(await saveIfChanged(dir, run, [])).toBe('saved')
   expect((await loadRun(dir, 'p', run.run_id))?.title).toBe('changed this tick')
-  expect(await saveIfChanged(dir, run, JSON.stringify(run), [() => {}])).toBe('saved')
+  expect(await saveIfChanged(dir, run, [() => {}])).toBe('saved')
+})
+
+test('a change the CI poll made before the tick looked at the run is saved', async () => {
+  // The tick polls CI into its copies before it advances them. Judged against a
+  // snapshot taken after the poll, the CI head never reached the file, so its
+  // settle window restarted on every read and a PR never left CI.
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  const polled = (await loadRun(dir, 'p', run.run_id))!
+  polled.passes['branch-review'] = 1
+  expect(await saveIfChanged(dir, polled, [])).toBe('saved')
+  expect((await loadRun(dir, 'p', run.run_id))?.passes['branch-review']).toBe(1)
 })
