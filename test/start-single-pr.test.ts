@@ -83,6 +83,19 @@ test('the ruleset recommended names the batch branch\'s own pattern, not batch/*
   expect(out.text).not.toContain('batch/*')
 })
 
+// Smoke run 14: start recommended the ruleset on a repo that already had one.
+test('start confirms a ruleset already protecting the batch branch instead of recommending one', async () => {
+  const { clone } = cloneOfRemote('main')
+  const asked: string[] = []
+  const out = await cmdStart(ctx(), input(clone, { batchBranch: 'batch/menu' }), startBeads(), startBatch({
+    rulesetProtects: async (_root, branch) => { asked.push(branch); return true },
+  }))
+  expect(out.ok).toBe(true)
+  expect(asked).toEqual(['batch/menu'])
+  expect(out.text).toContain('ruleset: batch/menu is already protected from force-pushes and deletion\n')
+  expect(out.text).not.toContain('protect batch/* from')
+})
+
 test('a retry after a start whose save failed adopts the branch it already pushed', async () => {
   const { remote, clone } = cloneOfRemote('main')
   const head = revParse(clone, 'origin/main')

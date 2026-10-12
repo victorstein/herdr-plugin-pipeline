@@ -210,8 +210,9 @@ and never changes: abort and start again, which costs nothing before the first d
   after a failed start goes through.
 
 It prints a `batch:` line, a `check:` line, and a recommendation: protect `batch/*` against
-force-pushes and deletion with a GitHub ruleset. Landing is gated by git refusing a push that is not a
-fast-forward; a `--force` push gets through unless a ruleset forbids it.
+force-pushes and deletion with a GitHub ruleset, unless GitHub says a ruleset already does. Landing is
+gated by git refusing a push that is not a fast-forward; a `--force` push gets through unless a ruleset
+forbids it.
 
 **`hpipe submit`.** A single-PR worker ends `implement` with
 

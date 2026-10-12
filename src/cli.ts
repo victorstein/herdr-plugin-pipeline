@@ -210,15 +210,20 @@ export interface StartBeads {
 
 const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
 
-/** What `start --single-pr` asks outside git: whether the supervisor can drive a batch, and whether GitHub can squash. */
+/**
+ * What `start --single-pr` asks outside git: whether the supervisor can drive a
+ * batch, whether GitHub can squash, and whether a ruleset already guards the branch.
+ */
 export interface StartBatch {
   supervisor: () => Promise<SupervisorState>
   squashMergeAllowed: (repoRoot: string) => Promise<{ allowed: boolean } | { error: string }>
+  rulesetProtects: (repoRoot: string, branch: string) => Promise<boolean>
 }
 
 const realStartBatch = (ctx: Ctx): StartBatch => ({
   supervisor: () => supervisorState(ctx.stateDir, ctx.session),
   squashMergeAllowed: (repoRoot) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).squashMergeAllowed(),
+  rulesetProtects: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).rulesetProtects(branch),
 })
 
 interface BatchPlan { branch: string; into: string; commit: string; adopted: boolean }
@@ -268,14 +273,16 @@ async function planBatch(
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
 
-function batchLines(plan: BatchPlan, repoRoot: string): string[] {
+function batchLines(plan: BatchPlan, repoRoot: string, protectedAlready: boolean): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
   return [
     `batch: ${plan.branch} at ${sha8(plan.commit)} (origin/${plan.into} as just fetched${adopted}) — ` +
       `this run ships as one PR into ${plan.into}`,
     checkLine(repoCheck(repoRoot)),
-    `ruleset: protect ${rulesetPattern(plan.branch)} from force-pushes and deletion (GitHub → Settings → Rules → ` +
-      'Rulesets): git refuses only a landing that is not a fast-forward, and a --force push gets through without one',
+    protectedAlready
+      ? `ruleset: ${plan.branch} is already protected from force-pushes and deletion`
+      : `ruleset: protect ${rulesetPattern(plan.branch)} from force-pushes and deletion (GitHub → Settings → Rules → ` +
+        'Rulesets): git refuses only a landing that is not a fast-forward, and a --force push gets through without one',
   ]
 }
 
@@ -299,10 +306,12 @@ export async function cmdStart(ctx: Ctx, input: {
     repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
   })
   let plan: BatchPlan | null = null
+  let protectedAlready = false
   if (input.singlePr) {
     const planned = await planBatch(ctx, run, input.batchBranch, batch)
     if (!planned.ok) return fail(planned.error)
     plan = planned.plan
+    protectedAlready = await batch.rulesetProtects(input.repoRoot, plan.branch)
   }
 
   const tools = await beads.tools()
@@ -340,7 +349,7 @@ export async function cmdStart(ctx: Ctx, input: {
   const preface = [
     ...setupLines(setup, ctx.stateDir),
     ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
-    ...(plan === null ? [] : batchLines(plan, input.repoRoot)),
+    ...(plan === null ? [] : batchLines(plan, input.repoRoot, protectedAlready)),
   ]
   return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }

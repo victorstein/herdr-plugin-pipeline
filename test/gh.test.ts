@@ -110,3 +110,14 @@ test('whether the repo allows squash merges is read from gh, and a gh failure sa
   const broken = await makeFakeBin(dir, { 'repo view': { error: { code: 'auth', message: 'gh auth login' } } })
   expect(await new Gh(broken, dir).squashMergeAllowed()).toMatchObject({ error: expect.stringContaining('gh auth login') })
 })
+
+test('a branch counts as protected only when an active ruleset refuses both its force-push and its deletion', async () => {
+  const rules = (types: string[]) => makeFakeBin(dir, {
+    'api repos/{owner}/{repo}/rules/branches/batch%2Fmenu': types.map((type) => ({ type, ruleset_id: 7 })),
+  })
+  expect(await new Gh(await rules(['non_fast_forward', 'deletion']), dir).rulesetProtects('batch/menu')).toBe(true)
+  expect(await new Gh(await rules(['deletion']), dir).rulesetProtects('batch/menu')).toBe(false)
+  expect(await new Gh(await rules([]), dir).rulesetProtects('batch/menu')).toBe(false)
+  const broken = await makeFakeBin(dir, { api: { error: { code: 'auth', message: 'gh auth login' } } })
+  expect(await new Gh(broken, dir).rulesetProtects('batch/menu')).toBe(false)
+})

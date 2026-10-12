@@ -17,11 +17,12 @@ export function startBeads(over: Partial<StartBeads> = {}): StartBeads {
   }
 }
 
-/** No supervisor running and a repo that allows squash merges, unless a test says otherwise. */
+/** No supervisor running, a repo that allows squash merges, and no ruleset on the batch, unless a test says otherwise. */
 export function startBatch(over: Partial<StartBatch> = {}): StartBatch {
   return {
     supervisor: async () => ({ state: 'none' }),
     squashMergeAllowed: async () => ({ allowed: true }),
+    rulesetProtects: async () => false,
     ...over,
   }
 }

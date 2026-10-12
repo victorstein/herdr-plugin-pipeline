@@ -128,6 +128,19 @@ export class Gh {
     }
   }
 
+  /**
+   * GitHub's own answer for a branch name, which need not exist yet: every active
+   * rule that applies to it, from any ruleset. A failed read counts as unprotected,
+   * so the advice to add a ruleset is shown rather than wrongly withheld.
+   */
+  async rulesetProtects(branch: string): Promise<boolean> {
+    const rules = await this.json<{ type: string }[]>(
+      ['api', `repos/{owner}/{repo}/rules/branches/${encodeURIComponent(branch)}`],
+    )
+    const types = new Set((rules ?? []).map((rule) => rule.type))
+    return types.has('non_fast_forward') && types.has('deletion')
+  }
+
   async prChecksDetail(pr: number): Promise<string> {
     const rows = await this.json<{ bucket: string; name: string; link?: string }[]>(
       ['pr', 'checks', String(pr), '--json', 'bucket,name,state,link'],

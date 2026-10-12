@@ -1158,7 +1158,8 @@ hpipe status                               # assert: "ships as one PR: batch/<�
 
 **Assert** the output carries `batch: batch/<…> at <sha8> (origin/main as just fetched)`, `check:
 .claude/pipeline-check` and the `ruleset:` line, and the intake prompt opens with "This run ships as
-one PR".
+one PR". With the `batch/*` ruleset active, the `ruleset:` line reads `batch/<…> is already protected
+from force-pushes and deletion`; without it, it recommends one.
 
 ### 9c. Registration, the base, submit's refusals
 
