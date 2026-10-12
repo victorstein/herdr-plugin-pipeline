@@ -3,8 +3,13 @@ import type { CallResult } from '../lib/herdr'
 import { isAgentReady } from '../lib/machine'
 import { enqueue, isCurrent, recipientPane, type Settlement } from '../lib/outbox'
 import { runRow } from '../lib/phases'
+import {
+  inputBoxText, PASTE_PLACEHOLDER, SCREEN_LINES, withoutFaintText,
+} from '../lib/screen'
+import { limitLineOn } from '../lib/usage-limit'
 import type { AgentStatus, QueuedEvent, Run } from '../lib/types'
 import { type Delivery, isRetryable, type PendingPrompt, warnToTick } from './deliver'
+import { readingFrom, USAGE_LIMIT, UsageLimits } from './usage-limits'
 
 export interface PromptIO {
   agentPromptConfirmed(target: string, text: string, timeoutMs: number): Promise<CallResult<unknown>>
@@ -44,93 +49,10 @@ export class ClearGuard {
   }
 }
 
-const PLAIN_RULE = /^─{10,}$/
-/**
- * A session named with `/rename` carries its name in the box's TOP rule —
- * `──── PR#132 review ─`, truncated with `…` in a narrow pane — leaving as few as
- * two dashes before it. Only ever accepted as the top rule of a box whose first
- * line is `❯` and whose bottom rule is plain: transcript text can start with
- * `── ` too.
- */
-const LABELLED_TOP_RULE = /^─{2,} \S.*$/
-const SCREEN_LINES = 40
-
-/**
- * The text in a Claude input box — the `❯` line and any continuation lines between
- * the two horizontal rules that frame it — or `null` when the screen shows no box
- * this recognises, which callers must read as "do not touch". The last framed box
- * wins; Claude's rewind menu also draws `❯`, but indented and unframed.
- */
-export function inputBoxText(screen: string): string | null {
-  const lines = screen.split('\n')
-  const isTopRule = (line: string) => PLAIN_RULE.test(line) || LABELLED_TOP_RULE.test(line)
-  for (let close = lines.length - 1; close > 0; close--) {
-    if (!PLAIN_RULE.test((lines[close] ?? '').trim())) continue
-    let open = close - 1
-    while (open >= 0 && !isTopRule((lines[open] ?? '').trim())) open--
-    if (open < 0) return null
-    const box = lines.slice(open + 1, close)
-    if (!(box[0] ?? '').startsWith('❯')) continue
-    return box.map((line, i) => (i === 0 ? line.slice(1) : line)).join('\n').trim()
-  }
-  return null
-}
-
-const TERMINAL_ESCAPE = /\x1b(?:\[([0-9;:?]*)([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g
-
-/** SGR parameters after which a colour index or RGB triple follows, not a style. */
-const EXTENDED_COLOUR = new Set([38, 48, 58])
-
-function faintAfter(params: string, faint: boolean): boolean {
-  const codes = params === '' ? [0] : params.split(';').map(Number)
-  for (let i = 0; i < codes.length; i++) {
-    const code = codes[i]
-    if (code !== undefined && EXTENDED_COLOUR.has(code)) {
-      i += codes[i + 1] === 5 ? 2 : codes[i + 1] === 2 ? 4 : 1
-    } else if (code === 0 || code === 22) {
-      faint = false
-    } else if (code === 2) {
-      faint = true
-    }
-  }
-  return faint
-}
-
-/**
- * The screen as text, minus everything drawn faint. Claude draws its prompt
- * suggestion inside the input box in faint text, and a plain-text read cannot
- * tell it from a human's draft — every idle box would read as stuck. Measured
- * against Claude Code in a live herdr 0.9.0 session.
- */
-export function withoutFaintText(styled: string): string {
-  let faint = false
-  let text = ''
-  let from = 0
-  const visible = (segment: string) => (faint ? keptWhenFaint(segment) : segment)
-  for (const escape of styled.matchAll(TERMINAL_ESCAPE)) {
-    text += visible(styled.slice(from, escape.index))
-    from = escape.index + escape[0].length
-    if (escape[2] === 'm') faint = faintAfter(escape[1] ?? '', faint)
-  }
-  text += visible(styled.slice(from))
-  return text.replace(/\r/g, '')
-}
-
-/**
- * A paste placeholder is someone's input whatever it is drawn in: dropped with
- * the suggestion, a stuck paste would read as an empty box and the next send
- * would be appended to it.
- */
-function keptWhenFaint(segment: string): string {
-  return (segment.match(PASTE_PLACEHOLDER) ?? []).join(' ')
-}
-
 async function readInputBox(io: PromptIO, paneId: string): Promise<string | null> {
   return inputBoxText(withoutFaintText(await io.paneReadStyled(paneId, SCREEN_LINES)))
 }
 
-/** How a long paste collapses in a Claude input box, measured live: `[Pasted text #1 +40 lines]`. */
-const PASTE_PLACEHOLDER = /\[Pasted text #\d+[^\]]*\]/g
 const squashSpace = (text: string): string => text.replace(/\s+/g, ' ').trim()
 
 /**
@@ -230,7 +152,7 @@ export async function sendConfirmed(
   return box === 'cleared' || box === 'empty' ? { ...sent, boxClear: true } : sent
 }
 
-export type HoldReason = 'pane_gone' | 'backoff' | 'budget' | typeof STUCK_INPUT
+export type HoldReason = 'pane_gone' | 'backoff' | 'budget' | typeof STUCK_INPUT | typeof USAGE_LIMIT
 
 export interface SendOutcome {
   ok: boolean
@@ -318,14 +240,22 @@ export class DeliveryGate {
   private sentThisTick = 0
   private firstSendAt: number | null = null
   private budgetReported = false
-  /** Bumped whenever `holds()` would read differently, so the supervisor rewrites it only then. */
-  revision = 0
+  private ownRevision = 0
+  readonly limits: UsageLimits
 
   constructor(
     private readonly config: GateConfig,
     private readonly now: () => number = Date.now,
     private readonly log: (message: string) => void = warnToTick,
-  ) {}
+    limits?: UsageLimits,
+  ) {
+    this.limits = limits ?? new UsageLimits(now, log)
+  }
+
+  /** Bumped whenever `holds()` would read differently, so the supervisor rewrites it only then. */
+  get revision(): number {
+    return this.ownRevision + this.limits.revision
+  }
 
   /**
    * `livePanes` is herdr's global pane list. An empty one is a failed `pane list`,
@@ -334,6 +264,7 @@ export class DeliveryGate {
    */
   beginTick(livePanes: ReadonlySet<string>): void {
     this.livePanes = livePanes
+    this.limits.forgetGone(livePanes)
     this.sentThisTick = 0
     this.firstSendAt = null
     this.budgetReported = false
@@ -391,14 +322,14 @@ export class DeliveryGate {
   markStuck(paneId: string): void {
     if (this.stuck.has(paneId)) return
     this.stuck.set(paneId, this.now())
-    this.revision += 1
+    this.ownRevision += 1
     this.log(`stuck input in ${paneId}: its input box holds text the supervisor did not send, ` +
       'so nothing more is sent there until it is submitted or cleared — `hpipe status` lists it')
   }
 
   unstick(paneId: string): void {
     if (!this.stuck.delete(paneId)) return
-    this.revision += 1
+    this.ownRevision += 1
     this.log(`input box of ${paneId} is clear again; delivering to it`)
   }
 
@@ -446,7 +377,7 @@ export class DeliveryGate {
       this.stalledSends.delete(paneId)
       if (health) {
         this.health.delete(paneId)
-        this.revision += 1
+        this.ownRevision += 1
         this.log(`delivery to ${paneId} recovered after ${health.failures} failed attempt(s)`)
       }
       return
@@ -460,7 +391,7 @@ export class DeliveryGate {
     this.health.set(paneId, {
       failures, nextAttemptAt: now + delay, lastCode: code, since: health?.since ?? now,
     })
-    this.revision += 1
+    this.ownRevision += 1
     if (failures === 1) {
       this.log(`delivery to ${paneId} failed (${code}); retrying with backoff, what is owed stays queued`)
     }
@@ -470,7 +401,11 @@ export class DeliveryGate {
     return this.health.get(paneId)?.failures ?? 0
   }
 
-  /** Every pane the gate is holding sends for, and why — what `hpipe status` reads. */
+  /**
+   * Every pane the gate is holding sends for, and why — what `hpipe status` reads.
+   * A usage limit wins over anything else wrong with the pane: nothing else can be
+   * fixed while it stands, and the rest shows again once it is lifted.
+   */
   holds(): Record<string, PaneHold> {
     const out: Record<string, PaneHold> = {}
     for (const [pane, health] of this.health) {
@@ -482,7 +417,7 @@ export class DeliveryGate {
         since: Math.min(since, failing?.since ?? since), failures: failing?.failures ?? 0, code: STUCK_INPUT,
       }
     }
-    return out
+    return { ...out, ...this.limits.holds() }
   }
 }
 
@@ -499,12 +434,14 @@ export function makeCourier(
   const humanTypesIn = options.humanTypesIn ?? (() => false)
   const heldStuck: SendOutcome = { ok: false, code: STUCK_INPUT, held: STUCK_INPUT }
   return async (paneId, text, sendOptions = {}) => {
+    if (gate.limits.isLimited(paneId)) return HELD_BY_LIMIT
     if (gate.isStuck(paneId) && gate.boxReadAlready(paneId)) return heldStuck
     const held = gate.admit(paneId, sendOptions.overBudget === true)
     if (held !== null) return { ok: false, code: held, held }
     const boxHeld = await boxHold(io, gate, paneId, text, clears, humanTypesIn(paneId))
     if (boxHeld !== null) return boxHeld
     const result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
+    if (result.ok) gate.limits.noteActivity(paneId)
     if (result.boxClear === true) gate.forgetStalled(paneId)
     else if (!result.ok && MAY_HAVE_LANDED.has(result.code ?? '')) gate.noteStalled(paneId, text)
     gate.record(paneId, result)
@@ -530,7 +467,13 @@ async function boxHold(
   humanTypesIn: boolean,
 ): Promise<SendOutcome | null> {
   gate.boxReadAlready(paneId)
-  const box = await readInputBox(io, paneId)
+  const screen = await io.paneReadStyled(paneId, SCREEN_LINES)
+  // Ahead of the box: a limited pane rejects whatever is sent, so its box is not ours to clear either.
+  if (limitLineOn(screen).line !== null) {
+    gate.limits.observe(paneId, readingFrom(screen, await io.agentStatus(paneId)))
+    if (gate.limits.isLimited(paneId)) return HELD_BY_LIMIT
+  }
+  const box = inputBoxText(withoutFaintText(screen))
   if (box === null || box.length === 0) {
     if (box !== null) gate.forgetStalled(paneId)
     gate.unstick(paneId)
@@ -548,6 +491,8 @@ async function boxHold(
   gate.forgetStalled(paneId)
   return null
 }
+
+const HELD_BY_LIMIT: SendOutcome = { ok: false, code: USAGE_LIMIT, held: USAGE_LIMIT }
 
 /** Whether any line of the box carries a paste placeholder or a piece of the sent text. */
 function boxHoldsAnyOf(box: string, sent: string): boolean {

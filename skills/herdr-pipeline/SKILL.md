@@ -76,7 +76,8 @@ behaviour; this skill does.
    another task later reopens intake — run `dispatch --done` again afterwards.
 
 The supervisor nudges a silent task with a stall probe (workers every 45 min, the orchestrator every
-15); 3 unanswered probes escalate it.
+15); 3 unanswered probes escalate it. A pane Claude's usage limit has stopped is neither probed nor
+escalated: the supervisor holds what it owes the pane and resumes it at the reset.
 
 ## While it runs
 
@@ -102,6 +103,7 @@ The supervisor nudges a silent task with a stall probe (workers every 45 min, th
 | Orchestrator pane died / replaced | Run inside the new orchestrator pane (it claims the pane it runs in): `herdr plugin action invoke claim --plugin stein.pipeline`. Held prompts and a catch-up digest follow |
 | Supervisor dead | `herdr plugin action invoke supervisor --plugin stein.pipeline` |
 | Task blocked behind a failed sibling's `--files` | `hpipe release --task <id>` |
+| Workers idle after Claude's usage limit (`paused by Claude's usage limit` in `hpipe status`) | Nothing: the supervisor tells them to carry on at the reset and sends you one note. If one is still idle a few minutes after, `hpipe nudge --task <id>` (or `--all`). Never `rewind` to the same phase for this: that restarts the phase and its reviews. If your own session was stopped, the note says so: pick up what you were doing |
 | A task sits in `close` and status shows its bead out of sync | Relay bd's error to the user (never run `bd` yourself), or `hpipe close --task <id>`; `--force` (overrides bd's close guards) only with the user's go-ahead |
 | `hpipe start` refuses on bd's version | `brew upgrade beads` (the user's call — ask first); bd ≥ 1.3.1 is required |
 | `hpipe next` or the board says `bv` is missing | The pipeline runs without it. Installing it is the user's call — its licence carries a rider (see the README) |

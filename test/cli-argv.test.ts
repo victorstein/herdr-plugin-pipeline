@@ -371,9 +371,11 @@ test('dispatch --task submits the brief through herdr agent prompt and waits for
 
   expect(r.code).toBe(0)
   expect(r.out).toContain('brief for t1 delivered to w1-2')
-  const calls = await Bun.file(log).text()
-  expect(calls).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
-  expect(calls).toContain('--wait --until working --until blocked --timeout')
+  const calls = (await Bun.file(log).text()).split('\n')
+  // The pane is read first, for a usage limit that would reject the brief on arrival.
+  expect(calls[0]).toBe('pane read w1-2 --source visible --lines 40 --format ansi')
+  expect(calls[1]).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
+  expect(calls.join('\n')).toContain('--wait --until working --until blocked --timeout')
   expect(bdCalls(f)).toContain('--json --actor hpipe update argv-1 --claim')
 })
 

@@ -3,7 +3,7 @@ import { baseArgument, type DispatchBase } from './dispatch-base'
 import { WORKER_EFFORT } from './models'
 import { queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
-import type { Run, Task } from './types'
+import type { Run, StallState, Task } from './types'
 
 /**
  * A worker's pane is recorded only when herdr detects an agent in its worktree
@@ -179,11 +179,16 @@ export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number
   // Any other row's ladder probes the orchestrator, whose silence a new worker
   // pane does not change.
   if (taskRow(task.phase).actor !== 'worker') return true
-  task.stall = {
-    at: task.phase_entered_at, run_at: run.phase_entered_at,
+  task.stall = freshLadder(run, task, now)
+  return true
+}
+
+/** A stall ladder starting over now, stamped for the record's current phase entry. */
+export function freshLadder(run: Run, record: Run | Task, now: number): StallState {
+  return {
+    at: record.phase_entered_at, run_at: run.phase_entered_at,
     last_probe_at: now, probes: 0, undelivered: 0, holds: 0,
   }
-  return true
 }
 
 /**

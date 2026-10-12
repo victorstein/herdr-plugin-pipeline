@@ -14,6 +14,8 @@ export type EventKind =
   | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
   | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited' | 'pane.closed'
   | 'pane.moved' | 'workspace.closed'
+  /** Written by `hpipe nudge`, not herdr: release the supervisor's usage-limit hold on `pane_id`. */
+  | 'pipeline.nudge'
 
 export interface QueuedEvent {
   kind: EventKind
@@ -120,6 +122,11 @@ export interface OutboxEntry {
    */
   entered_at: number
   text: string
+  /**
+   * `resume`: carry on where Claude's usage limit stopped the worker. Absent: the
+   * phase's own prompt, which a worker that has not read it cannot have answered.
+   */
+  kind?: 'resume'
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number
