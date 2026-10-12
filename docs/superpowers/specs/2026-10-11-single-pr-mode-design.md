@@ -1147,6 +1147,10 @@ Where the code departs from the text above, and why.
   quoted titles and paths but not branches. Every pasted command now passes a branch, a refspec or a
   range through `shellWord`, which quotes only a word the shell would split or run, so an ordinary name,
   and so every per-task render, reads exactly as before.
+- **A document-only task cannot be submitted, and the docs say so.** m3's "nothing to land" excludes all
+  of `docs/superpowers/`, so a task whose deliverable is a design doc there, this repo's own convention,
+  is refused every time. The exclusion stands, since a merge that brings only sibling docs must not count
+  as work; the README and the skill now say to run such a task per-task or keep its document elsewhere.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
   account for, for the review's resync note. `start` prints the ruleset recommendation as a third
   line, naming `batch/*`, or the branch itself when `--batch-branch` names one outside it. Status reads

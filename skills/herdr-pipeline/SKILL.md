@@ -47,8 +47,9 @@ behaviour; this skill does.
    one squash merge. The mode is fixed at start. It needs a repo that allows squash merges, and it
    wants an executable `.claude/pipeline-check` (the tests and the typecheck): with no per-task CI,
    that check is the only test a landing gets before the final PR, and without one `status` marks
-   every landing unverified. `start` refuses beside a supervisor that predates single-PR runs —
-   restart it (see **Recovery**).
+   every landing unverified. A task whose only deliverable is a document under `docs/superpowers/` cannot
+   be submitted in such a run (`submit` counts those as the pipeline's, not as work to land). `start`
+   refuses beside a supervisor that predates single-PR runs — restart it (see **Recovery**).
 2. One bead per task; **the bead's brief is the worker's entire brief** (goal, acceptance criteria,
    `file:line` pointers), captured when the task is registered. Check the backlog first: `hpipe next`
    shows bv's top 10 recommendations among unheld open beads — the picks claimable `now` (capped by
