@@ -319,7 +319,8 @@ missing or too old.
 **Setup** happens on the first `hpipe start` in a repo, or on demand with the **Set up Beads for this
 repo** action from a pane in it. Bead ids are `<prefix>-<n>`; the prefix defaults to the repo's name
 cut to eight characters. To choose another, pass `hpipe start --prefix <p>` on the first start: once
-the store exists the prefix is fixed and `--prefix` is ignored. The action uses the default prefix,
+the store exists the prefix is fixed, and a `--prefix` that disagrees is ignored with a ⚠ line, first
+in `start`'s output, naming the prefix in use. The action uses the default prefix,
 or `HPIPE_BEADS_PREFIX` if it is set in herdr's own environment. A prefix holds letters, digits and
 dashes and must start with a letter; it is stored lowercase, with any trailing dashes trimmed. Setup
 refuses a prefix another repo's store already uses, and one whose `<prefix>-<n>` names

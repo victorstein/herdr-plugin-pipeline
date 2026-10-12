@@ -14,7 +14,11 @@ export interface SetupInput {
 }
 
 export type SetupResult =
-  | { ok: true; slug: string; prefix: string; created: boolean; notes: string[] }
+  | {
+    ok: true; slug: string; prefix: string; created: boolean; notes: string[]
+    /** A `--prefix` the existing store overrode: accepted, since the prefix only names new beads. */
+    ignoredPrefix?: string
+  }
   | { ok: false; error: string }
 
 export interface SetupDeps {
@@ -42,10 +46,10 @@ export async function setupBeads(input: SetupInput, deps: SetupDeps = REAL_SETUP
   const slug = beadsSlug(input.repoKey)
   const existing = await readBeadsProject(input.stateDir, slug)
   if (existing !== null) {
-    const ignored = input.prefix !== null && normalisePrefix(input.prefix) !== existing.prefix
-      ? [`this repo's Beads store already uses prefix ${existing.prefix}; --prefix ${input.prefix} was ignored`]
-      : []
-    return { ok: true, slug, prefix: existing.prefix, created: false, notes: ignored }
+    const kept = { ok: true as const, slug, prefix: existing.prefix, created: false, notes: [] }
+    return input.prefix !== null && normalisePrefix(input.prefix) !== existing.prefix
+      ? { ...kept, ignoredPrefix: input.prefix }
+      : kept
   }
 
   const requested = input.prefix ?? defaultPrefix(input.repoKey)
@@ -99,9 +103,14 @@ export async function setupBeads(input: SetupInput, deps: SetupDeps = REAL_SETUP
   return { ok: true, slug, prefix, created: true, notes }
 }
 
+/** An ignored `--prefix` leads: as one note among the rest, it went unseen. Measured on a live run. */
 export function setupLines(result: Extract<SetupResult, { ok: true }>, stateDir: string): string[] {
   const home = beadsHome(stateDir, result.slug)
   return [
+    ...(result.ignoredPrefix === undefined ? [] : [
+      `⚠ --prefix ${result.ignoredPrefix} was ignored: this repo's Beads store already uses ${result.prefix}, ` +
+        `so this run's beads are ${result.prefix}-<n>`,
+    ]),
     result.created ? `beads: created ${home} with prefix ${result.prefix}` : `beads: prefix ${result.prefix}, store ${home}`,
     ...result.notes.map((note) => `beads: ${note}`),
   ]
