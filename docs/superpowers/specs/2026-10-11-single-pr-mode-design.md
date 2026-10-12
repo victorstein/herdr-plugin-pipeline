@@ -1061,3 +1061,48 @@ None needed the owner. These answers hold over §1–§9 wherever the two disagr
 | m6 | Every rendered title goes through `shellQuoted` (`unstarted.ts:86-88`): `--title`, `--subject` and the `ship` suggestion |
 | m7 | Implementation notes: the paneless `sync` queue runs before `tasks.ts:231`'s `continue`. The `land-queue` clause also names a failing git read and `fetch_error`. The skill says a dirty-sync review spends the task's review counter |
 | m8 | §9 gains the unit tests and real-git `submit` cases the review lists, and two smoke steps: a reviewer's inline fix must be checked before it lands, and an orchestrator push in `merge` must land reviewed |
+
+## Implementation notes
+
+Where the code departs from the text above, and why.
+
+- **`merge` reads the branch head first, and `sync`'s shortcut is narrower.** Read literally, `merge`
+  sends a moved branch to `sync`, and `sync` sends a `land_sha` already on the batch to `merge`: a task
+  whose head landed while its branch moved past it would bounce between the two every tick. So `sync`
+  goes straight to `merge` only when `land_sha` is on the batch **and** the branch has not moved past
+  it. A moved branch waits for the worker's sync, whose walk meets the extra commit, so it lands
+  reviewed.
+- **"Moved" and "checked" ignore review verdicts.** A branch head that adds only files under
+  `docs/superpowers/reviews/` to `land_sha` has not moved, and a `land_sha` that adds only those to the
+  submitted head is checked (the after-pass-2 rule). Both diffs run in `repo_root`'s object store; a
+  diff git cannot read, for a commit pushed from another clone, counts as moved and unchecked, which
+  costs a sync and never a wrong landing.
+- **Yielding, and the queue head, consider only tasks that can take the slot.** A holder yields only
+  to a waiting task with a pane, or one that lands without a sync. Yielding to a paneless task that
+  must sync would hand the slot to nobody and let the holder take it back at once, re-sending its sync
+  prompt every window.
+- **A paneless `sync` is still evaluated.** Its prompt and brief are queued for the next agent, and its
+  edge still runs with the worker read as busy, so it can yield the slot or record a landing that
+  already happened. A transition into `sync` with no pane queues the same entry instead of handing
+  `main.ts` a prompt with no pane to drop.
+- **`hpipe task --branch` refuses the batch and default names in a single-PR run only.** The run
+  records both; refusing the default name per-task would need a network lookup on every registration.
+- **The worker brief keeps its per-task wording.** "Not into this PR" became `{{change_noun}}` rather
+  than a fixed "change", so a per-task run renders exactly today's text, as the edited prompts must.
+  The `handoff-pr`/`handoff-batch` fragments carry the paragraph after step 4 too, since it names the
+  PR head. A single-PR review names its subject by the range, `` `batch/x...t3-branch` ``.
+- **A task rewound while the run ships moves it to `execute` without reopening intake.** The rewound
+  task holds `execute` until it finishes; registration still reopens intake, as it always has.
+- **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
+  that holds uncommitted work, so the head it records is the tree it checked. With no check declared
+  it still records the head, as `check: 'none'`, so `ship` can clear.
+- **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
+  account for, for the review's resync note. `start` prints the `batch/*` ruleset recommendation as a
+  third line. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
+  renders take the state dir explicitly, since `ship` and `ship-merge` write the PR body and squash
+  body beside the run.
+- **`ship-merge` records a merge whatever the orchestrator is doing**: the merge is GitHub's fact, as
+  a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle.
+- **release-please's default sections** are coded from memory of its conventional-commit defaults
+  (`feat`, `fix`, `perf`, `revert` shown; `docs`, `style`, `chore`, `refactor`, `test`, `build`, `ci`
+  hidden). Verify 6 settles them on the smoke repo.

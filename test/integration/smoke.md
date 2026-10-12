@@ -1110,6 +1110,131 @@ back, not something to patch mid-run.
 
 ---
 
+## 9. One PR per batch (`--single-pr`)
+
+This mode touches startup (the push in `start`), gating (the batch as every base, the landing slot) and
+delivery (new prompts, the queued sync hand-over). The wiring test drives it end to end against a
+bare local origin, but GitHub, release-please and live agents are only proven here. Run it in a fresh
+`pipesmokeN` session against `victorstein/hpipe-smoke`.
+
+### 9a. Setup, before the session boots
+
+- release-please configured on `hpipe-smoke` (`release-please-config.json` with `changelog-sections`,
+  and the release workflow): step 9i is pass/fail on the release it cuts.
+- A ruleset on `batch/*` blocking force-pushes and deletion (Settings → Rules → Rulesets). The landing
+  gate is git refusing a non-fast-forward push; a `--force` landing gets through without the ruleset.
+- Squash merges allowed on the repo.
+- `.claude/pipeline-check` committed on `main`, executable, running the repo's tests, and a
+  `.claude/agents/<surface>-dev.md`.
+
+### 9b. A supervisor that predates the mode
+
+With the previous release's supervisor still running in the session, run
+`hpipe start "smoke batch" --single-pr` from the new CLI. **Assert:** refused, naming that
+supervisor's pid and the `Pipeline supervisor` pane; no `batch/*` branch on origin; no run in
+`hpipe status`. Restart the supervisor pane, then:
+
+```bash
+hpipe start "smoke batch" --single-pr
+git ls-remote --heads origin 'batch/*'     # assert: exactly the printed branch, at origin/main's head
+hpipe status                               # assert: "ships as one PR: batch/<…> → main · 0 of 0 landed"
+```
+
+**Assert** the output carries `batch: batch/<…> at <sha8> (origin/main as just fetched)`, `check:
+.claude/pipeline-check` and the `ruleset:` line, and the intake prompt opens with "This run ships as
+one PR".
+
+### 9c. Registration, the base, submit's refusals
+
+Register t1 and t3 with disjoint `--files`, and t2 with `--depends-on t1` and files overlapping t1's.
+**Assert:**
+
+- every `base:` line is `origin/batch/<…> as just fetched`, at the batch head;
+- `hpipe task --branch batch/<…>` and `--branch main` are refused;
+- in t1's worktree, before pushing, `hpipe submit --task t1 --title "feat: x"` says `push first`;
+  `--title "feet: x"` is refused naming the repo's types; a PR opened by hand from t1's branch makes
+  submit say `Close PR #n, then submit again` (close it after);
+- a real submit prints `submitted t1 at <sha8> as "…" (implement; check passed)` and the check's log
+  is under `$STATE/runs/$SMOKE/<run>.checks/`;
+- the review prompt's diff command is `git fetch origin … && git diff origin/batch/<…>...origin/<branch>`.
+
+### 9d. The gate, and one landing at a time
+
+Time t1 and t3 so both clear review within a minute of each other, holding one worker's last review
+back if needed. **Assert:**
+
+- one takes the slot (`landing: tN (merge)` in status); the other waits in `land-queue` with `nothing
+  for you — waiting to land; tN holds the landing slot`, no prompt, and no stall probe;
+- before the waiting task syncs, pushing its old reviewed sha by hand
+  (`git push origin <sha>:refs/heads/batch/<…>`) is refused;
+- the first lands with the rendered push: `origin/batch/<…>` equals its land sha, the landing shows in
+  status within one CI poll (30 s), its bead closes with `landed on batch/<…> (<sha8>); ships with
+  the batch PR into main`, and its worktree is torn down;
+- the second goes `land-queue → sync`, its worker merges and submits, `submit` reports `a clean merge
+  of batch/<…>` and runs the check, and it lands with no second review;
+- t2, once t1 is done, is cut from a batch head containing t1's land sha.
+
+### 9e. A reviewer's inline fix, checked before it lands
+
+Have a task's last reviewer fix a MAJOR inline (a code change, committed and pushed with its verdict).
+**Assert:** with the slot, the task goes to `sync`, not `merge` (`… was not checked since its review`
+in `hpipe show`'s visited list or the history), the worker's submit runs the check on that head, and
+only then does it land.
+
+### 9f. A push in `merge` lands reviewed
+
+While a task waits in `merge`, push a small hand-off commit to its branch as the orchestrator would.
+**Assert:** on the next tick it goes to `sync` (`<branch> moved to <sha8> after its reviewed head`),
+the sync is reported not clean, the task goes back through its review, and the commit lands on the
+batch reviewed — it does not vanish with the worktree.
+
+### 9g. A dirty sync, and a deleted branch
+
+Register t4 and t5 editing one file under wrongly disjoint `--files`. **Assert:** the second to land
+syncs with a conflict, `submit` reports `not a clean merge`, the task goes through its tier's first
+review with the remerge-diff note in its prompt, then lands. While a task is in `merge`, delete an
+already-landed sibling's branch on origin: the landing is still seen.
+
+### 9h. A lost pane
+
+Close the worker pane of a task waiting in `land-queue` that will have to sync. **Assert:** the task is
+not failed (`hpipe status` shows it waiting, with the `agent start` line); when the batch moves past
+it, another task with an agent takes the slot first; once you start an agent in its worktree, the
+brief and the sync prompt arrive on their own, and nothing has to be sent by hand.
+
+### 9i. The run's end, and the release
+
+**Assert**, in order:
+
+- `branch-review`'s prompt reads `git diff origin/main...origin/batch/<…>` in the batch checkout;
+- `ship` writes `$STATE/runs/$SMOKE/<run>.batch-pr.md` with one override line per landing, the
+  orchestrator creates `$STATE/checkouts/<run>` and runs `hpipe batch-check` there, and opens the PR;
+  the run stays in `ship` until the PR's head is the head `batch-check` recorded;
+- `ship-ci` stays pending until every workflow run on the PR head has finished;
+- **red CI, the fix-task route:** push a failing test to the batch: `ship-ci → ship`. `hpipe task …`
+  moves the run to `execute`, `dispatch --done`, the fix lands, the run goes
+  `execute → branch-review → ship`, needs a fresh `batch-check`, then `ship-ci`, green;
+- **red CI, the patch route:** with the run in `ship-merge`, push a failing test again; the moved head
+  sends it to `ship-ci`, and the second red escalates the run. `hpipe rewind <run> ship`, patch
+  through a subagent in the batch checkout, `batch-check`: `ship → ship-ci`, green;
+- squash-merge with the two rendered commands. **Pass/fail:** exactly one release PR follows, whose
+  notes list every landed title, the fix task's included, and nothing else;
+- on a throwaway PR with no override block, check that the squash body's extra lines alone give one
+  entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);
+- `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n
+  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch.
+
+### 9j. Abort
+
+On a second, throwaway single-PR run with one landed task, `hpipe abort <run>`. **Assert:** it names
+the landed task, says its bead stays closed and nothing reached main, and prints the clean-up
+commands; `hpipe status` shows `not shipped: batch/<…> holds 1 landed task (t1) that is not on main`.
+
+Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
+one does not fit, and that is a finding.
+
+---
+
 ## What to do when a step fails
 
 The ledger is at `$STATE/runs/$SMOKE/<run_id>.json` — read it, never hand-edit it. All of these run

@@ -185,6 +185,87 @@ and carries the question as a comment until you answer.
 
 Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
+### One PR per batch
+
+By default every task opens its own PR, and each merge cuts its own release. A batch that should ship
+as **one** release starts with:
+
+    hpipe start "reader menu" --single-pr [--batch-branch <name>]
+
+`start` fetches origin's default branch and pushes it as the run's **batch branch**
+(`batch/<run id without its repo prefix>` unless `--batch-branch` names one). Every task is cut from
+the batch branch, reviewed on its branch diff against it, and **lands** on it; no task opens a PR.
+Once the last task has landed, the branch review runs on what the batch carries, then the
+orchestrator opens one PR from the batch branch into the default branch. CI runs once, on that PR,
+and its squash merge ships one release whose notes list every landing. The mode is chosen at start
+and never changes: abort and start again, which costs nothing before the first dispatch.
+
+`start --single-pr` refuses, and leaves nothing behind, when:
+
+- this session's supervisor is running but predates single-PR runs — restart it (see **Upgrading**);
+- origin's default branch cannot be fetched;
+- the name is the default branch's, or one git refuses;
+- the repo does not allow squash merges: the PR body's release-note block applies only to a squash;
+- the name already exists on origin at another commit. At the same commit it is adopted, so a retry
+  after a failed start goes through.
+
+It prints a `batch:` line, a `check:` line, and a recommendation: protect `batch/*` against
+force-pushes and deletion with a GitHub ruleset. Landing is gated by git refusing a push that is not a
+fast-forward; a `--force` push gets through unless a ruleset forbids it.
+
+**`hpipe submit`.** A single-PR worker ends `implement` with
+
+    hpipe submit --task <id> --title "<conventional title>"
+
+where a per-task worker would open a PR. The title is the task's line in the release notes, so it
+must be one conventional line whose type the repo's release-please `changelog-sections` read (or
+release-please's defaults with no config): `feet:` is refused, and a type the config hides passes
+with a note. `submit` also refuses uncommitted or untracked work, a head origin does not have, a
+branch with nothing to land outside `docs/superpowers/`, a re-entry that only merged the batch since
+the review sent it back, and a branch with an open PR, which would carry every sibling's commits
+into the default branch. Then it runs the repo's check.
+
+**`.claude/pipeline-check`.** An executable the repo declares beside `.claude/pipeline-bootstrap`,
+run by `submit` on the pushed tree, with its output logged under the run's `.checks/` directory and
+the last 40 lines printed on failure. With no per-task CI it is the only test a landed tree gets
+before the final PR, so a repo wants one before its first single-PR run. With none, `submit` records
+the landing as unchecked, the workers fall back to running the tests themselves, and `hpipe status`
+says so. A check longer than an agent's 10-minute Bash timeout does not fit.
+
+**Landing, one at a time.** A task whose last review clears waits in `land-queue`. One task at a
+time takes the landing slot, oldest first, among the tasks that have an agent or need no sync:
+
+- **up to date and checked** — its reviewed head contains the batch head, and the check ran on that
+  head — goes to `merge`, where the orchestrator lands it with the printed
+  `git -C '<repo>' push origin <sha>:refs/heads/<batch>`. No force: if anything landed meanwhile, git
+  refuses it, and the task syncs.
+- **behind**, or carrying a reviewer's inline fix the check never saw, goes to `sync`: the worker
+  merges the batch in, pushes, and runs `hpipe submit` again, which runs the check.
+
+What lands is the head the last review cleared, never the branch tip: a push to the branch after its
+review sends the task back through `sync`, so it lands reviewed. A **clean** sync — every commit since
+the reviewed head an automatic merge of the batch, by `git merge-tree` — lands without another
+review. Anything else, a hand-resolved conflict or a new commit, goes back through the task's reviews
+first. A holder that has not submitted within `STALL_MINUTES` while another task waits gives the slot
+up, and a paneless task that must sync waits for an agent the orchestrator starts in its worktree.
+A task's bead closes when it lands, naming the batch branch; its code reaches the default branch only
+with the batch PR.
+
+**The final PR.** After the branch review, `ship` has the orchestrator bring the batch checkout
+(`$HERDR_PLUGIN_STATE_DIR/checkouts/<run>`) up to date, run `hpipe batch-check` there — the one run of
+every landing together, which records the head it passed on — and open the PR with the body the
+plugin renders: one line per landing between `BEGIN_COMMIT_OVERRIDE` and `END_COMMIT_OVERRIDE`. The
+PR clears `ship` only at a head `batch-check` recorded. `ship-ci` waits for CI on its head. A red one
+is the orchestrator's: an empty commit for an environmental failure, a subagent's patch in the batch
+checkout for a small defect, or a fix task — `hpipe task …` registers it into the run and moves it
+back to `execute` — for a bigger one. The batch PR gets one repair; a second red escalates the run.
+`ship-merge` renders the squash merge, whose commit carries the same lines, so the release reads them
+even if release-please never finds the PR body.
+
+**Clean-up.** The `done` notice, and `hpipe abort`, print it: `git push origin --delete` for each task
+branch whose head is on the batch, a warning for any branch with commits that did not land, and the
+removal of the batch checkout and the local batch branch.
+
 ## Review tiers
 
 Every task carries a tier that decides which reviews it runs:
@@ -325,6 +406,11 @@ The Beads release moves the ledger to `schema_version: 3`. Runs started before i
 and are no longer advanced: finish them on the previous release, then upgrade and restart the
 supervisor. They do not block `hpipe start`, and the commands that address a task or its
 discoveries do not see them.
+
+Single-PR runs are written as `schema_version: 4`, and per-task runs stay at 3, so every run in
+flight carries on across the upgrade and a rollback still reads them. A supervisor that predates
+single-PR runs ignores a v4 run rather than driving it as a per-task one, and `hpipe start --single-pr`
+refuses while this session's live supervisor is that old: restart it first.
 
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a

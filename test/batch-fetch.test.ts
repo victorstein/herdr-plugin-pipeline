@@ -94,3 +94,26 @@ test('nothing is fetched for a run with no task waiting to land, or for a per-ta
   await fetchBatches([quiet, perTask, landing], fetch)
   expect(fetched).toEqual(['/r3'])
 })
+
+test('the clean-up deletes only task branches whose head landed, and names the rest', async () => {
+  const { cleanupLines } = await import('../src/supervisor/deliver')
+  const { clone, other, t1 } = landingRepo()
+  git(['push', '-q', 'origin', `${t1}:refs/heads/batch/x`], other)
+  git(['checkout', '-q', 't1-branch'], other)
+  commitAs(other, 'src/handoff.ts', 'pushed after the landing\n')
+  git(['push', '-q', 'origin', 't1-branch'], other)
+  git(['push', '-q', 'origin', '--delete', 't3-branch'], other)
+  git(['fetch', '-q', 'origin', '+refs/heads/batch/x:refs/remotes/origin/batch/x'], clone)
+  const handoff = revParse(other, 't1-branch')
+
+  const landedOnly = runIn(clone, [mkTask({ task_id: 't1', branch: 't1-branch' }), mkTask({ task_id: 't3', branch: 't3-branch' })])
+  const lines = await cleanupLines(landedOnly, landedOnly.batch!)
+  expect(lines.join('\n')).not.toContain('--delete t1-branch')
+  expect(lines).toContain(`  t1-branch has commits that did not land: ${handoff.slice(0, 8)}; review before deleting`)
+  expect(lines.join('\n')).not.toContain('t3-branch')
+  expect(lines.at(-1)).toBe(`  git -C '${clone}' branch -D batch/x`)
+
+  git(['push', '-q', '--force', 'origin', `${t1}:refs/heads/t1-branch`], other)
+  expect((await cleanupLines(landedOnly, landedOnly.batch!)).join('\n'))
+    .toContain(`git -C '${clone}' push origin --delete t1-branch`)
+})

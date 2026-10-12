@@ -1,6 +1,6 @@
 ---
 name: herdr-pipeline
-description: Use when running, orchestrating, checking on or unsticking a batch of Beads issues (beads) through the herdr pipeline plugin (stein.pipeline) — the `hpipe` CLI (start, task, tier, dispatch, status, show, decide, answer, rewind, release, forget, next, bead show, escalate, discover, discoveries, close), review tiers, worker agents in herdr worktrees, escalated or stalled tasks, "stuck input", "waiting on you", or a dead orchestrator/supervisor pane.
+description: Use when running, orchestrating, checking on or unsticking a batch of Beads issues (beads) through the herdr pipeline plugin (stein.pipeline) — the `hpipe` CLI (start, start --single-pr, task, tier, dispatch, submit, batch-check, status, show, decide, answer, rewind, release, forget, next, bead show, escalate, discover, discoveries, close), review tiers, a batch shipped as one PR (land-queue, sync, landing on a batch branch, ship), worker agents in herdr worktrees, escalated or stalled tasks, "stuck input", "waiting on you", or a dead orchestrator/supervisor pane.
 ---
 
 # herdr pipeline (`hpipe`)
@@ -42,6 +42,13 @@ behaviour; this skill does.
 
 1. `hpipe start "<title>" [--prefix <p>]` — the first start in a repo sets up its Beads store (needs
    `bd` ≥ 1.3.1; the prefix must start with a letter) and prints the intake prompt. Follow it.
+   Add **`--single-pr [--batch-branch <name>]`** when the batch should ship as one release: every
+   task lands on a batch branch instead of opening a PR, and the run ends with one PR, one CI run and
+   one squash merge. The mode is fixed at start. It needs a repo that allows squash merges, and it
+   wants an executable `.claude/pipeline-check` (the tests and the typecheck): with no per-task CI,
+   that check is the only test a landing gets before the final PR, and without one `status` marks
+   every landing unverified. `start` refuses beside a supervisor that predates single-PR runs —
+   restart it (see **Recovery**).
 2. One bead per task; **the bead's brief is the worker's entire brief** (goal, acceptance criteria,
    `file:line` pointers), captured when the task is registered. Check the backlog first: `hpipe next`
    shows bv's top 10 recommendations among unheld open beads — the picks claimable `now` (capped by
@@ -90,6 +97,10 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | "Ready to merge — PR #n" | Check for conflicts with anything merged since (rebase + re-run bootstrap if needed), then merge. Merging is yours; nothing merges automatically |
 | Workers recorded out-of-scope work (`hpipe discover`) | At branch review: `hpipe discoveries` lists it, `hpipe discoveries --file` files it as beads labelled `discovered` (in order; a failure stops it, and a retry carries on without duplicates) |
 | The PR merged | Nothing to do: the supervisor closes the task's bead and moves it on |
+| Single-PR: "Land tN on batch/x" | Run the printed `git -C '<repo>' push origin <sha>:refs/heads/<batch>` exactly — that sha, no force, never the branch tip. If the push is refused for any reason, end your turn: the batch moved and the task syncs. Never `git pull` in the repo root, and never push to the task's branch while it waits to land |
+| Single-PR: tN waits in `land-queue` | Nothing: one task lands at a time and the slot passes on its own. Only a task with no agent that must sync needs you — status prints the `agent start` line; its brief and sync prompt are already queued |
+| Single-PR: "Ship — run …: one PR from batch/x" | Follow the ship prompt: bring the batch checkout up to date, `hpipe batch-check`, then `gh pr create` (or `gh pr edit`) with the printed body file. The PR clears only at a head `batch-check` recorded, so re-run it after any push to the batch |
+| Single-PR: "Merge the batch PR" | Run the two printed commands: `gh pr edit … --body-file`, then `gh pr merge … --squash`. Squash only — the release notes come from the override block. Merging is yours |
 | A task turns out bigger than its tier (research or a decision finds a contract, a migration, another surface) | `hpipe tier --task <id> <higher> --why "…"`. The current phase completes; only the next step changes. Never lower a tier: it is refused from pipeline panes, so the user runs it from their own. `hpipe show --task <id>` prints `tier:`, `tier log:` and `visited:` |
 | Anything else | `hpipe status` (fleet, "waiting on you", held deliveries); `hpipe show --task <id>` for one task |
 
@@ -110,6 +121,10 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | The repo's `Board: …` tab is gone | `herdr plugin action invoke board --plugin stein.pipeline` from a pane in the repo, or let the supervisor reopen it next tick |
 | Stop / restart a whole run | `hpipe abort <run>` / `hpipe resume <run>` |
 | Plugin upgraded | Restart the supervisor after upgrading: close the `Pipeline supervisor` pane, then `herdr plugin action invoke supervisor --plugin stein.pipeline` (or restart the session). An old supervisor beside a new CLI routes tasks by the old table |
+| Single-PR: red CI on the batch PR | Three routes, in order: an environmental failure gets an empty commit pushed to the batch; a small defect (a few lines, in files the failure names, nothing the release notes would mention) is fixed by a subagent in the batch checkout, then `hpipe batch-check`; a bigger defect becomes a fix task — `hpipe task …` registers it into the run (it moves the run back to `execute`), then `hpipe dispatch --done`. The batch PR gets **one** repair: a second red escalates the run, and `hpipe rewind <run> ship` gives it another |
+| Single-PR: a branch-review BLOCKER too big to patch on the batch | Register a fix task the same way; registering works in `branch-review` and every ship phase until the PR merges |
+| Single-PR: a sync was not a clean merge | Nothing: the task goes back through its reviews, which read the resolution. That review spends the task's review counter, so a task that already took one BLOCKER escalates on the next |
+| Single-PR: anything touching the batch branch | Never force-push, rebase, squash or delete it, and never land anything but the printed sha: every base, every landing check and the release notes read its history |
 
 `hpipe brief --task <id>` reprints a task's brief and `hpipe bead show <id>` a bead as Beads holds it now (both read-only). `forget <workspace>` only unbinds a workspace. `drain` just flushes the plugin's event queue — you
 never need it in normal use.
