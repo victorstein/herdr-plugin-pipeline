@@ -101,6 +101,12 @@ function noteQueued(run: Run): boolean {
 
 export interface LiftDeps {
   io: LimitIO
+  /**
+   * Every run the supervisor drives, read from disk now. Not the tick's copies: a run
+   * that sat out the tick after two lost saves would be lifted without its re-arm,
+   * and one whose advancing threw half way would be saved with its half-done changes.
+   */
+  listRuns: () => Promise<Run[]>
   /** `saveOrReapply` with the one effect. */
   save: (run: Run, effect: RunEffect) => Promise<SaveOutcome>
   renderResume: (task: Task) => Promise<string>
@@ -115,12 +121,13 @@ export interface LiftDeps {
  * pane is read once for the resume guard; each run it touches is saved with the
  * lift as its effect. A pane is lifted only once every run it touches has landed
  * that save, so a failed save leaves it limited and the lift is tried again next
- * tick. Returns the runs whose tick copy is now stale, for the stall step to skip.
+ * tick. Returns the ids of the runs it touched: the tick's copies of them are
+ * stale now, and the stall step skips them.
  */
-export async function liftLimits(limits: UsageLimits, runs: readonly Run[], deps: LiftDeps): Promise<Set<Run>> {
-  const stale = new Set<Run>()
+export async function liftLimits(limits: UsageLimits, deps: LiftDeps): Promise<Set<string>> {
+  const touchedRuns = new Set<string>()
   const due = limits.due()
-  if (due.length === 0) return stale
+  if (due.length === 0) return touchedRuns
 
   const lifts = await Promise.all(due.flatMap((pane) => {
     const limit = limits.get(pane)
@@ -135,7 +142,7 @@ export async function liftLimits(limits: UsageLimits, runs: readonly Run[], deps
   const failed = new Set<string>()
   const log = deps.log ?? warnToTick
 
-  for (const run of runs) {
+  for (const run of await deps.listRuns()) {
     const resume = new Map<string, { phase: TaskPhase; text: string }>()
     for (const task of run.tasks) {
       if (task.pane_id === null || !duePanes.has(task.pane_id) || taskRow(task.phase).actor !== 'worker') continue
@@ -144,16 +151,16 @@ export async function liftLimits(limits: UsageLimits, runs: readonly Run[], deps
     const effect = liftEffect(lifts, { resume, note, hpipe: deps.hpipe }, deps.now())
     const touched = effect(run)
     if (touched.size === 0) continue
+    touchedRuns.add(run.run_id)
     try {
-      if (await deps.save(run, (fresh) => { effect(fresh) }) === 'reapplied') stale.add(run)
+      await deps.save(run, (fresh) => { effect(fresh) })
     } catch (error) {
       if (!isUnlandedSave(error)) throw error
-      stale.add(run)
       for (const pane of touched) failed.add(pane)
       log(`run ${run.run_id}: usage-limit lift not saved (${error.message}); tried again next tick`)
     }
   }
 
   for (const pane of due) if (!failed.has(pane)) limits.lifted(pane)
-  return stale
+  return touchedRuns
 }

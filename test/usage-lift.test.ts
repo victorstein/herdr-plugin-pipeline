@@ -156,12 +156,13 @@ const SCREEN = [`  ${LINE.text}`, '', '─'.repeat(40), '❯ ', '─'.repeat(40)
 const io = (status: AgentStatus = 'done', screen = SCREEN) => ({
   paneReadStyled: async () => screen, agentStatus: async () => status,
 })
-const deps = (over: Partial<Parameters<typeof liftLimits>[2]> = {}) => {
+const deps = (runs: Run[], over: Partial<Parameters<typeof liftLimits>[1]> = {}) => {
   const saved: Run[] = []
   return {
     saved,
     deps: {
       io: io(),
+      listRuns: async () => runs,
       save: async (run: Run, effect: RunEffect): Promise<SaveOutcome> => { saved.push(run); void effect; return 'saved' },
       renderResume: async (task: Task) => `carry on with ${task.phase}`,
       note: async () => NOTE,
@@ -172,11 +173,13 @@ const deps = (over: Partial<Parameters<typeof liftLimits>[2]> = {}) => {
   }
 }
 
-test('liftLimits saves each touched run once and lifts the mark only after', async () => {
+test('liftLimits saves each touched run once, read from disk, and lifts the mark only after', async () => {
   const limits = limited()
   const run = runWith(mkTask())
-  const { saved, deps: d } = deps()
-  expect(await liftLimits(limits, [run, runWith(mkTask({ pane_id: 'w9:p1' }))], d)).toEqual(new Set())
+  const untouched = runWith(mkTask({ pane_id: 'w9:p1' }))
+  untouched.run_id = 'r2'
+  const { saved, deps: d } = deps([run, untouched])
+  expect(await liftLimits(limits, d)).toEqual(new Set(['r1']))
   expect(saved).toEqual([run])
   expect(limits.isLimited('w4:p1')).toBe(false)
   expect(run.outbox?.some((e) => e.kind === 'resume')).toBe(true)
@@ -184,23 +187,21 @@ test('liftLimits saves each touched run once and lifts the mark only after', asy
 
 test('nothing is due before the reset plus the grace', async () => {
   const limits = limited(NOW - 1)
-  const { saved, deps: d } = deps()
-  await liftLimits(limits, [runWith(mkTask())], d)
+  const { saved, deps: d } = deps([runWith(mkTask())])
+  await liftLimits(limits, d)
   expect(saved).toEqual([])
   expect(limits.isLimited('w4:p1')).toBe(true)
 })
 
-test('a save that lands on a fresh copy reports the run stale; one that throws keeps the mark', async () => {
-  const run = runWith(mkTask())
-  const reapplied = deps({ save: async () => 'reapplied' })
+test('a save that lands on a fresh copy lifts the mark; one that throws keeps it for next tick', async () => {
+  const reapplied = deps([runWith(mkTask())], { save: async () => 'reapplied' })
   const limits = limited()
-  expect(await liftLimits(limits, [run], reapplied.deps)).toEqual(new Set([run]))
+  expect(await liftLimits(limits, reapplied.deps)).toEqual(new Set(['r1']))
   expect(limits.isLimited('w4:p1')).toBe(false)
 
-  const failing = deps({ save: async () => { throw new StaleRunError('r1') } })
+  const failing = deps([runWith(mkTask())], { save: async () => { throw new StaleRunError('r1') } })
   const kept = limited()
-  const other = runWith(mkTask())
-  expect(await liftLimits(kept, [other], failing.deps)).toEqual(new Set([other]))
+  expect(await liftLimits(kept, failing.deps)).toEqual(new Set(['r1']))
   expect(kept.isLimited('w4:p1')).toBe(true)
 })
 
@@ -215,7 +216,7 @@ test('a pane found working, with the line gone, or continuing by itself is re-ar
   ]
   for (const [why, paneIO] of cases) {
     const run = runWith(mkTask())
-    await liftLimits(limited(), [run], deps({ io: paneIO }).deps)
+    await liftLimits(limited(), deps([run], { io: paneIO }).deps)
     expect(run.outbox ?? [], why).toEqual([])
     expect(run.tasks[0]?.stall, why).toMatchObject(REARMED)
   }

@@ -524,8 +524,11 @@ async function main(): Promise<void> {
       // Before the stall step, and in the same tick: a pane the step lifts is re-armed
       // and saved before any ladder is evaluated, so none sees it neither limited nor
       // re-armed.
-      const liftedStale = await liftLimits(gate.limits, runs, {
+      const lifted = await liftLimits(gate.limits, {
         io: herdr,
+        listRuns: async () => (await listRuns(stateDir, session))
+          .filter(isCurrentSchemaRun)
+          .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key)),
         save: (run, effect) => saveOrReapply(stateDir, run, [effect]),
         renderResume: (task) => renderPrompt(pluginRoot, 'usage-resume', {
           phase: task.phase, task_id: task.task_id, branch: task.branch,
@@ -534,7 +537,7 @@ async function main(): Promise<void> {
         hpipe,
         now: Date.now,
       })
-      for (const run of liftedStale) unsaved.add(run)
+      for (const run of runs) if (lifted.has(run.run_id)) unsaved.add(run)
 
       const savedRuns = runs.filter((run) => !unsaved.has(run))
       await applyStalls(
