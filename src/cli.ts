@@ -10,16 +10,16 @@ import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
-import { defaultBatchBranch, sha8 } from './lib/batch'
+import { checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
-import { checkLine, repoCheck } from './lib/check'
+import { CHECK_REL, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
 import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import {
-  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, freshDispatchBase, pushToOrigin,
-  remoteBranchHead,
+  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, fetchFromOrigin,
+  freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
 } from './lib/dispatch-base'
 import { Gh } from './lib/gh'
 import { detectCycle, gateStatus } from './lib/gating'
@@ -52,10 +52,12 @@ import {
 } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import { renderRunPhasePrompt } from './supervisor/deliver'
+import { renderRunPhasePrompt, uncommittedPaths } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
-import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
+import { checkReleaseTitle, releaseSections } from './lib/release-title'
+import { headOf, isAncestor, nothingToLand, syncWalk, type SyncWalk } from './lib/sync-walk'
+import type { Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase } from './lib/types'
 import { isAgentReady } from './lib/machine'
 import { type LimitReading, readLimit, resetText } from './supervisor/usage-limits'
 
@@ -1117,6 +1119,154 @@ async function rewind(ctx: Ctx, input: {
 }
 export const cmdRewind = retryingOnStale(rewind)
 
+export interface SubmitDeps {
+  /** An open PR from `branch`, by number. */
+  openPr: (repoRoot: string, branch: string) => Promise<number | null>
+  runCheck?: (checkout: string, logPath: string) => Promise<CheckRun>
+}
+
+const REAL_SUBMIT_DEPS: SubmitDeps = {
+  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prForBranch(branch),
+}
+
+interface SubmitInput { taskId: string; title: string | null; repoKey: string | null; runId: string | null }
+
+type CheckOnce = (checkout: string, logPath: string, head: string) => Promise<CheckRun>
+
+/** The title a sync keeps when it names none: the change's own, from its last submission or landing. */
+function standingTitle(task: Task): string | null {
+  return task.submission?.title ?? task.landed?.at(-1)?.title ?? null
+}
+
+function submittedLine(task: Task, sub: Submission, batch: Batch): string {
+  const checked = sub.check === 'passed' ? 'check passed' : `no ${CHECK_REL} declared`
+  const head = `submitted ${task.task_id} at ${sha8(sub.head_sha)} as "${sub.title}" (${sub.kind}; ${checked})`
+  if (sub.kind !== 'sync') return head
+  return sub.merge === 'clean'
+    ? `${head} — a clean merge of ${batch.branch}: it lands next`
+    : `${head} — not a clean merge of ${batch.branch} (at ${sha8(sub.dirty_at ?? sub.head_sha)}): it goes back ` +
+      'through review before it lands'
+}
+
+/**
+ * The single-PR worker's equivalent of opening a PR. Local refusals come first,
+ * then one fetch, one ls-remote and one PR lookup, then the check, which is the
+ * slow one. Nothing is recorded unless every one of them passes.
+ */
+async function submit(ctx: Ctx, input: SubmitInput, deps: SubmitDeps, checkOnce: CheckOnce): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'driven', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+  const batch = run.batch
+  if (batch === undefined) {
+    return fail(`${run.run_id} is a per-task run: its tasks open PRs, and there is nothing to submit`)
+  }
+  if (task.phase !== 'implement' && task.phase !== 'sync') {
+    return fail(`${task.task_id} is in ${task.phase}; submit answers only implement and sync`)
+  }
+  const kind = task.phase
+  const checkout = task.checkout_path
+  if (checkout === null) return fail(`${task.task_id} has no worktree on record, so there is nothing to submit from`)
+
+  const title = input.title ?? (kind === 'sync' ? standingTitle(task) : null)
+  if (title === null) {
+    return fail(kind === 'implement'
+      ? '--title is required: it is this change\'s line in the batch PR\'s release notes'
+      : `--title is needed: no earlier submission of ${task.task_id} names this change`)
+  }
+  const titleCheck = checkReleaseTitle(title, releaseSections(checkout))
+  if (!titleCheck.ok) return fail(titleCheck.error)
+
+  const uncommitted = await uncommittedPaths(checkout)
+  if (uncommitted === null) return fail(`git could not read the status of ${checkout}`)
+  if (uncommitted.length > 0) {
+    const more = uncommitted.length > 5 ? ', …' : ''
+    return fail(`${checkout} has uncommitted or untracked work (${uncommitted.slice(0, 5).join(', ')}${more}): ` +
+      'commit it or ignore it, and push — the check must test the pushed tree')
+  }
+  const head = await headOf(checkout)
+  if (head === null) return fail(`git could not read HEAD in ${checkout}`)
+
+  const fetchFailed = await fetchFromOrigin(checkout, trackingRefspec(batch.branch))
+  if (fetchFailed !== null) return fail(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  const pushed = await remoteBranchHead(checkout, task.branch)
+  if (!pushed.ok) return fail(`could not ask origin about ${task.branch}: ${pushed.reason}`)
+  if (pushed.sha !== head) {
+    return fail(`push first: origin has ${task.branch} at ${pushed.sha === null ? 'nothing' : sha8(pushed.sha)}, ` +
+      `and HEAD is ${sha8(head)}`)
+  }
+  const batchRef = `refs/remotes/origin/${batch.branch}`
+  const empty = await nothingToLand(checkout, batchRef)
+  if (empty === null) return fail(`git could not compare ${task.branch} with ${batch.branch}`)
+  if (empty) {
+    return fail(`nothing to land: ${task.branch} has no change that ${batch.branch} lacks outside ${ARTIFACT_ROOT}/`)
+  }
+
+  let merge: SyncWalk | null = null
+  if (kind === 'implement' && task.head_sha_at_entry !== null) {
+    const sinceReview = await syncWalk(checkout, task.head_sha_at_entry, batchRef)
+    if (sinceReview.clean) {
+      return fail(`nothing but merges of ${batch.branch} since the review sent it back: commit the fixes, push, ` +
+        'and submit again')
+    }
+  }
+  if (kind === 'sync') {
+    const current = await isAncestor(checkout, batchRef, head)
+    if (current === null) return fail(`git could not compare ${task.branch} with ${batch.branch}`)
+    if (!current) return fail(`still behind ${batch.branch}: merge it and push — ${mergeBatchCommand(batch)}`)
+    merge = await syncWalk(checkout, task.land_sha ?? null, batchRef)
+  }
+
+  const pr = await deps.openPr(run.repo_root, task.branch)
+  if (pr !== null) {
+    return fail(`${task.branch} has an open PR, #${pr}, which would carry every sibling's commits into ` +
+      `${batch.into}. Close PR #${pr}, then submit again`)
+  }
+
+  const check = repoCheck(checkout)
+  if (check.kind === 'not-executable') {
+    return fail(`${CHECK_REL} is not executable in ${checkout}: chmod +x ${CHECK_REL}, commit and push that, ` +
+      'then submit again')
+  }
+  let outcome: CheckOutcome = 'none'
+  if (check.kind === 'ready') {
+    const log = join(checksDir(ctx.stateDir, run), `${task.task_id}-${sha8(head)}.log`)
+    const ran = await checkOnce(checkout, log, head)
+    if (ran.code !== 0) {
+      return fail(`${CHECK_REL} failed (exit ${ran.code}); its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
+    }
+    outcome = 'passed'
+  }
+
+  const submission: Submission = {
+    kind, title, head_sha: head, at: Date.now(), check: outcome,
+    ...(merge === null ? {} : merge.clean ? { merge: 'clean' } : { merge: 'dirty', dirty_at: merge.at }),
+  }
+  task.submission = submission
+  await saveRun(ctx.stateDir, run)
+  return ok([submittedLine(task, submission, batch), ...(titleCheck.note === null ? [] : [`note: ${titleCheck.note}`])]
+    .join('\n'))
+}
+
+export async function cmdSubmit(
+  ctx: Ctx, input: SubmitInput, deps: SubmitDeps = REAL_SUBMIT_DEPS,
+): Promise<CmdResult> {
+  // A retry re-reads the task from scratch, but the check ran on a commit, and the
+  // commit has not changed: running it again would only double the wait.
+  const ranChecks = new Map<string, Promise<CheckRun>>()
+  const checkOnce: CheckOnce = (checkout, logPath, head) => {
+    let ran = ranChecks.get(head)
+    if (ran === undefined) {
+      ran = (deps.runCheck ?? runCheck)(checkout, logPath)
+      ranChecks.set(head, ran)
+    }
+    return ran
+  }
+  return retryingOnStale(submit)(ctx, input, deps, checkOnce)
+}
+
 export type CloseBead = (repoKey: string, bead: string, reason: string, force: boolean) => Promise<Done | BdFailure>
 
 const cliCloseBead = (stateDir: string): CloseBead => (repoKey, bead, reason, force) =>
@@ -1753,6 +1903,7 @@ const USAGE: Record<string, string[]> = {
   abort: ['hpipe abort <run-id>'],
   forget: ['hpipe forget <workspace-id>'],
   close: ['hpipe close --task <id> [--force] [--run <run-id>]'],
+  submit: ['hpipe submit --task <id> [--title "<conventional title>"] [--run <run-id>]'],
 }
 
 const commandUsage = (forms: string[]): string => `usage: ${forms.join('\n       ')}`
@@ -1994,6 +2145,15 @@ async function dispatch(argv: string[]): Promise<number> {
         tier: positionals(rest)[0] ?? '',
         why: flag(rest, 'why') ?? '',
         callerPane: process.env.HERDR_PANE_ID || null,
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'submit':
+      out = await cmdSubmit(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        title: flag(rest, 'title'),
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })

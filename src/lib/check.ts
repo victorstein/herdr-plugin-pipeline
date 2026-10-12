@@ -1,5 +1,5 @@
-import { statSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 /** Printed verbatim into prompts as well as resolved on disk, like `BOOTSTRAP_REL`. */
 export const CHECK_REL = '.claude/pipeline-check'
@@ -29,4 +29,29 @@ export function checkLine(check: Check): string {
     return `check: ${CHECK_REL} (NOT EXECUTABLE — chmod +x it on the default branch, or every submit refuses)`
   }
   return `check: ${CHECK_REL}`
+}
+
+export interface CheckRun { code: number; tail: string }
+
+const TAIL_LINES = 40
+
+/**
+ * Runs the repo's check in `checkout`, writing everything it prints to `logPath`.
+ * Never in the supervisor's tick, which is serial: a test suite takes minutes.
+ */
+export async function runCheck(checkout: string, logPath: string): Promise<CheckRun> {
+  mkdirSync(dirname(logPath), { recursive: true })
+  const log = openSync(logPath, 'w')
+  let code: number
+  try {
+    const proc = Bun.spawn([join(checkout, CHECK_REL)], { cwd: checkout, stdin: 'ignore', stdout: log, stderr: log })
+    code = await proc.exited
+  } catch (error) {
+    writeFileSync(logPath, `${CHECK_REL} could not be run: ${String(error)}\n`)
+    code = -1
+  } finally {
+    closeSync(log)
+  }
+  const lines = readFileSync(logPath, 'utf8').replace(/\n+$/, '').split('\n')
+  return { code, tail: lines.slice(-TAIL_LINES).join('\n') }
 }
