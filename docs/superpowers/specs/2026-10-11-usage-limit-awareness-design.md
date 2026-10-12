@@ -466,3 +466,24 @@ agent is idle, it refuses without sending:
 - **Pre-existing, not changed here.** Probes are sent to a `working` pane and count as rungs (`stall.ts:523-533`),
   so a worker that stays busy for 135 min reaches the escalate rung, where only the `working` check holds it. The
   lift's re-arm resets that ladder; the general behaviour is a separate question.
+
+## 13. After the pass-2 review
+
+`docs/superpowers/reviews/2026-10-11-usage-limit-awareness-adversarial-2.md` found the design CLEAR, with 2 majors and 8 minors.
+The implementation answers them as follows. Where this section and §1–§12 disagree, this section holds.
+
+| Finding | Answer in the code |
+|---|---|
+| M1 `stale` never cleared | `UsageLimits.noteActivity` runs for every `working` event in a drained batch, not only the last, and for every prompt herdr confirmed (`makeCourier`). It clears `stale`, so a resume rejected again is marked again. A marked pane seen working and then stopped on the same line stays limited |
+| M2 fifth `queuedWorkerPrompt` caller | `status.ts` reads a queued resume like a queued phase prompt (`undeliveredWorkerPrompt`): "nothing for you — its resume after Claude's usage limit is queued for …", or "YOUR move" only when it is held or failing. Tested through `parkedFooter` |
+| m1 `nudge` without a limit | `nudge` needs the limit line still on the pane or the supervisor's `usage_limit` hold, and refuses otherwise |
+| m2 15 min tolerance | A line read within 15 min of the pane's last activity is fresh, dated with a 1 min tolerance, so a reset just under a day away is tomorrow's. A line with no such evidence keeps the 15 min tolerance |
+| m3 rendered forms | Parsed by segment, from the 2.1.296 bundle: `You've hit your <label>` then `· resets <when>`, `· your <limit> resets <when>` (team and org budgets, dated by the named limit), `· progress saved`. The credit blocks `You've reached your …` and `You're out of …` count too. A wrap at any space or inside the zone is joined. The year form `Jan 2, 2027 at 3:30am` parses. Fixtures are the captures with their blank lines and box rules rebuilt. §1's reason was wrong: a tool result's first line is also two columns in, and the idle requirement is what rules it out |
+| m4 auto-continue | Read in the same walk from the last notice below the limit line: armed only if that notice is `continuing automatically` (any case). A cancelled or finished wait counts as not armed. Still uncaptured: whether these notices start with `⏺`, and what herdr reports for an armed wait. The runbook's §4d.5 records both |
+| m5 the lift's runs | `liftLimits` reads every driven run from disk, not the tick's copies, and saves those. A run that sat out the tick is re-armed, and a run whose advancing threw is not saved with half-done changes. The tick's copies of the runs it touched sit out the stall step |
+| m6 read cost | Re-reads are scheduled from the last reading, conclusive or not. Only panes that belong to a run are read. A pane whose last event is `working` is not read. `forgetGone` ignores an empty pane list |
+| m7 persisted record | `delivery.<session>.json` keeps `limits.marks` and `limits.stale` apart |
+| m8 `dispatch --task` | Kept for a pane reused by a rewind. A fresh agent's brief rejected by the limit is recovered by the resume: the brief is the last thing in its context, and "carry on" acts on it |
+
+Also changed from §9: `hpipe show` prints no `paused:` line, because it does not read the supervisor's holds. `status` and the digest
+carry the clause.

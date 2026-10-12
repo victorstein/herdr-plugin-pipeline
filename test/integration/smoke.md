@@ -596,10 +596,22 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
    rule must still show at least two `─` before its name in the narrowest pane you use. When the
    held send is a worker's phase prompt, also check that the task names the held prompt rather
    than `worker idle with nothing at …` (#136; see §2).
-5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
-   for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
-   its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see
-   the limit — a finding.
+5. **Usage limit.** Limits are frequent (50 rejected requests in two weeks of worker transcripts), so
+   one is likely in any long run. When a pane shows `You've hit your … · resets …`:
+   - **Capture it raw**, before anything else touches the pane: `herdr pane read <pane> --source
+     visible --lines 40 --format ansi > limited.ansi`, the same with `--format text > limited.txt`,
+     and `herdr agent get <pane>`. Never through `grep` or `cut`: the parser needs the box rules and
+     the dim `⎿`. Compare them with the fixtures in `test/usage-limit.test.ts` and add them there.
+   - **Pass:** the supervisor logs `usage limit in <pane> until <reset>` once; `hpipe status` shows
+     the worker `paused by Claude's usage limit, resets …` and `⚠ usage limit in <pane>`; no stall
+     probe or escalation reaches it however long the outage; 90 s after the reset the log says
+     `usage limit in <pane> lifted`, the worker gets one `Usage limit lifted` prompt and carries on
+     without restarting its phase, and the orchestrator gets one note naming it.
+   - **Record** what herdr reports for the limited pane (`done` on 2026-10-11), and whether Claude's
+     own auto-continue appears (`continuing automatically`); if it does, capture that screen too and
+     check that no resume prompt was sent on top of it.
+   - `hpipe nudge --task <id>` on a limited worker queues the resume and the log says the hold is
+     released; on a worker with no limit line it refuses.
 
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 

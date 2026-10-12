@@ -303,6 +303,37 @@ The answer is recorded immediately but the worker resumes **only once the answer
 delivered** to its pane — a worker that is busy stays blocked, and `status` reports
 "answered but undelivered" rather than pretending the decision was applied.
 
+## Claude's usage limit
+
+When Claude's usage limit stops an agent, its pane shows `You've hit your session limit · resets
+10:20am (America/Managua)` and herdr reports it idle. The supervisor reads that line, from the
+screen it already reads before every send and from each pane that goes idle, and holds the pane
+until the reset:
+
+- nothing is typed into it: prompts and digests wait in the outbox;
+- its stall ladder stops: no probe, no escalation, however long the outage;
+- 90 s after the reset it restarts every ladder waiting on the pane. A worker still stopped where
+  the limit left it gets one `Usage limit lifted` prompt telling it to carry on, without starting
+  the phase over, and the orchestrator hears once what resumed.
+
+Nothing is resumed twice. A worker whose phase prompt is queued, whose phase changed meanwhile,
+that was never briefed, or that Claude's own auto-continue is resuming, gets no resume prompt.
+`hpipe status` shows `paused by Claude's usage limit, resets …` against each worker, and
+`⚠ usage limit in <pane>` for what is held.
+
+If a worker is still idle a few minutes after the reset:
+
+    hpipe nudge --task <id> | --all [--run <run-id>]
+
+It queues the same resume, restarts the ladder and releases the supervisor's hold. It changes no
+phase, pass count, verdict or history, unlike a same-phase `rewind`, which restarts the phase from
+the top. It acts only on a worker whose pane still shows the limit line or that the supervisor is
+holding for one. When the reset could not be read, the hold stays until the pane moves on or you
+nudge it, and status lists that worker under "waiting on you".
+
+The limits are kept in `delivery.<session>.json` in the state dir, so a supervisor restarted
+mid-outage carries them on.
+
 ## Getting out
 
 | | |
@@ -316,7 +347,8 @@ delivered** to its pane — a worker that is busy stays blocked, and `status` re
 | Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`, which refuses while another run holds one of its beads) |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
 | Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
-| A pane stopped answering (agent exited, usage limit) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |
+| A pane stopped answering (agent exited) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |
+| Workers idle after Claude's usage limit | Nothing: the supervisor resumes them at the reset (see **Claude's usage limit**). If one is still idle a few minutes after, `hpipe nudge --task <id>`. Never `rewind` to the same phase for this |
 | A run from an older plugin version | It is not migrated or advanced, and does not block `hpipe start`. Finish it on the release that started it, or `hpipe abort <id>` |
 | A task's bead will not close | `hpipe status` shows bd's error once it has failed five times; fix that, or `hpipe close --task <id>` (`--force` only to override bd's close guards) |
 | Plugin misbehaving | `herdr plugin disable stein.pipeline` |
