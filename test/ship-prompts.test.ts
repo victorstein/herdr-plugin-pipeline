@@ -48,6 +48,13 @@ test('ship writes the PR body beside the run and renders the commands to check a
   expect(text).not.toContain('{{')
 })
 
+test('ship fetches the default branch before asking whether the batch still merges into it', async () => {
+  const text = await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })
+  const checkout = join(dir, 'checkouts', 'r1')
+  expect(text).toContain(`git -C '${checkout}' fetch origin +refs/heads/main:refs/remotes/origin/main && ` +
+    `git -C '${checkout}' merge-tree --write-tree origin/main origin/batch/x`)
+})
+
 test('ship with a PR already open updates its body instead, and once the checkout exists only pulls it', async () => {
   const run = shipping('ship', { pr: 301 })
   mkdirSync(run.batch!.checkout, { recursive: true })

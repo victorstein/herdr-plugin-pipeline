@@ -7,7 +7,7 @@ import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { runChangeVars } from '../lib/change-prompt'
-import { mainlineBranch } from '../lib/dispatch-base'
+import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
 import { IMPLEMENT_MODEL } from '../lib/models'
@@ -25,7 +25,6 @@ import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
 import { shellQuoted } from '../lib/unstarted'
 import { FINISHED } from './teardown'
-import { remoteBranchHeadCooled } from '../lib/dispatch-base'
 import { isAncestor } from '../lib/sync-walk'
 
 export interface DigestInput {
@@ -506,6 +505,13 @@ function checkSentence(batch: Batch): string {
       'the head it passed on.'
 }
 
+/** The ship steps fetch only the batch, so `origin/<into>` is as old as the last fetch of it, which may be the start. */
+function intoConflictCheck(batch: Batch): string {
+  const checkout = shellQuoted(batch.checkout)
+  return `git -C ${checkout} fetch origin ${trackingRefspec(batch.into)} && ` +
+    `git -C ${checkout} merge-tree --write-tree origin/${batch.into} origin/${batch.branch}`
+}
+
 async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
   const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? ''
   const { body, squash } = writeShipFiles(stateDir, run)
@@ -525,7 +531,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   return renderPrompt(pluginRoot, 'ship', {
-    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch),
+    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
     pr_command: batch.pr === null
       ? `gh pr create --base ${batch.into} --head ${batch.branch} --title ${shellQuoted(suggestedPrTitle(run))} ` +
         `--body-file ${shellQuoted(body)}`

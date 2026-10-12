@@ -1131,6 +1131,10 @@ Where the code departs from the text above, and why.
   run inside the agent's 10-minute Bash timeout, which killed the CLI with nothing said and left a hung
   check's children running. At the deadline the whole group is killed and the refusal says the check did
   not finish, with its log's tail. Making a slow suite fit is still the repo's business.
+- **`ship`'s conflict check fetches `<into>` first.** The ship steps fetch only the batch, so §4's
+  `merge-tree` read an `origin/<into>` as old as its last fetch, perhaps the start, and a PR opened with
+  conflicts against a moved default branch gets no CI, leaving `ship-ci` to wait for good. The step now
+  renders the explicit-refspec fetch of `<into>` and the `merge-tree` as one command, in the checkout.
 - **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
   that holds uncommitted work, so the head it records is the tree it checked. With no check declared
   it still records the head, as `check: 'none'`, so `ship` can clear.
