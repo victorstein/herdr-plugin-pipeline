@@ -1122,6 +1122,10 @@ Where the code departs from the text above, and why.
   pull path adds the same line "if the pull changed what it builds", as `sync.md` does. Without it,
   `batch-check` ran the check in a tree with no dependencies installed, and `ship.md` sent a subagent to
   fix a toolchain as though it were a defect.
+- **The check runs under a 9-minute deadline, in its own process group.** `submit` and `batch-check`
+  run inside the agent's 10-minute Bash timeout, which killed the CLI with nothing said and left a hung
+  check's children running. At the deadline the whole group is killed and the refusal says the check did
+  not finish, with its log's tail. Making a slow suite fit is still the repo's business.
 - **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
   that holds uncommitted work, so the head it records is the tree it checked. With no check declared
   it still records the head, as `check: 'none'`, so `ship` can clear.

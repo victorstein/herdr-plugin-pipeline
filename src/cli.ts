@@ -13,7 +13,7 @@ import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib
 import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
-import { CHECK_REL, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
+import { CHECK_REL, checkFailure, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
 import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
@@ -1366,7 +1366,7 @@ async function prepareSubmission(
     const log = join(checksDir(ctx.stateDir, run), `${task.task_id}-${sha8(head)}.log`)
     const ran = await (deps.runCheck ?? runCheck)(checkout, log)
     if (ran.code !== 0) {
-      return refused(`${CHECK_REL} failed (exit ${ran.code}); its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
+      return refused(`${CHECK_REL} ${checkFailure(ran)}; its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
     }
     outcome = 'passed'
   }
@@ -1457,7 +1457,7 @@ async function batchCheck(
     const log = join(checksDir(ctx.stateDir, run), `batch-${sha8(head)}.log`)
     const ran = await check(batch.checkout, log)
     if (ran.code !== 0) {
-      return refused(`${CHECK_REL} failed on ${batch.branch} at ${sha8(head)} (exit ${ran.code}); its last lines:` +
+      return refused(`${CHECK_REL} ${checkFailure(ran)} on ${batch.branch} at ${sha8(head)}; its last lines:` +
         `\n\n${ran.tail}\n\nthe whole log: ${log}`)
     }
     outcome = 'passed'

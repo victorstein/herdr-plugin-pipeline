@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CHECK_REL, checkLine, repoCheck } from '../src/lib/check'
+import { CHECK_DEADLINE_MS, CHECK_REL, checkFailure, checkLine, repoCheck, runCheck } from '../src/lib/check'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -44,4 +44,42 @@ test('start prints one check line, and with none says landings rest on the worke
   )
   expect(checkLine({ kind: 'not-executable' }))
     .toBe('check: .claude/pipeline-check (NOT EXECUTABLE — chmod +x it on the default branch, or every submit refuses)')
+})
+
+test('a check gets less than the 10-minute Bash timeout submit runs under, so it is stopped before submit is', () => {
+  expect(CHECK_DEADLINE_MS).toBeLessThan(10 * 60_000)
+  expect(checkFailure({ code: 3, tail: '' })).toBe('failed (exit 3)')
+  expect(checkFailure({ code: -1, tail: '', timedOutAfterMs: CHECK_DEADLINE_MS }))
+    .toBe('did not finish within 9m and was stopped, with everything it started')
+})
+
+test('a check that hangs is stopped at its deadline with everything it started, and says so in its log', async () => {
+  const root = repoRoot(null)
+  const childPid = join(root, 'child.pid')
+  mkdirSync(join(root, '.claude'), { recursive: true })
+  writeFileSync(join(root, CHECK_REL), `#!/bin/sh\necho started\nsleep 30 &\necho $! > '${childPid}'\nwait\n`)
+  chmodSync(join(root, CHECK_REL), 0o755)
+  const log = join(root, 'check.log')
+
+  const started = Date.now()
+  const ran = await runCheck(root, log, 500)
+  expect(Date.now() - started).toBeLessThan(10_000)
+  expect(ran.timedOutAfterMs).toBe(500)
+  expect(ran.code).not.toBe(0)
+  expect(ran.tail).toContain('started')
+  expect(readFileSync(log, 'utf8')).toContain(`${CHECK_REL} was stopped after 0.5s`)
+
+  expect(existsSync(childPid)).toBe(true)
+  const pid = Number(readFileSync(childPid, 'utf8').trim())
+  await Bun.sleep(100)
+  expect(() => process.kill(pid, 0)).toThrow()
+})
+
+test('a check that finishes in time reports its own exit code', async () => {
+  const root = repoRoot(null)
+  mkdirSync(join(root, '.claude'), { recursive: true })
+  writeFileSync(join(root, CHECK_REL), '#!/bin/sh\necho red\nexit 3\n')
+  chmodSync(join(root, CHECK_REL), 0o755)
+  const ran = await runCheck(root, join(root, 'check.log'))
+  expect(ran).toEqual({ code: 3, tail: 'red' })
 })
