@@ -855,7 +855,14 @@ otherwise removes before you can read them.
    code itself with no subagent at all.
 3. **`Tier:` atop each verdict.** For every path under `verdicts:` in `hpipe show --task <id>`,
    `head -1 <checkout>/<path>` reads `Tier: <the task's tier>`.
-4. **`branch-review` runs.** Three tasks landed, so once the last is `done` the run goes `execute →
+4. **Each review runs at its own effort, and the plan review reads rather than runs.** `hpipe show`
+   prints `effort: worker high, reviews high (plan-review medium)` for the standard task and
+   `effort: worker xhigh, reviews xhigh` for the heavy one. In the worker panes, the standard task's
+   `plan-review` subagent is dispatched with `effort: medium` and its other reviews with `effort:
+   high`. In the `plan-review` subagent's transcript, record whether it ran the build or the tests,
+   or copied the worktree to apply the plan: the prompt now tells it not to, so any of those is a
+   finding. The plan itself has no step that pushes, opens a PR or runs `hpipe submit`.
+5. **`branch-review` runs.** Three tasks landed, so once the last is `done` the run goes `execute →
    branch-review`, the orchestrator's pane gets the final-review prompt, and its verdict opens
    `Tiers: t1 light, t2 standard, t3 heavy`. It clears to `done`.
 

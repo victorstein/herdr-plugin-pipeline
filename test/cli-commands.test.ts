@@ -1246,7 +1246,7 @@ test('the dispatched return keeps every header line above the one blank line', a
   expect(lines.slice(0, 6)).toEqual([
     'task_id: t1',
     'tier: standard (default)',
-    'effort: worker high, reviews high',
+    'effort: worker high, reviews high (plan-review medium)',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
@@ -1291,7 +1291,8 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
   expect(lines.slice(0, 6)).toEqual([
-    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high', 'files: none', 'bootstrap: none',
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high (plan-review medium)',
+    'files: none', 'bootstrap: none',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
@@ -1936,7 +1937,8 @@ test('a filed bead has no labels to read, so --title reads nothing', async () =>
   expect(result.ok).toBe(true)
   expect(shown()).toBe(0)
   expect(headLines(result.text).slice(0, 4)).toEqual([
-    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high', 'bead: hp-318 (filed)',
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high (plan-review medium)',
+    'bead: hp-318 (filed)',
   ])
 })
 
@@ -1986,6 +1988,12 @@ test('tier raises from any pane, logs the change, and writes nothing to run.hist
   }])
   expect(saved.history).toHaveLength(historyBefore)
   expect(saved.tasks[0]?.phase).toBe('implement')
+})
+
+test('a raise to standard says its plan review runs at a lower effort than its other reviews', async () => {
+  await seedTiered()
+  const result = await cmdTier(ctx(), tierInput({ tier: 'standard' }))
+  expect(result.text).toContain('Its reviews now run at effort high (plan-review medium);')
 })
 
 test('tier refuses to lower from the orchestrator pane or any worker pane, live or last', async () => {

@@ -3,9 +3,9 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
 import { newRun, withBatch } from '../src/lib/ledger'
-import { IMPLEMENT_MODEL, REVIEW_EFFORT, WORKER_EFFORT } from '../src/lib/models'
+import { IMPLEMENT_MODEL, PLAN_REVIEW_EFFORT, REVIEW_EFFORT, WORKER_EFFORT } from '../src/lib/models'
 import { TIERS } from '../src/lib/phases'
-import { phaseLoop, taskTiers, tierPromptVars } from '../src/lib/tier-prompt'
+import { effortSummary, phaseLoop, reviewEfforts, taskTiers, tierPromptVars } from '../src/lib/tier-prompt'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
@@ -47,6 +47,30 @@ test('only implement\'s coding subagent is pinned, to sonnet', () => {
 test('workers and reviewers run at an effort set by tier, never at the user default', () => {
   expect(WORKER_EFFORT).toEqual({ light: 'medium', standard: 'high', heavy: 'xhigh' })
   expect(REVIEW_EFFORT).toEqual({ light: 'high', standard: 'high', heavy: 'xhigh' })
+})
+
+// Its BLOCKER/MAJOR findings were mostly errors the implementer's own red/green
+// loop hits minutes later, so a standard plan review no longer pays for `high`.
+test('a plan review runs at medium on standard and at xhigh on heavy', () => {
+  expect(PLAN_REVIEW_EFFORT).toEqual({ light: 'medium', standard: 'medium', heavy: 'xhigh' })
+})
+
+test('review_effort is the effort of the review the task is in', () => {
+  const effortIn = (phase: TaskPhase, tier: 'light' | 'standard' | 'heavy') =>
+    tierPromptVars(PER_TASK, mkTask({ phase, tier })).review_effort
+  expect(effortIn('spec-review', 'standard')).toBe('high')
+  expect(effortIn('plan-review', 'standard')).toBe('medium')
+  expect(effortIn('pr-review', 'standard')).toBe('high')
+  expect(effortIn('plan-review', 'heavy')).toBe('xhigh')
+  expect(effortIn('pr-review', 'light')).toBe('high')
+})
+
+test('the review efforts name a review that runs at another effort than the rest', () => {
+  expect(reviewEfforts('light')).toBe('high')
+  expect(reviewEfforts('standard')).toBe('high (plan-review medium)')
+  expect(reviewEfforts('heavy')).toBe('xhigh')
+  expect(effortSummary(mkTask({ tier: 'standard' }))).toBe('worker high, reviews high (plan-review medium)')
+  expect(effortSummary(mkTask({ tier: 'light' }))).toBe('worker medium, reviews high')
 })
 
 test('the light loop skips plan-review and runs one combined PR review', () => {

@@ -36,7 +36,8 @@ behaviour; this skill does.
 - Run Claude with Opus as the default model. The orchestrator, the workers and every reviewer
   inherit it; only `implement`'s coding subagent is pinned, to Sonnet. Effort is pinned by tier
   instead: the `agent start` line in the dispatch block carries the worker's `--effort`, so run it as
-  printed, and never drop the flag.
+  printed, and never drop the flag. Each review prompt names its own `effort:`; a standard task's
+  `plan-review` runs at `medium`, below its other reviews, and the `effort:` line says so.
 
 ## Running a batch
 

@@ -1,4 +1,4 @@
-import type { Tier } from './phases'
+import type { TaskPhase, Tier } from './phases'
 
 /**
  * Only `implement`'s coding subagent is pinned. The orchestrator, the worker
@@ -18,3 +18,15 @@ export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export const WORKER_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'high', heavy: 'xhigh' }
 
 export const REVIEW_EFFORT: Record<Tier, Effort> = { light: 'high', standard: 'high', heavy: 'xhigh' }
+
+/**
+ * About 59% of the plan review's BLOCKER and MAJOR findings on berean-os were
+ * compile and command errors the implementer's own red/green loop hit minutes
+ * later, so below heavy it runs a notch lighter than the spec and PR reviews.
+ * Light runs no plan review; its entry serves a rewind into one.
+ */
+export const PLAN_REVIEW_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'medium', heavy: 'xhigh' }
+
+export function reviewEffort(tier: Tier, review: TaskPhase): Effort {
+  return review === 'plan-review' ? PLAN_REVIEW_EFFORT[tier] : REVIEW_EFFORT[tier]
+}

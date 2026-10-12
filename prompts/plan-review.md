@@ -24,14 +24,25 @@ Open the review with the line `Tier: {{tier}}`.
 
 Review `{{plan_path}}` adversarially against `{{spec_path}}`.
 
-Check specifically: does every spec requirement map to a step? Do types, function names and
-signatures stay consistent from step to step? Are there placeholders, vague steps, or steps that say
-what to do without showing how? Does every step start with a failing test, and does every step leave
-the tree working and committable? Could an implementer with no other context execute this plan
-literally and arrive at the spec? Does every file a step touches appear on a `FILES:` line at column
-0 outside any code block, as a repo-relative path or a directory prefix ending in `/` (not a glob)?
-Those lines are the file lock the pipeline enforces before implementation;
-a touched file missing from them is a MAJOR, fixed inline by adding it.
+Read the plan; do not apply it or build it. Every step starts with a failing test the implementer
+runs, and the build follows within minutes, so an error the plan's own red/green steps or the build
+would show at once — a compile error, a broken command, a wrong expected count — is theirs to hit, not
+yours to report. Spend the review where nothing downstream looks:
+
+- **Spec coverage.** Does every spec requirement map to a step, and does any step quietly drop or
+  narrow one?
+- **Behaviour the tests cannot see.** Logic a step writes that no test in the plan would exercise:
+  UI and device paths, workflow scripts, concurrency, error and fallback paths, data that persists.
+- **The file lock.** Does every file a step touches appear on a `FILES:` line at column 0 outside
+  any code block, as a repo-relative path or a directory prefix ending in `/` (not a glob)? Those
+  lines are the file lock the pipeline enforces before implementation; a touched file missing from
+  them is a MAJOR, fixed inline by adding it.
+- **Steps that would mislead the implementer.** A step that, followed faithfully, leads to the wrong
+  code or a hollow test: "fix the constant, never loosen the assertion" on a constant that is right,
+  a guard that can never trip, a re-run that tests nothing.
+
+The plan ends at implementation: a step that pushes, opens a PR or runs `{{hpipe}} submit` is a
+MINOR, fixed inline by deleting it.
 
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**, each as claim →
 problem → evidence → concrete fix, most severe first.

@@ -811,7 +811,7 @@ test('hpipe show prints the tier, its log and the phases visited, after the phas
   const phaseAt = lines.findIndex((line) => line.startsWith('phase:'))
   expect(lines.slice(phaseAt + 1, phaseAt + 5)).toEqual([
     'tier:       standard',
-    'effort:     worker medium (started light; a tier change does not restart it), reviews high',
+    'effort:     worker medium (started light; a tier change does not restart it), reviews high (plan-review medium)',
     'tier log:   2026-09-25 10:04Z — → light (label pipeline:tier-light) · ' +
       '2026-09-25 11:30Z light → standard (hpipe-tier, pane w3:p1): research found a contract change',
     'visited:    research → spec',

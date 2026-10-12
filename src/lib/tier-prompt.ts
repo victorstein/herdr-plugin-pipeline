@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { IMPLEMENT_MODEL, REVIEW_EFFORT, WORKER_EFFORT } from './models'
+import { IMPLEMENT_MODEL, REVIEW_EFFORT, reviewEffort, WORKER_EFFORT } from './models'
 import { nextPhase, routeOf, type RunMode, taskRow, TIERS, tierOf } from './phases'
 import type { Run, Task, TaskPhase, Tier } from './types'
 
@@ -57,7 +57,7 @@ export function tierPromptVars(run: Pick<Run, 'batch'>, task: Task): Record<stri
     task_id: task.task_id,
     agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
     implement_model: IMPLEMENT_MODEL,
-    review_effort: REVIEW_EFFORT[tierOf(task)],
+    review_effort: reviewEffort(tierOf(task), task.phase),
     phase_loop: phaseLoop(run, task),
     plan_status: planReviewed
       ? 'cleared review'
@@ -90,10 +90,31 @@ function startedTier(task: Task): Tier {
   return (task.tier_history ?? []).findLast((change) => change.at <= adoptedAt)?.to ?? tierOf(task)
 }
 
+/** The review rows a tier's route runs, in order; the mode changes only the last mile. */
+function reviewsOn(tier: Tier): TaskPhase[] {
+  const route = { tier, mode: 'per-task' as const }
+  const reviews: TaskPhase[] = []
+  let phase = taskRow('queued').onClear as TaskPhase
+  while (phase !== LOOP_END) {
+    if (taskRow(phase).signal === 'verdict') reviews.push(phase)
+    phase = nextPhase(route, taskRow(phase))
+  }
+  return reviews
+}
+
+/** `high`, or `high (plan-review medium)` when a review on the tier's route runs at another effort. */
+export function reviewEfforts(tier: Tier): string {
+  const usual = REVIEW_EFFORT[tier]
+  const others = reviewsOn(tier)
+    .filter((review) => reviewEffort(tier, review) !== usual)
+    .map((review) => `${review} ${reviewEffort(tier, review)}`)
+  return others.length === 0 ? usual : `${usual} (${others.join(', ')})`
+}
+
 export function effortSummary(task: Task): string {
   const started = startedTier(task)
   const worker = started === tierOf(task)
     ? `worker ${WORKER_EFFORT[started]}`
     : `worker ${WORKER_EFFORT[started]} (started ${started}; a tier change does not restart it)`
-  return `${worker}, reviews ${REVIEW_EFFORT[tierOf(task)]}`
+  return `${worker}, reviews ${reviewEfforts(tierOf(task))}`
 }

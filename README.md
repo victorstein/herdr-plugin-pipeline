@@ -390,13 +390,18 @@ Run Claude with Opus as the default model. Nothing pins the worker panes, so a S
 put the judgment on Sonnet too.
 
 Effort is pinned by tier, not inherited. A worker starts with `--effort` from its tier, and every
-review subagent is dispatched with an `effort:` from its task's current tier:
+review subagent is dispatched with an `effort:` from its task's current tier and the review it runs:
 
-| Tier | Worker | Reviews |
-|---|---|---|
-| `light` | `medium` | `high` |
-| `standard` | `high` | `high` |
-| `heavy` | `xhigh` | `xhigh` |
+| Tier | Worker | `spec-review`, `pr-review` | `plan-review` |
+|---|---|---|---|
+| `light` | `medium` | `high` | – |
+| `standard` | `high` | `high` | `medium` |
+| `heavy` | `xhigh` | `xhigh` | `xhigh` |
+
+The plan review is cheaper below heavy because it no longer dry-runs the plan: it reads it for spec
+coverage, behaviour no test would see, the `FILES:` lock and steps that would mislead the
+implementer, and leaves compile and command errors to the implementer's own red/green loop. `hpipe
+task` and `hpipe show` print the split, as `effort: worker high, reviews high (plan-review medium)`.
 
 The branch review runs at the heaviest task's review effort. A worker's effort is fixed when its agent
 starts, so `hpipe tier` changes only the reviews that follow; `hpipe show` prints both. Inheriting the

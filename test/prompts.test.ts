@@ -432,13 +432,45 @@ test('every reviewer is dispatched at the review effort, with a fallback if the 
   }
 })
 
-test('a review is dispatched at its task\'s tier effort', async () => {
-  for (const phase of ['spec-review', 'plan-review', 'pr-review'] as const) {
+test('a review is dispatched at its task\'s tier effort for that review', async () => {
+  for (const phase of ['spec-review', 'pr-review'] as const) {
     expect(await renderPhase(phase, { tier: 'standard' }), phase).toContain('`effort: high`')
   }
-  for (const phase of ['pr-review-intent', 'pr-review-quality'] as const) {
+  expect(await renderPhase('plan-review', { tier: 'standard' })).toContain('`effort: medium`')
+  for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
     expect(await renderPhase(phase, { tier: 'heavy' }), phase).toContain('`effort: xhigh`')
   }
+})
+
+// About 59% of berean-os plan-review BLOCKER/MAJOR findings were compile and
+// command errors the implementer's red/green loop hits minutes later, and
+// reviewers often applied the whole plan in a scratch copy to find them.
+test('the plan review reads the plan for what nothing downstream checks, and neither applies nor builds it', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'plan-review.md')).text())
+  expect(text).toContain('Read the plan; do not apply it or build it.')
+  expect(text).toContain('an error the plan\'s own red/green steps or the build would show at once')
+  for (const focus of [
+    '**Spec coverage.**', '**Behaviour the tests cannot see.**', '**The file lock.**',
+    '**Steps that would mislead the implementer.**',
+  ]) {
+    expect(text, focus).toContain(focus)
+  }
+  expect(text).not.toContain('execute this plan literally')
+  expect(text).toContain('a step that pushes, opens a PR or runs `{{hpipe}} submit` is a MINOR')
+})
+
+// "The plan tells the implementer to push and open the PR" recurred in eight or
+// more berean-os plan reviews, rated MAJOR, MINOR or no finding at all.
+test('a plan stops at implementation: pushing and the hand-off after it are the worker\'s', async () => {
+  for (const mode of MODES) {
+    const text = prose(await renderPhase('plan', {}, 'plan', mode))
+    expect(text, mode).toContain('The plan ends at implementation.')
+    expect(text, mode).toContain('Write no step that pushes, opens a PR or runs `')
+    expect(text, mode).toContain(' submit`')
+    expect(text, mode).toContain('leave out its execution hand-off')
+  }
+  const brief = prose(implementersBrief(await Bun.file(join(ROOT, 'prompts', 'implement.md')).text()))
+  expect(brief).toContain('If the plan has a step that pushes, opens a PR or runs `{{hpipe}} submit`, skip it')
 })
 
 test('the branch review runs at the effort of the heaviest task in the run', async () => {

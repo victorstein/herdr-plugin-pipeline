@@ -34,7 +34,8 @@ follow the tree and say so in your report.
 Work step by step, in order: the failing test first, run it, the minimum code that passes it, run it
 again, commit. One commit per step, with a conventional-commit message. Do not batch steps, and do
 not skip a step's test because the change looks obvious. Commit, but do not push: pushing is the
-worker's, once it has verified your work.
+worker's, once it has verified your work. If the plan has a step that pushes, opens a PR or runs
+`{{hpipe}} submit`, skip it and say so in your report.
 
 You cannot ask for decisions. On a choice you should not make alone — expensive to undo, changes
 scope, commits another surface to a contract, or invents a pattern this repo does not already

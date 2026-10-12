@@ -32,7 +32,6 @@ import {
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
-import { REVIEW_EFFORT } from './lib/models'
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
@@ -44,7 +43,7 @@ import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
-import { effortSummary } from './lib/tier-prompt'
+import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
 import {
@@ -1868,7 +1867,7 @@ async function tier(ctx: Ctx, input: {
   }]
   await saveRun(ctx.stateDir, run)
   return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}. ` +
-    `Its reviews now run at effort ${REVIEW_EFFORT[to]}; the worker keeps the effort it was started with.`)
+    `Its reviews now run at effort ${reviewEfforts(to)}; the worker keeps the effort it was started with.`)
 }
 export const cmdTier = retryingOnStale(tier)
 
