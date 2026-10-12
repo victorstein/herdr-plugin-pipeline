@@ -1077,8 +1077,8 @@ Where the code departs from the text above, and why.
   tick. The first cut read the branch head first in `merge`, which dropped the landing of a head that
   had landed, and wedged a task whose whole tip the orchestrator pushed: `sync` then had nothing to
   merge, and `submit` refused it as "nothing to land" for good. Now:
-  - The branch counts as moved only when its head adds more than review verdicts to `land_sha` **and**
-    `origin/<batch>` does not already contain it. A tip landed in place of `land_sha` therefore closes
+  - The branch counts as moved only when its head adds more than the pipeline's own documents to
+    `land_sha` **and** `origin/<batch>` does not already contain it. A tip landed in place of `land_sha` therefore closes
     the task, its unreviewed commits on the batch as §7 accepts.
   - Whenever `land_sha` is on the batch, `merge` (and `land-queue`, meeting the same case) appends its
     `landed` line first. A branch that has not moved then closes the task. One that has goes to `sync`
@@ -1087,11 +1087,15 @@ Where the code departs from the text above, and why.
   - `sync` goes straight to `merge` only when `land_sha` is on the batch and the branch has not moved,
     so the two rows never bounce: a moved branch waits for the worker's sync, whose walk meets the extra
     commit, so it lands reviewed.
-- **"Moved" and "checked" ignore review verdicts.** A branch head that adds only files under
-  `docs/superpowers/reviews/` to `land_sha` has not moved, and a `land_sha` that adds only those to the
-  submitted head is checked (the after-pass-2 rule). Both diffs run in `repo_root`'s object store; a
-  diff git cannot read, for a commit pushed from another clone, counts as moved and unchecked, which
-  costs a sync and never a wrong landing.
+- **"Moved" ignores the pipeline's documents, and "checked" ignores review verdicts.** A branch head
+  that adds only files under `docs/superpowers/` to `land_sha` has not moved: that is `submit`'s own
+  "nothing to land" rule, read through the one predicate, `landsNothing`. Counted as moved, a landed
+  task whose branch then gained a spec revision went to `sync`, where `submit` refused it until the stall
+  ladder escalated it. Such documents stay on the task branch, unlanded, and the `done` notice names the
+  branch as having commits that did not land. A `land_sha` that adds only files under
+  `docs/superpowers/reviews/` to the submitted head is checked (the after-pass-2 rule). Both diffs run in
+  `repo_root`'s object store; a diff git cannot read, for a commit pushed from another clone, counts as
+  moved and unchecked, which costs a sync and never a wrong landing.
 - **The tick's `ls-remote` cools down after a failure.** Landing reads one branch head per task in
   `merge`, `land-queue` and a landed `sync` on every tick, and the `done` notice one per task, each under
   the 15 s network budget. With origin unreachable that cost every run in the session 15 s per read per

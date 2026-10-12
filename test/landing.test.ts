@@ -159,6 +159,24 @@ test('a branch moved past its reviewed head syncs, unless the move is review ver
   expect(verdicts.tasks[0]?.phase).toBe('close')
 })
 
+test('a landed branch moved only by pipeline documents has nothing more to land, so it closes rather than wedging in sync', async () => {
+  // `submit` refuses such a move as "nothing to land", so a sync of it waited for the stall ladder.
+  for (const phase of ['merge', 'sync'] as const) {
+    const run = singlePrRun([mkTask({ task_id: 't1', phase, land_sha: 'L1', submission: submitted() })])
+    await advanceTasks(run, deps({ landingGit: fakeGit({
+      ancestors: ['b0>L1', 'L1>b0'], heads: { 't1-branch': 'X1' },
+      changed: { 'L1..X1': ['docs/superpowers/specs/hp-1-design.md', 'docs/superpowers/reviews/hp-1-pr-review-2.md'] },
+    }) }))
+    expect(run.tasks[0]?.phase, phase).toBe(phase === 'merge' ? 'close' : 'merge')
+  }
+
+  const outside = singlePrRun([mkTask({ task_id: 't1', phase: 'merge', land_sha: 'L1', submission: submitted() })])
+  await advanceTasks(outside, deps({ landingGit: fakeGit({
+    ancestors: ['b0>L1', 'L1>b0'], heads: { 't1-branch': 'X1' }, changed: { 'L1..X1': ['docs/guide.md'] },
+  }) }))
+  expect(outside.tasks[0]?.phase).toBe('sync')
+})
+
 test('a branch head already on the batch has not moved: a tip landed in place of the reviewed head closes the task', async () => {
   for (const phase of ['merge', 'land-queue', 'sync'] as const) {
     const run = singlePrRun([mkTask({ task_id: 't1', phase, land_sha: 'L1', submission: submitted() })])

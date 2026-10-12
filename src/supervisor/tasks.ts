@@ -23,7 +23,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { changePromptVars, landingPromptVars, syncPromptVars } from '../lib/change-prompt'
 import { tierPromptVars } from '../lib/tier-prompt'
-import { changedPaths, isAncestor, resolveCommit } from '../lib/sync-walk'
+import { changedPaths, isAncestor, landsNothing, resolveCommit } from '../lib/sync-walk'
 import { artifactBase, REVIEWS_DIR, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
@@ -222,12 +222,24 @@ function actorPane(run: Run, task: Task): string | null {
 
 const batchRefOf = (batch: Batch): string => `refs/remotes/origin/${batch.branch}`
 
-/** A push of review verdicts alone changes nothing that lands, so it neither moves the branch nor needs a check. */
-async function addsOnlyReviews(repoRoot: string, from: string, to: string, git: LandingGit): Promise<boolean> {
+async function changesOnly(
+  repoRoot: string, from: string, to: string, git: LandingGit, only: (path: string) => boolean,
+): Promise<boolean> {
   if (from === to) return true
   const paths = await git.changedPaths(repoRoot, from, to)
-  return paths !== null && paths.every((path) => path.startsWith(`${REVIEWS_DIR}/`))
+  return paths !== null && paths.every(only)
 }
+
+/** A push of review verdicts alone changes nothing a check tests, so it needs no new one. */
+const addsOnlyReviews = (repoRoot: string, from: string, to: string, git: LandingGit): Promise<boolean> =>
+  changesOnly(repoRoot, from, to, git, (path) => path.startsWith(`${REVIEWS_DIR}/`))
+
+/**
+ * Read by `submit`'s own rule: a move it would refuse as "nothing to land" is no
+ * move, or the task sent to `sync` for it could never submit its way out.
+ */
+const addsNothingToLand = (repoRoot: string, from: string, to: string, git: LandingGit): Promise<boolean> =>
+  changesOnly(repoRoot, from, to, git, landsNothing)
 
 /**
  * Null skips the tick: a git read that fails must not read as "not landed",
@@ -244,7 +256,7 @@ async function landingFacts(run: Run, task: Task, git: LandingGit): Promise<Land
   if (landed === null || upToDate === null) return null
   const remote = await git.remoteBranchHead(run.repo_root, task.branch)
   if (!remote.ok) return null
-  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git)) &&
+  const moved = remote.sha !== null && !(await addsNothingToLand(run.repo_root, landSha, remote.sha, git)) &&
     await git.isAncestor(run.repo_root, remote.sha, batchRef) !== true
   const submitted = task.submission?.head_sha
   const checked = submitted !== undefined && await addsOnlyReviews(run.repo_root, submitted, landSha, git)
