@@ -1106,8 +1106,11 @@ Where the code departs from the text above, and why.
   than a fixed "change", so a per-task run renders exactly today's text, as the edited prompts must.
   The `handoff-pr`/`handoff-batch` fragments carry the paragraph after step 4 too, since it names the
   PR head. A single-PR review names its subject by the range, `` `batch/x...t3-branch` ``.
-- **A task rewound while the run ships moves it to `execute` without reopening intake.** The rewound
-  task holds `execute` until it finishes; registration still reopens intake, as it always has.
+- **A task rewound while the run reviews or ships moves it to `execute` without reopening intake.** m4
+  named the three ship phases; `branch-review` is in the set too, as it is for registration, since a run
+  left there would go on to `ship` with the task in flight. The rewound task holds `execute` until it
+  finishes; registration still reopens intake, as it always has. Whether the batch PR has merged is asked
+  of GitHub once, before the retried save, for the reason `submit`'s checks run there.
 - **The batch checkout gets the bootstrap a task worktree gets.** Creating it ends with
   `(cd '<checkout>' && ./.claude/pipeline-bootstrap)` when the repo declares one, as §4 says, and the
   pull path adds the same line "if the pull changed what it builds", as `sync.md` does. Without it,

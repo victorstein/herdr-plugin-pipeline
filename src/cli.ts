@@ -1061,11 +1061,12 @@ function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
 
 interface RewindInput { runId: string; phase: string; taskId: string | null }
 
-const SHIPPING_PAST_EXECUTE: readonly RunPhase[] = ['ship', 'ship-ci', 'ship-merge']
-
-/** The run would otherwise ship, or reach `done` and stop being driven, with the rewound task stranded behind it. */
+/**
+ * The run would otherwise review, ship, or reach `done` and stop being driven, with
+ * the rewound task stranded behind it. The run phases registration reopens.
+ */
 function rewindReopensShipping(run: Run, input: RewindInput): boolean {
-  return Boolean(input.taskId) && modeOf(run) === 'single-pr' && SHIPPING_PAST_EXECUTE.includes(run.phase) &&
+  return Boolean(input.taskId) && modeOf(run) === 'single-pr' && SHIPPING.includes(run.phase) &&
     TASK_ROWS.some((r) => r.phase === input.phase) && !taskPhaseIsTerminal(input.phase)
 }
 

@@ -196,16 +196,20 @@ test('a rewind into land-queue, sync or merge restores the reviewed head from th
   }
 })
 
-test('a task rewound while the run ships moves the run back to execute; once shipped it is refused', async () => {
-  const run = singlePrRun([{ phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }] }])
-  run.phase = 'ship-ci'
-  run.intake_closed = true
-  run.batch!.pr = 301
-  await saveRun(dir, run)
-  const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, async () => false)
-  expect(out.ok).toBe(true)
-  expect(out.text).toContain('the run moves back to execute')
-  expect((await saved(run)).phase).toBe('execute')
+test('a task rewound while the run reviews or ships moves the run back to execute; once shipped it is refused', async () => {
+  for (const phase of ['branch-review', 'ship', 'ship-ci', 'ship-merge'] as const) {
+    const run = singlePrRun([{
+      phase: 'done', bead: `hp-${phase}`, merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }],
+    }])
+    run.phase = phase
+    run.intake_closed = true
+    run.batch!.pr = phase === 'branch-review' ? null : 301
+    await saveRun(dir, run)
+    const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, async () => false)
+    expect(out.ok, phase).toBe(true)
+    expect(out.text, phase).toContain('the run moves back to execute')
+    expect((await saved(run)).phase, phase).toBe('execute')
+  }
 
   const shipped = singlePrRun([{ phase: 'done', merged_at_ms: 1 }])
   shipped.phase = 'ship-merge'
