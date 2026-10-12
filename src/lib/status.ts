@@ -570,7 +570,7 @@ export function formatStatus(
         `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m]`,
         tierOf(task),
         ...(task.review_skip === undefined ? [] : [reviewsSkipped(task.review_skip)]),
-        task.agent_status,
+        `agent:${task.agent_status}`,
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
