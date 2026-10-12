@@ -1,14 +1,16 @@
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
-import { fileHolders } from './gating'
+import { landCommand, sha8 } from './batch'
+import { CHECK_REL, repoCheck } from './check'
+import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor } from './machine'
-import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
+import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import { effortSummary } from './tier-prompt'
-import type { MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
+import type { Batch, MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
   remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
@@ -17,6 +19,8 @@ import {
 export interface StatusSupervisor {
   state: 'live' | 'stale' | 'none' | 'other-session'
   pid?: number
+  /** The run schemas the live supervisor drives; absent for one that predates batches. */
+  schemas?: number[]
 }
 
 const MS_PER_MINUTE = 60_000
@@ -180,12 +184,18 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       (run.phase === 'execute' ? ' — the run holds in execute until one is run' : ''),
     )
   }
+  const batch = run.batch
+  if (batch !== undefined && task.phase === 'land-queue') return landQueueMove(run, task, batch, hpipe)
   if (row.actor === 'orchestrator') {
     const escalated = escalatedUnanswered(task)
     if (escalated !== null) {
       return yours(`decision ${escalated.id} was put to the human ` +
         `${ageMinutes(escalated.escalated_at ?? now, now)}m ago — record their ruling with ` +
         `\`${hpipe} answer --task ${task.task_id} --decision ${escalated.id} --answer "<their ruling>" --by human\``)
+    }
+    if (batch !== undefined && task.phase === 'merge') {
+      return yours(`YOUR move: \`${landCommand(run, task.land_sha ?? '<land sha>')}\` — waiting for ` +
+        awaitedFor(run, task))
     }
     // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
     return task.pending_answer === null
@@ -227,7 +237,8 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     }
     const work = currentUncommittedWork(run, task)
     if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
-    return notYours(`worker's move: waiting for ${awaitedFor(run, task)}`)
+    const waiters = task.phase === 'sync' ? waitingOn(run, task, 'sync') : ''
+    return notYours(`worker's move: ${waiters}waiting for ${awaitedFor(run, task)}`)
   }
   if (task.phase === 'blocked-on-files') {
     // A failed holder keeps its files until a human releases them. An escalated one
@@ -245,6 +256,39 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     }
   }
   return notYours('nothing for you — the supervisor is driving')
+}
+
+/** "t5, t6 wait on this sync; ": the tasks a slow holder is keeping from landing. */
+function waitingOn(run: Run, holder: Task, what: string): string {
+  const ids = landingQueue(run.tasks).filter((t) => t !== holder).map((t) => t.task_id)
+  return ids.length === 0 ? '' : `${ids.join(', ')} ${ids.length === 1 ? 'waits' : 'wait'} on this ${what}; `
+}
+
+/**
+ * Nobody's move: the supervisor hands the slot on as soon as it is free. A task
+ * with no agent can still land, but not sync, and only the orchestrator can
+ * start one for it.
+ */
+function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move {
+  if (task.pane_id === null) {
+    const start = task.workspace_id === null
+      ? dispatchWorkerCommand(run, task, hpipe)
+      : startWorkerCommand(run, task, task.workspace_id, hpipe)
+    return {
+      waitsOnYou: false,
+      clause: `nothing for you yet — waiting to land; it has no agent, so if ${batch.branch} moves past it, it ` +
+        `needs one in its worktree to sync: ${start}`,
+    }
+  }
+  const holder = landingSlotHolder(run.tasks)
+  if (holder !== null) {
+    const holding = holder.phase === 'blocked-on-decision' ? holder.decision_from ?? holder.phase : holder.phase
+    return { waitsOnYou: false, clause: `nothing for you — waiting to land; ${holder.task_id} holds the landing slot (${holding})` }
+  }
+  return {
+    waitsOnYou: false,
+    clause: landingQueue(run.tasks)[0] === task ? 'nothing for you — next to land' : 'nothing for you — waiting to land',
+  }
 }
 
 /**
@@ -383,8 +427,21 @@ function finishedRunSummary(run: Run, hpipe: string): string[] {
     ? [`  aborted from ${run.escalated_from}${outcomes === '' ? '' : `: ${outcomes}`} — ` +
       `\`${hpipe} resume ${run.run_id}\` puts it back`]
     : outcomes === '' ? [] : [`  ended: ${outcomes}`]
+  const shipping = run.batch === undefined ? [] : [shippedLine(run, run.batch)]
 
-  return [...head, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+  return [...head, ...shipping, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+}
+
+/** A landed task's code reaches the default branch only with the batch PR, so a run that stopped short says so. */
+function shippedLine(run: Run, batch: Batch): string {
+  if (batch.merged_at_ms !== null) {
+    return `  shipped: PR #${batch.pr ?? 'unknown'} squash-merged as ${sha8(batch.merge_commit ?? 'unknown')}`
+  }
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).map((t) => t.task_id)
+  if (landed.length === 0) return `  not shipped: nothing landed on ${batch.branch}`
+  const one = landed.length === 1
+  return `  not shipped: ${batch.branch} holds ${landed.length} landed task${one ? '' : 's'} (${landed.join(', ')}) ` +
+    `that ${one ? 'is' : 'are'} not on ${batch.into}; ${one ? 'its bead is' : 'their beads are'} closed`
 }
 
 function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
@@ -395,7 +452,8 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
     const where = task.checkout_path !== null
       ? `at ${task.checkout_path}`
       : `in workspace ${task.workspace_id ?? 'unknown'}`
-    return [`  ℹ ${task.task_id} merged but left its worktree ${where} — nothing unmerged is in it`]
+    const how = run.batch === undefined ? 'merged' : 'landed'
+    return [`  ℹ ${task.task_id} ${how} but left its worktree ${where} — nothing un${how} is in it`]
   }
   const pr = task.pr === null ? '' : ` PR #${task.pr}`
   return [`  ℹ ${task.task_id} [${task.phase}] ${task.branch}${pr} — ` +
@@ -470,6 +528,7 @@ export function formatStatus(
       lines.push(...finishedRunSummary(run, hpipe))
       continue
     }
+    if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now))
 
     for (const task of run.tasks) {
       const bits = [
@@ -497,6 +556,48 @@ export function formatStatus(
   }
 
   return lines.join('\n')
+}
+
+function shipLines(run: Run, batch: Batch): string[] {
+  const ci = batch.ci === null ? '' : ` ci:${batch.ci}${batch.ci_head ? ` (on ${sha8(batch.ci_head.sha)})` : ''}`
+  const pr = batch.pr === null ? '  · final PR: not opened' : `  · PR #${batch.pr}${ci}`
+  if (run.phase === 'ship') {
+    return [pr, '  YOUR move: check the batch and open its PR (the ship prompt has the commands)']
+  }
+  if (run.phase === 'ship-ci') return [pr]
+  if (run.phase === 'ship-merge') {
+    return [pr, `  YOUR move: squash-merge PR #${batch.pr ?? 'unknown'} (the ship-merge prompt has the commands)`]
+  }
+  return []
+}
+
+/**
+ * How a single-PR run ships, on every phase: a landing is invisible on the default
+ * branch until the batch PR merges, and nothing else in status would say where it is.
+ */
+function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number): string[] {
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).length
+  const holder = landingSlotHolder(run.tasks)
+  const next = landingQueue(run.tasks).map((t) => t.task_id)
+  const header = [
+    `  ships as one PR: ${batch.branch} → ${batch.into}`,
+    `${landed} of ${run.tasks.length} landed`,
+    ...(holder === null ? [] : [`landing: ${holder.task_id} (${holder.phase})`]),
+    ...(next.length === 0 ? [] : [`next: ${next.join(', ')}`]),
+  ].join(' · ')
+  const warnings: string[] = []
+  if (repoCheck(run.repo_root).kind === 'none') {
+    warnings.push(`  ⚠ no ${CHECK_REL} in this repo: each landing is checked only by its worker's own test run`)
+  }
+  if (batch.fetch_error) {
+    warnings.push(`  ⚠ ${batch.branch} has not fetched for ${ageMinutes(batch.fetch_error.since, now)}m ` +
+      `(${batch.fetch_error.reason}): landings are not being seen`)
+  }
+  if (supervisor.state === 'live' && !(supervisor.schemas ?? [3]).includes(BATCH_SCHEMA_VERSION)) {
+    warnings.push(`  ⚠ the running supervisor (pid ${supervisor.pid ?? 'unknown'}) predates single-PR runs and ignores ` +
+      "this run: close its Pipeline supervisor pane and run the plugin's supervisor action")
+  }
+  return [header, ...warnings, ...shipLines(run, batch)]
 }
 
 /**
@@ -530,6 +631,26 @@ const orNone = (value: string | number | null | undefined): string =>
 const listOrNone = (values: readonly string[]): string =>
   values.length > 0 ? values.join(', ') : 'none'
 
+function landingDetail(task: Task, batch: Batch, now: number): string[] {
+  const sub = task.submission
+  const submitted = sub === undefined
+    ? 'none'
+    : `${sub.title} (${sub.kind}, at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago; ` +
+      `${sub.check === 'passed' ? 'check passed' : 'no check declared'})`
+  const cleanSync = sub?.kind === 'sync' && sub.merge === 'clean' && sub.head_sha === task.land_sha
+  const landSha = task.land_sha
+    ? `${sha8(task.land_sha)} (${cleanSync ? `clean sync of ${batch.branch}` : 'reviewed'})`
+    : 'none'
+  const landings = (task.landed ?? []).map((l) => `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago`)
+  return [
+    `pr:         none (single-PR run: lands on ${batch.branch})`,
+    `submitted:  ${submitted}`,
+    `land sha:   ${landSha}`,
+    ...(landings.length === 0 ? ['landed:     none'] : landings.map((l) => `landed:     ${l}`)),
+    'ci:         n/a — CI runs once, on the batch PR',
+  ]
+}
+
 export function formatTaskDetail(run: Run, task: Task, now: number = Date.now()): string {
   const verdicts = Object.entries(task.artifacts.verdicts)
   const open = openDecisionFor(task)
@@ -558,8 +679,10 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `plan:       ${orNone(task.artifacts.plan)}`,
     verdicts.length === 0 ? 'verdicts:   none' : 'verdicts:',
     ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
-    `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
-    `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
+    ...(run.batch === undefined ? [
+      `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
+      `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
+    ] : landingDetail(task, run.batch, now)),
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
     `notes:      ${orNone(task.notes)}`,
   ].join('\n')

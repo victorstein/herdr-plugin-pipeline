@@ -1435,7 +1435,7 @@ export async function cmdClose(ctx: Ctx, input: {
     return fail(`no merge is recorded for ${task.task_id}, so its bead must not close yet — ` +
       `\`${hpipeCommand(ctx.pluginRoot)} rewind ${run.run_id} merge --task ${task.task_id}\` records it`)
   }
-  const closed = await close(run.repo_key, task.bead, closeReason(task), input.force)
+  const closed = await close(run.repo_key, task.bead, closeReason(task, run), input.force)
   if (isBdFailure(closed)) {
     return fail(`bd would not close ${task.bead}:\n  ${closed.error}` + (input.force
       ? ''
@@ -1915,7 +1915,10 @@ export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkToo
   )
   return ok(formatStatus(
     runs,
-    { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
+    {
+      state: state.state, pid: 'info' in state ? state.info.pid : undefined,
+      schemas: 'info' in state ? drivenSchemas(state.info) : undefined,
+    },
     ctx.session,
     hpipeCommand(ctx.pluginRoot),
     livePanes,

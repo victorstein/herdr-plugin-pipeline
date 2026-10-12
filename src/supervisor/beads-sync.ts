@@ -61,7 +61,12 @@ export interface SyncDeps {
   slugCursor: { index: number }
 }
 
-export function closeReason(task: Task): string {
+export function closeReason(task: Task, run?: Pick<Run, 'batch'>): string {
+  const batch = run?.batch
+  if (batch !== undefined) {
+    return `landed on ${batch.branch} (${(task.merge_commit ?? task.land_sha ?? 'unknown commit').slice(0, 8)}); ` +
+      `ships with the batch PR into ${batch.into}`
+  }
   return `merged in PR #${task.pr ?? 'unknown'} (${task.merge_commit ?? 'unknown commit'})`
 }
 
@@ -314,7 +319,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         }
         if (current.status === 'closed' && waitsOnClose(task)) effects.push(recordBeadClosed(task.task_id, deps.now()))
 
-        const calls = callsFor(desiredBead(task, run), current, closeReason(task))
+        const calls = callsFor(desiredBead(task, run), current, closeReason(task, run))
         if (calls.length === 0) continue
         let failure: BdFailure | null = null
         for (const call of calls) {

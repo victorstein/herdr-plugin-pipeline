@@ -35,7 +35,7 @@ export interface TeardownDeps {
   removeWorktree: (workspaceId: string) => Promise<WorktreeRemoval>
   /** For a checkout whose workspace is gone: herdr 0.9.0's `worktree remove` takes only a workspace. */
   removeCheckout: (
-    repoRoot: string, checkoutPath: string, branch: string, pr: number | null,
+    repoRoot: string, checkoutPath: string, branch: string, pr: number | null, batchBranch: string | null,
   ) => Promise<CheckoutRemoval>
 }
 
@@ -96,7 +96,8 @@ async function linkedWorktreeAt(repoRoot: string, checkoutPath: string): Promise
  * its PR has merged:
  * - It must be a linked worktree of this repo still on the task's branch. A
  *   detached or switched checkout may hold commits on no branch at all.
- * - Its HEAD must be pushed: on `origin/<branch>`, or on the PR's head. Otherwise
+ * - Its HEAD must be pushed: on `origin/<branch>`, on the PR's head, or — in a
+ *   single-PR run, which has no PR — on the batch branch it landed on. Otherwise
  *   it has local commits that `branch -d` would keep on the branch but nothing
  *   would ever report.
  * - Without `--force`, `worktree remove` refuses modified or untracked files and
@@ -106,7 +107,7 @@ async function linkedWorktreeAt(repoRoot: string, checkoutPath: string): Promise
  * checkout's HEAD or into its upstream; a refusal leaves the branch in place.
  */
 export async function removeCheckoutWithGit(
-  repoRoot: string, checkoutPath: string, branch: string, pr: number | null,
+  repoRoot: string, checkoutPath: string, branch: string, pr: number | null, batchBranch: string | null = null,
 ): Promise<CheckoutRemoval> {
   const keep = (why: string): CheckoutRemoval => ({ removed: false, kept: why })
 
@@ -119,7 +120,7 @@ export async function removeCheckoutWithGit(
   const head = worktree.head
   if (head === null) return keep('HEAD unreadable')
 
-  if (!(await isPushed(repoRoot, head, branch, pr))) {
+  if (!(await isPushed(repoRoot, head, branch, pr, batchBranch))) {
     return keep(pr === null
       ? `HEAD not pushed to origin/${branch}`
       : `HEAD on neither origin/${branch} nor PR #${pr}'s head`)
@@ -136,12 +137,19 @@ export async function removeCheckoutWithGit(
  * fetch then drops the tracking ref, so a merged checkout read as unpushed.
  * `refs/pull/<n>/head` is never deleted, and it is exactly what was merged.
  */
-async function isPushed(repoRoot: string, head: string, branch: string, pr: number | null): Promise<boolean> {
+async function isPushed(
+  repoRoot: string, head: string, branch: string, pr: number | null, batchBranch: string | null,
+): Promise<boolean> {
   const contains = async (ref: string) => (await git(repoRoot, ['merge-base', '--is-ancestor', head, ref])).ok
 
   const tracking = `refs/remotes/origin/${branch}`
   await fetchFromOrigin(repoRoot, `+refs/heads/${branch}:${tracking}`)
   if (await contains(tracking)) return true
+  if (batchBranch !== null) {
+    const batch = `refs/remotes/origin/${batchBranch}`
+    await fetchFromOrigin(repoRoot, `+refs/heads/${batchBranch}:${batch}`)
+    if (await contains(batch)) return true
+  }
   if (pr === null) return false
 
   const pullHead = `refs/hpipe/pr/${pr}`
@@ -203,7 +211,9 @@ export async function runTeardown(
       // A workspace closed under a task in `merge` or `close` leaves its checkout
       // behind; ending there `orphaned` called a merged task a dead end and left
       // the worktree on disk. Measured on a live run.
-      const removal = await deps.removeCheckout(run.repo_root, checkoutPath, task.branch, task.pr)
+      const removal = await deps.removeCheckout(
+        run.repo_root, checkoutPath, task.branch, task.pr, run.batch?.branch ?? null,
+      )
       if (removal.removed) {
         const holdsCheckout = (t: Task) => t.checkout_path === checkoutPath
         markTornDown(run, task.task_id, holdsCheckout)

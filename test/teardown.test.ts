@@ -293,3 +293,28 @@ test('FINISHED excludes escalated, which has stopped but a rewind resumes', () =
   expect(FINISHED.has('done')).toBe(true)
   expect(FINISHED.has('implement')).toBe(false)
 })
+
+test('in a single-PR run a checkout whose HEAD landed on the batch is removed, though its branch is gone from origin', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  commitIn(worktree, 'src/landed.ts', 'landed\n')
+  git(['update-ref', 'refs/remotes/origin/batch/x', 'HEAD'], worktree)
+  const repoRoot = repoRootOf(worktree)
+  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x', null)).toEqual(kept('HEAD not pushed to origin/feat/x'))
+  expect(await removeCheckoutWithGit(repoRoot, worktree, 'feat/x', null, 'batch/x')).toEqual({ removed: true })
+  expect(existsSync(worktree)).toBe(false)
+})
+
+test('a single-PR teardown hands the fallback its batch branch', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const { withBatch } = await import('../src/lib/ledger')
+  const { batchFixture } = await import('./helpers/batch')
+  withBatch(run, batchFixture())
+  const checkout = tempDir('hpipe-co-')
+  run.tasks = [mkTask({ workspace_id: null, checkout_path: checkout, pr: null })]
+  const asked: unknown[][] = []
+  await runTeardown([run], {
+    removeWorktree: async () => 'removed',
+    removeCheckout: async (...args) => { asked.push(args); return { removed: true } },
+  })
+  expect(asked).toEqual([['/r', checkout, 'feat/x', null, 'batch/x']])
+})

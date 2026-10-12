@@ -105,7 +105,7 @@ export async function changePromptVars(
   }
   const check = checkWording(task.checkout_path ?? run.repo_root)
   return {
-    subject: `\`${task.branch}\`'s change against \`${batch.branch}\``,
+    subject: `\`${batch.branch}...${task.branch}\``,
     the_change: 'the change', change_noun: 'change', whose_head: "the branch's",
     diff_command: `git fetch origin ${trackingRefspec(batch.branch)} ${trackingRefspec(task.branch)} && ` +
       `git diff origin/${batch.branch}...origin/${task.branch}`,
