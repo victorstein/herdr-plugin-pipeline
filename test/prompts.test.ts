@@ -674,6 +674,19 @@ test('sync tells a worker whose review was skipped that it was, not that it was 
     .toContain('Your change was reviewed, and it is next in line to land')
 })
 
+// Smoke run 15: a worker that resolved a conflict was told only that a commit beyond the
+// merge goes back to review, and read its resolved merge as one that would land as is.
+test('sync says a resolved conflict goes through review, like any commit beyond the automatic merge', async () => {
+  const text = prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc' }))
+  expect(text).toContain('**Wait for it within this turn.** A merge whose conflict you resolved is not a clean ' +
+    'merge: `submit` sends the change through review before it lands, because the resolution is code no ' +
+    'reviewer has seen.')
+  expect(text).toContain('Only a merge git made on its own, left as git made it, lands without another review: a ' +
+    'resolved conflict, an edit to the merge, or any commit after it sends this branch through review. That ' +
+    'is expected, not a failure.')
+  expect(text).not.toContain('Any commit beyond the merge')
+})
+
 test('a review after a skipped review and a dirty sync reads the whole change, not a range since a review', async () => {
   const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
     merge: 'dirty' as const, dirty_at: 'ffff6666' }
