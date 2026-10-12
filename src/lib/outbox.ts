@@ -22,11 +22,22 @@ export function recipientPane(run: Run, entry: OutboxEntry): string | null {
  * The task's own prompt still waiting in the outbox. Until it lands, an idle
  * worker is idle because it was never told what this phase wants, not because it
  * stopped short: status once called a worker whose spec prompt was held by stuck
- * input "idle with nothing at" its spec path. Measured on a live run.
+ * input "idle with nothing at" its spec path. Measured on a live run. A queued
+ * resume is not one: the worker has read its phase prompt, so what it has pushed
+ * or written answers it.
  */
 export function queuedWorkerPrompt(run: Run, task: Task): OutboxEntry | null {
-  return (run.outbox ?? []).find((entry) =>
-    entry.to === 'worker' && entry.task_id === task.task_id && isCurrent(run, entry)) ?? null
+  return queuedFor(run, task, undefined)
+}
+
+/** A usage-limit resume still waiting in the outbox, from the supervisor or `hpipe nudge`. */
+export function queuedResume(run: Run, task: Task): OutboxEntry | null {
+  return queuedFor(run, task, 'resume')
+}
+
+function queuedFor(run: Run, task: Task, kind: OutboxEntry['kind']): OutboxEntry | null {
+  return (run.outbox ?? []).find((entry) => entry.to === 'worker' && entry.task_id === task.task_id &&
+    entry.kind === kind && isCurrent(run, entry)) ?? null
 }
 
 export interface OutboxInput {
@@ -34,6 +45,7 @@ export interface OutboxInput {
   taskId: string | null
   text: string
   phaseNote?: string
+  kind?: OutboxEntry['kind']
 }
 
 export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry {
@@ -43,6 +55,7 @@ export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry 
     task_id: input.taskId,
     entered_at: recordOf(run, input.taskId)?.phase_entered_at ?? run.phase_entered_at,
     text: input.text,
+    ...(input.kind ? { kind: input.kind } : {}),
     ...(input.phaseNote ? { phase_note: input.phaseNote } : {}),
     queued_at: now,
     attempts: 0,

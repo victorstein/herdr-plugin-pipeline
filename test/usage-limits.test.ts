@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import type { LimitLine } from '../src/lib/usage-limit'
 import type { AgentStatus } from '../src/lib/types'
 import {
-  checkLimits, FRESH_MS, LIFT_GRACE_MS, type LimitReading, readLimit, RECHECK_MS, UsageLimits,
+  checkLimits, FRESH_MS, LIFT_GRACE_MS, limitedNow, type LimitReading, readLimit, RECHECK_MS, UsageLimits,
 } from '../src/supervisor/usage-limits'
 
 const MANAGUA = 'America/Managua'
@@ -234,4 +234,21 @@ test('checkLimits reads panes that went idle or done, re-checks marks, and appli
   await checkLimits(limits, io, [{ kind: 'pipeline.nudge', session: 's', at: 5, pane_id: 'w1:p1' }])
   expect(io.calls.sort()).toEqual(['read w1:p1', 'read w4:p1', 'status w1:p1', 'status w4:p1'])
   expect(limits.get('w1:p1')?.release).toBe('nudge')
+})
+
+test('limitedNow answers from a mark, reads a pane not read lately, and trusts a fresh reading', async () => {
+  const { limits, clock } = limitsAt()
+  const io = fakeIO({ 'w4:p1': SCREEN, 'w5:p1': SCREEN })
+  const limited = limitedNow(limits, io)
+  expect(await limited('w4:p1')).toBe(true)
+  expect(io.calls).toEqual(['read w4:p1', 'status w4:p1'])
+  io.calls.length = 0
+  expect(await limited('w4:p1')).toBe(true)
+  expect(io.calls).toEqual([])
+
+  limits.observe('w5:p1', reading({ status: 'working', line: null }))
+  expect(await limited('w5:p1')).toBe(false)
+  expect(io.calls).toEqual([])
+  clock.now += FRESH_MS
+  expect(await limited('w5:p1')).toBe(true)
 })

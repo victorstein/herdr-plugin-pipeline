@@ -122,6 +122,11 @@ export interface OutboxEntry {
    */
   entered_at: number
   text: string
+  /**
+   * `resume`: carry on where Claude's usage limit stopped the worker. Absent: the
+   * phase's own prompt, which a worker that has not read it cannot have answered.
+   */
+  kind?: 'resume'
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number

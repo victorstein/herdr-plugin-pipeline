@@ -1,4 +1,4 @@
-import type { PaneHold } from '../lib/delivery-health'
+import type { PaneHold, PersistedLimits } from '../lib/delivery-health'
 import { isAgentReady } from '../lib/machine'
 import { SCREEN_LINES } from '../lib/screen'
 import type { AgentStatus, QueuedEvent } from '../lib/types'
@@ -31,13 +31,6 @@ export interface PaneLimit {
   checkedAt: number
   autoContinue: boolean
   release?: 'moved-on' | 'nudge'
-}
-
-/** What `delivery.<session>.json` keeps for the next supervisor. */
-export interface PersistedLimits {
-  marks: Record<string, { line: LimitLine; since: number; resets_at: number | null }>
-  /** Pane → the line last lifted while still on screen, which must not be marked again. */
-  stale: Record<string, string>
 }
 
 /**
@@ -219,6 +212,22 @@ export async function readLimit(io: LimitIO, pane: string, status?: AgentStatus)
   const screen = await io.paneReadStyled(pane, SCREEN_LINES)
   if (screen === '') return null
   return readingFrom(screen, status ?? await io.agentStatus(pane))
+}
+
+/**
+ * For the stall step: whether the pane is limited, reading it first when the last
+ * reading is too old to answer from. This is what catches a limit no event or send
+ * revealed — a 429 too brief for herdr to report `working`, or panes that went idle
+ * before the supervisor restarted.
+ */
+export function limitedNow(limits: UsageLimits, io: LimitIO): (pane: string) => Promise<boolean> {
+  return async (pane) => {
+    if (limits.isLimited(pane)) return true
+    if (!limits.needsRead(pane)) return false
+    const reading = await readLimit(io, pane)
+    if (reading !== null) limits.observe(pane, reading)
+    return limits.isLimited(pane)
+  }
 }
 
 /**

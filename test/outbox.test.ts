@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import {
-  deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, recipientPane, settleOutbox,
-  UNATTEMPTED_WARN_MS,
+  deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume, queuedWorkerPrompt,
+  recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
 import type { Decision, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -269,4 +269,17 @@ test('a stuck box the supervisor recorded is named for what is held behind it â€
 
 test('a live orchestrator pane with an agent in it gets no warning', () => {
   expect(deliveryWarnings(mkRun(), LIVE, MINUTE, { agentless: new Set(['w7:p9']) })).toEqual([])
+})
+
+test('a queued resume is not the task\'s phase prompt, and a phase prompt is not a resume', () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const task = mkTask({ phase_entered_at: run.phase_entered_at })
+  run.tasks = [task]
+  const resume = enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 1)
+  expect(resume.kind).toBe('resume')
+  expect(queuedWorkerPrompt(run, task)).toBeNull()
+  expect(queuedResume(run, task)?.id).toBe(resume.id)
+  const phase = enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 2)
+  expect(phase.kind).toBeUndefined()
+  expect(queuedWorkerPrompt(run, task)?.id).toBe(phase.id)
 })

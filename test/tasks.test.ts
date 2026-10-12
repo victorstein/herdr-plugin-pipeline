@@ -632,6 +632,27 @@ test('an idle worker still owed its phase prompt is not inspected for uncommitte
   expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
 })
 
+test('a queued usage-limit resume is not a phase prompt: an idle worker without its artifact is still reported', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 5)
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeDefined()
+})
+
+test('a queued usage-limit resume does not hide a PR the worker opened before the limit', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 0)
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.pr).toBe(42)
+  expect(run.tasks[0]?.phase).not.toBe('implement')
+})
+
 test('a working worker clears a missing-artifact record instead of reporting it', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
 

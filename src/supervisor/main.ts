@@ -29,7 +29,7 @@ import {
   boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, makeSubmissionCheck,
   outboxPending, queuePending, readyPanes,
 } from './courier'
-import { HEALTH_REFRESH_MS, writeDeliveryHealth } from '../lib/delivery-health'
+import { HEALTH_REFRESH_MS, readDeliveryHealth, writeDeliveryHealth } from '../lib/delivery-health'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
@@ -43,6 +43,8 @@ import {
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
+import { liftLimits } from './usage-lift'
+import { checkLimits, limitedNow, UsageLimits } from './usage-limits'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
@@ -197,7 +199,9 @@ async function main(): Promise<void> {
     sendsPerTick: config.DELIVERY_SENDS_PER_TICK,
     backoffMaxMs: config.DELIVERY_BACKOFF_MAX_SECONDS * 1000,
     tickBudgetMs: config.DELIVERY_TICK_BUDGET_MS,
-  })
+  }, undefined, undefined, new UsageLimits(
+    undefined, undefined, (await readDeliveryHealth(stateDir, session))?.limits,
+  ))
   // Read at the moment of a clear, not snapshotted: a rebind mid-tick moves a run
   // onto a new orchestrator pane, and that pane is one a human types in at once.
   let claimedPanes = new Set<string>()
@@ -232,6 +236,8 @@ async function main(): Promise<void> {
       const livePanes = new Set(listed.map((p) => p.pane_id))
       gate.beginTick(livePanes)
       for (const pane of readyPanes(drained)) gate.wake(pane)
+      // Before the wake lines and delivery, so both already see a pane the limit stopped.
+      await checkLimits(gate.limits, herdr, drained)
       const events = tickEvents(tickRuns, drained, {
         panes: { absence: paneAbsence, listed },
         workspaces: { absence: workspaceAbsence, listed: await herdr.workspaceList() },
@@ -493,7 +499,7 @@ async function main(): Promise<void> {
             ladder: ladderFor(c, probeMax),
           })
           const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
-          return { ...sent, deferred: sent.held === 'budget' }
+          return { ...sent, deferred: sent.held === 'budget' || sent.held === 'usage_limit' }
         },
         escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
           run_id: c.run.run_id,
@@ -509,7 +515,23 @@ async function main(): Promise<void> {
         queueEscalation: (c, text) => {
           enqueue(c.run, { to: 'orchestrator', taskId: c.task?.task_id ?? null, text }, Date.now())
         },
+        limited: limitedNow(gate.limits, herdr),
       }
+
+      // Before the stall step, and in the same tick: a pane the step lifts is re-armed
+      // and saved before any ladder is evaluated, so none sees it neither limited nor
+      // re-armed.
+      const liftedStale = await liftLimits(gate.limits, runs, {
+        io: herdr,
+        save: (run, effect) => saveOrReapply(stateDir, run, [effect]),
+        renderResume: (task) => renderPrompt(pluginRoot, 'usage-resume', {
+          phase: task.phase, task_id: task.task_id, branch: task.branch,
+        }),
+        note: () => Bun.file(join(pluginRoot, 'prompts', 'usage-lifted.md')).text(),
+        hpipe,
+        now: Date.now,
+      })
+      for (const run of liftedStale) unsaved.add(run)
 
       const savedRuns = runs.filter((run) => !unsaved.has(run))
       await applyStalls(
@@ -525,7 +547,7 @@ async function main(): Promise<void> {
       if (gate.revision !== healthRevision || Date.now() - healthWrittenAt >= HEALTH_REFRESH_MS) {
         healthWrittenAt = Date.now()
         await writeDeliveryHealth(stateDir, session, {
-          pid: process.pid, written_at: healthWrittenAt, panes: gate.holds(),
+          pid: process.pid, written_at: healthWrittenAt, panes: gate.holds(), limits: gate.limits.snapshot(),
         })
         healthRevision = gate.revision
       }

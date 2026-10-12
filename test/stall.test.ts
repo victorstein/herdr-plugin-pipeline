@@ -520,9 +520,51 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
     queueEscalation: (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
     agentStatus: async () => 'idle',
     persist: async () => {},
+    limited: async () => false,
   }
   return { ...base, ...over, sent }
 }
+
+test('a candidate whose pane Claude\'s usage limit stopped is neither probed nor escalated, and nothing is written', async () => {
+  const atTheTop = () => {
+    const run = runAt('execute', LONG_AGO)
+    const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO, pane_id: 'w7:p1' })
+    run.tasks = [task]
+    task.stall = { at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+    return { run, task }
+  }
+  const { run, task } = atTheTop()
+  const before = structuredClone(task.stall)
+  let persisted = 0
+  const asked: string[] = []
+  const deps = mkDeps({
+    persist: async () => { persisted += 1 },
+    limited: async (pane) => { asked.push(pane); return pane === 'w7:p1' },
+  })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(task.phase).toBe('implement')
+  expect(task.stall).toEqual(before)
+  expect(persisted).toBe(0)
+  expect(asked).toEqual(['w7:p1'])
+
+  const probing = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  const probeDeps = mkDeps({ now: () => 45 * 60_000, limited: async () => true })
+  await applyStalls(taskStallCandidates([probing], 45 * 60_000, 45, 3), probeDeps)
+  expect(probeDeps.sent).toEqual([])
+  expect(probing.tasks[0]?.stall).toBeUndefined()
+})
+
+test('a task waiting on a limited orchestrator is skipped, and the pane is asked about once', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'merge', phase_entered_at: LONG_AGO, pane_id: 'w7:p1', pr: 7 })
+  run.tasks = [task]
+  const asked: string[] = []
+  const deps = mkDeps({ limited: async (pane) => { asked.push(pane); return pane === ORCHESTRATOR_PANE } })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(asked).toEqual([ORCHESTRATOR_PANE])
+})
 
 test('a probe deferred by the supervisor\'s own send budget records nothing — it is no sign of the pane', async () => {
   const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })

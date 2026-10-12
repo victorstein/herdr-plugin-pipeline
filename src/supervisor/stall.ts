@@ -49,7 +49,7 @@ export interface StallCandidate {
  * consulting anyone" — consulting `probeRecipient`'s fallback would gate a
  * worker's escalation on an unrelated agent's status.
  */
-function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
+export function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
   return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
 }
 
@@ -464,6 +464,12 @@ export interface StallDeps {
    * the save lose to a CLI write; see `saveOrReapply`.
    */
   persist: (run: Run, effect?: RunEffect) => Promise<SaveOutcome | void>
+  /**
+   * Whether Claude's usage limit has stopped the pane. A probe there is rejected on
+   * arrival, and an escalation would be a quota pause dressed as a stall: berean-os
+   * escalated three tasks in the middle of a 3 h 46 min limit. Measured on a live run.
+   */
+  limited: (paneId: string) => Promise<boolean>
 }
 
 /**
@@ -516,6 +522,8 @@ function stallEffectFor(
 
 async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutcome | void> {
   const record: Run | Task = c.task ?? c.run
+  if (await deps.limited(c.paneId)) return
+  if (c.actorPaneId !== null && c.actorPaneId !== c.paneId && await deps.limited(c.actorPaneId)) return
 
   // An undeliverable probe must still climb eventually: the ladder exists to
   // end silence, and a pane that cannot be reached is the case escalation

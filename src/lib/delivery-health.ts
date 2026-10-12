@@ -3,6 +3,7 @@ import { type PaneInfo, paneHasNoAgent } from './herdr'
 import type { PaneObservations } from './outbox'
 import { readJson, writeJson } from './store'
 import type { SessionKey } from './types'
+import type { LimitLine } from './usage-limit'
 
 /** Why the supervisor is holding what it owes one pane. */
 export interface PaneHold {
@@ -29,6 +30,14 @@ export interface DeliveryHealth {
   pid: number
   written_at: number
   panes: Record<string, PaneHold>
+  /** The usage limits the supervisor is tracking, for the next one to carry on from. */
+  limits?: PersistedLimits
+}
+
+export interface PersistedLimits {
+  marks: Record<string, { line: LimitLine; since: number; resets_at: number | null }>
+  /** Pane → the line last lifted while still on screen, which must not be marked again. */
+  stale: Record<string, string>
 }
 
 const healthPath = (stateDir: string, session: SessionKey) =>
@@ -48,6 +57,14 @@ export const HEALTH_REFRESH_MS = 15_000
  * wedged in a slow call — and its holds describe a moment long gone.
  */
 export const HEALTH_MAX_AGE_MS = 4 * HEALTH_REFRESH_MS
+
+/**
+ * Whatever supervisor wrote it, live or not: a restarted supervisor carries on from
+ * its predecessor's usage limits, so a limit keeps the time it was first seen.
+ */
+export async function readDeliveryHealth(stateDir: string, session: SessionKey): Promise<DeliveryHealth | null> {
+  return readJson<DeliveryHealth>(healthPath(stateDir, session))
+}
 
 /** Only the live, ticking supervisor's file counts. */
 export async function readPaneHolds(
