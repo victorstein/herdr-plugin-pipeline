@@ -689,11 +689,34 @@ test('sync says a resolved conflict goes through review, like any commit beyond 
 
 test('a review after a skipped review and a dirty sync reads the whole change, not a range since a review', async () => {
   const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
-    merge: 'dirty' as const, dirty_at: 'ffff6666' }
+    merge: 'dirty' as const, dirty_at: 'ffff66660000' }
   expect(await renderPhase('pr-review', { tier: 'light', land_sha: 'aaaa1111', submission: sync }, 'sync', 'single-pr'))
     .toContain('since the last reviewed head')
   expect(await renderPhase('pr-review', { tier: 'light', submission: sync }, 'sync', 'single-pr'))
     .not.toContain('since the last reviewed head')
+})
+
+// Smoke run 15: the first review of a skipped-review change after a conflicted sync got
+// only the generic brief, and nothing pointed it at the resolution.
+test('the first review after a dirty sync is told to read the whole diff and the conflict resolution', async () => {
+  const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
+    merge: 'dirty' as const, dirty_at: 'ffff66660000' }
+  const opening = 'This review was entered from a sync of `batch/x` that was not a clean merge'
+  const firstReview = 'No reviewed head is recorded, so this is the change\'s first review: read the whole diff.'
+  const atDirty = prose(await renderPhase('pr-review', { tier: 'light', submission: sync }, 'sync', 'single-pr'))
+  expect(atDirty).toContain(`${opening} (at \`ffff6666\`). ${firstReview} Then read the conflict resolution, ` +
+    'which no reviewer has seen, with `git show --remerge-diff ffff66660000`, and if that commit is not a merge, ' +
+    'the same for each merge in `git log --first-parent --merges origin/batch/x..origin/feat/x`.')
+
+  const { dirty_at: _, ...undated } = sync
+  const noDirtyAt = prose(await renderPhase('pr-review', { tier: 'light', submission: undated }, 'sync', 'single-pr'))
+  expect(noDirtyAt).toContain(`${opening}. ${firstReview} Then read each conflict resolution, which no reviewer ` +
+    'has seen, with `git show --remerge-diff <merge>` for each merge in ' +
+    '`git log --first-parent --merges origin/batch/x..origin/feat/x`.')
+
+  const clean = { ...sync, merge: 'clean' as const }
+  expect(await renderPhase('pr-review', { tier: 'light', submission: clean }, 'sync', 'single-pr'))
+    .not.toContain(opening)
 })
 
 test('intake explains the tiers and registers with --tier', async () => {

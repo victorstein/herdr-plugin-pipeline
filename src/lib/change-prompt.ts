@@ -79,17 +79,35 @@ function syncStep(batch: Batch): string {
 
 /**
  * A review entered from a sync that was not a clean merge: its resolution is code
- * no reviewer has seen, and the reviewed head is still `land_sha`, so the range
- * since it is what this review is for.
+ * no reviewer has seen. When a reviewed head is still `land_sha`, the range since
+ * it is what this review is for.
  */
 function resyncNote(batch: Batch, task: Task): string {
   const sync = task.submission
-  if (sync?.kind !== 'sync' || sync.merge !== 'dirty' || !task.land_sha) return ''
-  return `\n\nThis review was entered from a sync of \`${batch.branch}\` that was not a clean merge` +
-    `${sync.dirty_at ? ` (at \`${sha8(sync.dirty_at)}\`)` : ''}. Read what changed since the last reviewed head ` +
+  if (sync?.kind !== 'sync' || sync.merge !== 'dirty') return ''
+  const opening = `\n\nThis review was entered from a sync of \`${batch.branch}\` that was not a clean merge` +
+    `${sync.dirty_at ? ` (at \`${sha8(sync.dirty_at)}\`)` : ''}.`
+  if (!task.land_sha) return `${opening} ${firstReviewOfResync(batch, task, sync.dirty_at)}`
+  return `${opening} Read what changed since the last reviewed head ` +
     `with \`git log --first-parent ${shellWord(`${task.land_sha}..origin/${task.branch}`)}\`, and ` +
     '`git show --remerge-diff <merge>` ' +
     'for each merge in it: a conflict resolution is code no reviewer has seen.'
+}
+
+/**
+ * A dirty sync of a head whose PR review was skipped leaves no reviewed head, so
+ * nothing bounds a range. `dirty_at` is the newest commit the sync walk refused,
+ * which is a fix on top of the merge when the worker committed one after it.
+ */
+function firstReviewOfResync(batch: Batch, task: Task, dirtyAt: string | undefined): string {
+  const merges = `\`git log --first-parent --merges ${shellWord(`origin/${batch.branch}..origin/${task.branch}`)}\``
+  const resolution = dirtyAt
+    ? 'Then read the conflict resolution, which no reviewer has seen, with ' +
+      `\`git show --remerge-diff ${shellWord(dirtyAt)}\`, and if that commit is not a merge, the same for each ` +
+      `merge in ${merges}.`
+    : 'Then read each conflict resolution, which no reviewer has seen, with `git show --remerge-diff <merge>` ' +
+      `for each merge in ${merges}.`
+  return `No reviewed head is recorded, so this is the change's first review: read the whole diff. ${resolution}`
 }
 
 /**
