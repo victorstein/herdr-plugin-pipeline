@@ -40,6 +40,7 @@ import {
   applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
   saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
+import { fetchBatches } from './batch-fetch'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
@@ -289,6 +290,7 @@ async function main(): Promise<void> {
       if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
         lastCiPollMs = Date.now()
         await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).headCi(pr))
+        await fetchBatches(runs)
       }
 
       const advancing = pickOneAdvance(runs)
@@ -356,6 +358,7 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
+            syncYieldMs: config.STALL_MINUTES * 60_000,
             freshDispatchBase: async (repoRoot, dependencyMerges, branch) => {
               const base = await freshDispatchBase(repoRoot, dependencyMerges, branch)
               if (base.fetchError !== null) {

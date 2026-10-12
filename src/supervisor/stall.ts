@@ -1,14 +1,15 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
-import { fileHolders } from '../lib/gating'
-import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
+import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
+import { modeOf, type PhaseRow, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { probeRecipient } from '../lib/outbox'
 import {
-  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
+  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker, shellQuoted,
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
@@ -135,6 +136,9 @@ export function taskStallCandidates(
       const row = taskRow(task.phase)
       if (!row.stallable) continue
       if (task.phase === 'blocked-on-files' && waitsOnLiveHolders(task, run.tasks)) continue
+      // #22 again otherwise: the holder has its own ladder, and a probe about each
+      // task behind it says nothing new.
+      if (task.phase === 'land-queue' && landingSlotHolder(run.tasks) !== null) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
@@ -295,8 +299,13 @@ export function stallAwaiting(
     }
   }
 
+  if (task !== null && modeOf(run) === 'single-pr') {
+    const landing = landingClause(run, task, hpipe, now)
+    if (landing !== null) return landing
+  }
+
   if (row.signal === 'artifact' || row.signal === 'verdict') {
-    const short =task ? awaitedFor(task) : 'its review verdict'
+    const short =task ? awaitedFor(run, task) : 'its review verdict'
     // With no worktree `absoluteArtifactPath` falls back to the main checkout,
     // which is the orchestrator's tree and holds every sibling's merged docs — so
     // naming it sends the reader at the wrong file when the real fault is that
@@ -324,7 +333,7 @@ export function stallAwaiting(
     }
   }
   if (row.signal === 'pr' && task) {
-    return sentence(awaitedFor(task))
+    return sentence(awaitedFor(run, task))
   }
   if (row.signal === 'ci' && task) {
     // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
@@ -334,7 +343,7 @@ export function stallAwaiting(
     // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
     // advances the row back to `implement` — one of the fastest ways OUT of ci.
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
         `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
         'conclusion, and this phase waits on it forever.',
@@ -347,7 +356,7 @@ export function stallAwaiting(
     // Not "the PR is unmerged": this row is evaluated only while the orchestrator
     // is idle or has no agent, so a merged PR can sit here as long as it stays busy.
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
         "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
         'merged, end your turn: this phase is read only while you are idle.',
@@ -356,20 +365,20 @@ export function stallAwaiting(
   if (row.signal === 'closed' && task) {
     if (task.merged_at_ms === null) {
       return {
-        short: awaitedFor(task),
+        short: awaitedFor(run, task),
         clause: `No merge is recorded for ${task.task_id}, so the supervisor will not close bead ${task.bead} ` +
           `and this phase cannot clear: \`${hpipe} rewind ${run.run_id} merge --task ${task.task_id}\` records it.`,
       }
     }
     if (!beadOutOfSync(task)) {
       return {
-        short: awaitedFor(task),
+        short: awaitedFor(run, task),
         clause: `This phase is waiting on the Beads close of ${task.bead}, which the supervisor retries every ` +
           'tick. Nothing is needed from you yet.',
       }
     }
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `The last ${task.bead_sync.streak} of the supervisor's Beads calls for ${task.bead} have failed in a row; ` +
         `the last said:\n\n    ${task.bead_sync.last_error}\n\nFix what it names, or close the bead by hand: ` +
         `\`${hpipe} close --task ${task.task_id}\`. Add \`--force\` only to override bd's close guards, ` +
@@ -378,14 +387,16 @@ export function stallAwaiting(
   }
   if (row.signal === 'files' && task) {
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: 'This phase is waiting for another task to release the files this one declared.',
     }
   }
-  if (row.signal === 'manual' && task) return sentence(awaitedFor(task))
+  if ((row.signal === 'manual' || row.signal === 'synced' || row.signal === 'slot') && task) {
+    return sentence(awaitedFor(run, task))
+  }
   if (row.signal === 'worktree') {
     return task
-      ? { short: awaitedFor(task),
+      ? { short: awaitedFor(run, task),
           clause: "This phase is waiting for this task's worktree to be removed. Teardown is " +
             'unconditional and runs first in every tick, so a task still here means this run is ' +
             "not being advanced — check the supervisor pane's log, and check whether another run " +
@@ -400,6 +411,72 @@ export function stallAwaiting(
     }
   }
   return sentence(`whatever clears ${phase}`)
+}
+
+/** "t5, t6 wait on this sync": the tasks a stuck holder is keeping from landing. */
+function waitersOn(run: Run, holder: Task, what: string): string {
+  const ids = landingQueue(run.tasks).filter((t) => t !== holder).map((t) => t.task_id)
+  if (ids.length === 0) return ''
+  return ` ${ids.join(', ')} ${ids.length === 1 ? 'waits' : 'wait'} on this ${what}.`
+}
+
+/** The single-PR forms of the rows a batch changes; null leaves the row to the shared clauses. */
+function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiting | null {
+  const batch = run.batch
+  if (batch === undefined) return null
+  const short = awaitedFor(run, task)
+  switch (task.phase) {
+    case 'implement':
+      return {
+        short,
+        clause: `This phase is waiting for a submission: push, then \`${hpipe} submit --task ${task.task_id} ` +
+          `--title "<conventional title>"\`. It refuses, with the reason, until the work is committed, pushed, ` +
+          `checked and not already on ${batch.branch}.`,
+      }
+    case 'land-queue': {
+      if (task.pane_id === null) {
+        const start = task.workspace_id === null
+          ? dispatchWorkerCommand(run, task, hpipe)
+          : startWorkerCommand(run, task, task.workspace_id, hpipe)
+        return {
+          short: 'an agent in its worktree to sync',
+          clause: `${task.task_id} waits to land, but ${batch.branch} has moved past it, so it needs an agent in ` +
+            `its worktree to sync before it can take the landing slot: ${start}.`,
+        }
+      }
+      const fetchError = batch.fetch_error
+      const unseen = fetchError
+        ? ` ${batch.branch} has not fetched for ${ageMinutes(fetchError.since, now)}m (${fetchError.reason}), so ` +
+          'landings are not being seen.'
+        : ''
+      return {
+        short,
+        clause: 'No task holds the landing slot and this one is first in line, yet it has not taken it, so this ' +
+          `run is not being advanced.${unseen} Check the supervisor pane's log, whether another run holds this ` +
+          `orchestrator pane, and whether git can read the batch: \`git -C ${shellQuoted(run.repo_root)} ` +
+          `merge-base --is-ancestor origin/${batch.branch} ${task.land_sha ?? '<land sha>'}\` must exit 0 or 1.`,
+      }
+    }
+    case 'sync':
+      if (task.pane_id === null) return null
+      return {
+        short,
+        clause: `This phase is waiting for ${batch.branch} merged into ${task.branch}, checked, pushed and ` +
+          `submitted: \`${mergeBatchCommand(batch)}\`, then \`${hpipe} submit --task ${task.task_id}\`.` +
+          waitersOn(run, task, 'sync'),
+      }
+    case 'merge':
+      return {
+        short,
+        clause: `This phase is waiting for you to land ${task.branch}: ` +
+          `\`${landCommand(run, task.land_sha ?? '<land sha>')}\`. If the push is refused for any reason, end ` +
+          `your turn: ${batch.branch} has moved, and the task goes back to sync. Landing is yours, not the ` +
+          "plugin's; nothing lands automatically. If it has landed, end your turn: this phase is read only while " +
+          'you are idle.' + waitersOn(run, task, 'landing'),
+      }
+    default:
+      return null
+  }
 }
 
 /**

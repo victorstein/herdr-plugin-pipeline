@@ -1,5 +1,5 @@
-import { taskRow } from './phases'
-import type { Task } from './types'
+import { modeOf, taskRow } from './phases'
+import type { Run, Task } from './types'
 
 export const UNRECORDED_PR = 'a PR number this task never recorded'
 
@@ -10,19 +10,29 @@ export const UNRECORDED_PR = 'a PR number this task never recorded'
  * read as a bare "YOUR move" in status while its probe said "PR #7 to be
  * merged". Measured on a live run.
  */
-export function awaitedFor(task: Task): string {
+export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
   const row = taskRow(task.phase)
+  const batch = modeOf(run) === 'single-pr' ? run.batch : undefined
   switch (row.signal) {
     case 'artifact':
       return `its ${row.artifact ?? task.phase} artifact`
     case 'verdict':
       return 'its review verdict'
     case 'pr':
-      return `a pushed PR for ${task.branch} (${task.bead})`
+      return batch === undefined
+        ? `a pushed PR for ${task.branch} (${task.bead})`
+        : `a submission for ${task.branch} (${task.bead})`
     case 'ci':
       return task.pr === null ? UNRECORDED_PR : `CI on PR #${task.pr}`
     case 'merged':
+      if (batch !== undefined) {
+        return `${task.branch} at ${(task.land_sha ?? '<no reviewed head>').slice(0, 8)} to land on ${batch.branch}`
+      }
       return task.pr === null ? UNRECORDED_PR : `PR #${task.pr} to be merged`
+    case 'slot':
+      return 'the landing slot'
+    case 'synced':
+      return `${batch?.branch ?? 'the batch'} merged into ${task.branch}, checked and resubmitted`
     case 'closed':
       return `bead ${task.bead} to be closed by the supervisor`
     case 'files':

@@ -1,22 +1,26 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
-import { baseLine, dependencyMerges, type DispatchBase } from '../lib/dispatch-base'
+import { baseLine, dependencyMerges, type DispatchBase, type RemoteHead, remoteBranchHead } from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
-  gateStatus, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, widenFiles,
+  gateStatus, landingQueue, landingSlotHolder, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts,
+  widenFiles,
 } from '../lib/gating'
 import type { RunEffect } from '../lib/ledger'
 import type { PrView } from '../lib/gh'
-import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
-import { queuedWorkerPrompt } from '../lib/outbox'
-import { modeOf, taskRow } from '../lib/phases'
+import {
+  advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, type LandingFacts, landsWithoutSync,
+} from '../lib/machine'
+import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
+import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { changePromptVars, landingPromptVars, syncPromptVars } from '../lib/change-prompt'
 import { tierPromptVars } from '../lib/tier-prompt'
-import { artifactBase, reserveVerdict } from '../lib/verdict-path'
+import { changedPaths, isAncestor, resolveCommit } from '../lib/sync-walk'
+import { artifactBase, REVIEWS_DIR, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Run, Task, TaskPhase } from '../lib/types'
@@ -57,7 +61,25 @@ export interface TaskDeps extends TeardownDeps {
   freshDispatchBase: (
     repoRoot: string, dependencyMerges: string[] | null, branch: string | null,
   ) => Promise<DispatchBase>
+  /** Single-PR landing reads; the real ones read `repo_root`'s refs and ask origin for one branch head. */
+  landingGit?: LandingGit
+  /** How long a `sync` holder may go without submitting while another task waits to land. */
+  syncYieldMs?: number
 }
+
+export interface LandingGit {
+  isAncestor: (repoRoot: string, ancestor: string, of: string) => Promise<boolean | null>
+  remoteBranchHead: (repoRoot: string, branch: string) => Promise<RemoteHead>
+  resolve: (repoRoot: string, ref: string) => Promise<string | null>
+  changedPaths: (repoRoot: string, from: string, to: string) => Promise<string[] | null>
+}
+
+export const LOCAL_LANDING_GIT: LandingGit = {
+  isAncestor, remoteBranchHead, resolve: resolveCommit, changedPaths,
+}
+
+/** STALL_MINUTES, the orchestrator's cadence: a stuck sync holds up every landing behind it. */
+const DEFAULT_SYNC_YIELD_MS = 15 * 60_000
 
 const UNCOMMITTED_SAMPLE = 3
 
@@ -192,6 +214,94 @@ function actorPane(run: Run, task: Task): string | null {
   return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
 }
 
+const batchRefOf = (run: Run): string => `refs/remotes/origin/${run.batch?.branch ?? ''}`
+
+/** A push of review verdicts alone changes nothing that lands, so it neither moves the branch nor needs a check. */
+async function addsOnlyReviews(repoRoot: string, from: string, to: string, git: LandingGit): Promise<boolean> {
+  if (from === to) return true
+  const paths = await git.changedPaths(repoRoot, from, to)
+  return paths !== null && paths.every((path) => path.startsWith(`${REVIEWS_DIR}/`))
+}
+
+/**
+ * Null skips the tick: a git read that fails must not read as "not landed",
+ * which would send a landed task to sync.
+ */
+async function landingFacts(run: Run, task: Task, git: LandingGit): Promise<LandingFacts | null> {
+  const landSha = task.land_sha
+  if (run.batch === undefined || !landSha) return null
+  const batchRef = batchRefOf(run)
+  const batchHead = await git.resolve(run.repo_root, batchRef)
+  if (batchHead === null) return null
+  const landed = await git.isAncestor(run.repo_root, landSha, batchRef)
+  const upToDate = await git.isAncestor(run.repo_root, batchRef, landSha)
+  if (landed === null || upToDate === null) return null
+  const remote = await git.remoteBranchHead(run.repo_root, task.branch)
+  if (!remote.ok) return null
+  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git))
+  const submitted = task.submission?.head_sha
+  const checked = submitted !== undefined && await addsOnlyReviews(run.repo_root, submitted, landSha, git)
+  return { movedTo: moved ? remote.sha : null, landed, upToDate, checked, batchHead }
+}
+
+type LandingFor = (task: Task) => Promise<LandingFacts | null>
+
+/** One read per task per tick, however many rows ask about it. */
+function landingReader(run: Run, git: LandingGit): LandingFor {
+  const read = new Map<string, Promise<LandingFacts | null>>()
+  return (task) => {
+    let facts = read.get(task.task_id)
+    if (facts === undefined) {
+      facts = landingFacts(run, task, git)
+      read.set(task.task_id, facts)
+    }
+    return facts
+  }
+}
+
+/**
+ * The tasks waiting to land that could take the slot now: one with a pane, or one
+ * that lands without a sync and so needs no worker. A paneless task that must
+ * sync would hold every landing up until an agent is started for it.
+ */
+async function eligibleToLand(run: Run, landingFor: LandingFor, except: Task | null = null): Promise<Task[]> {
+  const eligible: Task[] = []
+  for (const waiting of landingQueue(run.tasks)) {
+    if (waiting === except) continue
+    if (waiting.pane_id !== null) {
+      eligible.push(waiting)
+      continue
+    }
+    const facts = await landingFor(waiting)
+    if (facts !== null && landsWithoutSync(facts)) eligible.push(waiting)
+  }
+  return eligible
+}
+
+async function takesTheSlot(run: Run, task: Task, landingFor: LandingFor): Promise<boolean> {
+  if (landingSlotHolder(run.tasks) !== null) return false
+  for (const waiting of landingQueue(run.tasks)) {
+    if (waiting.pane_id === null) {
+      const facts = await landingFor(waiting)
+      if (facts === null || !landsWithoutSync(facts)) continue
+    }
+    return waiting === task
+  }
+  return false
+}
+
+/**
+ * A row any agent can take, with no pane bound: the brief and the phase prompt
+ * go out as one entry, as a rewind queues them, and wait in the outbox until an
+ * agent is started in the worktree.
+ */
+async function queueForAFreshAgent(run: Run, task: Task, deps: TaskDeps): Promise<void> {
+  if (queuedWorkerPrompt(run, task) !== null) return
+  const phasePrompt = await renderTaskPhasePrompt(run, task, deps, task.phase)
+  const brief = await renderWorkerPrompt(deps.pluginRoot, run, task)
+  enqueue(run, { to: 'worker', taskId: task.task_id, text: `${brief}\n\n---\n\n${phasePrompt}` }, Date.now())
+}
+
 /**
  * Drives every task in a run one step. Each returned prompt names the pane it is
  * addressed to, because worker-owned rows send one tick's prompts to several
@@ -209,6 +319,7 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   // let a task that reaches `teardown` THIS tick fall straight through to
   // `done` in the same call, skipping that phase's own settle.
   await runTeardown([run], deps, deps.effects)
+  const landingFor = landingReader(run, deps.landingGit ?? LOCAL_LANDING_GIT)
 
   for (const task of run.tasks) {
     if (task.phase === 'queued') {
@@ -238,7 +349,12 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 
     const row = taskRow(task.phase)
     const pane = actorPane(run, task)
-    if (row.actor !== undefined && pane === null) continue
+    if (row.actor !== undefined && pane === null) {
+      if (row.anyWorker !== true) continue
+      // Still evaluated: a holder with no agent must yield the slot, and one whose
+      // head has landed already must record it.
+      await queueForAFreshAgent(run, task, deps)
+    }
     const actorIdle = pane === null ? false : await deps.liveIdle(pane)
 
     // Phases whose signal comes from the orchestrator must not be evaluated
@@ -249,13 +365,17 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     if (row.actor === 'orchestrator' && !actorIdle && pane !== null && deps.hasLiveAgent(pane)) continue
 
     await noteUncommittedWork(run, task, actorIdle, deps)
-    const signals = await gatherSignals(run, task, deps, actorIdle)
+    const signals = await gatherSignals(run, task, deps, actorIdle, landingFor)
     if (!signals) continue
 
     const cameFrom = task.phase
     if (!advanceTask(run, task, signals)) continue
     if (task.phase === cameFrom) continue
 
+    if (taskRow(task.phase).anyWorker === true && task.pane_id === null) {
+      await queueForAFreshAgent(run, task, deps)
+      continue
+    }
     const prompt = await promptForTaskPhase(run, task, deps, cameFrom)
     if (prompt.length > 0) {
       prompts.push({ text: prompt, paneId: actorPane(run, task), taskId: task.task_id })
@@ -304,7 +424,9 @@ function logAmbiguous(run: Run, task: Task, candidates: string[], seen: Set<stri
   )
 }
 
-async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: boolean) {
+async function gatherSignals(
+  run: Run, task: Task, deps: TaskDeps, actorIdle: boolean, landingFor: LandingFor,
+) {
   const base = {
     actorIdle,
     artifactFresh: false,
@@ -319,8 +441,12 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     maxPasses: deps.maxPasses,
   }
 
+  const git = deps.landingGit ?? LOCAL_LANDING_GIT
+  const singlePr = modeOf(run) === 'single-pr'
+
   switch (task.phase) {
     case 'implement': {
+      if (singlePr) return base
       // GitHub's PR head lags a push, so a send-back can record the head from
       // before the reviewer's verdict commit, and that commit then reads as the
       // worker's push. Until the prompt lands the worker has pushed nothing, so
@@ -392,10 +518,31 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
     case 'pr-review-quality': {
       const verdict = await deps.verdictFor(run, task)
       const signals = { ...base, artifactFresh: verdict !== null, verdict }
-      const sendsBack = actorIdle && verdict !== null && verdict.verdict !== 'CLEAR'
-      return sendsBack ? withSendBackHead(signals, task, deps) : signals
+      if (!actorIdle || verdict === null) return signals
+      if (verdict.verdict !== 'CLEAR') return withSendBackHead(signals, run, task, deps)
+      return singlePr && nextPhase(routeOf(run, task), taskRow(task.phase)) === 'land-queue'
+        ? withReviewedHead(signals, run, task, git)
+        : signals
+    }
+    case 'land-queue': {
+      if (!singlePr || !(await takesTheSlot(run, task, landingFor))) return base
+      const landing = await landingFor(task)
+      return landing === null ? null : { ...base, slotMine: true, landing }
+    }
+    case 'sync': {
+      if (!task.land_sha) return base
+      const landed = await git.isAncestor(run.repo_root, task.land_sha, batchRefOf(run))
+      if (landed === null) return null
+      const landing = landed ? await landingFor(task) : undefined
+      if (landing === null) return null
+      const yieldAfterMs = deps.syncYieldMs ?? DEFAULT_SYNC_YIELD_MS
+      return { ...base, landing, yieldAfterMs, yieldTo: await yieldCandidates(run, task, yieldAfterMs, landingFor) }
     }
     case 'merge': {
+      if (singlePr) {
+        const landing = await landingFor(task)
+        return landing === null ? null : { ...base, landing }
+      }
       if (task.pr === null) return base
       const view = await deps.prView(task.pr)
       if (!view?.merged) return { ...base, headSha: view?.headSha ?? null }
@@ -417,7 +564,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         filesClear: releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id),
       }
     case 'ci':
-      return task.ci === 'fail' ? withSendBackHead(base, task, deps) : base
+      return task.ci === 'fail' ? withSendBackHead(base, run, task, deps) : base
     default:
       return null
   }
@@ -435,17 +582,48 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
  * than return to `implement`, so it must not wait on gh.
  */
 async function withSendBackHead<S extends { headSha: string | null; prNumber: number | null }>(
-  signals: S, task: Task, deps: TaskDeps,
+  signals: S, run: Run, task: Task, deps: TaskDeps,
 ): Promise<S | null> {
   const row = taskRow(task.phase)
   if (row.onBlocker !== 'implement') return signals
   if (row.counter !== undefined && counterFor(task, row.counter) + 1 >= deps.maxPasses) return signals
+  if (modeOf(run) === 'single-pr') {
+    const remote = await (deps.landingGit ?? LOCAL_LANDING_GIT).remoteBranchHead(run.repo_root, task.branch)
+    return remote.ok && remote.sha !== null ? { ...signals, headSha: remote.sha } : null
+  }
   const pr = task.pr ?? (await deps.prForBranch(task.branch))
   if (pr === null) return null
   task.pr = pr
   const view = await deps.prView(pr)
   if (view?.headSha == null) return null
   return { ...signals, prNumber: pr, headSha: view.headSha }
+}
+
+/**
+ * The last review's CLEAR records what lands: the branch head, read in the same
+ * tick the reviewers pushed their verdicts onto. It must contain the submitted
+ * head; the machine sends a branch that lost it back to implement. A failed read
+ * skips the tick, as a failed PR-head read does.
+ */
+async function withReviewedHead<S extends { headSha: string | null }>(
+  signals: S, run: Run, task: Task, git: LandingGit,
+): Promise<(S & { headContainsSubmission: boolean | null }) | null> {
+  const remote = await git.remoteBranchHead(run.repo_root, task.branch)
+  if (!remote.ok || remote.sha === null) return null
+  const submitted = task.submission?.head_sha
+  const contains = submitted === undefined ? true : await git.isAncestor(run.repo_root, submitted, remote.sha)
+  if (contains === null) return null
+  return { ...signals, headSha: remote.sha, headContainsSubmission: contains }
+}
+
+/** Only once the holder is past its window with nothing submitted: before that it is working, and costs no read. */
+async function yieldCandidates(
+  run: Run, task: Task, yieldAfterMs: number, landingFor: LandingFor,
+): Promise<string[]> {
+  const sync = task.submission
+  if (sync?.kind === 'sync' && sync.at >= task.phase_entered_at) return []
+  if (Date.now() - task.phase_entered_at < yieldAfterMs) return []
+  return (await eligibleToLand(run, landingFor, task)).map((t) => t.task_id)
 }
 
 /** The review verdict at the task's reserved path, if one newer than its baseline has settled. */

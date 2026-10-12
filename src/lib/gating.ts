@@ -180,6 +180,24 @@ export function releasableFromFiles(all: Task[]): Task[] {
   return released
 }
 
+/**
+ * Single-PR: the one task allowed to land, derived from phases on every tick and
+ * never stored, so a crash or a rewind can at worst leave two — which costs one
+ * refused push, never a wrong landing. A decision keeps the slot; anything else
+ * that leaves `sync` or `merge` passes it on, so one escalated task cannot stop
+ * every landing.
+ */
+export function landingSlotHolder(all: readonly Task[]): Task | null {
+  const holds = (phase: TaskPhase | null) => phase === 'sync' || phase === 'merge'
+  return all.find((t) => holds(t.phase) || (t.phase === 'blocked-on-decision' && holds(t.decision_from))) ?? null
+}
+
+export function landingQueue(all: readonly Task[]): Task[] {
+  return all
+    .filter((t) => t.phase === 'land-queue')
+    .sort((a, b) => a.phase_entered_at - b.phase_entered_at || a.task_id.localeCompare(b.task_id))
+}
+
 /** Kahn's algorithm. Returns the ids still in the graph when progress stops. */
 export function detectCycle(tasks: Pick<Task, 'task_id' | 'depends_on'>[]): string[] | null {
   const indegree = new Map<string, number>()

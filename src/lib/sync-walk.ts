@@ -72,3 +72,15 @@ export async function nothingToLand(checkout: string, batchRef: string): Promise
   if (changed.code !== 0) return null
   return changed.out.length === 0
 }
+
+export async function resolveCommit(repoRoot: string, ref: string): Promise<string | null> {
+  const resolved = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  return resolved.code === 0 ? resolved.out : null
+}
+
+/** Null when either commit is not in this object store, so the caller cannot mistake it for no change. */
+export async function changedPaths(repoRoot: string, from: string, to: string): Promise<string[] | null> {
+  const diff = await git(repoRoot, ['diff', '--name-only', '--no-renames', from, to])
+  if (diff.code !== 0) return null
+  return diff.out.split('\n').filter((path) => path.length > 0)
+}

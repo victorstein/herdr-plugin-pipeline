@@ -189,8 +189,8 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     }
     // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
     return task.pending_answer === null
-      ? yours(`YOUR move: waiting for ${awaitedFor(task)}`)
-      : notYours(`nothing for you — waiting for ${awaitedFor(task)}`)
+      ? yours(`YOUR move: waiting for ${awaitedFor(run, task)}`)
+      : notYours(`nothing for you — waiting for ${awaitedFor(run, task)}`)
   }
   if (row.actor === 'worker') {
     const unstarted = overdueUnstartedWorker(run, task, now)
@@ -227,7 +227,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     }
     const work = currentUncommittedWork(run, task)
     if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
-    return notYours(`worker's move: waiting for ${awaitedFor(task)}`)
+    return notYours(`worker's move: waiting for ${awaitedFor(run, task)}`)
   }
   if (task.phase === 'blocked-on-files') {
     // A failed holder keeps its files until a human releases them. An escalated one

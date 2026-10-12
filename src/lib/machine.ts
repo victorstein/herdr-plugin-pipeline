@@ -121,6 +121,9 @@ export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: stri
   // the first round's red before the new head was ever polled. Found by tracing
   // a tick, not measured.
   if (phase === 'ci') task.ci = null
+  // Whatever implement produces is reviewed afresh, so the head the last review
+  // cleared is no longer what lands.
+  if (phase === 'implement') delete task.land_sha
   task.phase = phase
   task.phase_entered_at = Date.now()
   return task
@@ -161,6 +164,22 @@ export function noteWorkingAfterAnswer(task: Task, at: number): void {
   if (task.answer_sent_at !== undefined && at >= task.answer_sent_at) task.worked_on_answer = true
 }
 
+/**
+ * A single-PR task's landing, read from local refs and one `ls-remote` of its
+ * branch. Only the push is the gate; these decide whom to prompt.
+ */
+export interface LandingFacts {
+  /** The branch head on origin, when it moved past `land_sha` with more than review verdicts. */
+  movedTo: string | null
+  /** `land_sha` is contained in `origin/<batch>`. */
+  landed: boolean
+  /** `land_sha` contains `origin/<batch>`. */
+  upToDate: boolean
+  /** The check ran on `land_sha`, or on a head it adds only review verdicts to. */
+  checked: boolean
+  batchHead: string
+}
+
 export interface TaskSignals {
   actorIdle: boolean
   artifactFresh: boolean
@@ -173,14 +192,125 @@ export interface TaskSignals {
   filesClear: boolean
   ciBucket: CiBucket | null
   maxPasses: number
+  /** Single-PR: no task holds the landing slot, and this one is first in line for it. */
+  slotMine?: boolean
+  landing?: LandingFacts
+  /** Single-PR, a review clearing into `land-queue`: whether `headSha` contains the submitted head. */
+  headContainsSubmission?: boolean | null
+  /** Single-PR `sync`: tasks in `land-queue` that could take the slot this one holds. */
+  yieldTo?: string[]
+  yieldAfterMs?: number
+}
+
+const sha8 = (sha: string): string => sha.slice(0, 8)
+
+/** A task that needs no sync to land, and so no worker: it may take the slot without a pane. */
+export function landsWithoutSync(l: LandingFacts): boolean {
+  return l.movedTo === null && (l.landed || (l.upToDate && l.checked))
+}
+
+/** A single-PR run's batch branch; only called from a single-PR edge. */
+const batchBranch = (run: Run): string => run.batch?.branch ?? 'the batch'
+
+/**
+ * The reviewed head is the branch head when the last review clears, read in the
+ * same tick. It must contain what was submitted, or the branch lost that work
+ * during review — a force-push, say — and what would land is not what was checked.
+ */
+function enterLandQueue(run: Run, task: Task, s: TaskSignals): Task | null {
+  if (s.headSha === null) return null
+  const submitted = task.submission?.head_sha
+  if (submitted !== undefined && s.headContainsSubmission !== true) {
+    if (s.headContainsSubmission !== false) return null
+    enterTaskPhase(run, task, 'implement',
+      `${task.branch} no longer contains its submitted head ${sha8(submitted)}: it lost work during review`)
+    task.head_sha_at_entry = s.headSha
+    return task
+  }
+  task.land_sha = s.headSha
+  return enterTaskPhase(run, task, 'land-queue', `cleared; reviewed head ${sha8(s.headSha)}`)
+}
+
+function recordLanding(task: Task, landSha: string, at: number): void {
+  task.merged_at_ms = at
+  task.merge_commit = landSha
+  const landed = task.landed ?? []
+  if (landed.at(-1)?.land_sha === landSha) return
+  const title = task.submission?.title ?? landed.at(-1)?.title ?? task.brief.title
+  task.landed = [...landed, { title, land_sha: landSha, at }]
+}
+
+function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
+  const landSha = task.land_sha
+  if (!landSha) return null
+  const batch = batchBranch(run)
+  const l = s.landing
+  switch (task.phase) {
+    case 'land-queue': {
+      if (s.slotMine !== true || l === undefined) return null
+      if (l.movedTo !== null) {
+        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
+      }
+      if (l.landed) return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is already on ${batch}`)
+      if (l.upToDate && l.checked) {
+        return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is up to date with ${batch} and checked`)
+      }
+      return enterTaskPhase(run, task, 'sync', l.upToDate
+        ? `${sha8(landSha)} is up to date with ${batch} but was not checked since its review`
+        : `${batch} moved to ${sha8(l.batchHead)} since ${sha8(landSha)} was reviewed`)
+    }
+
+    case 'sync': {
+      if (l?.landed === true && l.movedTo === null) {
+        return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is already on ${batch}`)
+      }
+      const sync = task.submission
+      if (sync?.kind !== 'sync' || sync.at < task.phase_entered_at) {
+        const waiting = s.yieldTo ?? []
+        const yieldAfterMs = s.yieldAfterMs ?? Number.POSITIVE_INFINITY
+        if (waiting.length === 0 || Date.now() - task.phase_entered_at < yieldAfterMs) return null
+        return enterTaskPhase(run, task, 'land-queue',
+          `yielded the landing slot: no sync after ${Math.round(yieldAfterMs / 60_000)}m, ${waiting.join(', ')} waiting`)
+      }
+      if (!s.actorIdle) return null
+      if (sync.merge === 'clean') {
+        task.land_sha = sync.head_sha
+        return enterTaskPhase(run, task, 'merge', `clean sync of ${batch} at ${sha8(sync.head_sha)}`)
+      }
+      return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')),
+        `sync of ${batch} was not a clean merge: ${sha8(sync.dirty_at ?? sync.head_sha)}`)
+    }
+
+    // A level, like per-task's: a landing pushed before the task entered `merge`,
+    // or a rewind into it after, is still recorded. The moved branch is read
+    // first, so a commit pushed after the review lands reviewed rather than not
+    // at all.
+    case 'merge': {
+      if (l === undefined) return null
+      if (l.movedTo !== null) {
+        return enterTaskPhase(run, task, 'sync', `${task.branch} moved to ${sha8(l.movedTo)} after its reviewed head`)
+      }
+      if (l.landed) {
+        recordLanding(task, landSha, Date.now())
+        return enterTaskPhase(run, task, 'close', `landed on ${batch} at ${sha8(landSha)}`)
+      }
+      if (l.upToDate) return null
+      return enterTaskPhase(run, task, 'sync', `${batch} moved to ${sha8(l.batchHead)} before ${sha8(landSha)} landed`)
+    }
+
+    default:
+      return null
+  }
 }
 
 function advanceLoopingRow(
   run: Run, task: Task, row: PhaseRow<TaskPhase>, cleared: boolean,
-  maxPasses: number, headSha: string | null,
+  maxPasses: number, headSha: string | null, s?: TaskSignals,
 ): Task | null {
   if (cleared) {
-    return enterTaskPhase(run, task, nextPhase(routeOf(run, task), row), 'cleared')
+    const next = nextPhase(routeOf(run, task), row)
+    if (next === 'land-queue' && s !== undefined) return enterLandQueue(run, task, s)
+    return enterTaskPhase(run, task, next, 'cleared')
   }
   const count = bumpCounter(task, row.phase)
   if (count >= maxPasses) {
@@ -192,6 +322,9 @@ function advanceLoopingRow(
 }
 
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
+  if (modeOf(run) === 'single-pr' && ['land-queue', 'sync', 'merge'].includes(task.phase)) {
+    return advanceLanding(run, task, s)
+  }
   switch (task.phase) {
     case 'research':
     case 'spec':
@@ -202,7 +335,17 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       )
     }
 
+    // The single-PR edge reads only the ledger: `hpipe submit` already checked the
+    // work, and a submission older than this entry cannot clear it.
     case 'implement': {
+      if (modeOf(run) === 'single-pr') {
+        const sub = task.submission
+        const fresh = sub?.kind === 'implement' && sub.at >= task.phase_entered_at &&
+          sub.head_sha !== task.head_sha_at_entry
+        if (!s.actorIdle || !fresh) return null
+        return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')),
+          `submitted ${sha8(sub.head_sha)} as "${sub.title}"`)
+      }
       const moved = s.headSha !== null && s.headSha !== task.head_sha_at_entry
       if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
@@ -219,7 +362,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
       return advanceLoopingRow(
         run, task, taskRow(task.phase), s.verdict.verdict === 'CLEAR',
-        s.maxPasses, s.headSha,
+        s.maxPasses, s.headSha, s,
       )
     }
 
