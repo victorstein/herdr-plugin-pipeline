@@ -1225,7 +1225,10 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 - on a throwaway PR with no override block, check that the squash body's extra lines alone give one
   entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);
 - `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n
-  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch.
+  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch. Run every
+  clean-up line it prints, then check nothing is left: no local task branch (`git branch`), the
+  default branch at the squash commit, `git status` showing only the branch-review file the notice
+  named, and the batch branch on origin only when a ruleset kept it.
 
 ### 9j. Abort
 

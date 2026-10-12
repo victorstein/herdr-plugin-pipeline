@@ -10,7 +10,7 @@ import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
-import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
+import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, rulesetPattern, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
 import { CHECK_REL, checkFailure, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
@@ -268,9 +268,6 @@ async function planBatch(
   }
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
-
-/** One ruleset covers every run's default-named batch; a name of the user's own is protected by name. */
-const rulesetPattern = (branch: string): string => (branch.startsWith('batch/') ? 'batch/*' : branch)
 
 function batchLines(plan: BatchPlan, repoRoot: string): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''

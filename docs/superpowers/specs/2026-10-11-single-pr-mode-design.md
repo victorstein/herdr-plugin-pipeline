@@ -724,7 +724,12 @@ clean-up commands:
 
 - `git push origin --delete <task branches>`, since GitHub deletes only a PR's own head branch on
   merge;
-- `git -C '<repo_root>' worktree remove '<checkout>'` and `git -C '<repo_root>' branch -D <batch>`.
+- `git -C '<repo_root>' worktree remove '<checkout>'` and `git -C '<repo_root>' branch -D <batch>`;
+- once the PR has merged, what that still leaves: `git branch -D` for each task's local branch whose
+  head is on the batch (herdr's worktree removal keeps the branch), a `pull --ff-only` or
+  `fetch origin <default>:<default>` for a default branch that predates the squash merge, the batch
+  branch still on origin (harmless to keep; deleting it needs a bypass if a ruleset protects it), and
+  the untracked branch-review file, named as the run's record: keep or delete it, never commit it.
 
 **`hpipe abort`** (m1). In a single-PR run, `cli.ts:1379-1380` is wrong for the landed tasks, and
 never prints the checkout removal. The message becomes: `<batch>` keeps the landed tasks (named),

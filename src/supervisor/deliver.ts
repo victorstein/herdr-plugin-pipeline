@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
-  batchPrBody, batchPrBodyPath, checkoutSteps, sha8, squashBody, squashBodyPath, squashSubject, suggestedPrTitle,
+  batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
+  suggestedPrTitle,
 } from '../lib/batch'
 import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
@@ -25,7 +26,7 @@ import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
 import { shellQuoted, shellWord } from '../lib/unstarted'
 import { FINISHED } from './teardown'
-import { isAncestor } from '../lib/sync-walk'
+import { isAncestor, resolveCommit } from '../lib/sync-walk'
 
 export interface DigestInput {
   run: Run
@@ -631,12 +632,81 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
   ]
 }
 
+/**
+ * What a shipped run still leaves once the clean-up above is run: herdr's worktree
+ * removal keeps each task's local branch, a ruleset keeps the batch on origin, the
+ * user's default branch predates the squash merge, and the branch review sits
+ * untracked in the working copy. Measured on a live run.
+ */
+async function shippedLeftovers(run: Run, batch: Batch): Promise<string[]> {
+  const repo = shellQuoted(run.repo_root)
+  return [
+    ...(await localTaskBranchLines(run, batch, repo)),
+    ...(await staleDefaultBranchLines(run, batch, repo)),
+    ...(await originBatchLines(run, batch, repo)),
+    ...branchReviewLines(run),
+  ]
+}
+
+/** Only a branch whose head is on the batch is safe to force-delete: a squash merge leaves none of them merged. */
+async function localTaskBranchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const batchRef = `refs/remotes/origin/${batch.branch}`
+  const deletable: string[] = []
+  const kept: string[] = []
+  for (const task of run.tasks) {
+    // A kept worktree still has its branch checked out, and `branch -D` refuses that.
+    if (task.checkout_path !== null && existsSync(task.checkout_path)) continue
+    const head = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
+    if (head === null) continue
+    const landed = await isAncestor(run.repo_root, head, batchRef)
+    const local = `  local ${task.branch}`
+    if (landed === true) deletable.push(task.branch)
+    else if (landed === false) kept.push(`${local} has commits that did not land: ${sha8(head)}; review before deleting`)
+    else kept.push(`${local} is at ${sha8(head)}, which could not be compared with ${batch.branch}; check before deleting`)
+  }
+  return [
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} branch -D ${deletable.map(shellWord).join(' ')}`]),
+    ...kept,
+  ]
+}
+
+/** `pull` only on the branch checked out; any other is moved by fetch, which refuses anything but a fast-forward. */
+async function staleDefaultBranchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const into = `refs/heads/${batch.into}`
+  if (batch.merge_commit !== null && await isAncestor(run.repo_root, batch.merge_commit, into) === true) return []
+  const current = await git(run.repo_root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  const why = `  # ${batch.into} predates PR #${batch.pr ?? 'unknown'}'s squash merge`
+  return [current.code === 0 && current.text.trim() === batch.into
+    ? `  git -C ${repo} pull --ff-only${why}`
+    : `  git -C ${repo} fetch origin ${shellWord(`${batch.into}:${batch.into}`)}${why}`]
+}
+
+async function originBatchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const onOrigin = await remoteBranchHeadCooled(run.repo_root, batch.branch)
+  if (!onOrigin.ok || onOrigin.sha === null) return []
+  return [`  origin keeps ${batch.branch}, which is harmless; deleting it, ` +
+    `\`git -C ${repo} push origin --delete ${shellWord(batch.branch)}\`, needs a bypass if a ruleset protects ` +
+    rulesetPattern(batch.branch)]
+}
+
+function branchReviewLines(run: Run): string[] {
+  return Object.entries(run.artifacts.verdicts)
+    .filter(([key]) => key.startsWith('branch-review-'))
+    .map(([, rel]) => join(run.repo_root, rel))
+    .filter((path) => existsSync(path))
+    .map((path) => `  ${path} is this run's branch review and its record: keep it or delete it, but do not commit it`)
+}
+
 async function batchDoneNotice(run: Run, batch: Batch): Promise<string> {
   const shipped = batch.merged_at_ms !== null
+  const outcome = shipped
     ? `shipped: PR #${batch.pr ?? 'unknown'} squash-merged as ${sha8(batch.merge_commit ?? 'unknown')}; ` +
       `${batch.into} now carries every landing`
     : `not shipped: nothing on ${batch.branch} reached ${batch.into}`
-  return [runDoneNotice(run), shipped, ...(await cleanupLines(run, batch))].join('\n')
+  return [
+    runDoneNotice(run), outcome, ...(await cleanupLines(run, batch)),
+    ...(shipped ? await shippedLeftovers(run, batch) : []),
+  ].join('\n')
 }
 
 export async function refreshBadges(run: Run, herdr: Herdr, pluginId: string): Promise<void> {
