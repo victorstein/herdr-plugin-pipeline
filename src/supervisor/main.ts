@@ -356,8 +356,8 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
-            freshDispatchBase: async (repoRoot, dependencyMerges) => {
-              const base = await freshDispatchBase(repoRoot, dependencyMerges)
+            freshDispatchBase: async (repoRoot, dependencyMerges, branch) => {
+              const base = await freshDispatchBase(repoRoot, dependencyMerges, branch)
               if (base.fetchError !== null) {
                 console.error(`[pipeline] run ${run.run_id}: ${baseLine(base)}`)
               }

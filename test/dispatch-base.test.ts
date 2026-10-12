@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  baseLine, dependencyMerges, describeBase, forgetDispatchBases, freshDispatchBase, mainlineBranch,
+  baseLine, dependencyMerges, describeBase, fetchFromOrigin, forgetDispatchBases, freshDispatchBase, mainlineBranch,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
 import {
@@ -70,12 +70,12 @@ test('a burst of dispatches shares one fetch until it expires', async () => {
   let clock = 1_000_000
   const now = () => clock
 
-  expect((await freshDispatchBase(clone, [], now)).commit).toBe(first)
+  expect((await freshDispatchBase(clone, [], null, now)).commit).toBe(first)
   const merged = landOnRemote(remote, 'main')
   clock += 30_000
-  expect((await freshDispatchBase(clone, [], now)).commit).toBe(first)
+  expect((await freshDispatchBase(clone, [], null, now)).commit).toBe(first)
   clock += 31_000
-  expect((await freshDispatchBase(clone, [], now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [], null, now)).commit).toBe(merged)
 })
 
 // The clock does not move at all: a merge landing in the same second as the
@@ -84,9 +84,9 @@ test('a cached fetch that lacks a dependency merge is not reused, even within th
   const { remote, clone } = cloneOfRemote('main')
   const now = () => 1_000_000
 
-  await freshDispatchBase(clone, [], now)
+  await freshDispatchBase(clone, [], null, now)
   const merged = landOnRemote(remote, 'main')
-  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [merged], null, now)).commit).toBe(merged)
 })
 
 test('a cached fetch that already contains the dependency merge is reused', async () => {
@@ -94,9 +94,9 @@ test('a cached fetch that already contains the dependency merge is reused', asyn
   const merged = landOnRemote(remote, 'main')
   const now = () => 1_000_000
 
-  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [merged], null, now)).commit).toBe(merged)
   const later = landOnRemote(remote, 'main')
-  expect((await freshDispatchBase(clone, [merged], now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, [merged], null, now)).commit).toBe(merged)
   expect(later).not.toBe(merged)
 })
 
@@ -104,9 +104,9 @@ test('a dependency merged with no merge commit on record always fetches', async 
   const { remote, clone } = cloneOfRemote('main')
   const now = () => 1_000_000
 
-  await freshDispatchBase(clone, [], now)
+  await freshDispatchBase(clone, [], null, now)
   const merged = landOnRemote(remote, 'main')
-  expect((await freshDispatchBase(clone, null, now)).commit).toBe(merged)
+  expect((await freshDispatchBase(clone, null, null, now)).commit).toBe(merged)
 })
 
 function fakeSsh(): { dir: string; log: string } {
@@ -231,4 +231,43 @@ test('a base must contain every dependency merge commit, and an unrecorded one f
   expect(dependencyMerges(task({ task_id: 't4', depends_on: ['t1', 't2'] }), tasks)).toEqual(['aaa', 'bbb'])
   expect(dependencyMerges(task({ task_id: 't5' }), tasks)).toEqual([])
   expect(dependencyMerges(task({ task_id: 't6', depends_on: ['t1', 't3'] }), tasks)).toBeNull()
+})
+
+// ——— single-PR: the batch branch as every task's base ———
+
+test('a single-PR task is cut from the batch branch as just fetched', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const landed = landOnRemote(remote, 'batch/x')
+  expect(await freshDispatchBase(clone, [], 'batch/x')).toEqual({ commit: landed, ref: 'origin/batch/x', fetchError: null })
+})
+
+test('the fetch cache is keyed by branch, so a batch dispatch never reuses a default-branch fetch', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const now = () => 1_000_000
+  const onBatch = landOnRemote(remote, 'batch/x')
+  const onMain = revParse(clone, 'origin/main')
+  expect((await freshDispatchBase(clone, [], null, now)).commit).toBe(onMain)
+  expect((await freshDispatchBase(clone, [], 'batch/x', now)).commit).toBe(onBatch)
+  expect((await freshDispatchBase(clone, [], null, now)).commit).toBe(onMain)
+})
+
+test('a clone whose fetch refspec misses the branch still gets its tracking ref, so the base is not stale', async () => {
+  const { remote } = cloneOfRemote('main')
+  landOnRemote(remote, 'feature')
+  const narrow = join(tempDir('hpipe-narrow-'), 'narrow')
+  git(['clone', '-q', '--single-branch', '--branch', 'feature', remote, narrow], tempDir('hpipe-cwd-'))
+  const merged = landOnRemote(remote, 'main')
+
+  const base = await freshDispatchBase(narrow)
+  expect(base).toEqual({ commit: merged, ref: 'origin/main', fetchError: null })
+  expect(revParse(narrow, 'refs/remotes/origin/main')).toBe(merged)
+})
+
+test('a fetch from origin says why it failed, and nothing when it worked', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  landOnRemote(remote, 'batch/x')
+  expect(await fetchFromOrigin(clone, '+refs/heads/batch/x:refs/remotes/origin/batch/x')).toBeNull()
+  const missing = await fetchFromOrigin(clone, '+refs/heads/batch/gone:refs/remotes/origin/batch/gone')
+  expect(missing).toContain('batch/gone')
+  expect(await fetchFromOrigin(tempDir('hpipe-nogit-'), '+refs/heads/main:refs/remotes/origin/main')).not.toBeNull()
 })

@@ -1,12 +1,10 @@
 import { join } from 'node:path'
+import { trackingRefspec } from './dispatch-base'
 import { parseTitle } from './release-title'
 import type { Batch, Landing, Run, Task } from './types'
 import { shellQuoted } from './unstarted'
 
 export const sha8 = (sha: string): string => sha.slice(0, 8)
-
-/** Explicit, so a clone whose fetch refspec does not cover the branch still gets its tracking ref. */
-export const batchRefspec = (branch: string): string => `+refs/heads/${branch}:refs/remotes/origin/${branch}`
 
 export function defaultBatchBranch(runId: string, repoRoot: string): string {
   const repoName = repoRoot.split('/').filter(Boolean).pop() ?? ''
@@ -14,7 +12,7 @@ export function defaultBatchBranch(runId: string, repoRoot: string): string {
 }
 
 export function fetchBatchCommand(batch: Batch): string {
-  return `git fetch origin ${batchRefspec(batch.branch)}`
+  return `git fetch origin ${trackingRefspec(batch.branch)}`
 }
 
 export function mergeBatchCommand(batch: Batch): string {
@@ -35,7 +33,7 @@ export function checkoutSteps(run: Run, exists: boolean): string[] {
   if (exists) return [`git -C ${shellQuoted(batch.checkout)} pull --ff-only`]
   const repo = shellQuoted(run.repo_root)
   return [
-    `git -C ${repo} fetch origin ${batchRefspec(batch.branch)}`,
+    `git -C ${repo} fetch origin ${trackingRefspec(batch.branch)}`,
     `git -C ${repo} worktree add --track -B ${batch.branch} ${shellQuoted(batch.checkout)} origin/${batch.branch}`,
   ]
 }

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
-import { batchRefspec, checkoutSteps, landCommand, mergeBatchCommand, sha8 } from './batch'
+import { checkoutSteps, landCommand, mergeBatchCommand, sha8 } from './batch'
+import { trackingRefspec } from './dispatch-base'
 import { CHECK_REL, repoCheck } from './check'
 import { modeOf } from './phases'
 import { renderPrompt } from './render'
@@ -106,7 +107,7 @@ export async function changePromptVars(
   return {
     subject: `\`${task.branch}\`'s change against \`${batch.branch}\``,
     the_change: 'the change', change_noun: 'change', whose_head: "the branch's",
-    diff_command: `git fetch origin ${batchRefspec(batch.branch)} ${batchRefspec(task.branch)} && ` +
+    diff_command: `git fetch origin ${trackingRefspec(batch.branch)} ${trackingRefspec(task.branch)} && ` +
       `git diff origin/${batch.branch}...origin/${task.branch}`,
     review_context: '\n\nThe worker answers a finding it rejects in an empty commit on the branch, so read ' +
       `\`git log origin/${batch.branch}..origin/${task.branch}\` for its replies.${resyncNote(batch, task)}`,

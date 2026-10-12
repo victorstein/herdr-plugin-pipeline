@@ -53,8 +53,10 @@ export interface TaskDeps extends TeardownDeps {
   /** Collects what this tick did outside the ledger; see `saveOrReapply`. */
   effects?: RunEffect[]
   uncommittedPaths: (checkoutPath: string) => Promise<string[] | null>
-  /** The commit a dispatched worktree is cut from; see lib/dispatch-base.ts. */
-  freshDispatchBase: (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
+  /** The commit a dispatched worktree is cut from; see lib/dispatch-base.ts. `branch` is a single-PR run's batch. */
+  freshDispatchBase: (
+    repoRoot: string, dependencyMerges: string[] | null, branch: string | null,
+  ) => Promise<DispatchBase>
 }
 
 const UNCOMMITTED_SAMPLE = 3
@@ -218,7 +220,9 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       if (gate.state !== 'ready') continue
 
       enterTaskPhase(run, task, taskRow('queued').onClear as TaskPhase, 'gate opened')
-      const dispatchBase = await deps.freshDispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+      const dispatchBase = await deps.freshDispatchBase(
+        run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null,
+      )
       const bootstrap = repoBootstrap(run.repo_root)
       prompts.push({
         text: `Dispatch ${task.task_id} (${task.branch}, ${task.bead}):\n` +
@@ -364,7 +368,7 @@ async function gatherSignals(run: Run, task: Task, deps: TaskDeps, actorIdle: bo
         [task.artifacts.research, task.artifacts.spec, task.artifacts.plan]
           .filter((path): path is string => path !== null),
       )
-      const candidates = await adoptableArtifacts(checkout, claimed)
+      const candidates = await adoptableArtifacts(checkout, claimed, run.batch?.branch ?? null)
       const adopted = candidates.length === 1 ? candidates[0] : undefined
       if (adopted === undefined) {
         if (candidates.length > 1) {

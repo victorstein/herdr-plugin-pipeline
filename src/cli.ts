@@ -291,7 +291,9 @@ interface RegistrationAttempt {
   dispatchBase: DispatchBaseFor
 }
 
-type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
+type DispatchBaseFor = (
+  repoRoot: string, dependencyMerges: string[] | null, branch: string | null,
+) => Promise<DispatchBase>
 
 interface TaskInput {
   branch: string; bead?: string; surface: string; notes: string
@@ -428,6 +430,10 @@ async function registerTask(
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
   if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
+  if (run.batch !== undefined && [run.batch.branch, run.batch.into].includes(input.branch)) {
+    const which = input.branch === run.batch.branch ? 'batch branch, which tasks land on' : 'default branch, which the batch ships into'
+    return fail(`--branch ${input.branch} is this run's ${which}; give the task a branch of its own`)
+  }
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
@@ -572,7 +578,7 @@ async function registerTask(
 
   // After the save, not before: nothing here is recorded, and a fetch between
   // the read and the save only widens the window a concurrent write can take.
-  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sequence = dispatchSequence(run, task, base, bootstrap, hpipeCommand(ctx.pluginRoot))
   return ok(`${header}\n${baseLine(base)}\n${sequence}\n\n${prompt}`)
@@ -665,7 +671,7 @@ export async function cmdShow(ctx: Ctx, input: {
   const { run, task } = found.value
   const detail = formatTaskDetail(run, task)
   if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
-  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
   return ok(`${detail}\n${baseLine(base)}`)
 }
 

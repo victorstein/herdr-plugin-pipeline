@@ -849,3 +849,18 @@ test('branch-review does not claim a dependency failed when it has since landed'
   expect(text).not.toContain('dependency failed')
   expect(text).toContain('a dependency that has since landed, and was never re-queued')
 })
+
+// A single-PR task is cut from the batch branch, which already holds every landed
+// sibling's docs; against origin/<default> alone the fork point is the batch's
+// base, and a fast-forward landing leaves no merge to subtract them by.
+test('in a single-PR run a sibling doc already on the batch branch is not a candidate', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  landOnRemote(remote, 'batch/x', SIBLING_DOC)
+  git(['fetch', '-q', 'origin', '+refs/heads/batch/x:refs/remotes/origin/batch/x'], clone)
+  const worktree = join(tempDir('hpipe-wt-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/x', worktree, revParse(clone, 'origin/batch/x')], clone)
+  commitAs(worktree, MY_DOC, 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set(), 'batch/x')).toEqual([MY_DOC])
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([SIBLING_DOC, MY_DOC].sort())
+})

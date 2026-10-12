@@ -207,7 +207,7 @@ async function git(checkoutPath: string, args: string[]): Promise<{ code: number
  * (`git add -A` with its artifact uncommitted) is subtracted as foreign.
  */
 export async function adoptableArtifacts(
-  checkoutPath: string | null, claimed: Set<string>,
+  checkoutPath: string | null, claimed: Set<string>, batchBranch: string | null = null,
 ): Promise<string[]> {
   // Adoption is a worktree-scoped repair. With no checkout the scan would run
   // against the main checkout, shared with the orchestrator, the run-level
@@ -215,7 +215,7 @@ export async function adoptableArtifacts(
   if (checkoutPath === null) return []
 
   const mainlines: string[] = []
-  for (const ref of await mainlineRefs(checkoutPath)) {
+  for (const ref of await mainlineRefs(checkoutPath, batchBranch)) {
     const resolved = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ref])
     if (resolved.code === 0) mainlines.push(ref)
   }
@@ -252,13 +252,16 @@ export async function adoptableArtifacts(
  *
  * A base pinned at dispatch would not help. Whatever the base, the diff runs to
  * HEAD's tree, and merging the default branch puts the siblings' docs in that tree.
+ *
+ * A single-PR run's batch branch is a mainline too: its worktrees are cut from it.
  */
-async function mainlineRefs(checkoutPath: string): Promise<string[]> {
+async function mainlineRefs(checkoutPath: string, batchBranch: string | null): Promise<string[]> {
   const branch = await mainlineBranch(checkoutPath, (reason) => warnToTick(
     `adoption offers no candidates in ${checkoutPath}: origin's default branch is unknown (${reason})`,
   ))
   if (branch === null) return []
-  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
+  const batch = batchBranch === null ? [] : [`refs/heads/${batchBranch}`, `refs/remotes/origin/${batchBranch}`]
+  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`, ...batch]
 }
 
 // `-m --first-parent`, not `--diff-merges=first-parent`: the latter needs git 2.31,
