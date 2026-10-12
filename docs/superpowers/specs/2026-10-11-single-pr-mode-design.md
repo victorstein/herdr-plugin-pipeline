@@ -1116,6 +1116,10 @@ Where the code departs from the text above, and why.
 - **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
   that holds uncommitted work, so the head it records is the tree it checked. With no check declared
   it still records the head, as `check: 'none'`, so `ship` can clear.
+- **`submit`'s open-PR refusal fails closed.** `prForBranch` reads any gh failure as "no PR", so a gh
+  outage let a branch with an open PR through, and that PR would carry every sibling into the default
+  branch. `submit` asks through `openPrForBranch`, which tells the two apart, and refuses with gh's error
+  when it cannot say.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
   account for, for the review's resync note. `start` prints the `batch/*` ruleset recommendation as a
   third line. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run

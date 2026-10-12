@@ -54,7 +54,7 @@ function task(over: Partial<Task>): Task {
   }
 }
 
-const NO_PR: SubmitDeps = { openPr: async () => null }
+const NO_PR: SubmitDeps = { openPr: async () => ({ pr: null }) }
 
 const submit = (f: Fixture, title: string | null = 'feat(menu): close on escape', deps: Partial<SubmitDeps> = {}) =>
   cmdSubmit(ctx(), { taskId: 't1', title, repoKey: null, runId: f.run.run_id }, { ...NO_PR, ...deps })
@@ -167,9 +167,23 @@ test('back in implement, nothing but a merge of the batch since the review is re
 test('a branch with an open PR is refused: that PR would carry every sibling into the default branch', async () => {
   const f = await fixture()
   work(f)
-  const out = await submit(f, undefined, { openPr: async () => 31 })
+  const out = await submit(f, undefined, { openPr: async () => ({ pr: 31 }) })
   expect(out.ok).toBe(false)
   expect(out.text).toContain('Close PR #31, then submit again')
+})
+
+test('a gh that cannot say whether the branch has an open PR is a refusal, not a pass', async () => {
+  const f = await fixture()
+  work(f)
+  let checked = false
+  const out = await submit(f, undefined, {
+    openPr: async () => ({ error: 'HTTP 502: Bad Gateway' }),
+    runCheck: async () => { checked = true; return { code: 0, tail: '' } },
+  })
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('could not ask GitHub whether t1-branch has an open PR (HTTP 502: Bad Gateway)')
+  expect(checked).toBe(false)
+  expect((await saved(f)).submission).toBeUndefined()
 })
 
 test('a declared check runs on the pushed tree; passing, it is recorded', async () => {
@@ -244,7 +258,7 @@ test('a submit outlasting many supervisor saves still lands: only the record is 
   }, 50)
   let checks = 0
   const out = await submit(f, undefined, {
-    openPr: async () => { await Bun.sleep(400); return null },
+    openPr: async () => { await Bun.sleep(400); return { pr: null } },
     runCheck: async (checkout, log) => {
       checks++
       const { runCheck } = await import('../src/lib/check')
@@ -268,7 +282,7 @@ test('a task that moves on while submit runs its checks records nothing', async 
       meanwhile.tasks[0]!.phase = 'pr-review'
       meanwhile.tasks[0]!.phase_entered_at = ENTERED + 5
       await saveRun(dir, meanwhile)
-      return null
+      return { pr: null }
     },
   })
   expect(out.ok).toBe(false)

@@ -83,7 +83,7 @@ async function phases(runId: string): Promise<Record<string, TaskPhase>> {
 async function workAndSubmit(runId: string, taskId: string, worktree: string, rel: string, title: string | null) {
   commitAs(worktree, rel, `${rel}\n`)
   git(['push', '-q', 'origin', 'HEAD'], worktree)
-  return cmdSubmit(ctx(), { taskId, title, repoKey: null, runId }, { openPr: async () => null })
+  return cmdSubmit(ctx(), { taskId, title, repoKey: null, runId }, { openPr: async () => ({ pr: null }) })
 }
 
 /** A reviewer: its verdict file is committed and pushed onto the branch it reviewed. */
@@ -198,7 +198,7 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   git(['fetch', '-q', 'origin', '+refs/heads/batch/menu:refs/remotes/origin/batch/menu'], worktrees.t1!)
   git(['merge', '-q', '--no-edit', 'origin/batch/menu'], worktrees.t1!)
   git(['push', '-q', 'origin', 'HEAD'], worktrees.t1!)
-  const synced = await cmdSubmit(ctx(), { taskId: 't1', title: null, repoKey: null, runId }, { openPr: async () => null })
+  const synced = await cmdSubmit(ctx(), { taskId: 't1', title: null, repoKey: null, runId }, { openPr: async () => ({ pr: null }) })
   expect(synced.text).toContain('a clean merge of batch/menu: it lands next')
   await supervisorTick(runId, verdicts)
   expect(await phases(runId)).toEqual({ t1: 'merge', t2: 'done' })

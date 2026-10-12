@@ -1190,13 +1190,13 @@ async function rewind(ctx: Ctx, input: {
 export const cmdRewind = retryingOnStale(rewind)
 
 export interface SubmitDeps {
-  /** An open PR from `branch`, by number. */
-  openPr: (repoRoot: string, branch: string) => Promise<number | null>
+  /** An open PR from `branch`, by number, or why gh could not say. */
+  openPr: (repoRoot: string, branch: string) => Promise<{ pr: number | null } | { error: string }>
   runCheck?: (checkout: string, logPath: string) => Promise<CheckRun>
 }
 
 const REAL_SUBMIT_DEPS: SubmitDeps = {
-  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prForBranch(branch),
+  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).openPrForBranch(branch),
 }
 
 interface SubmitInput { taskId: string; title: string | null; repoKey: string | null; runId: string | null }
@@ -1305,7 +1305,11 @@ async function prepareSubmission(
     merge = await syncWalk(checkout, task.land_sha ?? null, batchRef)
   }
 
-  const pr = await deps.openPr(run.repo_root, task.branch)
+  const open = await deps.openPr(run.repo_root, task.branch)
+  if ('error' in open) {
+    return refused(`could not ask GitHub whether ${task.branch} has an open PR (${open.error}); run it again`)
+  }
+  const pr = open.pr
   if (pr !== null) {
     return refused(`${task.branch} has an open PR, #${pr}, which would carry every sibling's commits into ` +
       `${batch.into}. Close PR #${pr}, then submit again`)
