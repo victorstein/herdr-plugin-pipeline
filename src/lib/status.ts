@@ -696,7 +696,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
     ...(run.batch === undefined ? [
       `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
-      `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
+      `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${sha8(task.ci_head.sha)})` : ''}`,
     ] : landingDetail(task, run.batch, now)),
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
     `notes:      ${orNone(task.notes)}`,

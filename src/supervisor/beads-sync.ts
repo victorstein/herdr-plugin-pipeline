@@ -1,4 +1,5 @@
 import { type Bd, type BdFailure, type BeadUpdate, type Done, type ExportedBead, isBdFailure } from '../lib/bd'
+import { sha8 } from '../lib/batch'
 import { type DesiredBead, desiredBead, isManagedLabel } from '../lib/bead-desired'
 import { beadsSlug } from '../lib/beads-project'
 import { type BeadClaimant, holdsBead } from '../lib/held'
@@ -65,7 +66,8 @@ export interface SyncDeps {
 export function closeReason(task: Task, run?: Pick<Run, 'batch'>): string {
   const batch = run?.batch
   if (batch !== undefined) {
-    return `landed on ${batch.branch} (${(task.merge_commit ?? task.land_sha ?? 'unknown commit').slice(0, 8)}); ` +
+    const landed = task.merge_commit ?? task.land_sha
+    return `landed on ${batch.branch} (${landed ? sha8(landed) : 'unknown commit'}); ` +
       `ships with the batch PR into ${batch.into}`
   }
   return `merged in PR #${task.pr ?? 'unknown'} (${task.merge_commit ?? 'unknown commit'})`

@@ -170,3 +170,9 @@ test('a landed task\'s bead closes naming the batch, and what ships it', () => {
   const perTask = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   expect(closeReason(mkTask({ pr: 7, merge_commit: 'abc' }), perTask)).toBe('merged in PR #7 (abc)')
 })
+
+test('a missing sha is named whole, never cut to eight characters of its placeholder', () => {
+  const unrecorded = mkTask({ phase: 'merge' })
+  expect(closeReason(unrecorded, singlePr([unrecorded]))).toContain('landed on batch/x (unknown commit)')
+  expect(actionFor(singlePr([unrecorded]), unrecorded, HP, NOW)).toContain('t1-branch at <no reviewed head> to land')
+})

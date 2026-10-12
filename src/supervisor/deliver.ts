@@ -333,17 +333,6 @@ export function taskSignalsFor(run: Run) {
   }
 }
 
-/**
- * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
- * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
- * momentary screen-detection misclassification will have flipped back to
- * working or blocked by then. That double-check rides its own explicit sleep on
- * config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
- * FILE_SETTLE_MS delay: the two settle windows guard unrelated subjects (file
- * write completion vs. screen-scrape flicker) and are independently tunable,
- * so conflating them would silently under- or over-wait whenever an operator
- * sets them to different values.
- */
 export type RunGh = Pick<Gh, 'prForBranch' | 'prView' | 'prChecksDetail'>
 
 /** The batch PR as gh reads it now; null when none is open, or a read failed, which skips the row this tick. */
@@ -360,6 +349,17 @@ async function readBatchPr(batch: Batch, gh: RunGh): Promise<BatchPr | null> {
 
 const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
 
+/**
+ * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
+ * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
+ * momentary screen-detection misclassification will have flipped back to
+ * working or blocked by then. That double-check rides its own explicit sleep on
+ * config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
+ * FILE_SETTLE_MS delay: the two settle windows guard unrelated subjects (file
+ * write completion vs. screen-scrape flicker) and are independently tunable,
+ * so conflating them would silently under- or over-wait whenever an operator
+ * sets them to different values.
+ */
 export async function evaluateRun(
   run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
   extras: RunRenderExtras = {},

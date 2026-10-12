@@ -1,6 +1,7 @@
-import { modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
+import { sha8 } from './batch'
+import { LANDING_PHASES, modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
-import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
+import type { AgentStatus, CiBucket, Run, RunPhase, Submission, Task, TaskPhase } from './types'
 
 interface HasPasses { passes: Record<string, number | undefined> }
 
@@ -273,7 +274,16 @@ export interface TaskSignals {
   yieldAfterMs?: number
 }
 
-const sha8 = (sha: string): string => sha.slice(0, 8)
+/** The sync this phase entry asked for, once the worker has submitted it; an older one answers an earlier entry. */
+export function syncSubmitted(task: Task): Submission | null {
+  const sync = task.submission
+  return sync?.kind === 'sync' && sync.at >= task.phase_entered_at ? sync : null
+}
+
+/** A `sync` holder past the window it may hold the slot without submitting while another task waits. */
+export function syncOverdue(task: Task, yieldAfterMs: number, now: number): boolean {
+  return syncSubmitted(task) === null && now - task.phase_entered_at >= yieldAfterMs
+}
 
 /** A task that needs no sync to land, and so no worker: it may take the slot without a pane. */
 export function landsWithoutSync(l: LandingFacts): boolean {
@@ -350,11 +360,11 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
       if (l?.landed === true && l.movedTo === null) {
         return enterTaskPhase(run, task, 'merge', `${sha8(landSha)} is already on ${batch}`)
       }
-      const sync = task.submission
-      if (sync?.kind !== 'sync' || sync.at < task.phase_entered_at) {
+      const sync = syncSubmitted(task)
+      if (sync === null) {
         const waiting = s.yieldTo ?? []
         const yieldAfterMs = s.yieldAfterMs ?? Number.POSITIVE_INFINITY
-        if (waiting.length === 0 || Date.now() - task.phase_entered_at < yieldAfterMs) return null
+        if (waiting.length === 0 || !syncOverdue(task, yieldAfterMs, Date.now())) return null
         return enterTaskPhase(run, task, 'land-queue',
           `yielded the landing slot: no sync after ${Math.round(yieldAfterMs / 60_000)}m, ${waiting.join(', ')} waiting`)
       }
@@ -405,7 +415,7 @@ function advanceLoopingRow(
 }
 
 export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
-  if (modeOf(run) === 'single-pr' && ['land-queue', 'sync', 'merge'].includes(task.phase)) {
+  if (modeOf(run) === 'single-pr' && LANDING_PHASES.has(task.phase)) {
     return advanceLanding(run, task, s)
   }
   switch (task.phase) {

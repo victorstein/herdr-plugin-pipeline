@@ -36,7 +36,8 @@ import { REVIEW_EFFORT } from './lib/models'
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
-  isTier, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow, taskRow, tierOf,
+  isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
+  taskRow, tierOf,
 } from './lib/phases'
 import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
@@ -362,7 +363,6 @@ const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
 const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
   ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'land-queue', 'sync', 'merge',
 ])
-const LANDING_PHASES: ReadonlySet<string> = new Set<TaskPhase>(['land-queue', 'sync', 'merge'])
 
 /** Whether the batch PR has merged: null when GitHub could not say. */
 export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | null>

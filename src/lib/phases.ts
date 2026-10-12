@@ -163,6 +163,12 @@ export type TaskPhase =
   | 'ci' | 'land-queue' | 'sync' | 'merge' | 'close' | 'teardown' | 'blocked-on-decision'
   | 'escalated' | 'failed' | 'orphaned' | 'blocked-on-failure' | 'done'
 
+/**
+ * A single-PR task's rows from its last review to its landing: the slot, the batch
+ * fetch, the machine's landing edges and a rewind's reviewed head all key on them.
+ */
+export const LANDING_PHASES: ReadonlySet<string> = new Set<TaskPhase>(['land-queue', 'sync', 'merge'])
+
 export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   { phase: 'queued', signal: 'gate', onClear: 'research', holdsFiles: false },
 

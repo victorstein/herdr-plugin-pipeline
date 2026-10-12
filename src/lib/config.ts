@@ -25,11 +25,13 @@ export interface Config {
   HPIPE_LINK_PATH: string
 }
 
+export const DEFAULT_STALL_MINUTES = 15
+
 const DEFAULTS: Config = {
   TICK_MS: 1000,
   WAKE_ON: ['blocked', 'done', 'idle', 'unknown', 'exited', 'released'],
   MAX_PASSES: 2,
-  STALL_MINUTES: 15,
+  STALL_MINUTES: DEFAULT_STALL_MINUTES,
   TASK_STALL_MINUTES: 45,
   STALL_PROBE_MAX: 3,
   FILE_SETTLE_MS: 750,
