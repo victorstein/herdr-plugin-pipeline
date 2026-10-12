@@ -1410,12 +1410,23 @@ test('show prints a freshly fetched base for an unfinished task, containing its 
   }
 
   const unfinished = await cmdShow(ctx(), { taskId: 't2', repoKey: 'k', runId: null }, fetchBase)
-  expect(unfinished.text).toContain('base: 1fb8a43 (origin/main as just fetched)')
+  expect(unfinished.text).toEndWith('base: 1fb8a43 (origin/main as just fetched) — the base for a new worktree')
   expect(requested).toEqual([[repoDir, ['c0ffee1']]])
 
   const finished = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
   expect(finished.text).not.toContain('base:')
   expect(requested).toHaveLength(1)
+})
+
+test('show\'s base for a task with a worktree says it is not the commit that worktree was cut from', async () => {
+  // Smoke run 14 read the batch tip on this line as the commit the worktree started at.
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement', checkout_path: '/wt/t1' }])
+  run.repo_root = repoDir
+  await saveRun(dir, run)
+  const fetchBase = async () => ({ commit: '9e06c26', ref: 'origin/batch/x', fetchError: null })
+  const shown = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
+  expect(shown.text).toEndWith('base: 9e06c26 (origin/batch/x as just fetched) — the base for a new worktree, ' +
+    'not the commit /wt/t1 was cut from')
 })
 
 test('show names a missing task', async () => {

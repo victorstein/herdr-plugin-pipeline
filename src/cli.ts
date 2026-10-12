@@ -843,7 +843,8 @@ export async function cmdBrief(ctx: Ctx, input: {
  * Read-only, and reaches a finished run under --run, like `brief`. An unfinished
  * task also gets a freshly fetched `base:` line: it is what the recovery advice
  * cuts a lost worktree from, and the one its dispatch printed may be long gone
- * from the orchestrator's context and stale besides.
+ * from the orchestrator's context and stale besides. Unlabelled, it read as the
+ * commit the task's worktree was cut from. Measured on a live run.
  */
 export async function cmdShow(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
@@ -857,7 +858,8 @@ export async function cmdShow(ctx: Ctx, input: {
   const detail = formatTaskDetail(run, task)
   if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
   const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
-  return ok(`${detail}\n${baseLine(base)}`)
+  const notThisOne = task.checkout_path === null ? '' : `, not the commit ${task.checkout_path} was cut from`
+  return ok(`${detail}\n${baseLine(base)} — the base for a new worktree${notThisOne}`)
 }
 
 export type ClaimBead = (repoKey: string, bead: string) => Promise<Done | BdFailure>
