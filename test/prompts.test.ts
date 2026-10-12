@@ -645,6 +645,9 @@ test('the worker sends out-of-scope work to discover, and the branch review file
   const brief = prose(await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text())
   expect(brief).toContain('{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>')
   expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('not into this PR')
+  // A plugin bug recorded as a discovery was filed into the repo's own backlog. Measured on a live run.
+  expect(brief).toContain('Discoveries are follow-up work for this repo')
+  expect(brief).toContain('a problem with the pipeline itself')
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')
