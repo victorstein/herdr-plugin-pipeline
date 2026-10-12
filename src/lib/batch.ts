@@ -3,7 +3,7 @@ import { BOOTSTRAP_REL, repoBootstrap } from './bootstrap'
 import { trackingRefspec } from './dispatch-base'
 import { parseTitle } from './release-title'
 import type { Batch, Landing, Run, Task } from './types'
-import { shellQuoted } from './unstarted'
+import { shellQuoted, shellWord } from './unstarted'
 
 export const sha8 = (sha: string): string => sha.slice(0, 8)
 
@@ -13,16 +13,17 @@ export function defaultBatchBranch(runId: string, repoRoot: string): string {
 }
 
 export function fetchBatchCommand(batch: Batch): string {
-  return `git fetch origin ${trackingRefspec(batch.branch)}`
+  return `git fetch origin ${shellWord(trackingRefspec(batch.branch))}`
 }
 
 export function mergeBatchCommand(batch: Batch): string {
-  return `${fetchBatchCommand(batch)} && git merge --no-edit origin/${batch.branch}`
+  return `${fetchBatchCommand(batch)} && git merge --no-edit ${shellWord(`origin/${batch.branch}`)}`
 }
 
 /** A non-force push: git refuses it unless `landSha` already contains the batch head, which is the landing gate. */
 export function landCommand(run: Run, landSha: string): string {
-  return `git -C ${shellQuoted(run.repo_root)} push origin ${landSha}:refs/heads/${(run.batch as Batch).branch}`
+  const refspec = `${landSha}:refs/heads/${(run.batch as Batch).branch}`
+  return `git -C ${shellQuoted(run.repo_root)} push origin ${shellWord(refspec)}`
 }
 
 /**
@@ -43,8 +44,9 @@ export function checkoutSteps(run: Run, exists: boolean): string[] {
   }
   const repo = shellQuoted(run.repo_root)
   return [
-    `git -C ${repo} fetch origin ${trackingRefspec(batch.branch)}`,
-    `git -C ${repo} worktree add --track -B ${batch.branch} ${checkout} origin/${batch.branch}`,
+    `git -C ${repo} fetch origin ${shellWord(trackingRefspec(batch.branch))}`,
+    `git -C ${repo} worktree add --track -B ${shellWord(batch.branch)} ${checkout} ` +
+      shellWord(`origin/${batch.branch}`),
     ...(bootstrap === null ? [] : [bootstrap]),
   ]
 }

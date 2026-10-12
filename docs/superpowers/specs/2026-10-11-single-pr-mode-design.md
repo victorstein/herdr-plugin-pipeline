@@ -1142,6 +1142,11 @@ Where the code departs from the text above, and why.
   outage let a branch with an open PR through, and that PR would carry every sibling into the default
   branch. `submit` asks through `openPrForBranch`, which tells the two apart, and refuses with gh's error
   when it cannot say.
+- **Branch names are quoted where a command needs it.** `--batch-branch` is checked only by
+  `git check-ref-format --branch`, which accepts `batch/it's`, `batch/$(id)` and `batch/a;b`, and m6
+  quoted titles and paths but not branches. Every pasted command now passes a branch, a refspec or a
+  range through `shellWord`, which quotes only a word the shell would split or run, so an ordinary name,
+  and so every per-task render, reads exactly as before.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
   account for, for the review's resync note. `start` prints the `batch/*` ruleset recommendation as a
   third line. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run

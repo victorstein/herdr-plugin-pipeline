@@ -9,7 +9,7 @@ import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { probeRecipient } from '../lib/outbox'
 import {
-  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker, shellQuoted,
+  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker, shellQuoted, shellWord,
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
@@ -489,7 +489,8 @@ function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiti
         clause: 'No task holds the landing slot and this one is first in line, yet it has not taken it, so this ' +
           `run is not being advanced.${unseen} Check the supervisor pane's log, whether another run holds this ` +
           `orchestrator pane, and whether git can read the batch: \`git -C ${shellQuoted(run.repo_root)} ` +
-          `merge-base --is-ancestor origin/${batch.branch} ${task.land_sha ?? '<land sha>'}\` must exit 0 or 1.`,
+          `merge-base --is-ancestor ${shellWord(`origin/${batch.branch}`)} ${task.land_sha ?? '<land sha>'}\` ` +
+          'must exit 0 or 1.',
       }
     }
     case 'sync':

@@ -23,7 +23,7 @@ import {
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
-import { shellQuoted } from '../lib/unstarted'
+import { shellQuoted, shellWord } from '../lib/unstarted'
 import { FINISHED } from './teardown'
 import { isAncestor } from '../lib/sync-walk'
 
@@ -508,8 +508,8 @@ function checkSentence(batch: Batch): string {
 /** The ship steps fetch only the batch, so `origin/<into>` is as old as the last fetch of it, which may be the start. */
 function intoConflictCheck(batch: Batch): string {
   const checkout = shellQuoted(batch.checkout)
-  return `git -C ${checkout} fetch origin ${trackingRefspec(batch.into)} && ` +
-    `git -C ${checkout} merge-tree --write-tree origin/${batch.into} origin/${batch.branch}`
+  return `git -C ${checkout} fetch origin ${shellWord(trackingRefspec(batch.into))} && git -C ${checkout} ` +
+    `merge-tree --write-tree ${shellWord(`origin/${batch.into}`)} ${shellWord(`origin/${batch.branch}`)}`
 }
 
 async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
@@ -533,7 +533,8 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   return renderPrompt(pluginRoot, 'ship', {
     ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
     pr_command: batch.pr === null
-      ? `gh pr create --base ${batch.into} --head ${batch.branch} --title ${shellQuoted(suggestedPrTitle(run))} ` +
+      ? `gh pr create --base ${shellWord(batch.into)} --head ${shellWord(batch.branch)} ` +
+        `--title ${shellQuoted(suggestedPrTitle(run))} ` +
         `--body-file ${shellQuoted(body)}`
       : `gh pr edit ${batch.pr} --body-file ${shellQuoted(body)}`,
   })
@@ -623,10 +624,10 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
   const repo = shellQuoted(run.repo_root)
   return [
     'Clean up when you are done with it:',
-    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.join(' ')}`]),
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
     `  git -C ${repo} worktree remove ${shellQuoted(batch.checkout)}`,
-    `  git -C ${repo} branch -D ${batch.branch}`,
+    `  git -C ${repo} branch -D ${shellWord(batch.branch)}`,
   ]
 }
 

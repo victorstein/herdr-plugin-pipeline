@@ -8,6 +8,8 @@ import {
 } from '../src/lib/batch'
 import { newRun, withBatch } from '../src/lib/ledger'
 import type { Landing, Run, Task } from '../src/lib/types'
+import { changePromptVars } from '../src/lib/change-prompt'
+import { shellWord } from '../src/lib/unstarted'
 import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -44,6 +46,47 @@ test('every command that touches the batch names it by an explicit refspec, and 
   expect(mergeBatchCommand(run.batch!))
     .toBe('git fetch origin +refs/heads/batch/x:refs/remotes/origin/batch/x && git merge --no-edit origin/batch/x')
   expect(landCommand(run, '9e06c2610000')).toBe("git -C '/code/o'\\''brien' push origin 9e06c2610000:refs/heads/batch/x")
+})
+
+const ODD_BRANCHES = ["batch/it's", 'batch/$(id)', 'batch/a;b', 'batch/a|b', 'batch/a&&b', 'batch/(x)', 'batch/`id`']
+
+test('a word git accepts but the shell would split or run is quoted, and a plain one is left as it was', () => {
+  for (const word of ['batch/x', '+refs/heads/batch/x:refs/remotes/origin/batch/x', 'origin/main...origin/t1-branch']) {
+    expect(shellWord(word)).toBe(word)
+  }
+  for (const word of [...ODD_BRANCHES, 'origin/batch/$(id)', '~x', '=x', 'a b']) {
+    const echoed = Bun.spawnSync(['sh', '-c', `printf '%s' ${shellWord(word)}`], { stdout: 'pipe' }).stdout.toString()
+    expect(echoed, word).toBe(word)
+  }
+})
+
+/** The words a pasted command hands git, with git stood in for by a shell function that prints them. */
+function gitWords(command: string): string[] {
+  const shell = Bun.spawnSync(['sh', '-c', `git() { printf '%s\\n' "$@"; }; ${command}`], { stdout: 'pipe', stderr: 'pipe' })
+  return shell.stdout.toString().split('\n')
+}
+
+test('every rendered command hands git a batch branch the shell would otherwise split or run as one word', () => {
+  for (const branch of ODD_BRANCHES) {
+    const run = runOf([])
+    run.batch!.branch = branch
+    expect(gitWords(fetchBatchCommand(run.batch!)), branch).toContain(`+refs/heads/${branch}:refs/remotes/origin/${branch}`)
+    expect(gitWords(mergeBatchCommand(run.batch!)), branch).toContain(`origin/${branch}`)
+    expect(gitWords(landCommand(run, '9e06c26')), branch).toContain(`9e06c26:refs/heads/${branch}`)
+    const [fetch, add] = checkoutSteps(run, false) as [string, string]
+    expect(gitWords(fetch), branch).toContain(`+refs/heads/${branch}:refs/remotes/origin/${branch}`)
+    expect(gitWords(add), branch).toEqual(expect.arrayContaining([branch, `origin/${branch}`]))
+  }
+})
+
+test('the reviewers\' diff and the ship commands hand git and gh an odd batch branch as one word', async () => {
+  for (const branch of ODD_BRANCHES) {
+    const run = runOf([{ phase: 'pr-review' }])
+    run.batch!.branch = branch
+    const review = await changePromptVars(join(import.meta.dir, '..'), 'hpipe', run, run.tasks[0]!)
+    expect(gitWords(review.diff_command!), branch).toContain(`origin/${branch}...origin/t1-branch`)
+    expect(gitWords(checkoutSteps(run, false)[1]!), branch).toContain(branch)
+  }
 })
 
 test('the batch checkout is created once at its absolute path, and only pulled after that', () => {

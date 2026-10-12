@@ -5,6 +5,7 @@ import { CHECK_REL, repoCheck } from './check'
 import { modeOf } from './phases'
 import { renderPrompt } from './render'
 import type { Batch, Run, Task } from './types'
+import { shellWord } from './unstarted'
 
 /**
  * The sentences that differ between a run that ships one PR per task and one that
@@ -86,7 +87,8 @@ function resyncNote(batch: Batch, task: Task): string {
   if (sync?.kind !== 'sync' || sync.merge !== 'dirty' || !task.land_sha) return ''
   return `\n\nThis review was entered from a sync of \`${batch.branch}\` that was not a clean merge` +
     `${sync.dirty_at ? ` (at \`${sha8(sync.dirty_at)}\`)` : ''}. Read what changed since the last reviewed head ` +
-    `with \`git log --first-parent ${task.land_sha}..origin/${task.branch}\`, and \`git show --remerge-diff <merge>\` ` +
+    `with \`git log --first-parent ${shellWord(`${task.land_sha}..origin/${task.branch}`)}\`, and ` +
+    '`git show --remerge-diff <merge>` ' +
     'for each merge in it: a conflict resolution is code no reviewer has seen.'
 }
 
@@ -104,13 +106,15 @@ export async function changePromptVars(
     }
   }
   const check = checkWording(task.checkout_path ?? run.repo_root)
+  const refspecs = [batch.branch, task.branch].map((branch) => shellWord(trackingRefspec(branch))).join(' ')
   return {
     subject: `\`${batch.branch}...${task.branch}\``,
     the_change: 'the change', change_noun: 'change', whose_head: "the branch's",
-    diff_command: `git fetch origin ${trackingRefspec(batch.branch)} ${trackingRefspec(task.branch)} && ` +
-      `git diff origin/${batch.branch}...origin/${task.branch}`,
+    diff_command: `git fetch origin ${refspecs} && ` +
+      `git diff ${shellWord(`origin/${batch.branch}...origin/${task.branch}`)}`,
     review_context: '\n\nThe worker answers a finding it rejects in an empty commit on the branch, so read ' +
-      `\`git log origin/${batch.branch}..origin/${task.branch}\` for its replies.${resyncNote(batch, task)}`,
+      `\`git log ${shellWord(`origin/${batch.branch}..origin/${task.branch}`)}\` for its replies.` +
+      resyncNote(batch, task),
     sync_step: syncStep(batch),
     reply_place: 'the message of an empty commit on the branch',
     handoff: await fragment(pluginRoot, 'handoff-batch', {
@@ -151,7 +155,8 @@ const PER_TASK_BLOCKER_NOTE = 'A BLOCKER sends this phase round again and you pa
 function batchScope(run: Run, batch: Batch, hpipe: string): string {
   return [
     'There is no run-level spec to review against: each task carried its own, on its own branch. Review',
-    `exactly what the batch PR will carry, \`git diff origin/${batch.into}...origin/${batch.branch}\`, in the batch`,
+    'exactly what the batch PR will carry, ' +
+    `\`git diff ${shellWord(`origin/${batch.into}...origin/${batch.branch}`)}\`, in the batch`,
     'checkout, brought up to date first:',
     '',
     ...checkoutSteps(run, existsSync(batch.checkout)).map((step) => `    ${step}`),
