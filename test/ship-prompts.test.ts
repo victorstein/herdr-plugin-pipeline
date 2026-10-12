@@ -48,6 +48,15 @@ test('ship writes the PR body beside the run and renders the commands to check a
   expect(text).not.toContain('{{')
 })
 
+test('ship repeats the ruleset advice start gave once, for the batch\'s own pattern', async () => {
+  // Printed once, above the intake prompt, it was missed. Measured on a live run.
+  const text = (await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  expect(text).toContain('If `batch/*` has no ruleset blocking force-pushes and deletion, recommend one to the user')
+  const own = (await renderRunPhasePrompt(shipping('ship', { branch: 'release/menu' }), ROOT, { stateDir: dir }))
+    .replace(/\s+/g, ' ')
+  expect(own).toContain('If `release/menu` has no ruleset')
+})
+
 test('ship fetches the default branch before asking whether the batch still merges into it', async () => {
   const text = await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })
   const checkout = join(dir, 'checkouts', 'r1')

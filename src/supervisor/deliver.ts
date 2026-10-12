@@ -520,7 +520,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     run_id: run.run_id, batch: batch.branch, into: batch.into, pr: String(batch.pr ?? 'unknown'),
     checkout: batch.checkout, checkout_quoted: shellQuoted(batch.checkout), implement_model: IMPLEMENT_MODEL,
     body_path: body, body_file: shellQuoted(body), squash_body_file: shellQuoted(squash),
-    subject: shellQuoted(squashSubject(run)),
+    subject: shellQuoted(squashSubject(run)), ruleset_pattern: rulesetPattern(batch.branch),
   }
   if (run.phase === 'ship-merge') return renderPrompt(pluginRoot, 'ship-merge', vars)
   const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'

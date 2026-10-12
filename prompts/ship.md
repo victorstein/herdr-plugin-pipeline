@@ -30,4 +30,6 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
    of its own goes through a fix task, whose title then lands in it. The title only has to pass PR-title
    lint: release-please reads the override block instead.
 
-Never force-push, rebase or squash `{{batch}}`: its history is every landing's record.
+Never force-push, rebase or squash `{{batch}}`: its history is every landing's record. If
+`{{ruleset_pattern}}` has no ruleset blocking force-pushes and deletion, recommend one to the user
+(GitHub → Settings → Rules → Rulesets): without it, a `--force` push gets past the landing gate.

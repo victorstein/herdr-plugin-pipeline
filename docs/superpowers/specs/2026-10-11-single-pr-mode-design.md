@@ -1158,7 +1158,8 @@ Where the code departs from the text above, and why.
   as work; the README and the skill now say to run such a task per-task or keep its document elsewhere.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
   account for, for the review's resync note. `start` prints the ruleset recommendation as a third
-  line, naming `batch/*`, or the branch itself when `--batch-branch` names one outside it. Status reads
+  line, naming `batch/*`, or the branch itself when `--batch-branch` names one outside it, and the
+  `ship` prompt repeats it in one line: printed once above the intake prompt, it was missed. Status reads
   whether a check is declared from a task checkout or the batch checkout, since the user's working copy
   may sit on any branch, and the `land-queue` probe names the task first in line rather than telling
   every waiting task it is. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
