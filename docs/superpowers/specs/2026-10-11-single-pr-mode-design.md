@@ -1087,6 +1087,12 @@ Where the code departs from the text above, and why.
   submitted head is checked (the after-pass-2 rule). Both diffs run in `repo_root`'s object store; a
   diff git cannot read, for a commit pushed from another clone, counts as moved and unchecked, which
   costs a sync and never a wrong landing.
+- **The tick's `ls-remote` cools down after a failure.** Landing reads one branch head per task in
+  `merge`, `land-queue` and a landed `sync` on every tick, and the `done` notice one per task, each under
+  the 15 s network budget. With origin unreachable that cost every run in the session 15 s per read per
+  tick, so a failure answers for the repo's origin for 60 s, as a failed default-branch lookup does.
+  `submit`'s reads are not cooled. The `done` notice also names a branch whose head it could not compare
+  with the batch as unknown, not as "has commits that did not land".
 - **Yielding, and the queue head, consider only tasks that can take the slot.** A holder yields only
   to a waiting task with a pane, or one that lands without a sync. Yielding to a paneless task that
   must sync would hand the slot to nobody and let the holder take it back at once, re-sending its sync

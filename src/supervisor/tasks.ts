@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import {
-  baseLine, dependencyMerges, type DispatchBase, fetchFromOrigin, type RemoteHead, remoteBranchHead, trackingRefspec,
+  baseLine, dependencyMerges, type DispatchBase, fetchFromOrigin, type RemoteHead, remoteBranchHeadCooled,
+  trackingRefspec,
 } from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
@@ -78,7 +79,8 @@ export interface LandingGit {
 }
 
 export const LOCAL_LANDING_GIT: LandingGit = {
-  isAncestor, remoteBranchHead, resolve: resolveCommit, changedPaths, fetch: fetchFromOrigin,
+  isAncestor, remoteBranchHead: (repoRoot, branch) => remoteBranchHeadCooled(repoRoot, branch),
+  resolve: resolveCommit, changedPaths, fetch: fetchFromOrigin,
 }
 
 /** STALL_MINUTES, the orchestrator's cadence: a stuck sync holds up every landing behind it. */

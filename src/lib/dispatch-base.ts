@@ -265,6 +265,27 @@ export async function remoteBranchHead(repoRoot: string, branch: string): Promis
   return { ok: true, sha: line === undefined ? null : line.split('\t')[0]! }
 }
 
+const unreachableOrigins = new Map<string, { at: number; reason: string }>()
+
+/**
+ * For the supervisor's tick, which is serial: with origin unreachable, every
+ * ls-remote costs the whole budget, for every task that asks, on every tick of
+ * every run. A failure answers for the repo's origin until it cools down, as a
+ * failed default-branch lookup does; a missing branch is an answer, not a failure.
+ */
+export async function remoteBranchHeadCooled(
+  repoRoot: string, branch: string, now: () => number = Date.now,
+): Promise<RemoteHead> {
+  const failed = unreachableOrigins.get(repoRoot)
+  if (failed !== undefined && now() - failed.at < CACHE_TTL_MS) {
+    return { ok: false, reason: `${failed.reason}; not retried for ${CACHE_TTL_MS / 1000}s` }
+  }
+  const head = await remoteBranchHead(repoRoot, branch)
+  if (head.ok) unreachableOrigins.delete(repoRoot)
+  else unreachableOrigins.set(repoRoot, { at: now(), reason: head.reason })
+  return head
+}
+
 /**
  * Never forced. Git refuses the update unless `sha` contains what origin has, and
  * origin compares-and-swaps the old value, so a refusal is the answer. Returns why
@@ -286,6 +307,7 @@ export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()
   unansweredLookups.clear()
+  unreachableOrigins.clear()
 }
 
 export function dependencyMerges(task: Task, tasks: Task[]): string[] | null {

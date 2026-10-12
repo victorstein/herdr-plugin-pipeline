@@ -25,7 +25,7 @@ import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
 import { shellQuoted } from '../lib/unstarted'
 import { FINISHED } from './teardown'
-import { remoteBranchHead } from '../lib/dispatch-base'
+import { remoteBranchHeadCooled } from '../lib/dispatch-base'
 import { isAncestor } from '../lib/sync-walk'
 
 export interface DigestInput {
@@ -598,15 +598,21 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
   const deletable: string[] = []
   const kept: string[] = []
   for (const task of run.tasks) {
-    const remote = await remoteBranchHead(run.repo_root, task.branch)
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
     if (!remote.ok) {
       kept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
       continue
     }
     if (remote.sha === null) continue
     const landed = await isAncestor(run.repo_root, remote.sha, `refs/remotes/origin/${batch.branch}`)
-    if (landed === true) deletable.push(task.branch)
-    else kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+    if (landed === true) {
+      deletable.push(task.branch)
+    } else if (landed === false) {
+      kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+    } else {
+      kept.push(`  ${task.branch} is at ${sha8(remote.sha)}, which could not be compared with ${batch.branch} here; ` +
+        'fetch it and check before deleting')
+    }
   }
   const repo = shellQuoted(run.repo_root)
   return [

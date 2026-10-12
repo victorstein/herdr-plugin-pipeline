@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   baseLine, branchNameRefusal, dependencyMerges, describeBase, fetchDefaultBranch, fetchFromOrigin, forgetDispatchBases,
-  freshDispatchBase, mainlineBranch, pushToOrigin, remoteBranchHead,
+  freshDispatchBase, mainlineBranch, pushToOrigin, remoteBranchHead, remoteBranchHeadCooled,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
 import {
@@ -287,6 +287,26 @@ test('a branch head on origin is read with ls-remote, absent when there is no su
   expect(await remoteBranchHead(clone, 'batch/none')).toEqual({ ok: true, sha: null })
   git(['remote', 'set-url', 'origin', join(tempDir('hpipe-gone-'), 'missing.git')], clone)
   expect((await remoteBranchHead(clone, 'batch/x')).ok).toBe(false)
+})
+
+test('the tick\'s ls-remote is not retried against an origin that just failed, for any branch, until it cools', async () => {
+  const { local } = pushedFromLocal('master')
+  const networkCalls = remoteCountingCalls(local)
+  let clock = 1_000_000
+  const now = () => clock
+
+  const first = await remoteBranchHeadCooled(local, 't1-branch', now)
+  expect(first.ok).toBe(false)
+  expect(networkCalls()).toBe(1)
+
+  clock += 59_000
+  const cooled = await remoteBranchHeadCooled(local, 't2-branch', now)
+  expect(cooled).toMatchObject({ ok: false, reason: expect.stringContaining('not retried for 60s') })
+  expect(networkCalls()).toBe(1)
+
+  clock += 2_000
+  expect((await remoteBranchHeadCooled(local, 't2-branch', now)).ok).toBe(false)
+  expect(networkCalls()).toBe(2)
 })
 
 test('a push to origin never forces: it says why a non-fast-forward was refused', async () => {
