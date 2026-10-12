@@ -564,7 +564,9 @@ export function formatStatus(
 
 function shipLines(run: Run, batch: Batch): string[] {
   const ci = batch.ci === null ? '' : ` ci:${batch.ci}${batch.ci_head ? ` (on ${sha8(batch.ci_head.sha)})` : ''}`
-  const pr = batch.pr === null ? '  · final PR: not opened' : `  · PR #${batch.pr}${ci}`
+  const pr = batch.pr === null
+    ? '  · final PR: none seen yet — the supervisor records it on its first tick after GitHub lists it'
+    : `  · PR #${batch.pr}${ci}`
   if (run.phase === 'ship') {
     return [pr, '  YOUR move: check the batch and open its PR (the ship prompt has the commands)']
   }

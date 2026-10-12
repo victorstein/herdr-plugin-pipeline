@@ -109,7 +109,8 @@ test('the ship rows say where the final PR stands, and whose move it is', () => 
   const ship = singlePr([])
   ship.phase = 'ship'
   const shipText = formatStatus([ship], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
-  expect(shipText).toContain('  · final PR: not opened')
+  expect(shipText).toContain('  · final PR: none seen yet — the supervisor records it on its first tick after ' +
+    'GitHub lists it')
   expect(shipText).toContain('YOUR move: check the batch and open its PR (the ship prompt has the commands)')
 
   const ci = singlePr([])

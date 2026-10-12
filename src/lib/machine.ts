@@ -130,9 +130,11 @@ function advanceShip(run: Run, s: RunSignals): Run | null {
   if (batch === undefined) return null
   const pr = s.batchPr ?? null
   switch (run.phase) {
+    // The PR is GitHub's fact, recorded as soon as it is seen: waiting for the orchestrator to go idle left
+    // status saying "none" right after `gh pr create`. Measured on a live run.
     case 'ship': {
+      if (pr !== null) batch.pr = pr.number
       if (!s.actorIdle || pr === null || pr.headSha === null) return null
-      batch.pr = pr.number
       if (pr.headSha === batch.head_sha_at_entry || batch.checked?.head_sha !== pr.headSha) return null
       return enterRunPhase(run, 'ship-ci', `PR #${pr.number} at ${sha8(pr.headSha)}, checked`)
     }

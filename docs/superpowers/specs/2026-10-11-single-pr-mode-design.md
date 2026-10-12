@@ -1156,7 +1156,10 @@ Where the code departs from the text above, and why.
   renders take the state dir explicitly, since `ship` and `ship-merge` write the PR body and squash
   body beside the run.
 - **`ship-merge` records a merge whatever the orchestrator is doing**: the merge is GitHub's fact, as
-  a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle.
+  a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle to clear,
+  and it records the PR it finds whatever the orchestrator is doing: on the smoke run, status said "final
+  PR: not opened" for seconds after `gh pr create`, while the orchestrator's turn went on. Status now says
+  "none seen yet" until the supervisor has seen one.
 - **release-please's default sections** are read from source, not memory. With no `changelog-sections`
   configured, release-please passes none to its `conventional-changelog-conventionalcommits` preset (^6),
   whose list shows `feat`, `feature`, `fix`, `perf` and `revert` and hides `docs`, `style`, `chore`,
