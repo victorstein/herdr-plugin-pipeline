@@ -10,10 +10,11 @@ import type { RunEffect } from '../lib/ledger'
 import type { PrView } from '../lib/gh'
 import { advanceTask, artifactFreshAfter, counterFor, enterTaskPhase } from '../lib/machine'
 import { queuedWorkerPrompt } from '../lib/outbox'
-import { taskRow } from '../lib/phases'
+import { modeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
+import { changePromptVars, landingPromptVars, syncPromptVars } from '../lib/change-prompt'
 import { tierPromptVars } from '../lib/tier-prompt'
 import { artifactBase, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
@@ -111,7 +112,8 @@ export async function renderTaskPhasePrompt(
   run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
 ): Promise<string> {
   const common = {
-    ...tierPromptVars(task),
+    ...tierPromptVars(run, task),
+    ...(await changePromptVars(deps.pluginRoot, hpipeCommand(deps.pluginRoot), run, task)),
     run_id: run.run_id,
     branch: task.branch,
     ...beadPromptVars(task),
@@ -138,7 +140,11 @@ export async function renderTaskPhasePrompt(
     case 'pr-review-quality':
       return renderPrompt(deps.pluginRoot, 'pr-review-quality', common)
     case 'merge':
-      return renderPrompt(deps.pluginRoot, 'merge', common)
+      return modeOf(run) === 'single-pr'
+        ? renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
+        : renderPrompt(deps.pluginRoot, 'merge', common)
+    case 'sync':
+      return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task) })
     case 'implement':
       // Re-entry from a red CI needs the failing checks inlined; every other
       // entry gets the standing brief, which points a returning worker at the
@@ -575,7 +581,7 @@ export async function announceDecisions(run: Run, deps: AnswerDeps): Promise<voi
     if (!decision || decision.prompted_at !== null) continue
 
     const text = await renderPrompt(deps.pluginRoot, 'decision', {
-      ...tierPromptVars(task),
+      ...tierPromptVars(run, task),
       decision_id: decision.id,
       phase: task.decision_from ?? '', question: decision.question,
       recommendation: decision.recommendation,

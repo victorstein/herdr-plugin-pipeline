@@ -1,6 +1,6 @@
-# `pr-review-intent` — stage 1 on PR #{{pr}}, {{branch}} ({{bead}}), pass {{pass}}
+# `pr-review-intent` — stage 1 on {{subject}}, {{branch}} ({{bead}}), pass {{pass}}
 
-PR #{{pr}} is open. Stage 1 asks one question: does it do what was asked, completely, and nothing it
+{{subject}} is open. Stage 1 asks one question: does it do what was asked, completely, and nothing it
 was not asked to do? Code quality is stage 2 and is not this reviewer's concern.
 
 You do not review it yourself. Hand the brief below to a subagent with a fresh context, verbatim, and
@@ -18,21 +18,21 @@ then treats a healthy worker as a stalled one.
 If the dispatch is rejected for its effort, dispatch without `effort:`.
 
 Commit and push the verdict file before ending your turn. This ordering is load-bearing: if the
-verdict were pushed at the start of your next `implement` turn, that push alone would move the PR's
-head off the sha recorded when `implement` began, and an unfixed PR would advance to the next review
+verdict were pushed at the start of your next `implement` turn, that push alone would move {{whose_head}}
+head off the sha recorded when `implement` began, and an unfixed {{change_noun}} would advance to the next review
 with no remediation done.
 
 ## The reviewer's brief
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) for **intent** against two documents:
-`{{bead}}`'s brief (`{{hpipe}} brief --task {{task_id}}`) and the spec the PR itself carries at `{{spec_path}}`.
+Review {{subject}} on `{{branch}}` (`{{diff_command}}`) for **intent** against two documents:
+`{{bead}}`'s brief (`{{hpipe}} brief --task {{task_id}}`) and the spec {{the_change}} itself carries at `{{spec_path}}`.{{review_context}}
 
 Check: every acceptance criterion in the brief met; every spec requirement implemented, not just the
 easy half; no silent scope reduction; no scope expansion beyond what was asked; tests that exercise
 the behaviour rather than restating the implementation; and no divergence from `{{plan_path}}` that
-the PR does not explain. {{plan_review_note}}
+{{the_change}} does not explain. {{plan_review_note}}
 
 Evidence-first, `file:line` citations, ranked **BLOCKER** / **MAJOR** / **MINOR**, most severe first.
 

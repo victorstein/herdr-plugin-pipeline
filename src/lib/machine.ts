@@ -1,4 +1,4 @@
-import { nextPhase, type PhaseRow, taskRow, tierOf } from './phases'
+import { modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
 import type { AgentStatus, CiBucket, Run, RunPhase, Task, TaskPhase } from './types'
 
@@ -77,13 +77,19 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
     case 'execute': {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
       if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
-      if (s.landedTaskCount === 1) return enterRunPhase(run, 'done', 'one task landed; branch-review skipped')
+      if (s.landedTaskCount === 1) {
+        return enterRunPhase(
+          run, nextRunPhase(modeOf(run), runRow('branch-review')), 'one task landed; branch-review skipped',
+        )
+      }
       return enterRunPhase(run, 'escalated', 'every task finished without one landing')
     }
 
     case 'branch-review': {
       if (!s.actorIdle || !s.artifactFresh || !s.verdict) return null
-      if (s.verdict.verdict === 'CLEAR') return enterRunPhase(run, 'done', 'review cleared')
+      if (s.verdict.verdict === 'CLEAR') {
+        return enterRunPhase(run, nextRunPhase(modeOf(run), runRow('branch-review')), 'review cleared')
+      }
       const count = bumpCounter(run, 'branch-review')
       if (count >= s.maxPasses) {
         return enterRunPhase(run, 'escalated', `${count} passes without clearing`)
@@ -174,7 +180,7 @@ function advanceLoopingRow(
   maxPasses: number, headSha: string | null,
 ): Task | null {
   if (cleared) {
-    return enterTaskPhase(run, task, nextPhase(tierOf(task), row), 'cleared')
+    return enterTaskPhase(run, task, nextPhase(routeOf(run, task), row), 'cleared')
   }
   const count = bumpCounter(task, row.phase)
   if (count >= maxPasses) {
@@ -192,7 +198,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
     case 'plan': {
       if (!s.actorIdle || !s.artifactFresh) return null
       return enterTaskPhase(
-        run, task, nextPhase(tierOf(task), taskRow(task.phase)), 'actor idle + artifact fresh',
+        run, task, nextPhase(routeOf(run, task), taskRow(task.phase)), 'actor idle + artifact fresh',
       )
     }
 
@@ -201,7 +207,7 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       if (!s.actorIdle || s.prNumber === null || !moved) return null
       task.pr = s.prNumber
       return enterTaskPhase(
-        run, task, nextPhase(tierOf(task), taskRow('implement')), `PR #${s.prNumber} at ${s.headSha}`,
+        run, task, nextPhase(routeOf(run, task), taskRow('implement')), `PR #${s.prNumber} at ${s.headSha}`,
       )
     }
 

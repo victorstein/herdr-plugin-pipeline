@@ -10,11 +10,12 @@ import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
 import { actionFor, ageMinutes } from '../src/lib/status'
 import { makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
-import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError, withBatch } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import { TASK_ROWS, TIERS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
@@ -1002,13 +1003,13 @@ test('a pane.moved that keeps the id changes nothing — #86', () => {
 })
 
 test('the worker is needed exactly while some reachable row is the worker\'s — #86', () => {
-  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: 'close' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: null }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'implement' }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'ci' }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'merge' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'merge' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'spec' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'blocked-on-decision', decision_from: 'close' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'blocked-on-decision', decision_from: null }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'implement' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'ci' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'escalated', escalated_from: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'escalated', escalated_from: 'spec' }))).toBe(true)
 })
 
 test('pane.moved rebinds the task to the pane\'s new id and fails nothing — #86', () => {
@@ -1162,9 +1163,9 @@ test('the worker is still needed from every worker row in every tier, and past m
   ] as const
   for (const tier of TIERS) {
     for (const phase of workerRows) {
-      expect(workerStillNeeded(mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
+      expect(workerStillNeeded(mkRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
     }
-    expect(workerStillNeeded(mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
+    expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
   }
 })
 
@@ -1219,4 +1220,44 @@ test('a line about a briefed worker is not held — #148', () => {
   const run = unbriefedRun(false)
   const line = idleLine(run)
   expect(holds.sift([line], [run], 0)).toEqual([line])
+})
+
+// ——— single-PR: a reviewed task waiting to land needs no particular worker ———
+
+const singlePrRun = (tasks: Task[]): Run => withBatch(mkRun(tasks), batchFixture())
+
+test('in a single-PR run the worker is not needed once the reviews are behind the task', () => {
+  for (const tier of TIERS) {
+    for (const phase of ['land-queue', 'sync', 'merge', 'close'] as const) {
+      expect(workerStillNeeded(singlePrRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(false)
+    }
+    for (const phase of ['implement', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+      expect(workerStillNeeded(singlePrRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
+    }
+  }
+})
+
+test('a worker pane lost in land-queue, sync or merge is released, not failed', () => {
+  for (const phase of ['land-queue', 'sync', 'merge'] as const) {
+    const run = singlePrRun([mkTask({ phase })])
+    applyEvents([run], [{ kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1' }], 'personal', new Set())
+    expect(run.tasks[0]?.phase, phase).toBe(phase)
+    expect(run.tasks[0]?.pane_id, phase).toBeNull()
+  }
+})
+
+test('a worker pane lost in implement or a review row still fails a single-PR task, worded for a submission', () => {
+  const run = singlePrRun([
+    mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w7:p1' }),
+    mkTask({ task_id: 't2', phase: 'pr-review', pane_id: 'w8:p1', workspace_id: 'w8',
+      submission: { kind: 'implement', title: 'fix: a', head_sha: 'abc', at: 1, check: 'passed' } }),
+  ])
+  const { wake } = applyEvents([run], [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1' },
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w8:p1' },
+  ], 'personal', new Set())
+  expect(run.tasks.map((t) => t.phase)).toEqual(['failed', 'failed'])
+  expect(run.history.filter((h) => h.to === 'failed').map((h) => h.why))
+    .toEqual(['pane exited before it submitted', 'pane exited after it submitted'])
+  expect(wake.map((w) => w.event)).toEqual(['pane exited, nothing submitted', 'pane exited'])
 })

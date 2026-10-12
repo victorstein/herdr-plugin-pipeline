@@ -5,16 +5,13 @@
 Dispatch a fresh subagent with `effort: {{review_effort}}` to review the **whole** body of work, not
 task by task. If the dispatch is rejected for its effort, dispatch without `effort:`.
 
-There is no run-level spec to review against: each task carried its own, on its own branch. Start
-from this run's merged PRs — `{{hpipe}} show --task <id>` prints each task's `pr:` — and read each
-one's spec and plan under `docs/superpowers/specs/` and `docs/superpowers/plans/`. Those are the
-contracts the work claimed to fulfil.
+{{scope}}
 
 Before you write the verdict, read what the workers found out of scope:
 
     {{hpipe}} discoveries
 
-Each line is a bug or a follow-up a worker recorded instead of fixing it in its PR. File them as
+Each line is a bug or a follow-up a worker recorded instead of fixing it in its {{change_noun}}. File them as
 beads with `{{hpipe}} discoveries --file`, which files every unfiled one, each linked to the bead it
 came from. Filing goes in order and stops at the first failure, keeping what it already filed; once
 the cause is fixed, run it again and it carries on without filing any twice. Name in the review any
@@ -22,7 +19,7 @@ the human may want to close after filing.
 
 Check specifically what per-task review cannot see: seams between tasks, duplicated abstractions
 introduced independently by two workers, contradictions between what the first task assumed and what
-the last one built, and requirements that every individual PR passed but no PR actually implemented.
+the last one built, and requirements that every individual {{change_noun}} passed but no {{change_noun}} actually implemented.
 
 Open the review with the line `Tiers: {{task_tiers}}`.
 
@@ -51,5 +48,4 @@ judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed
 trailer at the **start of the line** — not indented, and not inside a code fence. An indented or
 fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 
-A BLOCKER sends this phase round again and you patch the branch directly — there is no task left to
-send it back to.
+{{blocker_note}}

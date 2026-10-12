@@ -1,11 +1,12 @@
 export type RunPhase =
-  | 'intake' | 'dispatch' | 'execute' | 'branch-review' | 'escalated' | 'done'
+  | 'intake' | 'dispatch' | 'execute' | 'branch-review' | 'ship' | 'ship-ci' | 'ship-merge'
+  | 'escalated' | 'done'
 
 export type Actor = 'orchestrator' | 'worker' | 'human'
 
 export type Signal =
   | 'artifact' | 'verdict' | 'pr' | 'ci' | 'merged' | 'closed'
-  | 'worktree' | 'registration' | 'gate' | 'files' | 'manual'
+  | 'worktree' | 'registration' | 'gate' | 'files' | 'manual' | 'slot' | 'synced'
 
 /** Ordered lightest first: `isLowering` reads the order. */
 export type Tier = 'light' | 'standard' | 'heavy'
@@ -23,6 +24,28 @@ export function isTier(value: string): value is Tier {
  */
 export function tierOf(task: { tier?: Tier }): Tier {
   return task.tier ?? 'heavy'
+}
+
+/** How a run ships: one PR per task, or every task landed on a batch branch that ships as one PR. */
+export type RunMode = 'per-task' | 'single-pr'
+
+/** Structural for the same reason as `tierOf`: a run is single-PR exactly when it carries a batch. */
+export function modeOf(run: { batch?: unknown }): RunMode {
+  return run.batch === undefined || run.batch === null ? 'per-task' : 'single-pr'
+}
+
+export function modeName(mode: RunMode): string {
+  return mode === 'single-pr' ? 'single-PR' : 'per-task'
+}
+
+/** What decides a task's route through the table: its tier picks the reviews, its run's mode the last mile. */
+export interface TaskRoute {
+  tier: Tier
+  mode: RunMode
+}
+
+export function routeOf(run: { batch?: unknown }, task: { tier?: Tier }): TaskRoute {
+  return { tier: tierOf(task), mode: modeOf(run) }
 }
 
 export interface PhaseRow<P extends string> {
@@ -66,6 +89,18 @@ export interface PhaseRow<P extends string> {
    * by table.test.ts.
    */
   tiers?: readonly Tier[]
+  /**
+   * The run modes that run this row; absent means both. A row carrying it is the
+   * `onBlocker` only of rows whose own modes are a subset — asserted by
+   * table.test.ts — so no mode is ever sent back onto a row it skips.
+   */
+  modes?: readonly RunMode[]
+  /**
+   * The row needs none of its worker's context, so a fresh agent in the same
+   * worktree can take it over: a pane lost here, or before it, releases the pane
+   * rather than failing the task.
+   */
+  anyWorker?: boolean
 }
 
 const TERMINAL_OR_SETTLED: ReadonlySet<string> = new Set([
@@ -86,8 +121,14 @@ export const RUN_ROWS: readonly PhaseRow<RunPhase>[] = [
   // to return to. The orchestrator patches the branch directly, and the counter
   // still bounds the loop.
   { phase: 'branch-review', actor: 'orchestrator', signal: 'verdict',
-    onClear: 'done', onBlocker: 'branch-review', counter: 'branch-review',
+    onClear: 'ship', onBlocker: 'branch-review', counter: 'branch-review',
     prompt: 'branch-review', stallable: true },
+  { phase: 'ship', actor: 'orchestrator', signal: 'pr', onClear: 'ship-ci',
+    prompt: 'ship', stallable: true, modes: ['single-pr'] },
+  { phase: 'ship-ci', signal: 'ci', onClear: 'ship-merge', onBlocker: 'ship', counter: 'ship-ci',
+    stallable: true, probeTarget: 'orchestrator', modes: ['single-pr'] },
+  { phase: 'ship-merge', actor: 'orchestrator', signal: 'merged', onClear: 'done',
+    prompt: 'ship-merge', stallable: true, modes: ['single-pr'] },
   // Both release the orchestrator pane: neither clears `orchestrator_pane`, and
   // both need a human (`hpipe rewind`/`abort`) to leave, so either would
   // otherwise starve the next run started in that same terminal.
@@ -104,10 +145,22 @@ export function runRow(phase: RunPhase): PhaseRow<RunPhase> {
   return row
 }
 
+export function rowRunsIn(row: PhaseRow<string>, mode: RunMode): boolean {
+  return row.modes === undefined || row.modes.includes(mode)
+}
+
+/** Where a cleared run row goes in this mode: along `onClear`, past every row the mode skips. */
+export function nextRunPhase(mode: RunMode, from: PhaseRow<RunPhase>): RunPhase {
+  for (let phase = from.onClear; phase !== undefined; phase = runRow(phase).onClear) {
+    if (rowRunsIn(runRow(phase), mode)) return phase
+  }
+  throw new Error(`no ${mode} run row after ${from.phase}: the table runs out`)
+}
+
 export type TaskPhase =
   | 'queued' | 'research' | 'spec' | 'spec-review' | 'plan' | 'plan-review'
   | 'blocked-on-files' | 'implement' | 'pr-review' | 'pr-review-intent' | 'pr-review-quality'
-  | 'ci' | 'merge' | 'close' | 'teardown' | 'blocked-on-decision'
+  | 'ci' | 'land-queue' | 'sync' | 'merge' | 'close' | 'teardown' | 'blocked-on-decision'
   | 'escalated' | 'failed' | 'orphaned' | 'blocked-on-failure' | 'done'
 
 export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
@@ -149,9 +202,16 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   // none of their signals is escalatable, so each is nudged forever and can never
   // cascade a dependent. t3 sat in `merge` for 4h57m emitting nothing.
   // Measured on a live run.
-  { phase: 'ci', signal: 'ci', onClear: 'merge', onBlocker: 'implement',
+  { phase: 'ci', signal: 'ci', onClear: 'land-queue', onBlocker: 'implement',
     counter: 'ci', prompt: 'ci-red', stallable: true, probeTarget: 'orchestrator',
-    holdsFiles: true },
+    holdsFiles: true, modes: ['per-task'] },
+  // A single-PR task lands one at a time, and only once it contains every landing
+  // before it. The slot is derived from phases each tick, never stored, so a crash
+  // or a rewind can at worst leave two holders, which costs one refused push.
+  { phase: 'land-queue', signal: 'slot', onClear: 'sync', stallable: true,
+    probeTarget: 'orchestrator', holdsFiles: true, modes: ['single-pr'] },
+  { phase: 'sync', actor: 'worker', signal: 'synced', onClear: 'merge', prompt: 'sync',
+    stallable: true, holdsFiles: true, anyWorker: true, modes: ['single-pr'] },
   { phase: 'merge', actor: 'orchestrator', signal: 'merged',
     onClear: 'close', prompt: 'merge', stallable: true, holdsFiles: true },
   // The supervisor's own row: the reconciler closes the bead once the merge is
@@ -192,14 +252,15 @@ export function taskRow(phase: TaskPhase): PhaseRow<TaskPhase> {
 }
 
 /**
- * Where a cleared row goes for this tier: along `onClear`, past every row the
- * tier skips. Every forward step past `research` reads it, so a tier change needs
- * no special case — the next step simply reads the current tier.
+ * Where a cleared row goes on this route: along `onClear`, past every row the
+ * tier or the mode skips. Every forward step past `research` reads it, so a tier
+ * change needs no special case — the next step simply reads the current tier.
  */
-export function nextPhase(tier: Tier, from: PhaseRow<TaskPhase>): TaskPhase {
+export function nextPhase(route: TaskRoute, from: PhaseRow<TaskPhase>): TaskPhase {
   for (let phase = from.onClear; phase !== undefined; phase = taskRow(phase).onClear) {
-    const tiers = taskRow(phase).tiers
-    if (tiers === undefined || tiers.includes(tier)) return phase
+    const row = taskRow(phase)
+    const inTier = row.tiers === undefined || row.tiers.includes(route.tier)
+    if (inTier && rowRunsIn(row, route.mode)) return phase
   }
-  throw new Error(`no ${tier} row after ${from.phase}: the table runs out`)
+  throw new Error(`no ${route.tier} ${route.mode} row after ${from.phase}: the table runs out`)
 }

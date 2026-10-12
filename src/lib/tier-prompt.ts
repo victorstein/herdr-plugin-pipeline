@@ -1,23 +1,27 @@
 import { join } from 'node:path'
 import { IMPLEMENT_MODEL, REVIEW_EFFORT, WORKER_EFFORT } from './models'
-import { nextPhase, taskRow, TIERS, tierOf } from './phases'
+import { nextPhase, routeOf, type RunMode, taskRow, TIERS, tierOf } from './phases'
 import type { Run, Task, TaskPhase, Tier } from './types'
 
-// The worker's part of the loop ends where CI takes over: every row past it is the
-// orchestrator's or the supervisor's.
-const LOOP_END: TaskPhase = 'ci'
+// The worker's part of the loop ends where landing begins: every row from here on
+// is the orchestrator's or the supervisor's. Not `ci`, which a single-PR route
+// skips, and walking past it would run the table out.
+const LOOP_END: TaskPhase = 'merge'
 
-function loopStep(phase: TaskPhase, task: Task): string {
+function loopStep(phase: TaskPhase, task: Task, mode: RunMode): string {
+  const change = mode === 'single-pr' ? 'the change' : 'the PR'
   switch (phase) {
     case 'research': return `\`research\` → \`${task.artifacts.research ?? ''}\``
     case 'spec': return `\`spec\` → \`${task.artifacts.spec ?? ''}\``
     case 'spec-review': return '`spec-review` — you dispatch the reviewer'
     case 'plan': return `\`plan\` → \`${task.artifacts.plan ?? ''}\``
     case 'plan-review': return '`plan-review` — you dispatch the reviewer again'
-    case 'implement': return '`implement` — a subagent writes the code and tests; you verify, push and open the PR'
-    case 'pr-review': return '`pr-review` — one review of the PR, intent then quality'
-    case 'pr-review-intent': return '`pr-review-intent` — does the PR do what was asked'
+    case 'implement': return '`implement` — a subagent writes the code and tests; you verify, push and ' +
+      (mode === 'single-pr' ? 'run `hpipe submit`' : 'open the PR')
+    case 'pr-review': return `\`pr-review\` — one review of ${change}, intent then quality`
+    case 'pr-review-intent': return `\`pr-review-intent\` — does ${change} do what was asked`
     case 'pr-review-quality': return '`pr-review-quality` — is it written the way this codebase is'
+    case 'sync': return '`sync` — if the batch moves before you land: merge it in, check, push, submit'
     default: return `\`${phase}\``
   }
 }
@@ -26,14 +30,14 @@ function loopStep(phase: TaskPhase, task: Task): string {
  * The paths are written in as text, not as `{{research_path}}`: `render()` makes
  * one pass, so a token inside a variable's value would reach the worker verbatim.
  */
-export function phaseLoop(task: Task): string {
-  const tier = tierOf(task)
+export function phaseLoop(run: Pick<Run, 'batch'>, task: Task): string {
+  const route = routeOf(run, task)
   const steps: string[] = []
   let phase = taskRow('queued').onClear as TaskPhase
   while (phase !== LOOP_END) {
     const row = taskRow(phase)
-    if (row.actor === 'worker') steps.push(`${steps.length + 1}. ${loopStep(phase, task)}`)
-    phase = nextPhase(tier, row)
+    if (row.actor === 'worker') steps.push(`${steps.length + 1}. ${loopStep(phase, task, route.mode)}`)
+    phase = nextPhase(route, row)
   }
   return steps.join('\n')
 }
@@ -48,7 +52,7 @@ const reviewRan = (task: Task, phase: TaskPhase): boolean => (task.verdict_seq?.
  * current tier: a light task raised to standard after skipping `plan-review`
  * still has an unreviewed plan.
  */
-export function tierPromptVars(task: Task): Record<string, string> {
+export function tierPromptVars(run: Pick<Run, 'batch'>, task: Task): Record<string, string> {
   const planReviewed = reviewRan(task, 'plan-review')
   return {
     tier: tierOf(task),
@@ -56,7 +60,7 @@ export function tierPromptVars(task: Task): Record<string, string> {
     agent_file: join('.claude', 'agents', `${task.surface}-dev.md`),
     implement_model: IMPLEMENT_MODEL,
     review_effort: REVIEW_EFFORT[tierOf(task)],
-    phase_loop: phaseLoop(task),
+    phase_loop: phaseLoop(run, task),
     plan_status: planReviewed
       ? 'cleared review'
       : 'was not reviewed — read it critically, and fix it first if it is wrong',

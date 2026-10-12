@@ -11,7 +11,7 @@ reach you, and `{{hpipe}} brief --task {{task_id}}` prints it again.
 Never run `bd` or `bv` yourself.
 
 Out-of-scope bugs and follow-ups you find go to
-`{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>`, not into this PR.
+`{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>`, not into this {{change_noun}}.
 
 Read `{{agent_file}}` before your first edit — it is the scoped guide for surface `{{surface}}`, and
 the repo's root `CLAUDE.md` outranks it where they conflict. Work only on this surface, only in this
@@ -70,8 +70,4 @@ this pane and you resume where you stopped.
 - Commit and push before your turn ends, every phase, unless you are ending it on a decision with
   unverified work in the tree. Your branch starts with no upstream, so the first push is
   `git push -u origin HEAD`.
-- The PR body ends with the line:
-
-      Refs {{bead}}
-
-  There is no GitHub issue to close: the supervisor closes the bead itself once the PR merges.
+{{handoff_rule}}

@@ -3,13 +3,15 @@ import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
-import { newRun } from '../src/lib/ledger'
-import { TASK_ROWS, TIERS } from '../src/lib/phases'
+import { newRun, withBatch } from '../src/lib/ledger'
+import { rowRunsIn, type RunMode, TASK_ROWS, taskRow, TIERS } from '../src/lib/phases'
+import { hpipeCommand } from '../src/lib/render'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
 import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const ROOT = join(import.meta.dir, '..')
@@ -20,6 +22,7 @@ const ALL = [
   'spec', 'plan', 'dispatch', 'dispatch-registering', 'worker-brief', 'ci-red', 'merge',
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted',
+  'sync', 'merge-batch', 'ship', 'ship-ci-red', 'ship-merge', 'handoff-pr', 'handoff-batch',
 ]
 
 test('every declared prompt file exists', () => {
@@ -46,7 +49,8 @@ test('the worker brief inlines the captured brief and ends the PR body with Refs
   const text = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
   expect(text).toContain('{{agent_file}}')
   expect(text).toContain('{{brief}}')
-  expect(text).toContain('Refs {{bead}}')
+  expect(text).toContain('{{handoff_rule}}')
+  expect(await renderBriefFor([briefTask({})], 0)).toContain('      Refs hp-1\n')
   expect(text).not.toContain('gh issue')
   // `render()` throws on a placeholder no caller resolves, so an inherited
   // {{task_text}} kills the first dispatch.
@@ -337,10 +341,19 @@ test('pr-review carries the intent checks, then the quality checks, word for wor
   expect(combined.split('VERDICT: CLEAR')).toHaveLength(2)
 })
 
+const MODES: readonly RunMode[] = ['per-task', 'single-pr']
+
+/** A run of `mode`, or of the one mode `phase` runs in. */
+function runIn(mode: RunMode): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  return mode === 'single-pr' ? withBatch(run, batchFixture()) : run
+}
+
 async function renderPhase(
   phase: TaskPhase, over: Partial<Task> = {}, cameFrom: TaskPhase = phase,
+  mode: RunMode = rowRunsIn(taskRow(phase), 'per-task') ? 'per-task' : 'single-pr',
 ): Promise<string> {
-  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const run = runIn(mode)
   const task = briefTask({ phase, pr: 7, ...over })
   run.tasks = [task]
   return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
@@ -520,16 +533,17 @@ test('intake explains the tiers and registers with --tier', async () => {
 })
 
 test('every prompt renders for every tier on every path with no placeholder left', async () => {
-  for (const tier of TIERS) {
+  for (const [tier, mode] of TIERS.flatMap((t) => MODES.map((m) => [t, m] as const))) {
     const rendered: Array<[string, string]> = []
 
-    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined)) {
-      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' })])
+    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined && rowRunsIn(r, mode))) {
+      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' }, row.phase, mode)])
     }
-    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files')])
-    rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
+    rendered.push(['merge', await renderPhase('merge', { tier, land_sha: 'abc' }, 'merge', mode)])
+    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files', mode)])
+    if (mode === 'per-task') rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
 
-    const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+    const run = runIn(mode)
     run.orchestrator_pane = 'w1:p1'
     const task = briefTask({ tier })
     run.tasks = [task]
@@ -550,7 +564,7 @@ test('every prompt renders for every tier on every path with no placeholder left
     run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier })]
     rendered.push(['branch-review', await renderRunPhasePrompt(run, ROOT)])
 
-    for (const [what, text] of rendered) expect(text, `${tier}: ${what}`).not.toContain('{{')
+    for (const [what, text] of rendered) expect(text, `${tier} ${mode}: ${what}`).not.toContain('{{')
   }
 })
 
@@ -627,7 +641,7 @@ test('the decision prompt has the orchestrator escalate whatever it puts to the 
 test('the worker sends out-of-scope work to discover, and the branch review files it', async () => {
   const brief = prose(await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text())
   expect(brief).toContain('{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>')
-  expect(brief).toContain('not into this PR')
+  expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('not into this PR')
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')
@@ -661,8 +675,10 @@ test('dispatch says the bead\'s captured brief is the brief, and that dispatch c
 })
 
 test('the branch review finds the run\'s PRs in the ledger, not by searching GitHub issues', async () => {
-  const text = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
-  expect(text).toContain('`{{hpipe}} show --task <id>` prints each task\'s `pr:`')
+  const run = runIn('per-task')
+  run.phase = 'branch-review'
+  const text = prose(await renderRunPhasePrompt(run, ROOT))
+  expect(text).toContain(`\`${hpipeCommand(ROOT)} show --task <id>\` prints each task's \`pr:\``)
   expect(text).not.toContain('gh pr list')
 })
 

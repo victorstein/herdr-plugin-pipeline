@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  listRuns, loadRun, newRun, readOrchestrator,
-  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
+  BATCH_SCHEMA_VERSION, isCurrentSchemaRun, listRuns, loadRun, newRun, readOrchestrator,
+  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveRun, StaleRunError, withBatch,
+  writeOrchestrator,
 } from '../src/lib/ledger'
 import { tierOf } from '../src/lib/phases'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
@@ -59,6 +61,25 @@ test('a new run carries schema_version 3 and an open intake', () => {
   expect(run.schema_version).toBe(3)
   expect(run.intake_closed).toBe(false)
   expect(run.passes).toEqual({})
+})
+
+test('a single-PR run is written as schema 4, and both schemas are current', () => {
+  const perTask = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+  const singlePr = withBatch(newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' }),
+    batchFixture())
+  expect(singlePr.schema_version).toBe(BATCH_SCHEMA_VERSION)
+  expect(BATCH_SCHEMA_VERSION).toBe(4)
+  expect(singlePr.batch?.branch).toBe('batch/x')
+  expect(isCurrentSchemaRun(perTask)).toBe(true)
+  expect(isCurrentSchemaRun(singlePr)).toBe(true)
+  for (const other of [1, 2, 5]) expect(isCurrentSchemaRun({ ...perTask, schema_version: other })).toBe(false)
+})
+
+test('a single-PR run holds its repo like any other', async () => {
+  const batched = withBatch(newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'b' }),
+    batchFixture())
+  await saveRun(dir, batched)
+  expect(await runForRepo(dir, 'personal', 'k')).toMatchObject({ kind: 'one', run: { run_id: batched.run_id } })
 })
 
 test('runForRepo ignores a run of another schema, so it never blocks hpipe start', async () => {

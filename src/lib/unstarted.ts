@@ -84,7 +84,7 @@ export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { 
 }
 
 /** Printed for pasting into a shell, where a repo path with a space would split. */
-function shellQuoted(path: string): string {
+export function shellQuoted(path: string): string {
   return `'${path.replaceAll("'", "'\\''")}'`
 }
 

@@ -4,7 +4,7 @@ export type SessionKey = string
 
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done' | 'unknown'
 
-export type { RunPhase, TaskPhase, Tier } from './phases'
+export type { RunMode, RunPhase, TaskPhase, Tier } from './phases'
 
 export type Verdict = 'CLEAR' | 'BLOCKER'
 
@@ -162,6 +162,34 @@ export interface Discovery {
   filed_bead: string | null
 }
 
+/** What `.claude/pipeline-check` said: `none` when the repo declares no check. */
+export type CheckOutcome = 'passed' | 'none'
+
+/**
+ * What `hpipe submit` recorded: the single-PR worker's equivalent of opening a PR.
+ * Kept across every rewind — an edge reads only one recorded at or after its
+ * phase entry, so a stale one can never clear anything.
+ */
+export interface Submission {
+  kind: 'implement' | 'sync'
+  /** The conventional title this task's change ships under in the batch PR. */
+  title: string
+  head_sha: string
+  at: number
+  check: CheckOutcome
+  /** `sync` only: whether every commit since `land_sha` is an automatic merge of the batch. */
+  merge?: 'clean' | 'dirty'
+  /** `sync` only, when dirty: the first commit the walk could not account for. */
+  dirty_at?: string
+}
+
+/** One landing on the batch branch, and so one line of the batch PR's release notes. */
+export interface Landing {
+  title: string
+  land_sha: string
+  at: number
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -250,11 +278,41 @@ export interface Task {
   tier?: Tier
   /** Every tier this task has had, registration first. */
   tier_history?: TierChange[]
+  /** Single-PR only. */
+  submission?: Submission
+  /**
+   * Single-PR only: the reviewed head that lands, recorded when the last review
+   * clears and advanced only by a clean sync. Never re-read from the branch.
+   */
+  land_sha?: string | null
+  /** Single-PR only, append-only: no rewind clears it, because no rewind takes work off the batch branch. */
+  landed?: Landing[]
   notes: string
 }
 
 export interface RunArtifacts {
   verdicts: Record<string, string>
+}
+
+/** The branch a single-PR run lands every task on, and the one PR it ships through. */
+export interface Batch {
+  branch: string
+  /** The default branch at start: the final PR's base. */
+  into: string
+  base_commit: string
+  /** Absolute: prompts render it, and the orchestrator's shell may not know the state dir. */
+  checkout: string
+  pr: number | null
+  head_sha_at_entry: string | null
+  ci: CiBucket | null
+  /** The head `ci` was read for, and when that head was first seen. */
+  ci_head?: { sha: string; seen_at: number }
+  /** What `hpipe batch-check` last ran on; `ship` clears only once the PR's head is this one. */
+  checked?: { head_sha: string; at: number; check: CheckOutcome }
+  merged_at_ms: number | null
+  merge_commit: string | null
+  /** Set when a fetch of the batch branch fails, cleared by the next good one. */
+  fetch_error?: { reason: string; since: number } | null
 }
 
 export interface Run {
@@ -284,6 +342,8 @@ export interface Run {
   stall?: StallState
   /** Optional: ledgers written before #24 lack it, which reads as empty. */
   outbox?: OutboxEntry[]
+  /** Present exactly when the run ships as one PR; see `modeOf`. */
+  batch?: Batch
 }
 
 export interface HistoryEntry {
@@ -325,4 +385,6 @@ export interface SupervisorPid {
   session: SessionKey
   socket_path: string
   pane_id: string
+  /** The run schemas this supervisor drives. Absent on a supervisor that predates it, which drives only 3. */
+  schemas?: number[]
 }

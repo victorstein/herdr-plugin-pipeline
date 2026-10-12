@@ -11,7 +11,7 @@ import {
 } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
-  allOrchestratorPanes, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
+  allOrchestratorPanes, CURRENT_SCHEMAS, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
   saveOrReapply, saveRun,
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
@@ -147,6 +147,15 @@ export async function claimSupervisor(
   return true
 }
 
+export function supervisorSelf(input: {
+  pid: number; panePid: number; startedAtMs: number; session: string; socketPath: string; paneId: string
+}): SupervisorPid {
+  return {
+    pid: input.pid, pane_pid: input.panePid, started_at_ms: input.startedAtMs, session: input.session,
+    socket_path: input.socketPath, pane_id: input.paneId, schemas: [...CURRENT_SCHEMAS],
+  }
+}
+
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR
@@ -160,14 +169,14 @@ async function main(): Promise<void> {
   const beadLockContention = new Map<string, LockContention>()
   const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
-  const claimed = await claimSupervisor(stateDir, herdr, {
+  const claimed = await claimSupervisor(stateDir, herdr, supervisorSelf({
     pid: process.pid,
-    pane_pid: process.ppid,
-    started_at_ms: (await processStartedAtMs(process.pid)) ?? Date.now(),
+    panePid: process.ppid,
+    startedAtMs: (await processStartedAtMs(process.pid)) ?? Date.now(),
     session,
-    socket_path: process.env.HERDR_SOCKET_PATH ?? '',
-    pane_id: process.env.HERDR_PANE_ID ?? '',
-  })
+    socketPath: process.env.HERDR_SOCKET_PATH ?? '',
+    paneId: process.env.HERDR_PANE_ID ?? '',
+  }))
   if (!claimed) process.exit(EXIT_DUPLICATE)
   if (process.env.HERDR_PANE_ID) await herdr.renameTabOf(process.env.HERDR_PANE_ID, SUPERVISOR_LABEL)
 

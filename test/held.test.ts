@@ -8,7 +8,9 @@ let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'held-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
-function writeRun(session: string, run: { run_id: string; phase: string; repo_key?: string; tasks: object[] }): void {
+function writeRun(
+  session: string, run: { run_id: string; phase: string; repo_key?: string; tasks: object[]; schema_version?: number },
+): void {
   mkdirSync(join(dir, 'runs', session), { recursive: true })
   writeFileSync(join(dir, 'runs', session, `${run.run_id}.json`), JSON.stringify({ schema_version: 3, ...run }))
 }
@@ -65,5 +67,15 @@ test('claimants are every current-schema task naming a bead in any session, held
   expect(await beadClaimants(dir)).toEqual([
     { session: 'personal', run_id: 'r1', task_id: 't1', repo_key: '/code/a', bead: 'hp-1', holds: false, registered_at: 5 },
     { session: 'work', run_id: 'r2', task_id: 't1', repo_key: '/code/a', bead: 'hp-1', holds: true, registered_at: 7 },
+  ])
+})
+
+test('a single-PR run\'s tasks are claimants too, so its beads are known as claimed', async () => {
+  writeRun('personal', {
+    run_id: 'r4', phase: 'execute', repo_key: '/code/a', schema_version: 4,
+    tasks: [{ task_id: 't1', phase: 'land-queue', bead: 'hp-9', registered_at: 3 }],
+  })
+  expect(await beadClaimants(dir)).toEqual([
+    { session: 'personal', run_id: 'r4', task_id: 't1', repo_key: '/code/a', bead: 'hp-9', holds: true, registered_at: 3 },
   ])
 })

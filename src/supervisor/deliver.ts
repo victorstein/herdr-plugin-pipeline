@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
+import { runChangeVars } from '../lib/change-prompt'
 import { mainlineBranch } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, counterFor } from '../lib/machine'
@@ -421,6 +422,7 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
+    ...runChangeVars(run, hpipeCommand(pluginRoot)),
     run_id: run.run_id, title: run.title,
     pass: String(counterFor(run, run.phase)),
     verdict_path: verdictPath,

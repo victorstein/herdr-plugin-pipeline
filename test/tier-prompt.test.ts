@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
-import { newRun } from '../src/lib/ledger'
+import { newRun, withBatch } from '../src/lib/ledger'
 import { IMPLEMENT_MODEL, REVIEW_EFFORT, WORKER_EFFORT } from '../src/lib/models'
 import { TIERS } from '../src/lib/phases'
 import { phaseLoop, taskTiers, tierPromptVars } from '../src/lib/tier-prompt'
@@ -11,6 +11,7 @@ import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
 import { cleanupFixtures, tempDir } from './helpers/git-worktree'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 afterEach(cleanupFixtures)
@@ -30,6 +31,8 @@ function mkTask(over: Partial<Task> = {}): Task {
   }
 }
 
+const PER_TASK = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+
 const HEAD = [
   '1. `research` → `docs/r.md`',
   '2. `spec` → `docs/s.md`',
@@ -47,7 +50,7 @@ test('workers and reviewers run at an effort set by tier, never at the user defa
 })
 
 test('the light loop skips plan-review and runs one combined PR review', () => {
-  expect(phaseLoop(mkTask({ tier: 'light' }))).toBe([
+  expect(phaseLoop(PER_TASK, mkTask({ tier: 'light' }))).toBe([
     ...HEAD,
     '5. `implement` — a subagent writes the code and tests; you verify, push and open the PR',
     '6. `pr-review` — one review of the PR, intent then quality',
@@ -55,7 +58,7 @@ test('the light loop skips plan-review and runs one combined PR review', () => {
 })
 
 test('the standard loop keeps plan-review and the combined PR review', () => {
-  expect(phaseLoop(mkTask({ tier: 'standard' }))).toBe([
+  expect(phaseLoop(PER_TASK, mkTask({ tier: 'standard' }))).toBe([
     ...HEAD,
     '5. `plan-review` — you dispatch the reviewer again',
     '6. `implement` — a subagent writes the code and tests; you verify, push and open the PR',
@@ -64,7 +67,7 @@ test('the standard loop keeps plan-review and the combined PR review', () => {
 })
 
 test('the heavy loop runs both PR stages, as every task did before tiers', () => {
-  expect(phaseLoop(mkTask())).toBe([
+  expect(phaseLoop(PER_TASK, mkTask())).toBe([
     ...HEAD,
     '5. `plan-review` — you dispatch the reviewer again',
     '6. `implement` — a subagent writes the code and tests; you verify, push and open the PR',
@@ -73,41 +76,53 @@ test('the heavy loop runs both PR stages, as every task did before tiers', () =>
   ].join('\n'))
 })
 
+test('a single-PR loop ends implement with hpipe submit and gains the sync step', () => {
+  const singlePr = withBatch(newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' }),
+    batchFixture())
+  expect(phaseLoop(singlePr, mkTask({ tier: 'light' }))).toBe([
+    ...HEAD,
+    '5. `implement` — a subagent writes the code and tests; you verify, push and run `hpipe submit`',
+    '6. `pr-review` — one review of the change, intent then quality',
+    '7. `sync` — if the batch moves before you land: merge it in, check, push, submit',
+  ].join('\n'))
+  expect(phaseLoop(singlePr, mkTask())).toContain('`pr-review-intent` — does the change do what was asked')
+})
+
 test('the loop carries its paths as text, never as a token render() would pass through', () => {
-  for (const tier of TIERS) expect(phaseLoop(mkTask({ tier }))).not.toContain('{{')
+  for (const tier of TIERS) expect(phaseLoop(PER_TASK, mkTask({ tier }))).not.toContain('{{')
 })
 
 test('the tier variables name the tier, the task, its agent file and the implement model', () => {
-  expect(tierPromptVars(mkTask({ surface: 'web', tier: 'light' }))).toMatchObject({
+  expect(tierPromptVars(PER_TASK, mkTask({ surface: 'web', tier: 'light' }))).toMatchObject({
     tier: 'light', task_id: 't1', agent_file: '.claude/agents/web-dev.md', implement_model: 'sonnet',
   })
-  expect(tierPromptVars(mkTask()).tier).toBe('heavy')
+  expect(tierPromptVars(PER_TASK, mkTask()).tier).toBe('heavy')
 })
 
 test('review_effort follows the task\'s current tier, so a raised task gets the heavier review', () => {
-  expect(tierPromptVars(mkTask({ tier: 'light' })).review_effort).toBe('high')
-  expect(tierPromptVars(mkTask({ tier: 'standard' })).review_effort).toBe('high')
-  expect(tierPromptVars(mkTask({ tier: 'heavy' })).review_effort).toBe('xhigh')
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'light' })).review_effort).toBe('high')
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'standard' })).review_effort).toBe('high')
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'heavy' })).review_effort).toBe('xhigh')
 })
 
 test('the plan wording follows whether a plan review ran, not the current tier', () => {
-  const raisedAfterSkipping = tierPromptVars(mkTask({ tier: 'standard' }))
+  const raisedAfterSkipping = tierPromptVars(PER_TASK, mkTask({ tier: 'standard' }))
   expect(raisedAfterSkipping.plan_status)
     .toBe('was not reviewed — read it critically, and fix it first if it is wrong')
   expect(raisedAfterSkipping.plan_review_note)
     .toBe('No plan review ran; judge the plan\'s soundness from the diff as well.')
 
-  const loweredAfterReview = tierPromptVars(mkTask({ tier: 'light', verdict_seq: { 'plan-review': 1 } }))
+  const loweredAfterReview = tierPromptVars(PER_TASK, mkTask({ tier: 'light', verdict_seq: { 'plan-review': 1 } }))
   expect(loweredAfterReview.plan_status).toBe('cleared review')
   expect(loweredAfterReview.plan_review_note).toBe('')
 })
 
 test('review_count says both stages only when pr-review-quality ran', () => {
-  expect(tierPromptVars(mkTask({ verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } })).review_count)
+  expect(tierPromptVars(PER_TASK, mkTask({ verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } })).review_count)
     .toBe('Both review stages cleared')
-  expect(tierPromptVars(mkTask({ tier: 'light', verdict_seq: { 'pr-review-intent': 1 } })).review_count)
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'light', verdict_seq: { 'pr-review-intent': 1 } })).review_count)
     .toBe('Review cleared')
-  expect(tierPromptVars(mkTask({ tier: 'light', verdict_seq: { 'pr-review': 1 } })).review_count)
+  expect(tierPromptVars(PER_TASK, mkTask({ tier: 'light', verdict_seq: { 'pr-review': 1 } })).review_count)
     .toBe('Review cleared')
 })
 
@@ -133,6 +148,7 @@ function probeRoot(): string {
   for (const name of [...COMMON_PROMPTS, 'worker-brief', 'decision']) {
     writeFileSync(join(root, 'prompts', `${name}.md`), TIER_TOKENS)
   }
+  for (const fragment of ['handoff-pr', 'handoff-batch']) writeFileSync(join(root, 'prompts', `${fragment}.md`), '')
   writeFileSync(join(root, 'prompts', 'branch-review.md'), '{{task_tiers}}|{{review_effort}}')
   return root
 }

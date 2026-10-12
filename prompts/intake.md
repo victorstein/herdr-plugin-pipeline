@@ -2,7 +2,7 @@
 
 You are the orchestrator. Intake is yours: understand the problem, cut it into tasks, back each task
 with one bead, and register them. You do **not** write specs or plans — each worker researches, specs
-and plans its own bead.
+and plans its own bead.{{mode_note}}
 
 0. **Before anything else, make sure the run can do its work.** It needs Claude Code to let this pane
    run `git push`, `gh pr create`, `gh pr merge`, `git pull`, `herdr worktree create`,

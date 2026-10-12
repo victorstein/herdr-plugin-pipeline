@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { TASK_ROWS, runRow } from './phases'
 import { LockTimeoutError, readJson, writeJson, writeJsonIf } from './store'
-import type { Orchestrator, Run, RunPhase, SessionKey, Task } from './types'
+import type { Batch, Orchestrator, Run, RunPhase, SessionKey, Task } from './types'
 
 const runsDir = (stateDir: string, session: SessionKey) => join(stateDir, 'runs', session)
 const runPath = (stateDir: string, session: SessionKey, runId: string) =>
@@ -13,14 +13,30 @@ export function slugify(title: string): string {
 }
 
 export const SCHEMA_VERSION = 3
+/**
+ * A single-PR run only. Writing it as 3 would let a supervisor that predates
+ * batches drive it as a per-task run, and have workers cut from the batch branch
+ * open PRs into the default branch carrying every sibling's commits. Bumping
+ * every run to 4 would strand each v3 run in flight behind `abort`.
+ */
+export const BATCH_SCHEMA_VERSION = 4
+
+export const CURRENT_SCHEMAS: readonly number[] = [SCHEMA_VERSION, BATCH_SCHEMA_VERSION]
 
 /**
  * No in-place migration: a run of another schema is never advanced, never
  * blocks `hpipe start`, and `hpipe status` tells the human to finish it on the
  * release that wrote it.
  */
-export function isCurrentSchemaRun(run: Run): boolean {
-  return run.schema_version === SCHEMA_VERSION
+export function isCurrentSchemaRun(run: Pick<Run, 'schema_version'>): boolean {
+  return CURRENT_SCHEMAS.includes(run.schema_version)
+}
+
+/** Makes a run single-PR, which is decided once, at start, and never changes. */
+export function withBatch(run: Run, batch: Batch): Run {
+  run.batch = batch
+  run.schema_version = BATCH_SCHEMA_VERSION
+  return run
 }
 
 export function newRun(input: {

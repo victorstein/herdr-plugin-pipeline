@@ -1,7 +1,7 @@
-# `pr-review` — PR #{{pr}}, {{branch}} ({{bead}}), pass {{pass}}
+# `pr-review` — {{subject}}, {{branch}} ({{bead}}), pass {{pass}}
 
-PR #{{pr}} is open. This one review asks both questions the heavy tier splits across two stages:
-does the PR do what was asked, completely, and nothing it was not asked to do — and is it written the
+{{subject}} is open. This one review asks both questions the heavy tier splits across two stages:
+does {{the_change}} do what was asked, completely, and nothing it was not asked to do — and is it written the
 way this codebase is already written?
 
 You do not review it yourself. Hand the brief below to a subagent with a fresh context, verbatim, and
@@ -19,24 +19,24 @@ then treats a healthy worker as a stalled one.
 If the dispatch is rejected for its effort, dispatch without `effort:`.
 
 Commit and push the verdict file before ending your turn. This ordering is load-bearing: if the
-verdict were pushed at the start of your next `implement` turn, that push alone would move the PR's
-head off the sha recorded when `implement` began, and an unfixed PR would advance past its own review
+verdict were pushed at the start of your next `implement` turn, that push alone would move {{whose_head}}
+head off the sha recorded when `implement` began, and an unfixed {{change_noun}} would advance past its own review
 with no remediation done.
 
 ## The reviewer's brief
 
 Open the review with the line `Tier: {{tier}}`.
 
-Review PR #{{pr}} on `{{branch}}` (`gh pr diff {{pr}}`) against the brief for `{{bead}}`
-(`{{hpipe}} brief --task {{task_id}}`) and the spec the PR itself carries at `{{spec_path}}`. The review has two
-mandatory sections, in this order.
+Review {{subject}} on `{{branch}}` (`{{diff_command}}`) against the brief for `{{bead}}`
+(`{{hpipe}} brief --task {{task_id}}`) and the spec {{the_change}} itself carries at `{{spec_path}}`. The review has two
+mandatory sections, in this order.{{review_context}}
 
 ### Intent
 
 Check: every acceptance criterion in the brief met; every spec requirement implemented, not just the
 easy half; no silent scope reduction; no scope expansion beyond what was asked; tests that exercise
 the behaviour rather than restating the implementation; and no divergence from `{{plan_path}}` that
-the PR does not explain. {{plan_review_note}}
+{{the_change}} does not explain. {{plan_review_note}}
 
 ### Quality
 

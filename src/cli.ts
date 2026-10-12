@@ -11,6 +11,7 @@ import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
+import { runChangeVars } from './lib/change-prompt'
 import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
@@ -28,7 +29,9 @@ import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { REVIEW_EFFORT } from './lib/models'
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
-import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
+import {
+  isTier, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow, taskRow, tierOf,
+} from './lib/phases'
 import { supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
@@ -231,6 +234,7 @@ export async function cmdStart(ctx: Ctx, input: {
   })
 
   const intake = await renderPrompt(ctx.pluginRoot, 'intake', {
+    ...runChangeVars(run, hpipeCommand(ctx.pluginRoot)),
     run_id: run.run_id, title: run.title,
   })
   const preface = [
@@ -871,6 +875,10 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
     : `; its prompt is queued for ${task.pane_id}`
 }
 
+function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
+  return `its phases are ${rows.filter((r) => rowRunsIn(r, mode)).map((r) => r.phase).join(', ')}`
+}
+
 async function rewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
 }): Promise<CmdResult> {
@@ -887,6 +895,14 @@ async function rewind(ctx: Ctx, input: {
   if (!rows.some((r) => r.phase === input.phase)) {
     return fail(`no such phase: ${input.phase || '(missing)'} — valid ` +
       `${isTask ? 'task' : 'run'} phases are ${rows.map((r) => r.phase).join(', ')}`)
+  }
+  // Tiers only warn about this, because a task routed past a row still leaves it.
+  // A mode cannot: a single-PR task left in `ci` waits forever on a PR that does
+  // not exist, and a per-task one in `land-queue` on a batch branch it never had.
+  const mode = modeOf(run)
+  const target = (rows as readonly PhaseRow<string>[]).find((r) => r.phase === input.phase)!
+  if (!rowRunsIn(target, mode)) {
+    return fail(`${input.phase} is not a phase of a ${modeName(mode)} run — ${modePhases(rows, mode)}`)
   }
 
   // A rewind ONTO a review row commissions a new review but renders no prompt —

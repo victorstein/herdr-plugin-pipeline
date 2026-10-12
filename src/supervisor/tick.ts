@@ -1,7 +1,7 @@
 import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
-import { nextPhase, taskRow, tierOf } from '../lib/phases'
+import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
@@ -175,16 +175,20 @@ export interface ApplyResult {
  * A row whose exit is recorded on the task is judged by where it returns: a
  * decision opened in `merge` resumes `merge`, which the worker takes no part in.
  * Only a return target the task never recorded falls back to `resumeActor`.
+ *
+ * An `anyWorker` row is walked past: a fresh agent in the worktree can take it,
+ * so a reviewed task waiting to land is released rather than failed.
  */
-export function workerStillNeeded(task: Task): boolean {
+export function workerStillNeeded(run: Run, task: Task): boolean {
+  const route = routeOf(run, task)
   const seen = new Set<TaskPhase>()
   const reachable: TaskPhase[] = [task.phase]
   for (let phase = reachable.pop(); phase !== undefined; phase = reachable.pop()) {
     if (seen.has(phase)) continue
     seen.add(phase)
     const row = taskRow(phase)
-    if (row.actor === 'worker') return true
-    if (row.onClear) reachable.push(nextPhase(tierOf(task), row))
+    if (row.actor === 'worker' && row.anyWorker !== true) return true
+    if (row.onClear) reachable.push(nextPhase(route, row))
     if (row.onBlocker) reachable.push(row.onBlocker)
     if (row.returnsTo !== undefined) {
       const returnsTo = task[row.returnsTo]
@@ -196,7 +200,7 @@ export function workerStillNeeded(task: Task): boolean {
 }
 
 function losePane(run: Run, task: Task, wake: WakeLine[]): void {
-  if (!workerStillNeeded(task)) {
+  if (!workerStillNeeded(run, task)) {
     // The answer to an open decision is delivered to the worker's pane, so with
     // that pane gone the question is moot and the task goes back to the row the
     // orchestrator was driving rather than waiting on a delivery that cannot happen.
@@ -210,11 +214,16 @@ function losePane(run: Run, task: Task, wake: WakeLine[]): void {
   }
   const phaseAtEvent = task.phase
   if (task.phase === 'blocked-on-decision') abandonDecisions(task)
-  enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
+  const singlePr = modeOf(run) === 'single-pr'
+  const handedOver = singlePr ? task.submission !== undefined : task.pr !== null
+  const why = singlePr
+    ? `pane exited ${handedOver ? 'after' : 'before'} it submitted`
+    : handedOver ? 'pane exited after PR' : 'pane exited with no PR'
+  enterTaskPhase(run, task, 'failed', why)
   releaseWorkerPane(task)
   wake.push({
     run, task, phaseAtEvent,
-    event: `pane exited${task.pr ? '' : ', no PR'}`,
+    event: `pane exited${handedOver ? '' : singlePr ? ', nothing submitted' : ', no PR'}`,
   })
 }
 

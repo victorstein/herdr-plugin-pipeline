@@ -4,30 +4,21 @@ The plan at `{{plan_path}}` {{plan_status}}. The files you need are yours.
 
 You keep the judgment; one subagent writes the code. Do not write it yourself.
 
-1. **Triage.** If you are here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file
+{{sync_step}}1. **Triage.** If you are here from a `BLOCKER` verdict (pass {{pass}}), the review is the newest file
    for this bead under `docs/superpowers/reviews/`. Decide which findings you accept. Every BLOCKER
    and every MAJOR you accept goes to the subagent before anything else; answer the ones you reject
-   in the PR body rather than silently ignoring them.
+   in {{reply_place}} rather than silently ignoring them.
 2. **Dispatch.** Dispatch one subagent with `model: {{implement_model}}`, and
    **wait for it within this turn**. Backgrounding it ends your turn and leaves this pane reading
    idle while the code is still being written, and the supervisor then treats a healthy worker as a
    stalled one. If the dispatch is rejected for its model, dispatch without `model:` and say so in
-   the PR body. Its brief is the plan path, `{{plan_path}}`; the findings you accepted, if any; and
+   {{reply_place}}. Its brief is the plan path, `{{plan_path}}`; the findings you accepted, if any; and
    the implementer's brief below, verbatim.
 3. **Continue.** If the subagent returns with steps unfinished, dispatch a fresh one, starting at the
    first unfinished step. If it returns a question, raise it with `{{hpipe}} decide` as your brief
    describes, and end your turn without pushing: its partial work is unverified, and the answer
    resumes it.
-4. **Verify and ship.** Run the tests and the typecheck yourself and read their output. If either is
-   red, dispatch a fresh subagent with the failing output; do not fix it yourself. When both are
-   green, push, and open the PR. Its body ends with the line:
-
-       Refs {{bead}}
-
-   There is no GitHub issue to close: the supervisor closes the bead itself once the PR merges.
-
-Push only work you have verified, and push it before your turn ends. The supervisor watches the
-branch and the PR head, not this pane.
+{{handoff}}
 
 ## The implementer's brief
 

@@ -17,7 +17,7 @@ import type { AgentStatus, Run, StallState, Task } from '../lib/types'
 const MS_PER_MINUTE = 60_000
 
 /** Signals the probed actor produces by its own work. Only these escalate. */
-const ESCALATING_SIGNALS: ReadonlySet<string> = new Set(['artifact', 'verdict', 'pr'])
+const ESCALATING_SIGNALS: ReadonlySet<string> = new Set(['artifact', 'verdict', 'pr', 'synced'])
 
 export type StallAction = 'probe' | 'escalate'
 

@@ -1,0 +1,28 @@
+# Sync — {{branch}} ({{bead}}) with `{{batch}}`
+
+Your change was reviewed, and it is next in line to land on `{{batch}}`. It may land only once it
+contains every landing before it, so bring `{{batch}}` in, check, and submit again. Nothing else is
+asked of you here.
+
+1. **Merge it in:**
+
+       {{merge_batch}}
+
+   If git answers "Already up to date", there is nothing to merge: go straight to step 4, which checks
+   exactly the tree that will land.
+2. **On a conflict**, resolve it the way `implement` works: you keep the judgment, and one subagent
+   with `model: {{implement_model}}` writes the resolution. **Wait for it within this turn.**
+3. **If the merge changed what this repo's bootstrap builds**, re-run `./.claude/pipeline-bootstrap`
+   here before you check anything.
+4. **Push, then submit:**
+
+       {{hpipe}} submit --task {{task_id}}
+
+   {{check_note}} It refuses, with the reason, until the merge is pushed{{check_until}}; fix what
+   it names and run it again.
+5. **If the check fails**, fix it the same way — a subagent writes the fix, you verify it — then commit,
+   push and submit again. Any commit beyond the merge sends this branch back through review. That is
+   expected, not a failure.
+
+Never rebase, squash or force-push this branch: the supervisor reads its first-parent history to tell
+an automatic merge of `{{batch}}` from new code, and a rewritten history reads as new code.

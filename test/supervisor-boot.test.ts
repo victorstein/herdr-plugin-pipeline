@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
-import { claimSupervisor, eachIsolated, sharedRead } from '../src/supervisor/main'
+import { CURRENT_SCHEMAS } from '../src/lib/ledger'
+import { claimSupervisor, eachIsolated, sharedRead, supervisorSelf } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
 
 let dir: string
@@ -132,4 +133,12 @@ test('a run read that fails skips only the steps reading it, and is attempted on
   expect(logged).toEqual([
     '[pipeline] beads sync failed this tick:', '[pipeline] board upkeep failed this tick:',
   ])
+})
+
+test('a claiming supervisor records every schema it drives, so start can refuse beside an old one', async () => {
+  const me = supervisorSelf({ pid: 4243, panePid: 223, startedAtMs: 1, session: 'personal', socketPath: '/s', paneId: '' })
+  expect(me.schemas).toEqual([3, 4])
+  expect(me.schemas).toEqual([...CURRENT_SCHEMAS])
+  expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
+  expect((await readPid(dir, 'personal'))?.schemas).toEqual([3, 4])
 })
