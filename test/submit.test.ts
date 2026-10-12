@@ -231,6 +231,51 @@ test('a stale save is retried without running the check again', async () => {
   expect((await saved(f)).submission?.check).toBe('passed')
 })
 
+test('a submit outlasting many supervisor saves still lands: only the record is retried, never the checks', async () => {
+  const f = await fixture()
+  declareCheck(f, '#!/bin/sh\nexit 0\n')
+  work(f)
+  let saves = 0
+  const supervisor = setInterval(async () => {
+    const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+    meanwhile.history.push({ at: saves, from: 'x', to: 'x', why: 'a supervisor tick' })
+    await saveRun(dir, meanwhile).catch(() => {})
+    saves++
+  }, 50)
+  let checks = 0
+  const out = await submit(f, undefined, {
+    openPr: async () => { await Bun.sleep(400); return null },
+    runCheck: async (checkout, log) => {
+      checks++
+      const { runCheck } = await import('../src/lib/check')
+      const result = await runCheck(checkout, log)
+      await Bun.sleep(400)
+      return result
+    },
+  }).finally(() => clearInterval(supervisor))
+  expect(saves).toBeGreaterThan(5)
+  expect(out.ok).toBe(true)
+  expect(checks).toBe(1)
+  expect((await saved(f)).submission?.check).toBe('passed')
+})
+
+test('a task that moves on while submit runs its checks records nothing', async () => {
+  const f = await fixture()
+  work(f)
+  const out = await submit(f, undefined, {
+    openPr: async () => {
+      const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+      meanwhile.tasks[0]!.phase = 'pr-review'
+      meanwhile.tasks[0]!.phase_entered_at = ENTERED + 5
+      await saveRun(dir, meanwhile)
+      return null
+    },
+  })
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('moved on (now in pr-review) while submit ran its checks; nothing was recorded')
+  expect((await saved(f)).submission).toBeUndefined()
+})
+
 // ——— sync ———
 
 async function reviewedAndBehind(): Promise<{ f: Fixture; reviewed: string }> {
