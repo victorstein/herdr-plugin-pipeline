@@ -86,6 +86,26 @@ test('a pushed, committed change with a release-note title is recorded as the im
   expect(t1.submission!.at).toBeGreaterThanOrEqual(ENTERED)
 })
 
+// Smoke run 15: the orchestrator pushed to the batch after the worker's implement-start
+// merge, submit said only "(implement; check passed)", and the sync came later unexplained.
+test('implement: a head that lacks the batch head is recorded, and submit says the task syncs before it lands', async () => {
+  const f = await fixture()
+  const head = work(f)
+  const moved = landOnRemote(f.remote, 'batch/x')
+  const out = await submit(f)
+  expect(out.ok).toBe(true)
+  expect(out.text).toContain(`submitted t1 at ${head.slice(0, 8)}`)
+  expect(out.text).toContain(`\nbatch/x moved to ${moved.slice(0, 8)} since this head last merged it, so t1 goes ` +
+    'through sync before it lands: you are sent the sync prompt when its turn comes')
+  expect((await saved(f)).submission).toMatchObject({ kind: 'implement', head_sha: head })
+})
+
+test('implement: a head that contains the batch head says nothing about the batch', async () => {
+  const f = await fixture()
+  work(f)
+  expect((await submit(f)).text).not.toContain('moved to')
+})
+
 test('a per-task run, or a task in another phase, has nothing to submit', async () => {
   const f = await fixture()
   const perTask = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: f.clone, title: 'p' })

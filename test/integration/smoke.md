@@ -1178,6 +1178,9 @@ Register t1 and t3 with disjoint `--files`, and t2 with `--depends-on t1` and fi
   submit say `Close PR #n, then submit again` (close it after);
 - a real submit prints `submitted t1 at <sha8> as "…" (implement; check passed)` and the check's log
   is under `$STATE/runs/$SMOKE/<run>.checks/`;
+- push a commit to the batch after a worker's implement-start merge and before its submit: the submit
+  prints a second line, `batch/<…> moved to <sha8> since this head last merged it, so tN goes through
+  sync before it lands`, `<sha8>` being that push, and the task later goes `land-queue → sync`;
 - the review prompt's diff command is `git fetch origin … && git diff origin/batch/<…>...origin/<branch>`.
 
 ### 9d. The gate, and one landing at a time

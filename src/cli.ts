@@ -1297,7 +1297,17 @@ interface PreparedSubmission {
   landSha: string | null
   submission: Submission
   note: string | null
+  /** The batch head as just fetched, when an `implement` head does not contain it. */
+  batchMovedTo: string | null
 }
+
+/**
+ * The supervisor sends such a task to `sync` only once it reaches `land-queue`, and
+ * a worker told nothing read the sync as unexplained. Measured on a live run.
+ */
+const batchMovedLine = (batch: Batch, taskId: string, batchHead: string): string =>
+  `${batch.branch} moved to ${sha8(batchHead)} since this head last merged it, so ${taskId} goes through sync ` +
+  'before it lands: you are sent the sync prompt when its turn comes'
 
 type Prepared<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
 
@@ -1380,6 +1390,9 @@ async function prepareSubmission(
     if (!current) return refused(`still behind ${batch.branch}: merge it and push — ${mergeBatchCommand(batch)}`)
     merge = await syncWalk(checkout, task.land_sha ?? null, batchRef)
   }
+  const batchMovedTo = kind === 'implement' && await isAncestor(checkout, batchRef, head) === false
+    ? await resolveCommit(checkout, batchRef)
+    : null
 
   const open = await deps.openPr(run.repo_root, task.branch)
   if ('error' in open) {
@@ -1416,7 +1429,7 @@ async function prepareSubmission(
       batch,
       prepared: {
         runId: run.run_id, taskId: task.task_id, kind, enteredAt: task.phase_entered_at,
-        landSha: task.land_sha ?? null, submission, note: titleCheck.note,
+        landSha: task.land_sha ?? null, submission, note: titleCheck.note, batchMovedTo,
       },
     },
   }
@@ -1438,8 +1451,11 @@ async function recordSubmission(
   }
   task.submission = prepared.submission
   await saveRun(ctx.stateDir, run)
-  return ok([submittedLine(task, prepared.submission, batch), ...(prepared.note === null ? [] : [`note: ${prepared.note}`])]
-    .join('\n'))
+  return ok([
+    submittedLine(task, prepared.submission, batch),
+    ...(prepared.batchMovedTo === null ? [] : [batchMovedLine(batch, task.task_id, prepared.batchMovedTo)]),
+    ...(prepared.note === null ? [] : [`note: ${prepared.note}`]),
+  ].join('\n'))
 }
 
 /** The single-PR worker's equivalent of opening a PR. Nothing is recorded unless every check passes. */

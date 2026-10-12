@@ -226,7 +226,8 @@ with a note. `submit` also refuses uncommitted or untracked work, a head origin 
 branch with nothing to land outside `docs/superpowers/`, a re-entry that only merged the batch since
 the review sent it back, and a branch with an open PR, which would carry every sibling's commits
 into the default branch; when GitHub cannot say whether there is one, it refuses too. Then it runs
-the repo's check. Because the pipeline's own documents do not count as something to land, a task
+the repo's check. An `implement` head that lacks the batch head as just fetched is still recorded, and
+`submit` says the batch moved, so the task goes through `sync` before it lands. Because the pipeline's own documents do not count as something to land, a task
 whose whole deliverable is a document under `docs/superpowers/` can never be submitted: run such a
 task per-task, or keep its document elsewhere.
 
