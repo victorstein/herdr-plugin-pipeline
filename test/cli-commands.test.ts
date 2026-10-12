@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, fileUnlessFiled, cmdEscalate, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
-  cmdTier, recordWorkerPane,
+  cmdNudge, cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
+  cmdTier, type NudgeDeps, recordWorkerPane,
 } from '../src/cli'
 import type { BeadCreateInput, BeadDetail } from '../src/lib/bd'
 import { cmdTask, fakeBeads, openBead } from './helpers/cmd-task'
@@ -1434,6 +1434,23 @@ test('dispatch --task hands the bare brief to the pane, not the header lines', a
   expect(afterRest).toEqual(beforeRest)
 })
 
+test('dispatch --task refuses a pane Claude\'s usage limit has stopped, sending and claiming nothing', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+  let claimed = 0
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send, undefined, async () => { claimed += 1; return { ok: true } }, async () => ({
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  }))
+  expect(result).toMatchObject({ ok: false })
+  expect(result.text).toBe("the agent in w1-2 is stopped by Claude's usage limit (resets 10:20am (America/Managua)); " +
+    'nothing was sent — run this again after the reset')
+  expect(sent).toEqual([])
+  expect(claimed).toBe(0)
+})
+
 test('dispatch --task records the pane over a supervisor write made during the handoff — #12', async () => {
   // A lost `pane.agent_detected` must not leave a briefed worker looking agentless.
   await registerReadyTask()
@@ -2467,4 +2484,101 @@ test('--bead still assigned to hpipe by a run that released it names that run an
   expect(result.text).toContain(`bead hp-12 is still assigned to hpipe by t4 of run ${released.run_id} (session work)`)
   expect(result.text).toContain('the supervisor of session work')
   expect(await registered()).toEqual([])
+})
+
+const nudgeDeps = (over: Partial<NudgeDeps> = {}) => {
+  const released: string[] = []
+  const deps: NudgeDeps = {
+    agentStatus: async () => 'done',
+    holds: async () => ({ 'w7:p1': { since: 0, failures: 0, code: 'usage_limit', until: 1, reset: '10:20am' } }),
+    release: async (pane) => { released.push(pane) },
+    ...over,
+  }
+  return { deps, released }
+}
+const worker = (over: Partial<Task> = {}): Partial<Task> => ({
+  task_id: 't1', phase: 'pr-review', pane_id: 'w7:p1', workspace_id: 'w7', phase_entered_at: 5,
+  stall: { at: 5, run_at: 0, last_probe_at: 100, probes: 3, undelivered: 1, holds: 1 },
+  passes: { 'pr-review': 1 }, verdict_seq: 2, ...over,
+} as Partial<Task>)
+
+test('nudge queues a resume, restarts the ladder, releases the hold, and changes nothing else', async () => {
+  const run = runWithTasks([worker()])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const before = structuredClone(run.tasks[0] as Task)
+  const { deps, released } = nudgeDeps()
+
+  const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(result).toEqual({
+    ok: true, text: "t1: resume queued for w7:p1 (pr-review); the supervisor's usage-limit hold on it is released",
+    json: undefined,
+  })
+  expect(released).toEqual(['w7:p1'])
+  const saved = (await listRuns(dir, 'personal'))[0] as Run
+  const task = saved.tasks[0] as Task
+  expect(saved.outbox?.map((e) => [e.to, e.task_id, e.kind])).toEqual([['worker', 't1', 'resume']])
+  expect(saved.outbox?.[0]?.text).toContain('Carry on with `pr-review`')
+  expect(task.stall).toMatchObject({ probes: 0, undelivered: 0, holds: 0 })
+  for (const field of ['phase', 'phase_entered_at', 'passes', 'verdict_seq', 'artifacts'] as const) {
+    expect(task[field], field).toEqual(before[field])
+  }
+  expect(saved.history).toEqual(run.history)
+})
+
+test('nudge refuses a task it cannot help, saying why, and sends nothing', async () => {
+  const cases: Array<[string, Partial<Task>, Partial<NudgeDeps>, string]> = [
+    ['orchestrator row', { phase: 'merge' }, {}, 'which does not wait on its worker'],
+    ['no pane', { pane_id: null }, {}, 'has no agent pane'],
+    ['working', {}, { agentStatus: async () => 'working' }, "t1's agent is working; nothing to nudge"],
+  ]
+  for (const [why, over, depsOver, message] of cases) {
+    rmSync(join(dir, 'runs'), { recursive: true, force: true })
+    const run = runWithTasks([worker(over)])
+    run.phase = 'execute'
+    await saveRun(dir, run)
+    const { deps, released } = nudgeDeps(depsOver)
+    const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+    expect(result.ok, why).toBe(false)
+    expect(result.text, why).toContain(message)
+    expect(released, why).toEqual([])
+    expect((await listRuns(dir, 'personal'))[0]?.outbox ?? [], why).toEqual([])
+  }
+})
+
+test('nudge does not queue a second resume, or one behind a queued phase prompt', async () => {
+  const run = runWithTasks([worker(), worker({ task_id: 't2', pane_id: 'w8:p1' })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps()
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(true)
+  const again = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(again.text).toBe('t1: a resume is already queued for w7:p1')
+})
+
+test('nudge --all resumes every idle worker and lists the ones it skipped', async () => {
+  const run = runWithTasks([
+    worker(),
+    worker({ task_id: 't2', pane_id: 'w8:p1' }),
+    worker({ task_id: 't3', phase: 'merge', pane_id: 'w9:p1' }),
+    worker({ task_id: 't4', phase: 'done', pane_id: null }),
+  ])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps, released } = nudgeDeps({ agentStatus: async (pane) => (pane === 'w8:p1' ? 'working' : 'idle') })
+  const result = await cmdNudge(ctx(), { taskId: null, all: true, repoKey: 'k', runId: null }, deps)
+  expect(result.text.split('\n')).toEqual([
+    "t1: resume queued for w7:p1 (pr-review); the supervisor's usage-limit hold on it is released",
+    'skipped: t2 (working), t3 (merge)',
+  ])
+  expect(released).toEqual(['w7:p1'])
+})
+
+test('nudge needs exactly one of --task and --all', async () => {
+  const { deps } = nudgeDeps()
+  for (const input of [{ taskId: null, all: false }, { taskId: 't1', all: true }]) {
+    const result = await cmdNudge(ctx(), { ...input, repoKey: 'k', runId: null }, deps)
+    expect(result.ok).toBe(false)
+    expect(result.text).toContain('usage: hpipe nudge')
+  }
 })

@@ -12,7 +12,7 @@ import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { bvTriage } from './lib/bv'
-import { observePanes } from './lib/delivery-health'
+import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
 import { detectCycle, gateStatus } from './lib/gating'
@@ -26,23 +26,27 @@ import {
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
-import { enqueue } from './lib/outbox'
+import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
 import { supervisorState } from './lib/pidfile'
-import { drain } from './lib/queue'
+import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
 import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
-import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
+import {
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, startWorkerCommand, unbriefedWorker,
+} from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
 import { renderRunPhasePrompt } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
-import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
+import type { AgentStatus, BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
+import { isAgentReady } from './lib/machine'
+import { type LimitReading, readLimit, resetText } from './supervisor/usage-limits'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -672,10 +676,15 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
  * brief goes over `agent prompt` instead, the same channel the supervisor uses
  * for every later phase. Measured on a live run.
  */
+export type ReadPaneLimit = (paneId: string) => Promise<LimitReading | null>
+
+const cliReadPaneLimit: ReadPaneLimit = (paneId) => readLimit(new Herdr(), paneId)
+
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
-  claim: ClaimBead = cliClaimBead(ctx.stateDir)): Promise<CmdResult> {
+  claim: ClaimBead = cliClaimBead(ctx.stateDir), readPaneLimit: ReadPaneLimit = cliReadPaneLimit,
+): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
   // would strand the opposite way, since registration already moved the task past
@@ -720,6 +729,16 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   if (holder) {
     return fail(`${input.paneId} is already ${holder.task_id}'s worker pane — pass ${task.task_id}'s ` +
       'root pane, from `herdr pane list --workspace <its workspace>`')
+  }
+
+  // A brief typed into a pane Claude's usage limit has stopped is rejected on
+  // arrival, yet herdr confirms it, and the task would wait on a worker that never
+  // read it.
+  const limit = await readPaneLimit(input.paneId)
+  if (limit?.line != null && isAgentReady(limit.status)) {
+    const reset = resetText(limit.line)
+    return fail(`the agent in ${input.paneId} is stopped by Claude's usage limit` +
+      `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`)
   }
 
   // Before the send: a brief cannot be recalled, and a bead someone else holds
@@ -1035,6 +1054,121 @@ async function release(ctx: Ctx, input: {
   return ok(`released ${input.taskId}; files reservation cleared`)
 }
 export const cmdRelease = retryingOnStale(release)
+
+export interface NudgeDeps {
+  agentStatus: (paneId: string) => Promise<AgentStatus>
+  /** The live supervisor's holds, to say when a usage-limit hold is being released. */
+  holds: () => Promise<Record<string, PaneHold>>
+  /** Tells the supervisor to drop its usage-limit hold on the pane. */
+  release: (paneId: string) => Promise<void>
+}
+
+const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
+  agentStatus: (paneId) => new Herdr().agentStatus(paneId),
+  holds: async () => {
+    const state = await supervisorState(ctx.stateDir, ctx.session)
+    return readPaneHolds(ctx.stateDir, ctx.session, state.state === 'live' ? state.info.pid : undefined)
+  },
+  release: async (paneId) => {
+    await enqueueEvent(join(ctx.stateDir, 'queue', ctx.session), {
+      kind: 'pipeline.nudge', session: ctx.session, at: Date.now(), pane_id: paneId,
+    })
+  },
+})
+
+/** Why a task is not nudged; `quiet` ones are left out of `--all`'s output, which lists them by id. */
+interface NudgeRefusal { why: string; short: string }
+
+async function nudgeRefusal(run: Run, task: Task, hpipe: string, deps: NudgeDeps): Promise<NudgeRefusal | null> {
+  const row = taskRow(task.phase)
+  if (row.actor !== 'worker') {
+    return { why: `${task.task_id} is in ${task.phase}, which does not wait on its worker; nothing to nudge`, short: task.phase }
+  }
+  if (task.pane_id === null) {
+    return { why: `${task.task_id} has no agent pane — \`${hpipe} status\` says how to start one`, short: 'no pane' }
+  }
+  const unbriefed = unbriefedWorker(run, task)
+  if (unbriefed !== null) {
+    return { why: `${task.task_id}'s agent has not been handed its brief: ${briefCommand(task, unbriefed.paneId, hpipe)}`, short: 'unbriefed' }
+  }
+  if (queuedResume(run, task) !== null) {
+    return { why: `${task.task_id}: a resume is already queued for ${task.pane_id}`, short: 'queued' }
+  }
+  if (queuedWorkerPrompt(run, task) !== null) {
+    return { why: `${task.task_id}'s ${task.phase} prompt is queued and restarts it; nothing to nudge`, short: 'prompt queued' }
+  }
+  if (await deps.agentStatus(task.pane_id) === 'working') {
+    return { why: `${task.task_id}'s agent is working; nothing to nudge`, short: 'working' }
+  }
+  return null
+}
+
+/**
+ * Tells idle workers to carry on where they stopped — after Claude's usage limit,
+ * or whenever one sits idle mid-phase. Unlike a same-phase rewind it touches no
+ * phase, passes, verdict reservation or history, so a review in flight is not
+ * dispatched twice. It restarts each one's stall ladder and releases the
+ * supervisor's usage-limit hold on its pane.
+ */
+async function nudge(ctx: Ctx, input: {
+  taskId: string | null; all: boolean; repoKey: string | null; runId: string | null
+}, deps: NudgeDeps): Promise<CmdResult> {
+  if ((input.taskId === null) === !input.all) return fail(commandUsage(USAGE.nudge as string[]))
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  let run: Run
+  let candidates: Task[]
+  if (input.taskId !== null) {
+    const found = await resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'driven', escape: null,
+    })
+    if (!found.ok) return found.result
+    run = found.value.run
+    candidates = [found.value.task]
+  } else {
+    const found = await resolveFor(ctx, {
+      runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'driven',
+    }, null)
+    if (!found.ok) return found.result
+    run = found.value
+    candidates = run.tasks.filter((t) => !taskPhaseIsTerminal(t.phase))
+  }
+
+  const nudged: Task[] = []
+  const skipped: Array<[Task, NudgeRefusal]> = []
+  for (const task of candidates) {
+    const refusal = await nudgeRefusal(run, task, hpipe, deps)
+    if (refusal === null) nudged.push(task)
+    else skipped.push([task, refusal])
+  }
+  if (input.taskId !== null && skipped[0] !== undefined) return fail(skipped[0][1].why)
+  const skippedLine = skipped.length === 0 ? [] :
+    [`skipped: ${skipped.map(([t, r]) => `${t.task_id} (${r.short})`).join(', ')}`]
+  if (nudged.length === 0) return ok(['nothing to nudge', ...skippedLine].join('\n'))
+
+  const now = Date.now()
+  for (const task of nudged) {
+    const text = await renderPrompt(ctx.pluginRoot, 'usage-resume', {
+      phase: task.phase, task_id: task.task_id, branch: task.branch,
+    })
+    enqueue(run, { to: 'worker', taskId: task.task_id, text, kind: 'resume' }, now)
+    task.stall = freshLadder(run, task, now)
+  }
+  await saveRun(ctx.stateDir, run)
+
+  const holds = await deps.holds()
+  const lines: string[] = []
+  for (const task of nudged) {
+    const pane = task.pane_id as string
+    await deps.release(pane)
+    const held = holds[pane]?.code === 'usage_limit'
+    lines.push(`${task.task_id}: resume queued for ${pane} (${task.phase})` +
+      (held ? "; the supervisor's usage-limit hold on it is released" : ''))
+  }
+  return ok([...lines, ...skippedLine].join('\n'))
+}
+
+export const cmdNudge = (ctx: Ctx, input: Parameters<typeof nudge>[1], deps: NudgeDeps = cliNudgeDeps(ctx)) =>
+  retryingOnStale(nudge)(ctx, input, deps)
 
 async function decide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
@@ -1469,6 +1603,7 @@ const USAGE: Record<string, string[]> = {
   drain: ['hpipe drain'],
   rewind: ['hpipe rewind <run-id> <phase> [--task <id>]'],
   release: ['hpipe release --task <id> [--run <run-id>]'],
+  nudge: ['hpipe nudge (--task <id> | --all) [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
   escalate: ['hpipe escalate --task <id> --decision <id> --recommend <text> [--run <run-id>]'],
   discover: ['hpipe discover --task <id> --title <title> --body-file <path> [--run <run-id>]'],
@@ -1488,7 +1623,7 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
@@ -1639,6 +1774,15 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'rewind':
       out = await cmdRewind(ctx, {
         runId: rest[0] ?? '', phase: rest[1] ?? '', taskId: flag(rest, 'task'),
+      })
+      break
+
+    case 'nudge':
+      out = await cmdNudge(ctx, {
+        taskId: flag(rest, 'task') ?? null,
+        all: rest.includes('--all'),
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
       })
       break
 

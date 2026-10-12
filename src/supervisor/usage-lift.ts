@@ -4,7 +4,7 @@ import { enqueue, isCurrent, probeRecipient, queuedResume, queuedWorkerPrompt } 
 import { runRow, taskRow } from '../lib/phases'
 import { render } from '../lib/render'
 import type { Run, Task, TaskPhase } from '../lib/types'
-import { unbriefedWorker } from '../lib/unstarted'
+import { freshLadder, unbriefedWorker } from '../lib/unstarted'
 import { warnToTick } from './deliver'
 import { actorPaneFor } from './stall'
 import { type LimitIO, type PaneLimit, readLimit, resetText, type UsageLimits } from './usage-limits'
@@ -47,9 +47,7 @@ export function liftEffect(lifts: readonly Lift[], texts: LiftTexts, now: number
       const lifted = [probeRecipient(run, task), actorPaneFor(run, row, task)]
         .filter((pane): pane is string => pane !== null && byPane.has(pane))
       if (lifted.length === 0) continue
-      record.stall = {
-        at: record.phase_entered_at, run_at: run.phase_entered_at, last_probe_at: now, probes: 0, undelivered: 0, holds: 0,
-      }
+      record.stall = freshLadder(run, record, now)
       for (const pane of lifted) touched.add(pane)
     }
 
