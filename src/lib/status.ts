@@ -710,7 +710,10 @@ function landingDetail(task: Task, batch: Batch, now: number): string[] {
   const landSha = task.land_sha
     ? `${sha8(task.land_sha)} (${landsCleanSync(task) ? `clean sync of ${batch.branch}` : judged})`
     : 'none'
-  const landings = (task.landed ?? []).map((l) => `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago`)
+  const landings = (task.landed ?? []).map((l) => {
+    const skipped = l.review_skipped === undefined ? '' : ` (${l.review_skipped.join(' and ')} skipped)`
+    return `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago${skipped}`
+  })
   return [
     `pr:         none (single-PR run: lands on ${batch.branch})`,
     `submitted:  ${submitted}`,

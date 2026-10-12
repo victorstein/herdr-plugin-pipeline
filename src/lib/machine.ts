@@ -360,7 +360,8 @@ function noteLanded(task: Task, landSha: string, at: number): void {
   const landed = task.landed ?? []
   if (landed.at(-1)?.land_sha === landSha) return
   const title = task.submission?.title ?? landed.at(-1)?.title ?? task.brief.title
-  task.landed = [...landed, { title, land_sha: landSha, at }]
+  const skipped = task.review_skip === undefined ? {} : { review_skipped: task.review_skip.skipped }
+  task.landed = [...landed, { title, land_sha: landSha, at, ...skipped }]
 }
 
 /** The machine's: landed now, and nothing more to land, so the bead closes. */

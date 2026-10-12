@@ -202,6 +202,12 @@ export interface Landing {
   title: string
   land_sha: string
   at: number
+  /**
+   * The PR review rows this landing went in past. Kept here because `review_skip`
+   * is cleared once a later commit is reviewed, and with it any record that this
+   * landing never was. Absent on a reviewed landing and on older ledgers.
+   */
+  review_skipped?: TaskPhase[]
 }
 
 export interface Task {

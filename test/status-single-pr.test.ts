@@ -197,6 +197,19 @@ test('show tells a sync submission by its own kind and sha, without the change\'
     .toContain('submitted:  sync at 3ad9911f, 33m ago (a clean merge of batch/x; check passed)')
 })
 
+test('show marks a landing that went in with its PR review skipped, after the skip itself is cleared', () => {
+  const task = mkTask({
+    phase: 'done', land_sha: 'eeee5555aa',
+    landed: [
+      { title: 'feat(math): remap', land_sha: 'aaaa1111bb', at: NOW - 5 * 60_000, review_skipped: ['pr-review'] },
+      { title: 'feat(math): remap', land_sha: 'eeee5555aa', at: NOW - 3 * 60_000 },
+    ],
+  })
+  const detail = formatTaskDetail(singlePr([task]), task, NOW)
+  expect(detail).toContain('landed:     batch/x at aaaa1111, 5m ago (pr-review skipped)\n')
+  expect(detail).toContain('landed:     batch/x at eeee5555, 3m ago\n')
+})
+
 test('show calls a land sha whose review was skipped submitted, not reviewed', () => {
   const task = mkTask({
     phase: 'land-queue', land_sha: '4b1d0e2a99',

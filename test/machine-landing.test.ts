@@ -259,6 +259,23 @@ test('merge: a landing is recorded even when the branch moved on, and the rest s
   expect(task.landed).toHaveLength(1)
 })
 
+// Smoke run 14: t2's first landing skipped its PR review, a later commit went
+// through pr-review, and that cleared every record of the skip.
+test('a landing made past a skipped PR review keeps the skip once the task is reviewed again', () => {
+  const { run, task } = fixture('merge', {
+    tier: 'light', land_sha: 'aaaa1111', submission: submitted(), review_skip: SKIP,
+  })
+  expect(advanceTask(run, task, signals({ landing: facts({ landed: true, movedTo: 'dddd4444' }) }))?.phase).toBe('sync')
+  enterTaskPhase(run, task, 'pr-review', 'sync of batch/x was not a clean merge')
+  expect(task.review_skip).toBeUndefined()
+  task.land_sha = 'eeee5555'
+  enterTaskPhase(run, task, 'merge', 'cleared')
+  advanceTask(run, task, signals({ landing: facts({ landed: true }) }))
+  expect(task.landed?.map((l) => [l.land_sha, l.review_skipped])).toEqual([
+    ['aaaa1111', ['pr-review']], ['eeee5555', undefined],
+  ])
+})
+
 test('merge: up to date and not yet landed waits for the orchestrator, with no ci_head rule', () => {
   const { run, task } = fixture('merge', { land_sha: 'aaaa1111', ci_head: { sha: 'old', seen_at: 0 } })
   expect(advanceTask(run, task, signals({ landing: facts(), headSha: 'zzz' }))).toBeNull()
