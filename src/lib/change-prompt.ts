@@ -6,6 +6,7 @@ import { modeOf } from './phases'
 import { renderPrompt } from './render'
 import type { Batch, Run, Task } from './types'
 import { shellWord } from './unstarted'
+import { REVIEWS_DIR } from './verdict-path'
 
 /**
  * The sentences that differ between a run that ships one PR per task and one that
@@ -178,17 +179,35 @@ export function mergePromptVars(task: Task): Record<string, string> {
   }
 }
 
+/**
+ * A CLEAR records the head that carries its verdict, past the head `submit`
+ * checked, and `land-queue` lets it through unchecked only because all it adds is
+ * review verdicts. Calling that head "checked" was a claim about a commit the
+ * check never ran on. Measured on a live run.
+ */
+function landHead(batch: Batch, task: Task): string {
+  const sub = task.submission
+  const checked = sub?.check === 'passed'
+  const judged = task.review_skip === undefined ? 'reviewed' : 'submitted'
+  if (landsCleanSync(task)) {
+    return `a clean sync of \`${batch.branch}\` on top of the ${judged} head${checked ? ', checked' : ''}`
+  }
+  if (!checked || !task.land_sha || sub.head_sha === task.land_sha) {
+    return `the head that was ${judged}${checked ? ' and checked' : ''}`
+  }
+  const recorded = task.review_skip === undefined
+    ? 'the head that was reviewed'
+    : 'the head recorded when its PR review was skipped'
+  return `${recorded}. The check ran on \`${sha8(sub.head_sha)}\`, and \`${sha8(task.land_sha)}\` adds nothing to ` +
+    `it but review verdicts under \`${REVIEWS_DIR}/\`, which no check tests`
+}
+
 /** A single-PR `merge`: the orchestrator lands the recorded head, never the branch tip. */
 export function landingPromptVars(run: Run, task: Task): Record<string, string> {
   const batch = run.batch as Batch
   const landSha = task.land_sha ?? '<no reviewed head recorded>'
-  const checked = task.submission?.check === 'passed'
-  const judged = task.review_skip === undefined ? 'reviewed' : 'submitted'
-  const landHead = landsCleanSync(task)
-    ? `a clean sync of \`${batch.branch}\` on top of the ${judged} head${checked ? ', checked' : ''}`
-    : `the head that was ${judged}${checked ? ' and checked' : ''}`
   return {
-    batch: batch.branch, into: batch.into, land_sha8: sha8(landSha), land_head: landHead,
+    batch: batch.branch, into: batch.into, land_sha8: sha8(landSha), land_head: landHead(batch, task),
     land_command: landCommand(run, landSha), repo_root: run.repo_root,
   }
 }

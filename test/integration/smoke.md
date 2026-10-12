@@ -1186,6 +1186,10 @@ back if needed. **Assert:**
   for you — waiting to land; tN holds the landing slot`, no prompt, and no stall probe;
 - before the waiting task syncs, pushing its old reviewed sha by hand
   (`git push origin <sha>:refs/heads/batch/<…>`) is refused;
+- the slot holder's landing prompt reads `<land sha8> is the head that was reviewed. The check ran on
+  <sha8>, and <land sha8> adds nothing to it but review verdicts under docs/superpowers/reviews/`, where
+  `<sha8>` is the head `submit` printed and `git diff --name-only <sha8> <land sha8>` lists only that
+  task's review file;
 - the first lands with the rendered push: `origin/batch/<…>` equals its land sha, the landing shows in
   status within one CI poll (30 s), its bead closes with `landed on batch/<…> (<sha8>); ships with
   the batch PR into main`, and its worktree is torn down;

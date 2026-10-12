@@ -241,7 +241,8 @@ refuses: an agent's Bash call times out at 10, so a longer suite does not fit.
 time takes the landing slot, oldest first, among the tasks that have an agent or need no sync:
 
 - **up to date and checked** — its reviewed head contains the batch head, and the check ran on that
-  head — goes to `merge`, where the orchestrator lands it with the printed
+  head or on the submission it adds only review verdicts to, which the landing prompt names — goes to
+  `merge`, where the orchestrator lands it with the printed
   `git -C '<repo>' push origin <sha>:refs/heads/<batch>`. No force: if anything landed meanwhile, git
   refuses it, and the task syncs.
 - **behind**, or carrying a reviewer's inline fix the check never saw, goes to `sync`: the worker

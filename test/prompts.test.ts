@@ -662,8 +662,32 @@ test('the batch landing names a clean sync as one, on top of the head that was r
   const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
   expect(prose(await renderPhase('merge', { ...reviewed, review_skip }, 'merge', 'single-pr')))
     .toContain('`13f910ea` is a clean sync of `batch/x` on top of the submitted head, checked.')
-  expect(prose(await renderPhase('merge', { ...reviewed, land_sha: 'aaaa1111' }, 'merge', 'single-pr')))
-    .toContain('`aaaa1111` is the head that was reviewed and checked.')
+  const implemented = { ...sync, kind: 'implement' as const, merge: undefined, head_sha: 'aaaa1111' }
+  expect(prose(await renderPhase('merge', { ...reviewed, land_sha: 'aaaa1111', submission: implemented }, 'merge',
+    'single-pr'))).toContain('`aaaa1111` is the head that was reviewed and checked.')
+})
+
+// Smoke run 15: the check ran on the sync submission, the CLEAR recorded the head that
+// adds the review file, and the land prompt called that head "reviewed and checked".
+test('the batch landing says where the check ran when the reviewed head only adds review verdicts to it', async () => {
+  const onlyVerdicts = 'The check ran on `e461a2f0`, and `ebcd8194` adds nothing to it but review verdicts under ' +
+    '`docs/superpowers/reviews/`, which no check tests. It contains every landing'
+  for (const [kind, merge] of [['implement', undefined], ['sync', 'dirty'], ['sync', 'clean']] as const) {
+    const submission = { kind, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'passed' as const,
+      ...(merge === undefined ? {} : { merge }) }
+    const text = prose(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 },
+      land_sha: 'ebcd81940000', submission }, 'merge', 'single-pr'))
+    expect(text, `${kind} ${merge}`).toContain(`Review cleared, and \`ebcd8194\` is the head that was reviewed. ${onlyVerdicts}`)
+    expect(text, `${kind} ${merge}`).not.toContain('clean sync')
+  }
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  const submitted = { kind: 'implement' as const, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'passed' as const }
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, land_sha: 'ebcd81940000', submission: submitted },
+    'merge', 'single-pr'))).toContain(`\`ebcd8194\` is the head recorded when its PR review was skipped. ${onlyVerdicts}`)
+  const unchecked = { kind: 'implement' as const, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'none' as const }
+  expect(prose(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, land_sha: 'ebcd81940000',
+    submission: unchecked }, 'merge', 'single-pr')))
+    .toContain('Review cleared, and `ebcd8194` is the head that was reviewed. It contains every landing')
 })
 
 test('sync tells a worker whose review was skipped that it was, not that it was reviewed', async () => {
