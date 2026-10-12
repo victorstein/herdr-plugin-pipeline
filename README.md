@@ -278,9 +278,9 @@ Every task carries a tier that decides which reviews it runs:
 
 | Tier | `spec-review` | `plan-review` | PR review |
 |---|---|---|---|
-| `light` | ✓ | – | one combined `pr-review` |
-| `standard` | ✓ | ✓ | one combined `pr-review` |
-| `heavy` | ✓ | ✓ | one combined `pr-review` |
+| `light` | ✓ | – | one combined `pr-review`, skipped for a small change (below) |
+| `standard` | ✓ | ✓ | one combined `pr-review`, skipped for a small change (below) |
+| `heavy` | ✓ | ✓ | one combined `pr-review`, never skipped |
 
 Heavy used to review the PR twice, `pr-review-intent` then `pr-review-quality`. The intent stage
 cleared all 66 of its reviews, and the one PR-stage defect in 254 berean-os verdicts came from a

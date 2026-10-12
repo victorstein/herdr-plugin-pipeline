@@ -876,7 +876,7 @@ test('the README documents Beads setup, backups, the br and reclaim warnings and
 
 test('the README, the skill and intake give heavy the same one combined PR review', async () => {
   const readme = await Bun.file(join(ROOT, 'README.md')).text()
-  expect(readme).toContain('| `heavy` | ✓ | ✓ | one combined `pr-review` |')
+  expect(readme).toContain('| `heavy` | ✓ | ✓ | one combined `pr-review`, never skipped |')
   const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
   expect(skill).toContain('every tier gets one combined `pr-review`')
   expect(skill).not.toContain('heavy runs `pr-review-intent` then `pr-review-quality`')
@@ -884,6 +884,21 @@ test('the README, the skill and intake give heavy the same one combined PR revie
   expect(intake).toContain('Every tier gets one combined PR review')
   expect(intake).not.toContain('two separate stages')
   expect(await Bun.file(join(ROOT, 'prompts', 'pr-review.md')).text()).not.toContain('the heavy tier splits')
+})
+
+// Smoke run 15: intake and the skill said every tier gets a PR review, and the
+// orchestrator met the skip only when a task went past it.
+test('where tiers are introduced, the README, the skill and intake say a small change skips its PR review', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).toContain('| `light` | ✓ | – | one combined `pr-review`, skipped for a small change (below) |')
+  expect(readme).toContain('| `standard` | ✓ | ✓ | one combined `pr-review`, skipped for a small change (below) |')
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('every tier gets one combined `pr-review`, except a light or standard task with a small ' +
+    'change, which skips it (the `pr-review skipped` row under **While it runs**); heavy never skips it')
+  const intake = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(intake).toContain('Every tier gets one combined PR review, except that a light or standard task whose ' +
+    "change turns out small skips it (the herdr-pipeline skill's `pr-review skipped` row has the rule); `heavy` " +
+    'never skips it')
 })
 
 test('the README and the skill name the PR review skip, its threshold and the always-review file', async () => {
