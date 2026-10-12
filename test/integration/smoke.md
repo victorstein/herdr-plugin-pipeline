@@ -929,9 +929,11 @@ hpipe start "beads smoke" --prefix bsm
 exists from §1 the line reads `beads: prefix <p>, store …` and `--prefix` is ignored; use that prefix
 wherever `bsm` appears below.
 
-**Check:** `ls -A "$STORE"` holds `.beads` and `project.json`; `$STORE/.beads/issues.jsonl` exists;
-`git -C "$STATE" status` shows nothing new if the state dir sits in a repo. **(human)** a `Board: <repo>
-<hash>` tab appears in the pipeline workspace within a tick or two and runs `bv`.
+**Check:** `ls -A "$STORE"` holds `.beads`, `.git` and `project.json`; `$STORE/.beads/issues.jsonl`
+exists; `git -C "$STORE" ls-files` prints only `.beads/issues.jsonl` and `git -C "$STORE" log
+--format='%an %s'` prints `hpipe init`; if the state dir sits in a repo, that repo gains no commit and
+nothing staged. **(human)** a `Board: <repo> <hash>` tab appears in the pipeline workspace within a
+tick or two and runs `bv`.
 
 ### 8b. One task, open to closed
 
@@ -1043,7 +1045,7 @@ back, not something to patch mid-run.
    *Look for:* every entry under `dependencies` and `dependents` carries `dependency_type` (`blocks` or
    `parent-child`) and `status`. The adoption refusal in 8e reads exactly those two names; if either is
    called something else, adoption silently lets an epic through.
-3. **bd's stderr warning outside git.** Provoke a failing bd write, for example
+3. **bd's stderr warning.** Provoke a failing bd write, for example
    `hpipe task --branch smoke/x --bead no-such-bead --surface <surface> --files NOTES.md` (or a `--title`
    run with an unreadable body). *Look for:* hpipe's error shows only bd's real error. Then capture the
    raw text with `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd create "x" --json --actor smoke 2>&1 >/dev/null | cat -A`
@@ -1075,6 +1077,13 @@ back, not something to patch mid-run.
    second (8d). *Look for:* the bead goes `open → in_progress → closed`; **(human)** the phase label on
    the board updates at each phase; an abort releases the bead (`open`, no assignee) and a resume
    re-claims it.
+8. **bv's history view (human).** After 8b, open bv's history view on the board. *Look for:* no
+   `History load failed` line, and the bead's changes listed against hpipe's commits (`git -C "$STORE"
+   log --format='%h %s'` shows one per CLI write and one per supervisor pass that wrote — `update bsm-1`,
+   `sync`, …). Then the upgrade path, on a store made by a release before this one (or a copy of one with
+   its `.git` removed, no run live): open the board with **Open board**. *Look for:* `$STORE/.git`
+   appears with one `catch up` commit before bv starts, and the history view loads. If bv still cannot
+   read the history, record its exact message: it is a finding, not something to work around mid-run.
 
 | Deferred check | Result | Notes |
 |---|---|---|
@@ -1085,6 +1094,7 @@ back, not something to patch mid-run.
 | 5 board after herdr restart | | |
 | 6 `hpipe next` compact | | |
 | 7 full task lifecycle | | |
+| 8 bv history view, new store and upgraded store | | |
 
 ---
 
