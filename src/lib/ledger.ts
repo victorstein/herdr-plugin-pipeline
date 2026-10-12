@@ -165,15 +165,18 @@ export async function saveOrReapply(
  * The tick's save, made only when the tick changed something. Saving an unchanged
  * run bumped `revision` every tick, and a CLI command slower than one tick then
  * lost every retry to it: a smoke-run orchestrator froze the supervisor with
- * `kill -STOP` to get a submit through. Measured on a live run. An unchanged copy
- * is still checked against the file, so nothing is delivered from a stale read.
+ * `kill -STOP` to get a submit through. Measured on a live run. "Changed" is
+ * judged against the file, not a snapshot the caller took: the tick polls CI into
+ * its copies before it advances them, and against a later snapshot that poll
+ * never reached the file, so CI never cleared. Also measured on a live run.
  */
 export async function saveIfChanged(
-  stateDir: string, run: Run, asRead: string, effects: readonly RunEffect[],
+  stateDir: string, run: Run, effects: readonly RunEffect[],
 ): Promise<SaveOutcome | 'unchanged' | 'stale'> {
-  if (effects.length > 0 || JSON.stringify(run) !== asRead) return saveOrReapply(stateDir, run, effects)
+  if (effects.length > 0) return saveOrReapply(stateDir, run, effects)
   const onDisk = await loadRun(stateDir, run.session, run.run_id)
-  return onDisk !== null && (onDisk.revision ?? 0) === (run.revision ?? 0) ? 'unchanged' : 'stale'
+  if (onDisk === null || (onDisk.revision ?? 0) !== (run.revision ?? 0)) return 'stale'
+  return JSON.stringify(onDisk) === JSON.stringify(run) ? 'unchanged' : saveOrReapply(stateDir, run, effects)
 }
 
 export async function listRuns(stateDir: string, session: SessionKey): Promise<Run[]> {

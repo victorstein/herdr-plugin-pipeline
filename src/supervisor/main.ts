@@ -325,7 +325,6 @@ async function main(): Promise<void> {
           })
         }
         const effects: RunEffect[] = []
-        const asRead = JSON.stringify(run)
         try {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
@@ -411,7 +410,7 @@ async function main(): Promise<void> {
           // so a prompt about a transition the ledger then refused is refused with
           // it, and one that is saved is sent until it lands.
           const eventsOnly = queuePending(run, runPending, tickNow)
-          const saved = await saveIfChanged(stateDir, run, asRead, effects)
+          const saved = await saveIfChanged(stateDir, run, effects)
           if (saved === 'saved' || saved === 'unchanged') {
             pending.push(...eventsOnly)
             deliverFrom.add(run)
