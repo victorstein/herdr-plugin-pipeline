@@ -5,7 +5,7 @@ import { fileHolders } from './gating'
 import { counterFor } from './machine'
 import { hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
-import { deliveryWarnings, limitReset, type PaneObservations, queuedWorkerPrompt } from './outbox'
+import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import type { MissingArtifact, Run, SessionKey, Task, TierChange, UncommittedWork } from './types'
 import {
@@ -84,26 +84,33 @@ export type PaneHolds = Readonly<Record<string, PaneHold>>
  * refused before it goes out settles nothing, so the gate's holds are the only
  * record of stuck input there; the entry's own last code is set only when a send
  * stalled and then found a human's text in the box.
+ *
+ * A worker owed a usage-limit resume is the same: idle because it has not yet been
+ * told to carry on. Read as idle with nothing, the first digest after the reset told
+ * the orchestrator to act on every worker the supervisor had just resumed.
  */
-function undeliveredPhasePrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
-  const entry = queuedWorkerPrompt(run, task)
+function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
+  const phasePrompt = queuedWorkerPrompt(run, task)
+  const resume = phasePrompt === null ? queuedResume(run, task) : null
+  const entry = phasePrompt ?? resume
   if (entry === null) return null
+  const what = resume === null ? `its ${task.phase} prompt` : 'its resume after Claude\'s usage limit'
   const pane = task.pane_id ?? 'its pane'
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
   if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
     return {
       waitsOnYou: true,
-      clause: `YOUR move: its ${task.phase} prompt is held by text in the input box of ${pane} — ` +
+      clause: `YOUR move: ${what} is held by text in the input box of ${pane} — ` +
         'submit or clear that text; see the ⚠ stuck input line below',
     }
   }
   if (hold !== undefined || entry.attempts > 0) {
     return {
       waitsOnYou: true,
-      clause: `YOUR move: its ${task.phase} prompt has not reached ${pane} — see the ⚠ delivery line below`,
+      clause: `YOUR move: ${what} has not reached ${pane} — see the ⚠ delivery line below`,
     }
   }
-  return { waitsOnYou: false, clause: `nothing for you — its ${task.phase} prompt is queued for ${pane}` }
+  return { waitsOnYou: false, clause: `nothing for you — ${what} is queued for ${pane}` }
 }
 
 /**
@@ -209,7 +216,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     // Ahead of the undelivered prompt, which reads any hold as "YOUR move".
     const paused = pausedByUsageLimit(task, hpipe, holds)
     if (paused) return paused
-    const undelivered = undeliveredPhasePrompt(run, task, holds)
+    const undelivered = undeliveredWorkerPrompt(run, task, holds)
     if (undelivered) return undelivered
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
