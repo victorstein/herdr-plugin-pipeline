@@ -484,10 +484,15 @@ function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiti
         ? ` ${batch.branch} has not fetched for ${ageMinutes(fetchError.since, now)}m (${fetchError.reason}), so ` +
           'landings are not being seen.'
         : ''
+      // A paneless task ahead is passed over until an agent is started for it, and has its own clause.
+      const head = landingQueue(run.tasks).find((t) => t.pane_id !== null)
+      const inLine = head === undefined || head === task
+        ? 'this one is first in line, yet it has not taken it'
+        : `${head.task_id} is first in line, ahead of this one, yet nothing has taken it`
       return {
         short,
-        clause: 'No task holds the landing slot and this one is first in line, yet it has not taken it, so this ' +
-          `run is not being advanced.${unseen} Check the supervisor pane's log, whether another run holds this ` +
+        clause: `No task holds the landing slot and ${inLine}, so this run is not being advanced.${unseen} ` +
+          "Check the supervisor pane's log, whether another run holds this " +
           `orchestrator pane, and whether git can read the batch: \`git -C ${shellQuoted(run.repo_root)} ` +
           `merge-base --is-ancestor ${shellWord(`origin/${batch.branch}`)} ${task.land_sha ?? '<land sha>'}\` ` +
           'must exit 0 or 1.',

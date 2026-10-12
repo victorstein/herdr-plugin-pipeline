@@ -54,6 +54,19 @@ test('a repo with no check is flagged: every landing is unverified', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
+test('whether a check is declared is read from the batch\'s lineage, a task checkout, not the user\'s working copy', () => {
+  const working = mkdtempSync(join(tmpdir(), 'status-working-'))
+  const checkout = mkdtempSync(join(tmpdir(), 'status-task-'))
+  mkdirSync(join(checkout, '.claude'))
+  writeFileSync(join(checkout, '.claude', 'pipeline-check'), '#!/bin/sh\n')
+  chmodSync(join(checkout, '.claude', 'pipeline-check'), 0o755)
+  const run = singlePr([mkTask({ checkout_path: checkout })], working)
+  const text = formatStatus([run], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
+  expect(text).not.toContain('no .claude/pipeline-check')
+  rmSync(working, { recursive: true, force: true })
+  rmSync(checkout, { recursive: true, force: true })
+})
+
 test('a batch that has not fetched, and a supervisor that cannot drive the run, are both your move', () => {
   const run = singlePr([])
   run.batch!.fetch_error = { reason: 'Could not read from remote repository.', since: NOW - 12 * 60_000 }

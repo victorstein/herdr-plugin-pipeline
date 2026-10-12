@@ -268,14 +268,17 @@ async function planBatch(
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
 
+/** One ruleset covers every run's default-named batch; a name of the user's own is protected by name. */
+const rulesetPattern = (branch: string): string => (branch.startsWith('batch/') ? 'batch/*' : branch)
+
 function batchLines(plan: BatchPlan, repoRoot: string): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
   return [
     `batch: ${plan.branch} at ${sha8(plan.commit)} (origin/${plan.into} as just fetched${adopted}) — ` +
       `this run ships as one PR into ${plan.into}`,
     checkLine(repoCheck(repoRoot)),
-    'ruleset: protect batch/* from force-pushes and deletion (GitHub → Settings → Rules → Rulesets): git ' +
-      'refuses only a landing that is not a fast-forward, and a --force push gets through without one',
+    `ruleset: protect ${rulesetPattern(plan.branch)} from force-pushes and deletion (GitHub → Settings → Rules → ` +
+      'Rulesets): git refuses only a landing that is not a fast-forward, and a --force push gets through without one',
   ]
 }
 

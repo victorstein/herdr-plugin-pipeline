@@ -1148,8 +1148,11 @@ Where the code departs from the text above, and why.
   range through `shellWord`, which quotes only a word the shell would split or run, so an ordinary name,
   and so every per-task render, reads exactly as before.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
-  account for, for the review's resync note. `start` prints the `batch/*` ruleset recommendation as a
-  third line. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
+  account for, for the review's resync note. `start` prints the ruleset recommendation as a third
+  line, naming `batch/*`, or the branch itself when `--batch-branch` names one outside it. Status reads
+  whether a check is declared from a task checkout or the batch checkout, since the user's working copy
+  may sit on any branch, and the `land-queue` probe names the task first in line rather than telling
+  every waiting task it is. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
   renders take the state dir explicitly, since `ship` and `ship-merge` write the PR body and squash
   body beside the run.
 - **`ship-merge` records a merge whatever the orchestrator is doing**: the merge is GitHub's fact, as

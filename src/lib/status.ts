@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
@@ -578,6 +579,15 @@ function shipLines(run: Run, batch: Batch): string[] {
  * How a single-PR run ships, on every phase: a landing is invisible on the default
  * branch until the batch PR merges, and nothing else in status would say where it is.
  */
+/**
+ * Where to read what the batch declares: a task checkout cut from it, or the batch
+ * checkout, before the user's working copy, which may sit on any branch.
+ */
+function batchLineage(run: Run, batch: Batch): string {
+  const checkouts = [...run.tasks.map((t) => t.checkout_path), batch.checkout]
+  return checkouts.find((path): path is string => path !== null && existsSync(path)) ?? run.repo_root
+}
+
 function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number): string[] {
   const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).length
   const holder = landingSlotHolder(run.tasks)
@@ -589,7 +599,7 @@ function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: 
     ...(next.length === 0 ? [] : [`next: ${next.join(', ')}`]),
   ].join(' · ')
   const warnings: string[] = []
-  if (repoCheck(run.repo_root).kind === 'none') {
+  if (repoCheck(batchLineage(run, batch)).kind === 'none') {
     warnings.push(`  ⚠ no ${CHECK_REL} in this repo: each landing is checked only by its worker's own test run`)
   }
   if (batch.fetch_error) {
