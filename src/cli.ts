@@ -369,6 +369,24 @@ const ghBatchShipped: BatchShipped = async (repoRoot, pr) => {
   return view === null ? null : view.merged
 }
 
+/**
+ * One GitHub question per command. A stale save re-runs the whole attempt, and a
+ * gh call inside it outlasts a supervisor tick, so every attempt would lose to the
+ * supervisor's next save; asked once, before the retried save, it costs none of them.
+ */
+function askedOnce(shipped: BatchShipped): BatchShipped {
+  const answers = new Map<string, Promise<boolean | null>>()
+  return (repoRoot, pr) => {
+    const key = `${repoRoot}\0${pr}`
+    let answer = answers.get(key)
+    if (answer === undefined) {
+      answer = shipped(repoRoot, pr)
+      answers.set(key, answer)
+    }
+    return answer
+  }
+}
+
 /** Why nothing more can join this single-PR run, or null. Once its PR merged, a fix lands on a branch already shipped. */
 async function shippedRefusal(run: Run, shipped: BatchShipped): Promise<string | null> {
   const batch = run.batch
@@ -511,6 +529,14 @@ function filingInput(input: TaskInput): BeadCreateInput {
   }
 }
 
+/** The single-PR run a fix task would reopen, if this repo's live run is shipping. */
+async function shippingRun(ctx: Ctx, input: TaskInput): Promise<Run | null> {
+  const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, {
+    runId: input.runId, repoKey: input.repoKey, phases: SHIPPING, taskId: null, reach: 'unfinished',
+  })
+  return shipping.ok && modeOf(shipping.run) === 'single-pr' ? shipping.run : null
+}
+
 async function registerTask(
   ctx: Ctx, input: TaskInput, attempt: RegistrationAttempt,
 ): Promise<CmdResult> {
@@ -526,9 +552,9 @@ async function registerTask(
   if (found.ok) {
     run = found.value
   } else {
-    const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, { ...query, phases: SHIPPING })
-    if (!shipping.ok || modeOf(shipping.run) !== 'single-pr') return found.result
-    run = shipping.run
+    const shipping = await shippingRun(ctx, input)
+    if (shipping === null) return found.result
+    run = shipping
     reopensShipping = true
     const refusal = await shippedRefusal(run, attempt.shipped)
     if (refusal !== null) return fail(`${refusal}; register the fix in a new run`)
@@ -746,8 +772,10 @@ export async function cmdTask(
     showBeadOnce: (repoKey, id) => (outcome.shown ??= beads.show(repoKey, id)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
-    shipped,
+    shipped: askedOnce(shipped),
   }
+  const shipping = await shippingRun(ctx, input)
+  if (shipping !== null) await shippedRefusal(shipping, attempt.shipped)
   const filedBead = async (): Promise<CreatedBead | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
     return filed === null || isBdFailure(filed) ? null : filed
@@ -1031,9 +1059,17 @@ function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
   return `its phases are ${rows.filter((r) => rowRunsIn(r, mode)).map((r) => r.phase).join(', ')}`
 }
 
-async function rewind(ctx: Ctx, input: {
-  runId: string; phase: string; taskId: string | null
-}, shipped: BatchShipped = ghBatchShipped): Promise<CmdResult> {
+interface RewindInput { runId: string; phase: string; taskId: string | null }
+
+const SHIPPING_PAST_EXECUTE: readonly RunPhase[] = ['ship', 'ship-ci', 'ship-merge']
+
+/** The run would otherwise ship, or reach `done` and stop being driven, with the rewound task stranded behind it. */
+function rewindReopensShipping(run: Run, input: RewindInput): boolean {
+  return Boolean(input.taskId) && modeOf(run) === 'single-pr' && SHIPPING_PAST_EXECUTE.includes(run.phase) &&
+    TASK_ROWS.some((r) => r.phase === input.phase) && !taskPhaseIsTerminal(input.phase)
+}
+
+async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -1080,10 +1116,7 @@ async function rewind(ctx: Ctx, input: {
       }
       task.land_sha = last.land_sha
     }
-    // The run would otherwise ship, or reach `done` and stop being driven, with this
-    // task stranded behind it.
-    const shipping = modeOf(run) === 'single-pr' && (['ship', 'ship-ci', 'ship-merge'] as string[]).includes(run.phase)
-    if (shipping && !taskPhaseIsTerminal(input.phase)) {
+    if (rewindReopensShipping(run, input)) {
       const refusal = await shippedRefusal(run, shipped)
       if (refusal !== null) return fail(`${input.taskId} was not rewound: ${refusal}`)
       enterRunPhase(run, 'execute', `${input.taskId} was rewound to ${input.phase}`)
@@ -1187,7 +1220,14 @@ async function rewind(ctx: Ctx, input: {
     (reserved === null ? '' : `; next verdict → ${reserved}`) + reopensShipping + owed + tierWarning,
   )
 }
-export const cmdRewind = retryingOnStale(rewind)
+export async function cmdRewind(
+  ctx: Ctx, input: RewindInput, shipped: BatchShipped = ghBatchShipped,
+): Promise<CmdResult> {
+  const askShipped = askedOnce(shipped)
+  const before = await runById(ctx.stateDir, ctx.session, input.runId)
+  if (before && rewindReopensShipping(before, input)) await shippedRefusal(before, askShipped)
+  return retryingOnStale(rewind)(ctx, input, askShipped)
+}
 
 export interface SubmitDeps {
   /** An open PR from `branch`, by number, or why gh could not say. */

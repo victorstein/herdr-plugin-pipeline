@@ -216,6 +216,36 @@ test('a task rewound while the run ships moves the run back to execute; once shi
   expect(refused.text).toContain('the batch already shipped as PR #301')
 })
 
+/** A supervisor saving the run on a short cadence, as `main.ts` saves every advancing run every tick. */
+function liveSupervisor(run: Run): { stop: () => void } {
+  const timer = setInterval(async () => {
+    const meanwhile = await saved(run)
+    meanwhile.history.push({ at: Date.now(), from: 'x', to: 'x', why: 'a supervisor tick' })
+    await saveRun(dir, meanwhile).catch(() => {})
+  }, 100)
+  return { stop: () => clearInterval(timer) }
+}
+
+test('a rewind and a fix task while the run ships land against a live supervisor, asking GitHub once each', async () => {
+  for (const command of ['rewind', 'register'] as const) {
+    const run = singlePrRun([{ phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }] }])
+    run.phase = 'ship-ci'
+    run.intake_closed = true
+    run.batch!.pr = 301
+    await saveRun(dir, run)
+    let asked = 0
+    const slowGitHub = async () => { asked++; await Bun.sleep(400); return false }
+    const supervisor = liveSupervisor(run)
+    const out = await (command === 'rewind'
+      ? cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, slowGitHub)
+      : fixTask(run, slowGitHub, 'hp-live')
+    ).finally(() => supervisor.stop())
+    expect(out.ok, `${command}: ${out.text}`).toBe(true)
+    expect(asked, command).toBe(1)
+    expect((await saved(run)).phase, command).toBe('execute')
+  }
+})
+
 test('a run rewound to ship forgets the PR it found; to ship-ci, the bucket it read', async () => {
   const run = singlePrRun([{ phase: 'done' }])
   run.phase = 'escalated'
