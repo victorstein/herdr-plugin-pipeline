@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
-import { baseLine, dependencyMerges, type DispatchBase, type RemoteHead, remoteBranchHead } from '../lib/dispatch-base'
+import {
+  baseLine, dependencyMerges, type DispatchBase, fetchFromOrigin, type RemoteHead, remoteBranchHead, trackingRefspec,
+} from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
   gateStatus, landingQueue, landingSlotHolder, planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts,
@@ -72,10 +74,11 @@ export interface LandingGit {
   remoteBranchHead: (repoRoot: string, branch: string) => Promise<RemoteHead>
   resolve: (repoRoot: string, ref: string) => Promise<string | null>
   changedPaths: (repoRoot: string, from: string, to: string) => Promise<string[] | null>
+  fetch: (repoRoot: string, refspec: string) => Promise<string | null>
 }
 
 export const LOCAL_LANDING_GIT: LandingGit = {
-  isAncestor, remoteBranchHead, resolve: resolveCommit, changedPaths,
+  isAncestor, remoteBranchHead, resolve: resolveCommit, changedPaths, fetch: fetchFromOrigin,
 }
 
 /** STALL_MINUTES, the orchestrator's cadence: a stuck sync holds up every landing behind it. */
@@ -611,7 +614,12 @@ async function withReviewedHead<S extends { headSha: string | null }>(
   const remote = await git.remoteBranchHead(run.repo_root, task.branch)
   if (!remote.ok || remote.sha === null) return null
   const submitted = task.submission?.head_sha
-  const contains = submitted === undefined ? true : await git.isAncestor(run.repo_root, submitted, remote.sha)
+  if (submitted === undefined) return { ...signals, headSha: remote.sha, headContainsSubmission: true }
+  let contains = await git.isAncestor(run.repo_root, submitted, remote.sha)
+  // A verdict pushed from another clone is not in this object store until fetched.
+  if (contains === null && await git.fetch(run.repo_root, trackingRefspec(task.branch)) === null) {
+    contains = await git.isAncestor(run.repo_root, submitted, remote.sha)
+  }
   if (contains === null) return null
   return { ...signals, headSha: remote.sha, headContainsSubmission: contains }
 }

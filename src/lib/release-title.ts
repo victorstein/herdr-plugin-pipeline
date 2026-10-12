@@ -31,7 +31,8 @@ const CONFIG_FILE = 'release-please-config.json'
 
 /** The repo's `changelog-sections`, at the top level or on its root package; release-please's default without one. */
 export function releaseSections(repoRoot: string): readonly ReleaseSection[] {
-  let config: { 'changelog-sections'?: ReleaseSection[]; packages?: Record<string, { 'changelog-sections'?: ReleaseSection[] }> }
+  type Sections = { 'changelog-sections'?: ReleaseSection[] }
+  let config: Sections & { packages?: Record<string, Sections> }
   try {
     config = JSON.parse(readFileSync(join(repoRoot, CONFIG_FILE), 'utf8'))
   } catch {
@@ -49,7 +50,11 @@ export type TitleCheck = { ok: true; note: string | null } | { ok: false; error:
 export function checkReleaseTitle(title: string, sections: readonly ReleaseSection[]): TitleCheck {
   const parsed = parseTitle(title)
   if (parsed === null) {
-    return { ok: false, error: `--title must be one conventional line, \`<type>(<scope>)!: <summary>\` with the scope and \`!\` optional, got: ${title}` }
+    return {
+      ok: false,
+      error: '--title must be one conventional line, `<type>(<scope>)!: <summary>` with the scope and `!` optional, ' +
+        `got: ${title}`,
+    }
   }
   const section = sections.find((s) => s.type === parsed.type)
   if (section === undefined) {

@@ -86,6 +86,7 @@ function fakeGit(over: {
     },
     resolve: async (_root, ref) => resolve(ref),
     changedPaths: async (_root, from, to) => over.changed?.[`${from}..${to}`] ?? ['src/menu.ts'],
+    fetch: async () => (over.unreachable ? 'unreachable' : null),
   }
 }
 
@@ -234,4 +235,19 @@ test('a landed task rewound into sync records its landing instead of waiting on 
   const run = singlePrRun([mkTask({ phase: 'sync', land_sha: 'L1', pane_id: null, submission: submitted() })])
   await advanceTasks(run, deps({ landingGit: fakeGit({ batchHead: 'b9', ancestors: ['L1>b9'], heads: { 't1-branch': 'L1' } }) }))
   expect(run.tasks[0]?.phase).toBe('merge')
+})
+
+test('a reviewed head not yet in this object store is fetched before it is read, not waited on forever', async () => {
+  const CLEAR = { verdict: 'CLEAR' as const, blockers: 0, majors: 0 }
+  let fetched = false
+  const git = fakeGit({ heads: { 't1-branch': 'H1' }, ancestors: ['S1>H1'] })
+  const unknownUntilFetched: LandingGit = {
+    ...git,
+    isAncestor: async (root, a, b) => (b === 'H1' && !fetched ? null : git.isAncestor(root, a, b)),
+    fetch: async (_root, refspec) => { fetched = refspec === '+refs/heads/t1-branch:refs/remotes/origin/t1-branch'; return null },
+  }
+  const run = singlePrRun([mkTask({ phase: 'pr-review', tier: 'light', submission: submitted({ head_sha: 'S1' }) })])
+  await advanceTasks(run, deps({ verdictFor: async () => CLEAR, landingGit: unknownUntilFetched }))
+  expect(fetched).toBe(true)
+  expect(run.tasks[0]?.phase).toBe('land-queue')
 })

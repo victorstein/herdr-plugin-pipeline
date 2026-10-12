@@ -570,7 +570,9 @@ async function registerTask(
   if (input.branch.trim().length === 0) return fail('--branch is required')
   if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
   if (run.batch !== undefined && [run.batch.branch, run.batch.into].includes(input.branch)) {
-    const which = input.branch === run.batch.branch ? 'batch branch, which tasks land on' : 'default branch, which the batch ships into'
+    const which = input.branch === run.batch.branch
+      ? 'batch branch, which tasks land on'
+      : 'default branch, which the batch ships into'
     return fail(`--branch ${input.branch} is this run's ${which}; give the task a branch of its own`)
   }
 

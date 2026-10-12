@@ -283,7 +283,10 @@ function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move 
   const holder = landingSlotHolder(run.tasks)
   if (holder !== null) {
     const holding = holder.phase === 'blocked-on-decision' ? holder.decision_from ?? holder.phase : holder.phase
-    return { waitsOnYou: false, clause: `nothing for you — waiting to land; ${holder.task_id} holds the landing slot (${holding})` }
+    return {
+      waitsOnYou: false,
+      clause: `nothing for you — waiting to land; ${holder.task_id} holds the landing slot (${holding})`,
+    }
   }
   return {
     waitsOnYou: false,

@@ -68,7 +68,9 @@ export async function syncWalk(checkout: string, reviewed: string | null, batchR
  * batch is not contained in it, yet it changes nothing but the task's own docs.
  */
 export async function nothingToLand(checkout: string, batchRef: string): Promise<boolean | null> {
-  const changed = await git(checkout, ['diff', '--name-only', `${batchRef}...HEAD`, '--', '.', `:(exclude)${ARTIFACT_ROOT}/`])
+  const changed = await git(checkout, [
+    'diff', '--name-only', `${batchRef}...HEAD`, '--', '.', `:(exclude)${ARTIFACT_ROOT}/`,
+  ])
   if (changed.code !== 0) return null
   return changed.out.length === 0
 }
