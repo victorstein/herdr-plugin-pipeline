@@ -273,6 +273,27 @@ test('a submit outlasting many supervisor saves still lands: only the record is 
   expect((await saved(f)).submission?.check).toBe('passed')
 })
 
+test('a check that leaves untracked output behind still records its pass, with the run saved meanwhile', async () => {
+  const f = await fixture()
+  declareCheck(f, '#!/bin/sh\necho 100% > coverage.txt\nexit 0\n')
+  work(f)
+  let raced = false
+  const out = await submit(f, undefined, {
+    openPr: async () => {
+      if (!raced) {
+        raced = true
+        const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+        meanwhile.history.push({ at: 1, from: 'x', to: 'x', why: 'a supervisor tick' })
+        await saveRun(dir, meanwhile)
+      }
+      return { pr: null }
+    },
+  })
+  expect(out.ok, out.text).toBe(true)
+  expect(existsSync(join(f.worktree, 'coverage.txt'))).toBe(true)
+  expect((await saved(f)).submission?.check).toBe('passed')
+})
+
 test('a task that moves on while submit runs its checks records nothing', async () => {
   const f = await fixture()
   work(f)
