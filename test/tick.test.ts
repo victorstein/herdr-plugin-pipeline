@@ -465,14 +465,19 @@ test('a blocked-on-files task held by an escalated task points at the holder, no
   )
 })
 
-test('a blocked-on-files task held by a live task is still the supervisor\'s', () => {
+test('a blocked-on-files task held by a live task is still the supervisor\'s, and names who holds them', () => {
   // `hpipe release` refuses an in-flight holder, so offering it against a healthy
-  // one sends the orchestrator at a command that will bounce.
+  // one sends the orchestrator at a command that will bounce. Unnamed, the holder
+  // left an orchestrator to guess the files were free while status still showed
+  // the wait. Measured on a live run.
   const run = mkRun([])
-  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
-  const holder = mkTask({ task_id: 't2', phase: 'implement', files: ['src/a.ts'] })
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts', 'src/b.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'close', files: ['src/a.ts'] })
   run.tasks = [blocked, holder]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — waiting for t2 (close) to free the files it holds')
+  run.tasks = [blocked, holder, mkTask({ task_id: 't3', phase: 'implement', files: ['src/b.ts'] })]
+  expect(actionFor(run, blocked, 'hp'))
+    .toBe('nothing for you — waiting for t2 (close), t3 (implement) to free the files they hold')
 })
 
 test('a blocked-on-files task whose holder touches other files is not blamed on it', () => {
@@ -480,7 +485,8 @@ test('a blocked-on-files task whose holder touches other files is not blamed on 
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const unrelated = mkTask({ task_id: 't2', phase: 'failed', files: ['src/z.ts'] })
   run.tasks = [blocked, unrelated]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — no task holds its files now; the supervisor\'s ' +
+    'file gate passes it to implement unless another task takes them first')
 })
 
 test('every row in TASK_ROWS gets a clause that matches who its actor is', () => {

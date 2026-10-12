@@ -389,7 +389,10 @@ tier passes through it on the way to `implement`: a heavy or standard task enter
 
    The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (light and
    standard), `pr-review-intent` and `pr-review-quality` (heavy), `ci`, `merge`, `close`, `teardown`
-   all hold files. Pinned heavy, `t1` passes through the heavy pair.
+   all hold files. Pinned heavy, `t1` passes through the heavy pair. `t2`'s own task line, and any
+   digest line about it, names the same holder: `— nothing for you — waiting for t1 (implement) to
+   free the files it holds`. A digest that says no task holds its files while status still prints
+   the ⚠ line above is a finding.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.
