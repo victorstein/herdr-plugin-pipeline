@@ -101,3 +101,24 @@ test('in a single-PR run a move clause names what the stall probe for the same r
     expect(actionFor(run, task, 'hp', NOW), row.phase).toEndWith(`waiting for ${stallAwaiting(run, task, 'hp', NOW).short}`)
   }
 })
+
+test('the ship rows have clauses of their own, and only ship escalates', () => {
+  const ship = singlePr([])
+  ship.phase = 'ship'
+  expect(stallAwaiting(ship, null, 'hp', NOW)).toMatchObject({ short: 'the batch PR, opened at a checked head' })
+  expect(stallAwaiting(ship, null, 'hp', NOW).clause).toContain('hp batch-check')
+
+  const ci = singlePr([])
+  ci.phase = 'ship-ci'
+  ci.batch!.pr = 301
+  expect(stallAwaiting(ci, null, 'hp', NOW).clause).toContain('gh pr checks 301')
+
+  const merging = singlePr([])
+  merging.phase = 'ship-merge'
+  merging.batch!.pr = 301
+  const { clause } = stallAwaiting(merging, null, 'hp', NOW)
+  expect(clause).toContain('squash-merge PR #301')
+  expect(clause).toContain('gh pr update-branch 301')
+  expect(clause).toContain(`hp rewind ${merging.run_id} ship`)
+  expect(clause).toContain('no other `hp start` can begin here')
+})

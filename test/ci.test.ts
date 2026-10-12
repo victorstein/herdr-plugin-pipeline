@@ -78,3 +78,26 @@ test('red is red at once: a failed check on this head needs no settling', async 
   await ciTransitions([run], head('fail'), NOW)
   expect(run.tasks[0]?.ci).toBe('fail')
 })
+
+test('a single-PR run in ship-ci is polled on its batch PR, with the same settle and head reset as a task', async () => {
+  const { withBatch } = await import('../src/lib/ledger')
+  const { batchFixture } = await import('./helpers/batch')
+  const run = withBatch(mkRun([]), batchFixture({ pr: 301 }))
+  run.phase = 'ship-ci'
+  const polled: number[] = []
+  const poll = (bucket: 'pass' | 'fail', sha: string) => async (pr: number) => { polled.push(pr); return { bucket, headSha: sha } }
+
+  await ciTransitions([run], poll('pass', 'h1'), NOW)
+  expect(run.batch?.ci).toBe('pending')
+  expect(run.batch?.ci_head).toEqual({ sha: 'h1', seen_at: NOW })
+  await ciTransitions([run], poll('pass', 'h1'), NOW + CI_SETTLE_MS)
+  expect(run.batch?.ci).toBe('pass')
+  await ciTransitions([run], poll('pass', 'h2'), NOW + CI_SETTLE_MS + 1)
+  expect(run.batch?.ci).toBe('pending')
+  expect(polled).toEqual([301, 301, 301])
+
+  const noPr = withBatch(mkRun([]), batchFixture())
+  noPr.phase = 'ship-ci'
+  await ciTransitions([noPr], poll('fail', 'h1'), NOW)
+  expect(noPr.batch?.ci).toBeNull()
+})

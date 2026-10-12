@@ -44,11 +44,24 @@ export interface RunSignals {
    * normally post-merge, but a manual rewind can put an unmerged task there.
    */
   landedTaskCount: number
+  /** Single-PR ship rows: the batch PR as just read; null when none is open or the read failed. */
+  batchPr?: BatchPr | null
+}
+
+export interface BatchPr {
+  number: number
+  headSha: string | null
+  merged: boolean
+  mergedAtMs: number | null
+  mergeCommit: string | null
 }
 
 export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
   run.history.push({ at: Date.now(), from: run.phase, to: phase, why })
   if (phase === 'escalated') run.escalated_from = run.phase
+  // As a task's `ci` entry forgets its bucket: the last round's red would fail the
+  // new round before its head was ever polled.
+  if (phase === 'ship-ci' && run.batch !== undefined) run.batch.ci = null
   run.phase = phase
   run.phase_entered_at = Date.now()
   return run
@@ -95,6 +108,57 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
         return enterRunPhase(run, 'escalated', `${count} passes without clearing`)
       }
       return enterRunPhase(run, 'branch-review', `review returned BLOCKER (pass ${count})`)
+    }
+
+    case 'ship':
+    case 'ship-ci':
+    case 'ship-merge':
+      return advanceShip(run, s)
+
+    default:
+      return null
+  }
+}
+
+/**
+ * The single-PR run's last mile. `ship` clears like `implement`: the PR found,
+ * at a head past the one CI last failed on, and that head is the one
+ * `hpipe batch-check` passed, so a fix-task landing forces a new check before CI.
+ */
+function advanceShip(run: Run, s: RunSignals): Run | null {
+  const batch = run.batch
+  if (batch === undefined) return null
+  const pr = s.batchPr ?? null
+  switch (run.phase) {
+    case 'ship': {
+      if (!s.actorIdle || pr === null || pr.headSha === null) return null
+      batch.pr = pr.number
+      if (pr.headSha === batch.head_sha_at_entry || batch.checked?.head_sha !== pr.headSha) return null
+      return enterRunPhase(run, 'ship-ci', `PR #${pr.number} at ${sha8(pr.headSha)}, checked`)
+    }
+
+    case 'ship-ci': {
+      if (batch.ci === 'pass') return enterRunPhase(run, 'ship-merge', `CI passed on PR #${batch.pr ?? 'unknown'}`)
+      if (batch.ci !== 'fail') return null
+      // The last allowed pass escalates rather than return to `ship`, so it must not wait on gh.
+      const escalates = counterFor(run, 'ship-ci') + 1 >= s.maxPasses
+      if (!escalates && (pr === null || pr.headSha === null)) return null
+      const count = bumpCounter(run, 'ship-ci')
+      if (escalates) return enterRunPhase(run, 'escalated', `${count} red CI runs on the batch PR`)
+      batch.head_sha_at_entry = pr?.headSha ?? null
+      return enterRunPhase(run, 'ship', `CI failed on PR #${batch.pr ?? 'unknown'} (pass ${count})`)
+    }
+
+    case 'ship-merge': {
+      if (pr !== null && pr.merged) {
+        batch.merged_at_ms = pr.mergedAtMs ?? Date.now()
+        batch.merge_commit = pr.mergeCommit
+        return enterRunPhase(run, 'done', `PR #${pr.number} squash-merged as ${sha8(pr.mergeCommit ?? 'unknown')}`)
+      }
+      // A push after CI passed, as `merge` sends a task back to `ci`.
+      const checked = batch.ci_head?.sha
+      if (pr === null || pr.headSha === null || checked === undefined || pr.headSha === checked) return null
+      return enterRunPhase(run, 'ship-ci', `head moved to ${pr.headSha} after CI passed on ${checked}`)
     }
 
     default:

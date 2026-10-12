@@ -13,7 +13,7 @@ import {
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
-import type { AgentStatus, Run, StallState, Task } from '../lib/types'
+import type { AgentStatus, Batch, Run, StallState, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
 
@@ -253,6 +253,11 @@ export function stallAwaiting(
       `${run.run_id} implement --task ${t.task_id}\`.`,
   })
 
+  if (task === null && run.batch !== undefined) {
+    const shipping = shipClause(run, run.batch, hpipe)
+    if (shipping !== null) return shipping
+  }
+
   // A human-owned row waits on a person, not on the pane being probed. Checked
   // before the `manual` branch, which `blocked-on-decision` shares with it and
   // which would otherwise tell an escalated task it is waiting for an answer to a
@@ -411,6 +416,36 @@ export function stallAwaiting(
     }
   }
   return sentence(`whatever clears ${phase}`)
+}
+
+function shipClause(run: Run, batch: Batch, hpipe: string): Awaiting | null {
+  const pr = batch.pr === null ? 'the batch PR' : `PR #${batch.pr}`
+  switch (run.phase) {
+    case 'ship':
+      return {
+        short: 'the batch PR, opened at a checked head',
+        clause: `This phase is waiting for the batch PR: check ${batch.branch} with \`${hpipe} batch-check\`, then ` +
+          'open or update the PR, as the ship prompt says. It clears only once the PR\'s head is the head ' +
+          '`batch-check` recorded.',
+      }
+    case 'ship-ci':
+      return {
+        short: `CI on ${pr}`,
+        clause: `This phase is waiting for CI on ${pr}: \`gh pr checks ${batch.pr ?? '<pr>'}\`. A run that is queued ` +
+          'or was never triggered reports nothing, and this phase waits on it.',
+      }
+    case 'ship-merge':
+      return {
+        short: `${pr} to be squash-merged`,
+        clause: `This phase is waiting for you to squash-merge ${pr} with the commands the ship-merge prompt ` +
+          'rendered. If GitHub refuses, a required review means getting one, and "branches must be up to date" ' +
+          `means \`gh pr update-branch ${batch.pr ?? '<pr>'}\`, which moves the head back through ship-ci. If ${pr} ` +
+          `was closed unmerged, reopen it, or \`${hpipe} rewind ${run.run_id} ship\`. Until ${pr} merges this run ` +
+          `holds the repo, and no other \`${hpipe} start\` can begin here.`,
+      }
+    default:
+      return null
+  }
 }
 
 /** "t5, t6 wait on this sync": the tasks a stuck holder is keeping from landing. */

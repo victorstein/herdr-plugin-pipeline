@@ -10,7 +10,7 @@ import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
-import { checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
+import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
 import { CHECK_REL, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
@@ -31,7 +31,7 @@ import {
   wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
-import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
+import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { REVIEW_EFFORT } from './lib/models'
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
@@ -48,15 +48,16 @@ import { effortSummary } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
 import {
-  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, startWorkerCommand, unbriefedWorker,
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, shellQuoted, startWorkerCommand,
+  unbriefedWorker,
 } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import { renderRunPhasePrompt, uncommittedPaths } from './supervisor/deliver'
+import { cleanupLines, renderRunPhasePrompt, uncommittedPaths } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
 import { checkReleaseTitle, releaseSections } from './lib/release-title'
-import { headOf, isAncestor, nothingToLand, syncWalk, type SyncWalk } from './lib/sync-walk'
+import { headOf, isAncestor, nothingToLand, resolveCommit, syncWalk, type SyncWalk } from './lib/sync-walk'
 import type { Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase } from './lib/types'
 import { isAgentReady } from './lib/machine'
 import { type LimitReading, readLimit, resetText } from './supervisor/usage-limits'
@@ -345,12 +346,39 @@ export async function cmdStart(ctx: Ctx, input: {
 }
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
+/**
+ * A single-PR run is also registrable here: a red final CI too big to patch, or a
+ * branch-review BLOCKER, becomes a fix task, and registering it moves the run back
+ * to `execute`. A run rewind there would not do: intake stays closed, and the run
+ * is back in `branch-review` on the next tick.
+ */
+const SHIPPING: readonly RunPhase[] = ['branch-review', 'ship', 'ship-ci', 'ship-merge']
 const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
   'queued', 'research', 'spec', 'spec-review', 'plan', 'plan-review', 'blocked-on-files', 'implement',
 ])
 const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
-  ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'merge',
+  ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'land-queue', 'sync', 'merge',
 ])
+const LANDING_PHASES: ReadonlySet<string> = new Set<TaskPhase>(['land-queue', 'sync', 'merge'])
+
+/** Whether the batch PR has merged: null when GitHub could not say. */
+export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | null>
+
+const ghBatchShipped: BatchShipped = async (repoRoot, pr) => {
+  const view = await new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prView(pr)
+  return view === null ? null : view.merged
+}
+
+/** Why nothing more can join this single-PR run, or null. Once its PR merged, a fix lands on a branch already shipped. */
+async function shippedRefusal(run: Run, shipped: BatchShipped): Promise<string | null> {
+  const batch = run.batch
+  if (batch === undefined) return null
+  if (batch.merged_at_ms !== null) return `the batch already shipped as PR #${batch.pr ?? 'unknown'}`
+  if (batch.pr === null) return null
+  const merged = await shipped(run.repo_root, batch.pr)
+  if (merged === null) return `could not ask GitHub whether PR #${batch.pr} has merged; run it again`
+  return merged ? `the batch already shipped as PR #${batch.pr}` : null
+}
 
 /** The store for this repo, or why the CLI cannot use one. */
 async function cliBd(stateDir: string, repoKey: string): Promise<Bd | BdFailure> {
@@ -389,6 +417,7 @@ interface RegistrationAttempt {
   showBeadOnce: (repoKey: string, id: string) => Promise<BeadDetail | BdFailure>
   landed: (taskId: string) => void
   dispatchBase: DispatchBaseFor
+  shipped: BatchShipped
 }
 
 type DispatchBaseFor = (
@@ -492,8 +521,18 @@ async function registerTask(
   // A v2 run's tasks carry no bead, so it must neither take this task nor make
   // the resolution ambiguous.
   const found = await resolveFor(ctx, query, null)
-  if (!found.ok) return found.result
-  const run = found.value
+  let run: Run
+  let reopensShipping = false
+  if (found.ok) {
+    run = found.value
+  } else {
+    const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, { ...query, phases: SHIPPING })
+    if (!shipping.ok || modeOf(shipping.run) !== 'single-pr') return found.result
+    run = shipping.run
+    reopensShipping = true
+    const refusal = await shippedRefusal(run, attempt.shipped)
+    if (refusal !== null) return fail(`${refusal}; register the fix in a new run`)
+  }
 
   // Work with no bead behind it used to fall outside the pipeline and be
   // hand-rolled, which is where the mistakes were. Filing one here keeps the
@@ -645,6 +684,7 @@ async function registerTask(
   // execute completes only once intake is closed and every task is terminal, so a
   // task registered mid-run must reopen the gate or the run could complete underneath it.
   run.intake_closed = false
+  if (reopensShipping) enterRunPhase(run, 'execute', 'a fix task was registered')
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
   // `queued` would make the next tick deliver the same prompt a second time. One
@@ -670,6 +710,9 @@ async function registerTask(
   const bootLine = bootstrapLine(bootstrap)
 
   const header = [
+    ...(reopensShipping
+      ? [`run moved to execute: register any other fix, then \`${hpipeCommand(ctx.pluginRoot)} dispatch --done\``]
+      : []),
     `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`, `effort: ${effortSummary(task)}`,
     ...(filed ? [`bead: ${bead} (filed)`] : []), filesLine, bootLine,
   ].join('\n')
@@ -686,7 +729,7 @@ async function registerTask(
 
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, beads: RegistrationBeads = cliRegistrationBeads(ctx.stateDir),
-  dispatchBase: DispatchBaseFor = freshDispatchBase,
+  dispatchBase: DispatchBaseFor = freshDispatchBase, shipped: BatchShipped = ghBatchShipped,
 ): Promise<CmdResult> {
   // The retry re-runs registerTask from a fresh read, so the bd calls are memoised
   // out here: a second attempt reuses the bead the first one filed and the bead it
@@ -701,6 +744,7 @@ export async function cmdTask(
     showBeadOnce: (repoKey, id) => (outcome.shown ??= beads.show(repoKey, id)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
+    shipped,
   }
   const filedBead = async (): Promise<CreatedBead | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
@@ -966,7 +1010,7 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
   // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
   const phasePrompt = task
     ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, task.phase)
-    : await renderRunPhasePrompt(run, ctx.pluginRoot)
+    : await renderRunPhasePrompt(run, ctx.pluginRoot, { stateDir: ctx.stateDir })
   if (phasePrompt.length === 0) return ''
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
   // brief — task id, agent file, `decide`, never main — already arrived. One entry,
@@ -987,7 +1031,7 @@ function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
 
 async function rewind(ctx: Ctx, input: {
   runId: string; phase: string; taskId: string | null
-}): Promise<CmdResult> {
+}, shipped: BatchShipped = ghBatchShipped): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -1018,11 +1062,31 @@ async function rewind(ctx: Ctx, input: {
   let reserved: string | null = null
   let rewoundTask: Task | null = null
   let tierWarning = ''
+  let reopensShipping = ''
 
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
     rewoundTask = task
+
+    // A landing reads the reviewed head, never the branch, so a task cannot land
+    // again without one: the last landing's is the head that is already on the batch.
+    if (modeOf(run) === 'single-pr' && LANDING_PHASES.has(input.phase) && !task.land_sha) {
+      const last = task.landed?.at(-1)
+      if (last === undefined) {
+        return fail(`no reviewed head is recorded for ${task.task_id}: rewind it to a review row`)
+      }
+      task.land_sha = last.land_sha
+    }
+    // The run would otherwise ship, or reach `done` and stop being driven, with this
+    // task stranded behind it.
+    const shipping = modeOf(run) === 'single-pr' && (['ship', 'ship-ci', 'ship-merge'] as string[]).includes(run.phase)
+    if (shipping && !taskPhaseIsTerminal(input.phase)) {
+      const refusal = await shippedRefusal(run, shipped)
+      if (refusal !== null) return fail(`${input.taskId} was not rewound: ${refusal}`)
+      enterRunPhase(run, 'execute', `${input.taskId} was rewound to ${input.phase}`)
+      reopensShipping = '; the run moves back to execute'
+    }
 
     if (!phaseHoldsBead(run.phase, task.phase) && phaseHoldsBead(run.phase, input.phase)) {
       const taken = await beadsTakenMeanwhile(ctx, run, [task])
@@ -1084,6 +1148,7 @@ async function rewind(ctx: Ctx, input: {
     if (PHASES_BEFORE_A_PR.has(task.phase)) {
       task.pr = null
       task.ci = null
+      delete task.land_sha
     }
     // A standing merge keeps the bead closed through the rework, and a standing
     // close would clear `close` the instant `merge` records the merge again.
@@ -1104,6 +1169,9 @@ async function rewind(ctx: Ctx, input: {
     run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
+    // `ship` finds the PR again if it is still open; `prForBranch` lists open ones only.
+    if (run.batch !== undefined && run.phase === 'ship') run.batch.pr = null
+    if (run.batch !== undefined && run.phase === 'ship-ci') run.batch.ci = null
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (runRow(run.phase).signal === 'verdict') {
       reserved = reserveVerdict(run, null, run.phase)
@@ -1114,7 +1182,7 @@ async function rewind(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(
     `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
-    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed + tierWarning,
+    (reserved === null ? '' : `; next verdict → ${reserved}`) + reopensShipping + owed + tierWarning,
   )
 }
 export const cmdRewind = retryingOnStale(rewind)
@@ -1265,6 +1333,78 @@ export async function cmdSubmit(
     return ran
   }
   return retryingOnStale(submit)(ctx, input, deps, checkOnce)
+}
+
+/**
+ * The one local run of every landing together, in the batch checkout at the head
+ * just fetched. `ship` clears only once the PR's head is the head recorded here,
+ * so a fix-task landing forces a fresh check before CI.
+ */
+async function batchCheck(
+  ctx: Ctx, input: { repoKey: string | null; runId: string | null }, checkOnce: CheckOnce,
+): Promise<CmdResult> {
+  const found = await resolveFor(ctx, {
+    runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'driven',
+  }, null)
+  if (!found.ok) return found.result
+  const run = found.value
+  const batch = run.batch
+  if (batch === undefined) return fail(`${run.run_id} is a per-task run: there is no batch to check`)
+  if (!existsSync(batch.checkout)) {
+    return fail(`the batch checkout is not there yet; create it first:\n  ${checkoutSteps(run, false).join('\n  ')}`)
+  }
+
+  const fetchFailed = await fetchFromOrigin(run.repo_root, trackingRefspec(batch.branch))
+  if (fetchFailed !== null) return fail(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  const head = await resolveCommit(run.repo_root, `refs/remotes/origin/${batch.branch}`)
+  if (head === null) return fail(`origin/${batch.branch} does not resolve after the fetch`)
+  const checkoutHead = await headOf(batch.checkout)
+  if (checkoutHead !== head) {
+    return fail(`the batch checkout is at ${checkoutHead === null ? 'nothing' : sha8(checkoutHead)}, not at ` +
+      `origin/${batch.branch}'s ${sha8(head)}: push anything of its own, then bring it up to date with ` +
+      `\`git -C ${shellQuoted(batch.checkout)} pull --ff-only\``)
+  }
+  const uncommitted = await uncommittedPaths(batch.checkout)
+  if (uncommitted === null || uncommitted.length > 0) {
+    return fail(`the batch checkout has uncommitted or untracked work (${(uncommitted ?? ['unreadable']).join(', ')}): ` +
+      'commit and push it, or remove it, so the check tests what the PR carries')
+  }
+
+  const check = repoCheck(batch.checkout)
+  if (check.kind === 'not-executable') {
+    return fail(`${CHECK_REL} is not executable on ${batch.branch}: chmod +x ${CHECK_REL}, commit and push it`)
+  }
+  let outcome: CheckOutcome = 'none'
+  if (check.kind === 'ready') {
+    const log = join(checksDir(ctx.stateDir, run), `batch-${sha8(head)}.log`)
+    const ran = await checkOnce(batch.checkout, log, head)
+    if (ran.code !== 0) {
+      return fail(`${CHECK_REL} failed on ${batch.branch} at ${sha8(head)} (exit ${ran.code}); its last lines:` +
+        `\n\n${ran.tail}\n\nthe whole log: ${log}`)
+    }
+    outcome = 'passed'
+  }
+  batch.checked = { head_sha: head, at: Date.now(), check: outcome }
+  await saveRun(ctx.stateDir, run)
+  return ok(`checked ${batch.branch} at ${sha8(head)}: ` + (outcome === 'passed'
+    ? `${CHECK_REL} passed`
+    : `no ${CHECK_REL} declared — run the tests and the typecheck in ${batch.checkout} yourself`))
+}
+
+export async function cmdBatchCheck(
+  ctx: Ctx, input: { repoKey: string | null; runId: string | null },
+  check: (checkout: string, logPath: string) => Promise<CheckRun> = runCheck,
+): Promise<CmdResult> {
+  const ranChecks = new Map<string, Promise<CheckRun>>()
+  const checkOnce: CheckOnce = (checkout, logPath, head) => {
+    let ran = ranChecks.get(head)
+    if (ran === undefined) {
+      ran = check(checkout, logPath)
+      ranChecks.set(head, ran)
+    }
+    return ran
+  }
+  return retryingOnStale(batchCheck)(ctx, input, checkOnce)
 }
 
 export type CloseBead = (repoKey: string, bead: string, reason: string, force: boolean) => Promise<Done | BdFailure>
@@ -1799,8 +1939,24 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   run.escalated_from = run.phase
   run.phase = 'done'
   await saveRun(ctx.stateDir, run)
-  return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
-    `supervisor's next tick. Undo: hpipe resume ${run.run_id}`)
+  const undo = `Undo: hpipe resume ${run.run_id}`
+  if (run.batch === undefined) {
+    return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
+      `supervisor's next tick. ${undo}`)
+  }
+  return ok([`aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`, ...(await cleanupLines(run, run.batch))]
+    .join('\n'))
+}
+
+/** A landed task's bead stays closed through an abort: its commits are on the batch branch, which nothing deletes. */
+function abortedBatch(run: Run, batch: Batch): string {
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).map((t) => t.task_id)
+  const kept = landed.length === 0
+    ? `nothing landed on ${batch.branch}`
+    : `${batch.branch} keeps the landed tasks (${landed.join(', ')}), whose beads stay closed`
+  const pr = batch.pr === null ? '' : ` PR #${batch.pr} is left open.`
+  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone, and the unlanded ` +
+    `tasks' beads are released on the supervisor's next tick.${pr}`
 }
 export const cmdAbort = retryingOnStale(abort)
 
@@ -1904,6 +2060,7 @@ const USAGE: Record<string, string[]> = {
   forget: ['hpipe forget <workspace-id>'],
   close: ['hpipe close --task <id> [--force] [--run <run-id>]'],
   submit: ['hpipe submit --task <id> [--title "<conventional title>"] [--run <run-id>]'],
+  'batch-check': ['hpipe batch-check [--run <run-id>]'],
 }
 
 const commandUsage = (forms: string[]): string => `usage: ${forms.join('\n       ')}`
@@ -2148,6 +2305,10 @@ async function dispatch(argv: string[]): Promise<number> {
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })
+      break
+
+    case 'batch-check':
+      out = await cmdBatchCheck(ctx, { repoKey: repo?.repoKey ?? null, runId: flag(rest, 'run') })
       break
 
     case 'submit':

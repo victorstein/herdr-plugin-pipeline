@@ -11,9 +11,8 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
 
        {{hpipe}} batch-check
 
-   It fetches `{{batch}}`, {{check_subject}} in `{{checkout}}` at that head, and records the head it
-   passed on. This phase clears only once the PR's head is that one, so run it again after any push
-   to `{{batch}}`. If it is red, dispatch a subagent with `model: {{implement_model}}` to fix it in the
+   {{check_sentence}} This phase clears only once the PR's head is the one it recorded, so run it again
+   after any push to `{{batch}}`. If it is red, dispatch a subagent with `model: {{implement_model}}` to fix it in the
    checkout and **wait for it within this turn**; verify, commit, push, and run `batch-check` again.
 2. **Bring `{{into}}` in only if it conflicts.** If `origin/{{into}}` has moved and
    `git -C {{checkout_quoted}} merge-tree --write-tree origin/{{into}} origin/{{batch}}` reports conflicts,

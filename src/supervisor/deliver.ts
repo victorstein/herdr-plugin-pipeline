@@ -1,11 +1,17 @@
-import { join } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import {
+  batchPrBody, batchPrBodyPath, checkoutSteps, sha8, squashBody, squashBodyPath, squashSubject, suggestedPrTitle,
+} from '../lib/batch'
+import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { runChangeVars } from '../lib/change-prompt'
 import { mainlineBranch } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
-import { advanceRun, counterFor } from '../lib/machine'
-import { runRow, taskRow } from '../lib/phases'
+import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
+import { IMPLEMENT_MODEL } from '../lib/models'
+import { modeOf, runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
@@ -16,8 +22,11 @@ import {
 } from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
-import type { Run, Task, TaskPhase } from '../lib/types'
+import type { Batch, Run, Task, TaskPhase } from '../lib/types'
+import { shellQuoted } from '../lib/unstarted'
 import { FINISHED } from './teardown'
+import { remoteBranchHead } from '../lib/dispatch-base'
+import { isAncestor } from '../lib/sync-walk'
 
 export interface DigestInput {
   run: Run
@@ -336,8 +345,24 @@ export function taskSignalsFor(run: Run) {
  * so conflating them would silently under- or over-wait whenever an operator
  * sets them to different values.
  */
+export type RunGh = Pick<Gh, 'prForBranch' | 'prView' | 'prChecksDetail'>
+
+/** The batch PR as gh reads it now; null when none is open, or a read failed, which skips the row this tick. */
+async function readBatchPr(batch: Batch, gh: RunGh): Promise<BatchPr | null> {
+  const number = batch.pr ?? (await gh.prForBranch(batch.branch))
+  if (number === null) return null
+  const view = await gh.prView(number)
+  if (view === null) return null
+  return {
+    number, headSha: view.headSha, merged: view.merged, mergedAtMs: view.mergedAtMs,
+    mergeCommit: view.mergeCommit ?? null,
+  }
+}
+
+const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
+
 export async function evaluateRun(
-  run: Run, gh: Gh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
+  run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
@@ -362,14 +387,19 @@ export async function evaluateRun(
     verdict = await parseVerdict(absolute)
   }
 
+  const batch = run.batch
+  const readsPr = batch !== undefined &&
+    (READS_THE_BATCH_PR.has(run.phase) || (run.phase === 'ship-ci' && batch.ci === 'fail'))
+  const batchPr = readsPr ? await readBatchPr(batch, gh) : undefined
+
   const before = run.phase
   const advanced = advanceRun(run, {
     actorIdle, artifactFresh, verdict, maxPasses: config.MAX_PASSES,
-    ...taskSignalsFor(run),
+    ...taskSignalsFor(run), batchPr,
   })
   if (!advanced) return stay
 
-  const nextPrompt = await promptForRunPhase(run, config)
+  const nextPrompt = await promptForRunPhase(run, config, { ciDetail: (pr) => gh.prChecksDetail(pr) })
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
 }
 
@@ -377,6 +407,17 @@ const UNLANDED_MEANING: Partial<Record<TaskPhase, string>> = {
   'failed': 'its work never merged',
   'orphaned': 'it merged, but its worktree was not removed; its code is on the base branch',
   'escalated': 'it is waiting on a human and its work has not merged',
+}
+
+/**
+ * Read off `landed`, not `merged_at_ms`: a task that landed and was then rewound
+ * and abandoned has no merge recorded, yet its commits are on the batch branch.
+ */
+function unlandedMeaning(run: Run, task: Task, batch: Batch): string {
+  if ((task.landed ?? []).length > 0) return `it landed on \`${batch.branch}\` before it stopped`
+  if (task.phase === 'blocked-on-failure') return neverStarted(run, task)
+  if (task.phase === 'escalated') return `it is waiting on a human and has not landed on \`${batch.branch}\``
+  return `its work never landed on \`${batch.branch}\``
 }
 
 /**
@@ -400,6 +441,8 @@ function neverStarted(run: Run, task: Task): string {
  * all. Measured on a live run.
  */
 export function taskOutcomesFor(run: Run): string {
+  const batch = run.batch
+  if (batch !== undefined) return batchOutcomes(run, batch)
   const unlanded = run.tasks.filter((t) => t.phase !== 'done')
   if (unlanded.length === 0) return `Every task in **${run.title}** is merged and torn down.`
   const lines = unlanded.map((t) =>
@@ -415,13 +458,84 @@ export function taskOutcomesFor(run: Run): string {
   ].join('\n')
 }
 
-export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
+function batchOutcomes(run: Run, batch: Batch): string {
+  const unlanded = run.tasks.filter((t) => t.phase !== 'done')
+  if (unlanded.length === 0) return `Every task in **${run.title}** has landed on \`${batch.branch}\` and is torn down.`
+  return [
+    `Not every task in **${run.title}** landed on \`${batch.branch}\`. Every task has landed and is torn down except:`,
+    '',
+    ...unlanded.map((t) =>
+      `- \`${t.task_id}\` (${t.bead}, \`${t.branch}\`) stopped at \`${t.phase}\` — ${unlandedMeaning(run, t, batch)}`),
+    '',
+    'Review what is on the batch branch. Do not report the absence of work that never landed as a finding ' +
+    'against the tasks that did — the human already knows these stopped.',
+  ].join('\n')
+}
+
+/** What a run render needs beyond the ledger; the supervisor's are its environment and gh. */
+export interface RunRenderExtras {
+  stateDir?: string
+  ciDetail?: (pr: number) => Promise<string>
+  maxPasses?: number
+}
+
+export async function promptForRunPhase(run: Run, config: Config, extras: RunRenderExtras = {}): Promise<string> {
   if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
-  return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd())
+  return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd(), {
+    maxPasses: config.MAX_PASSES, ...extras,
+  })
+}
+
+/** Rewritten on every render, so the body always lists every landing so far. */
+function writeShipFiles(stateDir: string, run: Run): { body: string; squash: string } {
+  const body = batchPrBodyPath(stateDir, run)
+  const squash = squashBodyPath(stateDir, run)
+  mkdirSync(dirname(body), { recursive: true })
+  writeFileSync(body, batchPrBody(run))
+  writeFileSync(squash, squashBody(run))
+  return { body, squash }
+}
+
+function checkSentence(batch: Batch): string {
+  const check = repoCheck(existsSync(batch.checkout) ? batch.checkout : '')
+  return check.kind === 'none'
+    ? `It fetches \`${batch.branch}\` and records the head of the checkout at it, but this repo declares no ` +
+      `\`${CHECK_REL}\`: run the tests and the typecheck there yourself first.`
+    : `It fetches \`${batch.branch}\`, runs \`${CHECK_REL}\` in \`${batch.checkout}\` at that head, and records ` +
+      'the head it passed on.'
+}
+
+async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
+  const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? ''
+  const { body, squash } = writeShipFiles(stateDir, run)
+  const vars = {
+    run_id: run.run_id, batch: batch.branch, into: batch.into, pr: String(batch.pr ?? 'unknown'),
+    checkout: batch.checkout, checkout_quoted: shellQuoted(batch.checkout), implement_model: IMPLEMENT_MODEL,
+    body_path: body, body_file: shellQuoted(body), squash_body_file: shellQuoted(squash),
+    subject: shellQuoted(squashSubject(run)),
+  }
+  if (run.phase === 'ship-merge') return renderPrompt(pluginRoot, 'ship-merge', vars)
+  const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'
+  if (cameFromRedCi && batch.pr !== null) {
+    return renderPrompt(pluginRoot, 'ship-ci-red', {
+      ...vars, ci_failure: (await extras.ciDetail?.(batch.pr)) ?? '',
+      pass: String(counterFor(run, 'ship-ci')), max_passes: String(extras.maxPasses ?? 2),
+    })
+  }
+  const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
+  return renderPrompt(pluginRoot, 'ship', {
+    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch),
+    pr_command: batch.pr === null
+      ? `gh pr create --base ${batch.into} --head ${batch.branch} --title ${shellQuoted(suggestedPrTitle(run))} ` +
+        `--body-file ${shellQuoted(body)}`
+      : `gh pr edit ${batch.pr} --body-file ${shellQuoted(body)}`,
+  })
 }
 
 /** The run's phase prompt against the verdict path already reserved; see `renderTaskPhasePrompt`. */
-export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promise<string> {
+export async function renderRunPhasePrompt(
+  run: Run, pluginRoot: string, extras: RunRenderExtras = {},
+): Promise<string> {
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
@@ -453,7 +567,10 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
         abandon: '',
       })
     }
-    case 'done': return runDoneNotice(run)
+    case 'ship':
+    case 'ship-merge':
+      return run.batch === undefined ? '' : shipPrompt(run, run.batch, pluginRoot, extras)
+    case 'done': return run.batch === undefined ? runDoneNotice(run) : batchDoneNotice(run, run.batch)
     default: return ''
   }
 }
@@ -469,6 +586,43 @@ function runDoneNotice(run: Run): string {
     `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
     ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}`),
   ].join('\n')
+}
+
+/**
+ * GitHub deletes only a PR's own head branch on merge, so the task branches are
+ * left to the orchestrator — but only a branch whose head is on the batch is
+ * safe to delete: anything pushed to it after its reviewed head never landed.
+ */
+export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
+  const deletable: string[] = []
+  const kept: string[] = []
+  for (const task of run.tasks) {
+    const remote = await remoteBranchHead(run.repo_root, task.branch)
+    if (!remote.ok) {
+      kept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
+      continue
+    }
+    if (remote.sha === null) continue
+    const landed = await isAncestor(run.repo_root, remote.sha, `refs/remotes/origin/${batch.branch}`)
+    if (landed === true) deletable.push(task.branch)
+    else kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+  }
+  const repo = shellQuoted(run.repo_root)
+  return [
+    'Clean up when you are done with it:',
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.join(' ')}`]),
+    ...kept,
+    `  git -C ${repo} worktree remove ${shellQuoted(batch.checkout)}`,
+    `  git -C ${repo} branch -D ${batch.branch}`,
+  ]
+}
+
+async function batchDoneNotice(run: Run, batch: Batch): Promise<string> {
+  const shipped = batch.merged_at_ms !== null
+    ? `shipped: PR #${batch.pr ?? 'unknown'} squash-merged as ${sha8(batch.merge_commit ?? 'unknown')}; ` +
+      `${batch.into} now carries every landing`
+    : `not shipped: nothing on ${batch.branch} reached ${batch.into}`
+  return [runDoneNotice(run), shipped, ...(await cleanupLines(run, batch))].join('\n')
 }
 
 export async function refreshBadges(run: Run, herdr: Herdr, pluginId: string): Promise<void> {
