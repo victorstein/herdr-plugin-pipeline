@@ -7,7 +7,7 @@ import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { runChangeVars } from '../lib/change-prompt'
-import { mainlineBranch } from '../lib/dispatch-base'
+import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
 import { IMPLEMENT_MODEL } from '../lib/models'
@@ -23,9 +23,8 @@ import {
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
-import { shellQuoted } from '../lib/unstarted'
+import { shellQuoted, shellWord } from '../lib/unstarted'
 import { FINISHED } from './teardown'
-import { remoteBranchHead } from '../lib/dispatch-base'
 import { isAncestor } from '../lib/sync-walk'
 
 export interface DigestInput {
@@ -334,17 +333,6 @@ export function taskSignalsFor(run: Run) {
   }
 }
 
-/**
- * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
- * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
- * momentary screen-detection misclassification will have flipped back to
- * working or blocked by then. That double-check rides its own explicit sleep on
- * config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
- * FILE_SETTLE_MS delay: the two settle windows guard unrelated subjects (file
- * write completion vs. screen-scrape flicker) and are independently tunable,
- * so conflating them would silently under- or over-wait whenever an operator
- * sets them to different values.
- */
 export type RunGh = Pick<Gh, 'prForBranch' | 'prView' | 'prChecksDetail'>
 
 /** The batch PR as gh reads it now; null when none is open, or a read failed, which skips the row this tick. */
@@ -361,6 +349,17 @@ async function readBatchPr(batch: Batch, gh: RunGh): Promise<BatchPr | null> {
 
 const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
 
+/**
+ * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
+ * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
+ * momentary screen-detection misclassification will have flipped back to
+ * working or blocked by then. That double-check rides its own explicit sleep on
+ * config.ACTOR_SETTLE_MS rather than piggybacking on the artifact's
+ * FILE_SETTLE_MS delay: the two settle windows guard unrelated subjects (file
+ * write completion vs. screen-scrape flicker) and are independently tunable,
+ * so conflating them would silently under- or over-wait whenever an operator
+ * sets them to different values.
+ */
 export async function evaluateRun(
   run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
   extras: RunRenderExtras = {},
@@ -506,6 +505,13 @@ function checkSentence(batch: Batch): string {
       'the head it passed on.'
 }
 
+/** The ship steps fetch only the batch, so `origin/<into>` is as old as the last fetch of it, which may be the start. */
+function intoConflictCheck(batch: Batch): string {
+  const checkout = shellQuoted(batch.checkout)
+  return `git -C ${checkout} fetch origin ${shellWord(trackingRefspec(batch.into))} && git -C ${checkout} ` +
+    `merge-tree --write-tree ${shellWord(`origin/${batch.into}`)} ${shellWord(`origin/${batch.branch}`)}`
+}
+
 async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
   const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? ''
   const { body, squash } = writeShipFiles(stateDir, run)
@@ -525,9 +531,10 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   return renderPrompt(pluginRoot, 'ship', {
-    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch),
+    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
     pr_command: batch.pr === null
-      ? `gh pr create --base ${batch.into} --head ${batch.branch} --title ${shellQuoted(suggestedPrTitle(run))} ` +
+      ? `gh pr create --base ${shellWord(batch.into)} --head ${shellWord(batch.branch)} ` +
+        `--title ${shellQuoted(suggestedPrTitle(run))} ` +
         `--body-file ${shellQuoted(body)}`
       : `gh pr edit ${batch.pr} --body-file ${shellQuoted(body)}`,
   })
@@ -598,23 +605,29 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
   const deletable: string[] = []
   const kept: string[] = []
   for (const task of run.tasks) {
-    const remote = await remoteBranchHead(run.repo_root, task.branch)
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
     if (!remote.ok) {
       kept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
       continue
     }
     if (remote.sha === null) continue
     const landed = await isAncestor(run.repo_root, remote.sha, `refs/remotes/origin/${batch.branch}`)
-    if (landed === true) deletable.push(task.branch)
-    else kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+    if (landed === true) {
+      deletable.push(task.branch)
+    } else if (landed === false) {
+      kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+    } else {
+      kept.push(`  ${task.branch} is at ${sha8(remote.sha)}, which could not be compared with ${batch.branch} here; ` +
+        'fetch it and check before deleting')
+    }
   }
   const repo = shellQuoted(run.repo_root)
   return [
     'Clean up when you are done with it:',
-    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.join(' ')}`]),
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
     `  git -C ${repo} worktree remove ${shellQuoted(batch.checkout)}`,
-    `  git -C ${repo} branch -D ${batch.branch}`,
+    `  git -C ${repo} branch -D ${shellWord(batch.branch)}`,
   ]
 }
 

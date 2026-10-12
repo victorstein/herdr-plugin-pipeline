@@ -89,6 +89,14 @@ export function shellQuoted(path: string): string {
 }
 
 /**
+ * A branch or ref for a pasted command, quoted only when it needs it: git accepts
+ * a branch named `batch/$(id)` or `a;b`, and a plain name renders as it always did.
+ */
+export function shellWord(word: string): string {
+  return /^[A-Za-z0-9_./:+@%,-]+$/.test(word) ? word : shellQuoted(word)
+}
+
+/**
  * Workers run unattended: a permission prompt would hold one with nobody watching its pane.
  * The effort is fixed for the session's life, so a later tier change reaches only the reviews.
  */
@@ -112,7 +120,8 @@ export function dispatchSequence(
   run: Run, task: Task, base: DispatchBase, bootstrap: Bootstrap, hpipe: string,
 ): string {
   const steps = [
-    `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base ${baseArgument(base)}`,
+    `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${shellWord(task.branch)} ` +
+      `--base ${baseArgument(base)}`,
     ...(bootstrap.kind === 'none' ? [] : [`(cd "<.result.worktree.path>" && ./${BOOTSTRAP_REL})`]),
     startAgentCommand(task, CREATED_ROOT_PANE),
     `${hpipe} dispatch --task ${task.task_id} --pane ${CREATED_ROOT_PANE}`,
@@ -143,9 +152,10 @@ function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
  * base. Both measured on herdr 0.9.0.
  */
 export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): string {
-  const create = `\`herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base <commit>\` ` +
+  const branch = shellWord(task.branch)
+  const create = `\`herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${branch} --base <commit>\` ` +
     `(the commit on the \`base:\` line \`${hpipe} show --task ${task.task_id}\` prints, never a base you pick)`
-  const open = `\`herdr worktree open --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch}\``
+  const open = `\`herdr worktree open --cwd ${shellQuoted(run.repo_root)} --branch ${branch}\``
   const worktree = task.checkout_path === null
     ? `${create}, run the repo's bootstrap in the new checkout`
     : `${open}; if that answers \`worktree_not_found\` the checkout is gone, so ${create} and run ` +

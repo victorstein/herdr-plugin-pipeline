@@ -3,7 +3,7 @@ import { escalatedUnanswered } from './decisions'
 import { fileHolders, TERMINAL_BAD } from './gating'
 import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
-import { TASK_ROWS } from './phases'
+import { rowRunsIn, type RunMode, TASK_ROWS } from './phases'
 import type { Run, Task } from './types'
 
 /**
@@ -18,7 +18,17 @@ export const ABORTED_LABEL = 'aborted'
  * keeping it managed lets the reconciler strip it from their beads.
  */
 const LEGACY_PHASE_LABEL_PREFIX = 'phase:'
-const PHASE_LABELS: ReadonlySet<string> = new Set([...TASK_ROWS.map((row) => row.phase), ABORTED_LABEL])
+/**
+ * Per mode, because a bare phase name can be an ordinary word: a per-task run never
+ * enters `sync`, and stripping a human's `sync` label from every bead it claims
+ * would take something it never wrote.
+ */
+const phaseLabelsIn = (mode: RunMode): ReadonlySet<string> =>
+  new Set([...TASK_ROWS.filter((row) => rowRunsIn(row, mode)).map((row) => row.phase), ABORTED_LABEL])
+const PHASE_LABELS: Readonly<Record<RunMode, ReadonlySet<string>>> = {
+  'per-task': phaseLabelsIn('per-task'),
+  'single-pr': phaseLabelsIn('single-pr'),
+}
 export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
 /**
  * Provenance labels sit outside the managed namespaces on purpose: a discovered bead can later be
@@ -57,8 +67,8 @@ export interface DesiredBead {
 }
 
 /** Every other label is a human's, and the reconciler never removes it. */
-export const isManagedLabel = (label: string): boolean =>
-  PHASE_LABELS.has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+export const isManagedLabel = (label: string, mode: RunMode): boolean =>
+  PHASE_LABELS[mode].has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
 
 export function commentMarker(taskId: string, decisionId: string, kind: 'asked' | 'ruling'): string {
   return `[hpipe ${taskId}/${decisionId}/${kind}]`

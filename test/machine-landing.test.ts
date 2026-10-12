@@ -142,11 +142,20 @@ test('with the slot, a task behind the batch, or up to date but unchecked, goes 
   }
 })
 
-test('with the slot, a branch moved past its reviewed head goes to sync, even when the head has landed', () => {
+test('with the slot, a branch moved past its reviewed head goes to sync', () => {
   const { run, task } = fixture('land-queue', { land_sha: 'aaaa1111' })
-  const next = advanceTask(run, task, signals({ slotMine: true, landing: facts({ landed: true, movedTo: 'dddd4444' }) }))
+  const next = advanceTask(run, task, signals({ slotMine: true, landing: facts({ movedTo: 'dddd4444' }) }))
   expect(next?.phase).toBe('sync')
   expect(run.history.at(-1)?.why).toBe('t1-branch moved to dddd4444 after its reviewed head')
+  expect(task.landed).toBeUndefined()
+})
+
+test('with the slot, a landed head whose branch moved on is recorded before the task syncs the rest', () => {
+  const { run, task } = fixture('land-queue', { land_sha: 'aaaa1111', submission: submitted() })
+  const next = advanceTask(run, task, signals({ slotMine: true, landing: facts({ landed: true, movedTo: 'dddd4444' }) }))
+  expect(next?.phase).toBe('sync')
+  expect(task.landed?.map((l) => l.land_sha)).toEqual(['aaaa1111'])
+  expect(task.merged_at_ms).toBeNull()
 })
 
 // ——— sync ———
@@ -230,10 +239,24 @@ test('merge: a batch that moved before the landing sends the task back to sync',
   expect(run.history.at(-1)?.why).toBe('batch/x moved to b0b0b0b0 before aaaa1111 landed')
 })
 
-test('merge: a push to the branch after its review is read before the landing, so it lands reviewed', () => {
+test('merge: a push to the branch after its review that has not landed goes to sync, so it lands reviewed', () => {
   const { run, task } = fixture('merge', { land_sha: 'aaaa1111' })
-  expect(advanceTask(run, task, signals({ landing: facts({ landed: true, movedTo: 'dddd4444' }) }))?.phase).toBe('sync')
+  expect(advanceTask(run, task, signals({ landing: facts({ movedTo: 'dddd4444' }) }))?.phase).toBe('sync')
   expect(task.landed).toBeUndefined()
+})
+
+test('merge: a landing is recorded even when the branch moved on, and the rest syncs with the bead still open', () => {
+  const { run, task } = fixture('merge', { land_sha: 'aaaa1111', submission: submitted() })
+  expect(advanceTask(run, task, signals({ landing: facts({ landed: true, movedTo: 'dddd4444' }) }))?.phase).toBe('sync')
+  expect(task.landed).toEqual([{ title: 'feat(menu): close on escape', land_sha: 'aaaa1111', at: expect.any(Number) }])
+  expect(task.merged_at_ms).toBeNull()
+  expect(task.merge_commit ?? null).toBeNull()
+  expect(run.history.at(-1)?.why).toBe('t1-branch moved to dddd4444 after its reviewed head aaaa1111 landed')
+
+  enterTaskPhase(run, task, 'merge', 'synced')
+  advanceTask(run, task, signals({ landing: facts({ landed: true }) }))
+  expect(task.phase).toBe('close')
+  expect(task.landed).toHaveLength(1)
 })
 
 test('merge: up to date and not yet landed waits for the orchestrator, with no ci_head rule', () => {

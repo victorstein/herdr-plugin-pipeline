@@ -1,8 +1,10 @@
 import { type Bd, type BdFailure, type BeadUpdate, type Done, type ExportedBead, isBdFailure } from '../lib/bd'
+import { sha8 } from '../lib/batch'
 import { type DesiredBead, desiredBead, isManagedLabel } from '../lib/bead-desired'
 import { beadsSlug } from '../lib/beads-project'
 import { type BeadClaimant, holdsBead } from '../lib/held'
 import type { RunEffect } from '../lib/ledger'
+import { modeOf, type RunMode } from '../lib/phases'
 import type { Run, Task } from '../lib/types'
 
 export const SYNC_BUDGET_MS = 2_000
@@ -64,7 +66,8 @@ export interface SyncDeps {
 export function closeReason(task: Task, run?: Pick<Run, 'batch'>): string {
   const batch = run?.batch
   if (batch !== undefined) {
-    return `landed on ${batch.branch} (${(task.merge_commit ?? task.land_sha ?? 'unknown commit').slice(0, 8)}); ` +
+    const landed = task.merge_commit ?? task.land_sha
+    return `landed on ${batch.branch} (${landed ? sha8(landed) : 'unknown commit'}); ` +
       `ships with the batch PR into ${batch.into}`
   }
   return `merged in PR #${task.pr ?? 'unknown'} (${task.merge_commit ?? 'unknown commit'})`
@@ -76,7 +79,7 @@ export function closeReason(task: Task, run?: Pick<Run, 'batch'>): string {
  * else. Each is idempotent against `desired`, so a pass cut short anywhere is
  * finished by recomputing the remainder next tick.
  */
-export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: string): BeadCall[] {
+export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: string, mode: RunMode): BeadCall[] {
   const calls: BeadCall[] = []
   const wasClosed = actual.status === 'closed'
   const wantsClosed = desired.status === 'closed'
@@ -91,7 +94,7 @@ export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: str
   if (!(wantsClosed && wasClosed) && (actual.assignee ?? '') !== assignee) change.assignee = assignee
   const labels = actual.labels ?? []
   const addLabels = desired.labels.filter((label) => !labels.includes(label))
-  const removeLabels = labels.filter((label) => isManagedLabel(label) && !desired.labels.includes(label))
+  const removeLabels = labels.filter((label) => isManagedLabel(label, mode) && !desired.labels.includes(label))
   if (addLabels.length > 0) change.addLabels = addLabels
   if (removeLabels.length > 0) change.removeLabels = removeLabels
   const metadata = actual.metadata ?? {}
@@ -319,7 +322,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         }
         if (current.status === 'closed' && waitsOnClose(task)) effects.push(recordBeadClosed(task.task_id, deps.now()))
 
-        const calls = callsFor(desiredBead(task, run), current, closeReason(task, run))
+        const calls = callsFor(desiredBead(task, run), current, closeReason(task, run), modeOf(run))
         if (calls.length === 0) continue
         let failure: BdFailure | null = null
         for (const call of calls) {

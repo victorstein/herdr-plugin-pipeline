@@ -54,7 +54,7 @@ function task(over: Partial<Task>): Task {
   }
 }
 
-const NO_PR: SubmitDeps = { openPr: async () => null }
+const NO_PR: SubmitDeps = { openPr: async () => ({ pr: null }) }
 
 const submit = (f: Fixture, title: string | null = 'feat(menu): close on escape', deps: Partial<SubmitDeps> = {}) =>
   cmdSubmit(ctx(), { taskId: 't1', title, repoKey: null, runId: f.run.run_id }, { ...NO_PR, ...deps })
@@ -167,9 +167,23 @@ test('back in implement, nothing but a merge of the batch since the review is re
 test('a branch with an open PR is refused: that PR would carry every sibling into the default branch', async () => {
   const f = await fixture()
   work(f)
-  const out = await submit(f, undefined, { openPr: async () => 31 })
+  const out = await submit(f, undefined, { openPr: async () => ({ pr: 31 }) })
   expect(out.ok).toBe(false)
   expect(out.text).toContain('Close PR #31, then submit again')
+})
+
+test('a gh that cannot say whether the branch has an open PR is a refusal, not a pass', async () => {
+  const f = await fixture()
+  work(f)
+  let checked = false
+  const out = await submit(f, undefined, {
+    openPr: async () => ({ error: 'HTTP 502: Bad Gateway' }),
+    runCheck: async () => { checked = true; return { code: 0, tail: '' } },
+  })
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('could not ask GitHub whether t1-branch has an open PR (HTTP 502: Bad Gateway)')
+  expect(checked).toBe(false)
+  expect((await saved(f)).submission).toBeUndefined()
 })
 
 test('a declared check runs on the pushed tree; passing, it is recorded', async () => {
@@ -229,6 +243,81 @@ test('a stale save is retried without running the check again', async () => {
   expect(out.ok).toBe(true)
   expect(checks).toBe(1)
   expect((await saved(f)).submission?.check).toBe('passed')
+})
+
+test('a submit outlasting many supervisor saves still lands: only the record is retried, never the checks', async () => {
+  const f = await fixture()
+  declareCheck(f, '#!/bin/sh\nexit 0\n')
+  work(f)
+  let saves = 0
+  const supervisor = setInterval(async () => {
+    const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+    meanwhile.history.push({ at: saves, from: 'x', to: 'x', why: 'a supervisor tick' })
+    await saveRun(dir, meanwhile).catch(() => {})
+    saves++
+  }, 50)
+  let checks = 0
+  const out = await submit(f, undefined, {
+    openPr: async () => { await Bun.sleep(400); return { pr: null } },
+    runCheck: async (checkout, log) => {
+      checks++
+      const { runCheck } = await import('../src/lib/check')
+      const result = await runCheck(checkout, log)
+      await Bun.sleep(400)
+      return result
+    },
+  }).finally(() => clearInterval(supervisor))
+  expect(saves).toBeGreaterThan(5)
+  expect(out.ok).toBe(true)
+  expect(checks).toBe(1)
+  expect((await saved(f)).submission?.check).toBe('passed')
+})
+
+test('a check that leaves untracked output behind still records its pass, with the run saved meanwhile', async () => {
+  const f = await fixture()
+  declareCheck(f, '#!/bin/sh\necho 100% > coverage.txt\nexit 0\n')
+  work(f)
+  let raced = false
+  const out = await submit(f, undefined, {
+    openPr: async () => {
+      if (!raced) {
+        raced = true
+        const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+        meanwhile.history.push({ at: 1, from: 'x', to: 'x', why: 'a supervisor tick' })
+        await saveRun(dir, meanwhile)
+      }
+      return { pr: null }
+    },
+  })
+  expect(out.ok, out.text).toBe(true)
+  expect(existsSync(join(f.worktree, 'coverage.txt'))).toBe(true)
+  expect((await saved(f)).submission?.check).toBe('passed')
+})
+
+test('a task that moves on while submit runs its checks records nothing', async () => {
+  const f = await fixture()
+  work(f)
+  const out = await submit(f, undefined, {
+    openPr: async () => {
+      const meanwhile = (await loadRun(dir, 'personal', f.run.run_id))!
+      meanwhile.tasks[0]!.phase = 'pr-review'
+      meanwhile.tasks[0]!.phase_entered_at = ENTERED + 5
+      await saveRun(dir, meanwhile)
+      return { pr: null }
+    },
+  })
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('moved on (now in pr-review) while submit ran its checks; nothing was recorded')
+  expect((await saved(f)).submission).toBeUndefined()
+})
+
+test('a task waiting for the landing slot tells its worker to end the turn, not to submit again', async () => {
+  const f = await fixture({ phase: 'land-queue', land_sha: 'L1' })
+  work(f)
+  const out = await submit(f)
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('t1 waits in land-queue for the landing slot; if it must sync when its turn comes, ' +
+    'you are sent the sync prompt then — end your turn')
 })
 
 // ——— sync ———

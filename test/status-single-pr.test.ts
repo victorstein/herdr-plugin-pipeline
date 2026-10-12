@@ -54,6 +54,19 @@ test('a repo with no check is flagged: every landing is unverified', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
+test('whether a check is declared is read from the batch\'s lineage, a task checkout, not the user\'s working copy', () => {
+  const working = mkdtempSync(join(tmpdir(), 'status-working-'))
+  const checkout = mkdtempSync(join(tmpdir(), 'status-task-'))
+  mkdirSync(join(checkout, '.claude'))
+  writeFileSync(join(checkout, '.claude', 'pipeline-check'), '#!/bin/sh\n')
+  chmodSync(join(checkout, '.claude', 'pipeline-check'), 0o755)
+  const run = singlePr([mkTask({ checkout_path: checkout })], working)
+  const text = formatStatus([run], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
+  expect(text).not.toContain('no .claude/pipeline-check')
+  rmSync(working, { recursive: true, force: true })
+  rmSync(checkout, { recursive: true, force: true })
+})
+
 test('a batch that has not fetched, and a supervisor that cannot drive the run, are both your move', () => {
   const run = singlePr([])
   run.batch!.fetch_error = { reason: 'Could not read from remote repository.', since: NOW - 12 * 60_000 }
@@ -96,7 +109,8 @@ test('the ship rows say where the final PR stands, and whose move it is', () => 
   const ship = singlePr([])
   ship.phase = 'ship'
   const shipText = formatStatus([ship], { state: 'live', schemas: [3, 4] }, 'personal', HP, new Set(), NOW)
-  expect(shipText).toContain('  · final PR: not opened')
+  expect(shipText).toContain('  · final PR: none seen yet — the supervisor records it on its first tick after ' +
+    'GitHub lists it')
   expect(shipText).toContain('YOUR move: check the batch and open its PR (the ship prompt has the commands)')
 
   const ci = singlePr([])
@@ -163,4 +177,10 @@ test('a landed task\'s bead closes naming the batch, and what ships it', () => {
   expect(closeReason(task, singlePr([task]))).toBe('landed on batch/x (4b1d0e2a); ships with the batch PR into main')
   const perTask = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   expect(closeReason(mkTask({ pr: 7, merge_commit: 'abc' }), perTask)).toBe('merged in PR #7 (abc)')
+})
+
+test('a missing sha is named whole, never cut to eight characters of its placeholder', () => {
+  const unrecorded = mkTask({ phase: 'merge' })
+  expect(closeReason(unrecorded, singlePr([unrecorded]))).toContain('landed on batch/x (unknown commit)')
+  expect(actionFor(singlePr([unrecorded]), unrecorded, HP, NOW)).toContain('t1-branch at <no reviewed head> to land')
 })

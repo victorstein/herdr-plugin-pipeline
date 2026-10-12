@@ -196,16 +196,20 @@ test('a rewind into land-queue, sync or merge restores the reviewed head from th
   }
 })
 
-test('a task rewound while the run ships moves the run back to execute; once shipped it is refused', async () => {
-  const run = singlePrRun([{ phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }] }])
-  run.phase = 'ship-ci'
-  run.intake_closed = true
-  run.batch!.pr = 301
-  await saveRun(dir, run)
-  const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, async () => false)
-  expect(out.ok).toBe(true)
-  expect(out.text).toContain('the run moves back to execute')
-  expect((await saved(run)).phase).toBe('execute')
+test('a task rewound while the run reviews or ships moves the run back to execute; once shipped it is refused', async () => {
+  for (const phase of ['branch-review', 'ship', 'ship-ci', 'ship-merge'] as const) {
+    const run = singlePrRun([{
+      phase: 'done', bead: `hp-${phase}`, merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }],
+    }])
+    run.phase = phase
+    run.intake_closed = true
+    run.batch!.pr = phase === 'branch-review' ? null : 301
+    await saveRun(dir, run)
+    const out = await cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, async () => false)
+    expect(out.ok, phase).toBe(true)
+    expect(out.text, phase).toContain('the run moves back to execute')
+    expect((await saved(run)).phase, phase).toBe('execute')
+  }
 
   const shipped = singlePrRun([{ phase: 'done', merged_at_ms: 1 }])
   shipped.phase = 'ship-merge'
@@ -214,6 +218,36 @@ test('a task rewound while the run ships moves the run back to execute; once shi
   const refused = await cmdRewind(ctx(), { runId: shipped.run_id, phase: 'implement', taskId: 't1' }, async () => true)
   expect(refused.ok).toBe(false)
   expect(refused.text).toContain('the batch already shipped as PR #301')
+})
+
+/** A supervisor saving the run on a short cadence, as `main.ts` saves every advancing run every tick. */
+function liveSupervisor(run: Run): { stop: () => void } {
+  const timer = setInterval(async () => {
+    const meanwhile = await saved(run)
+    meanwhile.history.push({ at: Date.now(), from: 'x', to: 'x', why: 'a supervisor tick' })
+    await saveRun(dir, meanwhile).catch(() => {})
+  }, 100)
+  return { stop: () => clearInterval(timer) }
+}
+
+test('a rewind and a fix task while the run ships land against a live supervisor, asking GitHub once each', async () => {
+  for (const command of ['rewind', 'register'] as const) {
+    const run = singlePrRun([{ phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: x', land_sha: 'L1', at: 1 }] }])
+    run.phase = 'ship-ci'
+    run.intake_closed = true
+    run.batch!.pr = 301
+    await saveRun(dir, run)
+    let asked = 0
+    const slowGitHub = async () => { asked++; await Bun.sleep(400); return false }
+    const supervisor = liveSupervisor(run)
+    const out = await (command === 'rewind'
+      ? cmdRewind(ctx(), { runId: run.run_id, phase: 'implement', taskId: 't1' }, slowGitHub)
+      : fixTask(run, slowGitHub, 'hp-live')
+    ).finally(() => supervisor.stop())
+    expect(out.ok, `${command}: ${out.text}`).toBe(true)
+    expect(asked, command).toBe(1)
+    expect((await saved(run)).phase, command).toBe('execute')
+  }
 })
 
 test('a run rewound to ship forgets the PR it found; to ship-ci, the bucket it read', async () => {
@@ -297,6 +331,20 @@ test('batch-check refuses a red check, a checkout behind the batch, and a missin
   const missing = await cmdBatchCheck(ctx(), { repoKey: null, runId: behind.run.run_id })
   expect(missing.ok).toBe(false)
   expect(missing.text).toContain('worktree add --track -B batch/x')
+})
+
+test('batch-check records its head against a live supervisor, running the check once', async () => {
+  const { run, clone } = await shippingRun('#!/bin/sh\nsleep 1\nexit 0\n')
+  let checks = 0
+  const supervisor = liveSupervisor(run)
+  const out = await cmdBatchCheck(ctx(), { repoKey: null, runId: run.run_id }, async (checkout, log) => {
+    checks++
+    const { runCheck } = await import('../src/lib/check')
+    return runCheck(checkout, log)
+  }).finally(() => supervisor.stop())
+  expect(out.ok, out.text).toBe(true)
+  expect(checks).toBe(1)
+  expect((await saved(run)).batch?.checked?.head_sha).toBe(revParse(clone, 'refs/remotes/origin/batch/x'))
 })
 
 test('with no check declared, batch-check still records the head, as unchecked', async () => {

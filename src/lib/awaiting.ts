@@ -1,3 +1,4 @@
+import { sha8 } from './batch'
 import { modeOf, taskRow } from './phases'
 import type { Run, Task } from './types'
 
@@ -26,7 +27,7 @@ export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
       return task.pr === null ? UNRECORDED_PR : `CI on PR #${task.pr}`
     case 'merged':
       if (batch !== undefined) {
-        return `${task.branch} at ${(task.land_sha ?? '<no reviewed head>').slice(0, 8)} to land on ${batch.branch}`
+        return `${task.branch} at ${task.land_sha ? sha8(task.land_sha) : '<no reviewed head>'} to land on ${batch.branch}`
       }
       return task.pr === null ? UNRECORDED_PR : `PR #${task.pr} to be merged`
     case 'slot':

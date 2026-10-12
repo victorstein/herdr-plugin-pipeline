@@ -14,9 +14,13 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
    {{check_sentence}} This phase clears only once the PR's head is the one it recorded, so run it again
    after any push to `{{batch}}`. If it is red, dispatch a subagent with `model: {{implement_model}}` to fix it in the
    checkout and **wait for it within this turn**; verify, commit, push, and run `batch-check` again.
-2. **Bring `{{into}}` in only if it conflicts.** If `origin/{{into}}` has moved and
-   `git -C {{checkout_quoted}} merge-tree --write-tree origin/{{into}} origin/{{batch}}` reports conflicts,
-   merge `origin/{{into}}` into the batch checkout, resolve, push, and run `batch-check` again.
+2. **Bring `{{into}}` in only if it conflicts.** A PR that conflicts with its base gets no CI, so ask
+   git, against `{{into}}` as just fetched:
+
+       {{into_conflict_check}}
+
+   If that reports conflicts, merge `origin/{{into}}` into the batch checkout, resolve, push, and run
+   `batch-check` again.
 3. **Open the PR, or update it:**
 
        {{pr_command}}

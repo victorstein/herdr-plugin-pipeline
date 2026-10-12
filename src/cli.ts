@@ -13,7 +13,7 @@ import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib
 import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
-import { CHECK_REL, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
+import { CHECK_REL, checkFailure, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
 import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
@@ -35,7 +35,8 @@ import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/ma
 import { formatNext, type TriageOutput } from './lib/next'
 import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
-  isTier, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow, taskRow, tierOf,
+  isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
+  taskRow, tierOf,
 } from './lib/phases'
 import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
@@ -267,14 +268,17 @@ async function planBatch(
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
 
+/** One ruleset covers every run's default-named batch; a name of the user's own is protected by name. */
+const rulesetPattern = (branch: string): string => (branch.startsWith('batch/') ? 'batch/*' : branch)
+
 function batchLines(plan: BatchPlan, repoRoot: string): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
   return [
     `batch: ${plan.branch} at ${sha8(plan.commit)} (origin/${plan.into} as just fetched${adopted}) — ` +
       `this run ships as one PR into ${plan.into}`,
     checkLine(repoCheck(repoRoot)),
-    'ruleset: protect batch/* from force-pushes and deletion (GitHub → Settings → Rules → Rulesets): git ' +
-      'refuses only a landing that is not a fast-forward, and a --force push gets through without one',
+    `ruleset: protect ${rulesetPattern(plan.branch)} from force-pushes and deletion (GitHub → Settings → Rules → ` +
+      'Rulesets): git refuses only a landing that is not a fast-forward, and a --force push gets through without one',
   ]
 }
 
@@ -358,7 +362,6 @@ const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
 const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
   ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'land-queue', 'sync', 'merge',
 ])
-const LANDING_PHASES: ReadonlySet<string> = new Set<TaskPhase>(['land-queue', 'sync', 'merge'])
 
 /** Whether the batch PR has merged: null when GitHub could not say. */
 export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | null>
@@ -366,6 +369,24 @@ export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | n
 const ghBatchShipped: BatchShipped = async (repoRoot, pr) => {
   const view = await new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prView(pr)
   return view === null ? null : view.merged
+}
+
+/**
+ * One GitHub question per command. A stale save re-runs the whole attempt, and a
+ * gh call inside it outlasts a supervisor tick, so every attempt would lose to the
+ * supervisor's next save; asked once, before the retried save, it costs none of them.
+ */
+function askedOnce(shipped: BatchShipped): BatchShipped {
+  const answers = new Map<string, Promise<boolean | null>>()
+  return (repoRoot, pr) => {
+    const key = `${repoRoot}\0${pr}`
+    let answer = answers.get(key)
+    if (answer === undefined) {
+      answer = shipped(repoRoot, pr)
+      answers.set(key, answer)
+    }
+    return answer
+  }
 }
 
 /** Why nothing more can join this single-PR run, or null. Once its PR merged, a fix lands on a branch already shipped. */
@@ -510,6 +531,14 @@ function filingInput(input: TaskInput): BeadCreateInput {
   }
 }
 
+/** The single-PR run a fix task would reopen, if this repo's live run is shipping. */
+async function shippingRun(ctx: Ctx, input: TaskInput): Promise<Run | null> {
+  const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, {
+    runId: input.runId, repoKey: input.repoKey, phases: SHIPPING, taskId: null, reach: 'unfinished',
+  })
+  return shipping.ok && modeOf(shipping.run) === 'single-pr' ? shipping.run : null
+}
+
 async function registerTask(
   ctx: Ctx, input: TaskInput, attempt: RegistrationAttempt,
 ): Promise<CmdResult> {
@@ -525,9 +554,9 @@ async function registerTask(
   if (found.ok) {
     run = found.value
   } else {
-    const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, { ...query, phases: SHIPPING })
-    if (!shipping.ok || modeOf(shipping.run) !== 'single-pr') return found.result
-    run = shipping.run
+    const shipping = await shippingRun(ctx, input)
+    if (shipping === null) return found.result
+    run = shipping
     reopensShipping = true
     const refusal = await shippedRefusal(run, attempt.shipped)
     if (refusal !== null) return fail(`${refusal}; register the fix in a new run`)
@@ -745,8 +774,10 @@ export async function cmdTask(
     showBeadOnce: (repoKey, id) => (outcome.shown ??= beads.show(repoKey, id)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
-    shipped,
+    shipped: askedOnce(shipped),
   }
+  const shipping = await shippingRun(ctx, input)
+  if (shipping !== null) await shippedRefusal(shipping, attempt.shipped)
   const filedBead = async (): Promise<CreatedBead | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
     return filed === null || isBdFailure(filed) ? null : filed
@@ -1030,9 +1061,18 @@ function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
   return `its phases are ${rows.filter((r) => rowRunsIn(r, mode)).map((r) => r.phase).join(', ')}`
 }
 
-async function rewind(ctx: Ctx, input: {
-  runId: string; phase: string; taskId: string | null
-}, shipped: BatchShipped = ghBatchShipped): Promise<CmdResult> {
+interface RewindInput { runId: string; phase: string; taskId: string | null }
+
+/**
+ * The run would otherwise review, ship, or reach `done` and stop being driven, with
+ * the rewound task stranded behind it. The run phases registration reopens.
+ */
+function rewindReopensShipping(run: Run, input: RewindInput): boolean {
+  return Boolean(input.taskId) && modeOf(run) === 'single-pr' && SHIPPING.includes(run.phase) &&
+    TASK_ROWS.some((r) => r.phase === input.phase) && !taskPhaseIsTerminal(input.phase)
+}
+
+async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -1079,10 +1119,7 @@ async function rewind(ctx: Ctx, input: {
       }
       task.land_sha = last.land_sha
     }
-    // The run would otherwise ship, or reach `done` and stop being driven, with this
-    // task stranded behind it.
-    const shipping = modeOf(run) === 'single-pr' && (['ship', 'ship-ci', 'ship-merge'] as string[]).includes(run.phase)
-    if (shipping && !taskPhaseIsTerminal(input.phase)) {
+    if (rewindReopensShipping(run, input)) {
       const refusal = await shippedRefusal(run, shipped)
       if (refusal !== null) return fail(`${input.taskId} was not rewound: ${refusal}`)
       enterRunPhase(run, 'execute', `${input.taskId} was rewound to ${input.phase}`)
@@ -1188,21 +1225,26 @@ async function rewind(ctx: Ctx, input: {
     (reserved === null ? '' : `; next verdict → ${reserved}`) + reopensShipping + owed + tierWarning,
   )
 }
-export const cmdRewind = retryingOnStale(rewind)
+export async function cmdRewind(
+  ctx: Ctx, input: RewindInput, shipped: BatchShipped = ghBatchShipped,
+): Promise<CmdResult> {
+  const askShipped = askedOnce(shipped)
+  const before = await runById(ctx.stateDir, ctx.session, input.runId)
+  if (before && rewindReopensShipping(before, input)) await shippedRefusal(before, askShipped)
+  return retryingOnStale(rewind)(ctx, input, askShipped)
+}
 
 export interface SubmitDeps {
-  /** An open PR from `branch`, by number. */
-  openPr: (repoRoot: string, branch: string) => Promise<number | null>
+  /** An open PR from `branch`, by number, or why gh could not say. */
+  openPr: (repoRoot: string, branch: string) => Promise<{ pr: number | null } | { error: string }>
   runCheck?: (checkout: string, logPath: string) => Promise<CheckRun>
 }
 
 const REAL_SUBMIT_DEPS: SubmitDeps = {
-  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prForBranch(branch),
+  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).openPrForBranch(branch),
 }
 
 interface SubmitInput { taskId: string; title: string | null; repoKey: string | null; runId: string | null }
-
-type CheckOnce = (checkout: string, logPath: string, head: string) => Promise<CheckRun>
 
 /** The title a sync keeps when it names none: the change's own, from its last submission or landing. */
 function standingTitle(task: Task): string | null {
@@ -1219,94 +1261,120 @@ function submittedLine(task: Task, sub: Submission, batch: Batch): string {
       'through review before it lands'
 }
 
+/** Everything `submit` verified, kept for the one quick save that records it. */
+interface PreparedSubmission {
+  runId: string
+  taskId: string
+  kind: Submission['kind']
+  enteredAt: number
+  landSha: string | null
+  submission: Submission
+  note: string | null
+}
+
+type Prepared<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
+
 /**
- * The single-PR worker's equivalent of opening a PR. Local refusals come first,
- * then one fetch, one ls-remote and one PR lookup, then the check, which is the
- * slow one. Nothing is recorded unless every one of them passes.
+ * Everything slow happens here, once, before the ledger is touched: one fetch, one
+ * ls-remote, one PR lookup and the check. Inside a save's stale-retry they could
+ * never land, because a live supervisor saves the run every tick and the network
+ * calls alone outlast one: berean-os's smoke worker failed nine submits in a row.
+ * Measured on a live run.
  */
-async function submit(ctx: Ctx, input: SubmitInput, deps: SubmitDeps, checkOnce: CheckOnce): Promise<CmdResult> {
+async function prepareSubmission(
+  ctx: Ctx, input: SubmitInput, deps: SubmitDeps,
+): Promise<Prepared<{ prepared: PreparedSubmission; batch: Batch }>> {
+  const refused = (text: string): Prepared<never> => ({ ok: false, result: fail(text) })
   const found = await resolveTask(ctx, {
     taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'driven', escape: null,
   })
-  if (!found.ok) return found.result
+  if (!found.ok) return { ok: false, result: found.result }
   const { run, task } = found.value
   const batch = run.batch
   if (batch === undefined) {
-    return fail(`${run.run_id} is a per-task run: its tasks open PRs, and there is nothing to submit`)
+    return refused(`${run.run_id} is a per-task run: its tasks open PRs, and there is nothing to submit`)
+  }
+  if (task.phase === 'land-queue') {
+    return refused(`${task.task_id} waits in land-queue for the landing slot; if it must sync when its turn comes, ` +
+      'you are sent the sync prompt then — end your turn')
   }
   if (task.phase !== 'implement' && task.phase !== 'sync') {
-    return fail(`${task.task_id} is in ${task.phase}; submit answers only implement and sync`)
+    return refused(`${task.task_id} is in ${task.phase}; submit answers only implement and sync`)
   }
   const kind = task.phase
   const checkout = task.checkout_path
-  if (checkout === null) return fail(`${task.task_id} has no worktree on record, so there is nothing to submit from`)
+  if (checkout === null) return refused(`${task.task_id} has no worktree on record, so there is nothing to submit from`)
 
   const title = input.title ?? (kind === 'sync' ? standingTitle(task) : null)
   if (title === null) {
-    return fail(kind === 'implement'
+    return refused(kind === 'implement'
       ? '--title is required: it is this change\'s line in the batch PR\'s release notes'
       : `--title is needed: no earlier submission of ${task.task_id} names this change`)
   }
   const titleCheck = checkReleaseTitle(title, releaseSections(checkout))
-  if (!titleCheck.ok) return fail(titleCheck.error)
+  if (!titleCheck.ok) return refused(titleCheck.error)
 
   const uncommitted = await uncommittedPaths(checkout)
-  if (uncommitted === null) return fail(`git could not read the status of ${checkout}`)
+  if (uncommitted === null) return refused(`git could not read the status of ${checkout}`)
   if (uncommitted.length > 0) {
     const more = uncommitted.length > 5 ? ', …' : ''
-    return fail(`${checkout} has uncommitted or untracked work (${uncommitted.slice(0, 5).join(', ')}${more}): ` +
+    return refused(`${checkout} has uncommitted or untracked work (${uncommitted.slice(0, 5).join(', ')}${more}): ` +
       'commit it or ignore it, and push — the check must test the pushed tree')
   }
   const head = await headOf(checkout)
-  if (head === null) return fail(`git could not read HEAD in ${checkout}`)
+  if (head === null) return refused(`git could not read HEAD in ${checkout}`)
 
   const fetchFailed = await fetchFromOrigin(checkout, trackingRefspec(batch.branch))
-  if (fetchFailed !== null) return fail(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  if (fetchFailed !== null) return refused(`could not fetch ${batch.branch}: ${fetchFailed}`)
   const pushed = await remoteBranchHead(checkout, task.branch)
-  if (!pushed.ok) return fail(`could not ask origin about ${task.branch}: ${pushed.reason}`)
+  if (!pushed.ok) return refused(`could not ask origin about ${task.branch}: ${pushed.reason}`)
   if (pushed.sha !== head) {
-    return fail(`push first: origin has ${task.branch} at ${pushed.sha === null ? 'nothing' : sha8(pushed.sha)}, ` +
+    return refused(`push first: origin has ${task.branch} at ${pushed.sha === null ? 'nothing' : sha8(pushed.sha)}, ` +
       `and HEAD is ${sha8(head)}`)
   }
   const batchRef = `refs/remotes/origin/${batch.branch}`
   const empty = await nothingToLand(checkout, batchRef)
-  if (empty === null) return fail(`git could not compare ${task.branch} with ${batch.branch}`)
+  if (empty === null) return refused(`git could not compare ${task.branch} with ${batch.branch}`)
   if (empty) {
-    return fail(`nothing to land: ${task.branch} has no change that ${batch.branch} lacks outside ${ARTIFACT_ROOT}/`)
+    return refused(`nothing to land: ${task.branch} has no change that ${batch.branch} lacks outside ${ARTIFACT_ROOT}/`)
   }
 
   let merge: SyncWalk | null = null
   if (kind === 'implement' && task.head_sha_at_entry !== null) {
     const sinceReview = await syncWalk(checkout, task.head_sha_at_entry, batchRef)
     if (sinceReview.clean) {
-      return fail(`nothing but merges of ${batch.branch} since the review sent it back: commit the fixes, push, ` +
+      return refused(`nothing but merges of ${batch.branch} since the review sent it back: commit the fixes, push, ` +
         'and submit again')
     }
   }
   if (kind === 'sync') {
     const current = await isAncestor(checkout, batchRef, head)
-    if (current === null) return fail(`git could not compare ${task.branch} with ${batch.branch}`)
-    if (!current) return fail(`still behind ${batch.branch}: merge it and push — ${mergeBatchCommand(batch)}`)
+    if (current === null) return refused(`git could not compare ${task.branch} with ${batch.branch}`)
+    if (!current) return refused(`still behind ${batch.branch}: merge it and push — ${mergeBatchCommand(batch)}`)
     merge = await syncWalk(checkout, task.land_sha ?? null, batchRef)
   }
 
-  const pr = await deps.openPr(run.repo_root, task.branch)
+  const open = await deps.openPr(run.repo_root, task.branch)
+  if ('error' in open) {
+    return refused(`could not ask GitHub whether ${task.branch} has an open PR (${open.error}); run it again`)
+  }
+  const pr = open.pr
   if (pr !== null) {
-    return fail(`${task.branch} has an open PR, #${pr}, which would carry every sibling's commits into ` +
+    return refused(`${task.branch} has an open PR, #${pr}, which would carry every sibling's commits into ` +
       `${batch.into}. Close PR #${pr}, then submit again`)
   }
 
   const check = repoCheck(checkout)
   if (check.kind === 'not-executable') {
-    return fail(`${CHECK_REL} is not executable in ${checkout}: chmod +x ${CHECK_REL}, commit and push that, ` +
+    return refused(`${CHECK_REL} is not executable in ${checkout}: chmod +x ${CHECK_REL}, commit and push that, ` +
       'then submit again')
   }
   let outcome: CheckOutcome = 'none'
   if (check.kind === 'ready') {
     const log = join(checksDir(ctx.stateDir, run), `${task.task_id}-${sha8(head)}.log`)
-    const ran = await checkOnce(checkout, log, head)
+    const ran = await (deps.runCheck ?? runCheck)(checkout, log)
     if (ran.code !== 0) {
-      return fail(`${CHECK_REL} failed (exit ${ran.code}); its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
+      return refused(`${CHECK_REL} ${checkFailure(ran)}; its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
     }
     outcome = 'passed'
   }
@@ -1315,99 +1383,123 @@ async function submit(ctx: Ctx, input: SubmitInput, deps: SubmitDeps, checkOnce:
     kind, title, head_sha: head, at: Date.now(), check: outcome,
     ...(merge === null ? {} : merge.clean ? { merge: 'clean' } : { merge: 'dirty', dirty_at: merge.at }),
   }
-  task.submission = submission
+  return {
+    ok: true,
+    value: {
+      batch,
+      prepared: {
+        runId: run.run_id, taskId: task.task_id, kind, enteredAt: task.phase_entered_at,
+        landSha: task.land_sha ?? null, submission, note: titleCheck.note,
+      },
+    },
+  }
+}
+
+/** The quick part, retried on a stale save: nothing in it waits on the network or the check. */
+async function recordSubmission(
+  ctx: Ctx, prepared: PreparedSubmission, batch: Batch, repoKey: string | null,
+): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: prepared.taskId, repoKey, runId: prepared.runId, reach: 'driven', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+  if (task.phase !== prepared.kind || task.phase_entered_at !== prepared.enteredAt ||
+    (task.land_sha ?? null) !== prepared.landSha) {
+    return fail(`${task.task_id} moved on (now in ${task.phase}) while submit ran its checks; nothing was recorded — ` +
+      'submit again if it still applies')
+  }
+  task.submission = prepared.submission
   await saveRun(ctx.stateDir, run)
-  return ok([submittedLine(task, submission, batch), ...(titleCheck.note === null ? [] : [`note: ${titleCheck.note}`])]
+  return ok([submittedLine(task, prepared.submission, batch), ...(prepared.note === null ? [] : [`note: ${prepared.note}`])]
     .join('\n'))
 }
 
+/** The single-PR worker's equivalent of opening a PR. Nothing is recorded unless every check passes. */
 export async function cmdSubmit(
   ctx: Ctx, input: SubmitInput, deps: SubmitDeps = REAL_SUBMIT_DEPS,
 ): Promise<CmdResult> {
-  // A retry re-reads the task from scratch, but the check ran on a commit, and the
-  // commit has not changed: running it again would only double the wait.
-  const ranChecks = new Map<string, Promise<CheckRun>>()
-  const checkOnce: CheckOnce = (checkout, logPath, head) => {
-    let ran = ranChecks.get(head)
-    if (ran === undefined) {
-      ran = (deps.runCheck ?? runCheck)(checkout, logPath)
-      ranChecks.set(head, ran)
-    }
-    return ran
-  }
-  return retryingOnStale(submit)(ctx, input, deps, checkOnce)
+  const prepared = await prepareSubmission(ctx, input, deps)
+  if (!prepared.ok) return prepared.result
+  return retryingOnStale(recordSubmission)(ctx, prepared.value.prepared, prepared.value.batch, input.repoKey)
 }
 
-/**
- * The one local run of every landing together, in the batch checkout at the head
- * just fetched. `ship` clears only once the PR's head is the head recorded here,
- * so a fix-task landing forces a fresh check before CI.
- */
 async function batchCheck(
-  ctx: Ctx, input: { repoKey: string | null; runId: string | null }, checkOnce: CheckOnce,
-): Promise<CmdResult> {
+  ctx: Ctx, input: { repoKey: string | null; runId: string | null },
+  check: (checkout: string, logPath: string) => Promise<CheckRun>,
+): Promise<Prepared<{ runId: string; checked: NonNullable<Batch['checked']>; batch: Batch }>> {
+  const refused = (text: string): Prepared<never> => ({ ok: false, result: fail(text) })
   const found = await resolveFor(ctx, {
     runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'driven',
   }, null)
-  if (!found.ok) return found.result
+  if (!found.ok) return { ok: false, result: found.result }
   const run = found.value
   const batch = run.batch
-  if (batch === undefined) return fail(`${run.run_id} is a per-task run: there is no batch to check`)
+  if (batch === undefined) return refused(`${run.run_id} is a per-task run: there is no batch to check`)
   if (!existsSync(batch.checkout)) {
-    return fail(`the batch checkout is not there yet; create it first:\n  ${checkoutSteps(run, false).join('\n  ')}`)
+    return refused(`the batch checkout is not there yet; create it first:\n  ${checkoutSteps(run, false).join('\n  ')}`)
   }
 
   const fetchFailed = await fetchFromOrigin(run.repo_root, trackingRefspec(batch.branch))
-  if (fetchFailed !== null) return fail(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  if (fetchFailed !== null) return refused(`could not fetch ${batch.branch}: ${fetchFailed}`)
   const head = await resolveCommit(run.repo_root, `refs/remotes/origin/${batch.branch}`)
-  if (head === null) return fail(`origin/${batch.branch} does not resolve after the fetch`)
+  if (head === null) return refused(`origin/${batch.branch} does not resolve after the fetch`)
   const checkoutHead = await headOf(batch.checkout)
   if (checkoutHead !== head) {
-    return fail(`the batch checkout is at ${checkoutHead === null ? 'nothing' : sha8(checkoutHead)}, not at ` +
+    return refused(`the batch checkout is at ${checkoutHead === null ? 'nothing' : sha8(checkoutHead)}, not at ` +
       `origin/${batch.branch}'s ${sha8(head)}: push anything of its own, then bring it up to date with ` +
       `\`git -C ${shellQuoted(batch.checkout)} pull --ff-only\``)
   }
   const uncommitted = await uncommittedPaths(batch.checkout)
   if (uncommitted === null || uncommitted.length > 0) {
-    return fail(`the batch checkout has uncommitted or untracked work (${(uncommitted ?? ['unreadable']).join(', ')}): ` +
+    return refused(`the batch checkout has uncommitted or untracked work (${(uncommitted ?? ['unreadable']).join(', ')}): ` +
       'commit and push it, or remove it, so the check tests what the PR carries')
   }
 
-  const check = repoCheck(batch.checkout)
-  if (check.kind === 'not-executable') {
-    return fail(`${CHECK_REL} is not executable on ${batch.branch}: chmod +x ${CHECK_REL}, commit and push it`)
+  const declared = repoCheck(batch.checkout)
+  if (declared.kind === 'not-executable') {
+    return refused(`${CHECK_REL} is not executable on ${batch.branch}: chmod +x ${CHECK_REL}, commit and push it`)
   }
   let outcome: CheckOutcome = 'none'
-  if (check.kind === 'ready') {
+  if (declared.kind === 'ready') {
     const log = join(checksDir(ctx.stateDir, run), `batch-${sha8(head)}.log`)
-    const ran = await checkOnce(batch.checkout, log, head)
+    const ran = await check(batch.checkout, log)
     if (ran.code !== 0) {
-      return fail(`${CHECK_REL} failed on ${batch.branch} at ${sha8(head)} (exit ${ran.code}); its last lines:` +
+      return refused(`${CHECK_REL} ${checkFailure(ran)} on ${batch.branch} at ${sha8(head)}; its last lines:` +
         `\n\n${ran.tail}\n\nthe whole log: ${log}`)
     }
     outcome = 'passed'
   }
-  batch.checked = { head_sha: head, at: Date.now(), check: outcome }
-  await saveRun(ctx.stateDir, run)
-  return ok(`checked ${batch.branch} at ${sha8(head)}: ` + (outcome === 'passed'
+  return { ok: true, value: { runId: run.run_id, batch, checked: { head_sha: head, at: Date.now(), check: outcome } } }
+}
+
+async function recordBatchCheck(
+  ctx: Ctx, runId: string, checked: NonNullable<Batch['checked']>, repoKey: string | null,
+): Promise<CmdResult> {
+  const found = await resolveFor(ctx, { runId, repoKey, phases: null, taskId: null, reach: 'driven' }, null)
+  if (!found.ok) return found.result
+  const batch = found.value.batch
+  if (batch === undefined) return fail(`${runId} is a per-task run: there is no batch to check`)
+  batch.checked = checked
+  await saveRun(ctx.stateDir, found.value)
+  return ok(`checked ${batch.branch} at ${sha8(checked.head_sha)}: ` + (checked.check === 'passed'
     ? `${CHECK_REL} passed`
     : `no ${CHECK_REL} declared — run the tests and the typecheck in ${batch.checkout} yourself`))
 }
 
+/**
+ * The one local run of every landing together, in the batch checkout at the head
+ * just fetched. `ship` clears only once the PR's head is the head recorded here,
+ * so a fix-task landing forces a fresh check before CI. The fetch and the check run
+ * once, outside the retried save, for the reason `prepareSubmission` gives.
+ */
 export async function cmdBatchCheck(
   ctx: Ctx, input: { repoKey: string | null; runId: string | null },
   check: (checkout: string, logPath: string) => Promise<CheckRun> = runCheck,
 ): Promise<CmdResult> {
-  const ranChecks = new Map<string, Promise<CheckRun>>()
-  const checkOnce: CheckOnce = (checkout, logPath, head) => {
-    let ran = ranChecks.get(head)
-    if (ran === undefined) {
-      ran = check(checkout, logPath)
-      ranChecks.set(head, ran)
-    }
-    return ran
-  }
-  return retryingOnStale(batchCheck)(ctx, input, checkOnce)
+  const prepared = await batchCheck(ctx, input, check)
+  if (!prepared.ok) return prepared.result
+  return retryingOnStale(recordBatchCheck)(ctx, prepared.value.runId, prepared.value.checked, input.repoKey)
 }
 
 export type CloseBead = (repoKey: string, bead: string, reason: string, force: boolean) => Promise<Done | BdFailure>

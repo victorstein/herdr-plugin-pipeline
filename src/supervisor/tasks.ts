@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
+import { DEFAULT_STALL_MINUTES } from '../lib/config'
 import {
-  baseLine, dependencyMerges, type DispatchBase, fetchFromOrigin, type RemoteHead, remoteBranchHead, trackingRefspec,
+  baseLine, dependencyMerges, type DispatchBase, fetchFromOrigin, type RemoteHead, remoteBranchHeadCooled,
+  trackingRefspec,
 } from '../lib/dispatch-base'
 import { openDecisionFor } from '../lib/decisions'
 import {
@@ -13,6 +15,7 @@ import type { RunEffect } from '../lib/ledger'
 import type { PrView } from '../lib/gh'
 import {
   advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
+  syncOverdue,
 } from '../lib/machine'
 import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
@@ -28,7 +31,7 @@ import { changedPaths, fileAt, type FileAtRef, isAncestor, numstat, resolveCommi
 import { artifactBase, REVIEWS_DIR, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
-import type { ReviewSkip, Run, Task, TaskPhase } from '../lib/types'
+import type { Batch, ReviewSkip, Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import type { CheckSubmission } from './courier'
 import { runTeardown, type TeardownDeps } from './teardown'
@@ -90,11 +93,12 @@ export interface LandingGit {
 }
 
 export const LOCAL_LANDING_GIT: LandingGit = {
-  isAncestor, remoteBranchHead, resolve: resolveCommit, changedPaths, fetch: fetchFromOrigin,
+  isAncestor, remoteBranchHead: (repoRoot, branch) => remoteBranchHeadCooled(repoRoot, branch),
+  resolve: resolveCommit, changedPaths, fetch: fetchFromOrigin,
 }
 
 /** STALL_MINUTES, the orchestrator's cadence: a stuck sync holds up every landing behind it. */
-const DEFAULT_SYNC_YIELD_MS = 15 * 60_000
+const DEFAULT_SYNC_YIELD_MS = DEFAULT_STALL_MINUTES * 60_000
 
 const UNCOMMITTED_SAMPLE = 3
 
@@ -229,7 +233,7 @@ function actorPane(run: Run, task: Task): string | null {
   return taskRow(task.phase).actor === 'worker' ? task.pane_id : run.orchestrator_pane
 }
 
-const batchRefOf = (run: Run): string => `refs/remotes/origin/${run.batch?.branch ?? ''}`
+const batchRefOf = (batch: Batch): string => `refs/remotes/origin/${batch.branch}`
 
 /** A push of review verdicts alone changes nothing that lands, so it neither moves the branch nor needs a check. */
 async function addsOnlyReviews(repoRoot: string, from: string, to: string, git: LandingGit): Promise<boolean> {
@@ -245,7 +249,7 @@ async function addsOnlyReviews(repoRoot: string, from: string, to: string, git: 
 async function landingFacts(run: Run, task: Task, git: LandingGit): Promise<LandingFacts | null> {
   const landSha = task.land_sha
   if (run.batch === undefined || !landSha) return null
-  const batchRef = batchRefOf(run)
+  const batchRef = batchRefOf(run.batch)
   const batchHead = await git.resolve(run.repo_root, batchRef)
   if (batchHead === null) return null
   const landed = await git.isAncestor(run.repo_root, landSha, batchRef)
@@ -253,7 +257,8 @@ async function landingFacts(run: Run, task: Task, git: LandingGit): Promise<Land
   if (landed === null || upToDate === null) return null
   const remote = await git.remoteBranchHead(run.repo_root, task.branch)
   if (!remote.ok) return null
-  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git))
+  const moved = remote.sha !== null && !(await addsOnlyReviews(run.repo_root, landSha, remote.sha, git)) &&
+    await git.isAncestor(run.repo_root, remote.sha, batchRef) !== true
   const submitted = task.submission?.head_sha
   const checked = submitted !== undefined && await addsOnlyReviews(run.repo_root, submitted, landSha, git)
   return { movedTo: moved ? remote.sha : null, landed, upToDate, checked, batchHead }
@@ -547,13 +552,16 @@ async function gatherSignals(
       return landing === null ? null : { ...base, slotMine: true, landing }
     }
     case 'sync': {
-      if (!task.land_sha) return base
-      const landed = await git.isAncestor(run.repo_root, task.land_sha, batchRefOf(run))
+      if (!task.land_sha || run.batch === undefined) return base
+      const landed = await git.isAncestor(run.repo_root, task.land_sha, batchRefOf(run.batch))
       if (landed === null) return null
       const landing = landed ? await landingFor(task) : undefined
       if (landing === null) return null
       const yieldAfterMs = deps.syncYieldMs ?? DEFAULT_SYNC_YIELD_MS
-      return { ...base, landing, yieldAfterMs, yieldTo: await yieldCandidates(run, task, yieldAfterMs, landingFor) }
+      const atWork = task.pane_id !== null && !actorIdle
+      return {
+        ...base, landing, yieldAfterMs, yieldTo: atWork ? [] : await yieldCandidates(run, task, yieldAfterMs, landingFor),
+      }
     }
     case 'merge': {
       if (singlePr) {
@@ -685,17 +693,20 @@ async function withSinglePrSkip<S extends { headSha: string | null }>(
   if (!remote.ok || remote.sha === null) return signals
   if (!(await fetchedAll(run, [run.batch.branch, task.branch], git))) return signals
   if (await git.isAncestor(run.repo_root, submitted, remote.sha) !== true) return signals
-  const skip = await sizedSkip(run, candidate, batchRefOf(run), remote.sha, deps)
+  const skip = await sizedSkip(run, candidate, batchRefOf(run.batch), remote.sha, deps)
   return skip === null ? signals : { ...signals, reviewSkip: skip, headSha: remote.sha, headContainsSubmission: true }
 }
 
-/** Only once the holder is past its window with nothing submitted: before that it is working, and costs no read. */
+/**
+ * Only once the holder is past its window with nothing submitted, and never while its
+ * worker is at work: a conflict resolution and a long check can outlast the window, and
+ * a yield then turns away the submit the check was for. A worker that never finishes
+ * has its own stall ladder, which escalates it and passes the slot on.
+ */
 async function yieldCandidates(
   run: Run, task: Task, yieldAfterMs: number, landingFor: LandingFor,
 ): Promise<string[]> {
-  const sync = task.submission
-  if (sync?.kind === 'sync' && sync.at >= task.phase_entered_at) return []
-  if (Date.now() - task.phase_entered_at < yieldAfterMs) return []
+  if (!syncOverdue(task, yieldAfterMs, Date.now())) return []
   return (await eligibleToLand(run, landingFor, task)).map((t) => t.task_id)
 }
 

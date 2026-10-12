@@ -107,6 +107,12 @@ test('the clean-up deletes only task branches whose head landed, and names the r
   const handoff = revParse(other, 't1-branch')
 
   const landedOnly = runIn(clone, [mkTask({ task_id: 't1', branch: 't1-branch' }), mkTask({ task_id: 't3', branch: 't3-branch' })])
+  const unread = await cleanupLines(landedOnly, landedOnly.batch!)
+  expect(unread.join('\n')).not.toContain('--delete t1-branch')
+  expect(unread).toContain(`  t1-branch is at ${handoff.slice(0, 8)}, which could not be compared with batch/x here; ` +
+    'fetch it and check before deleting')
+
+  git(['fetch', '-q', 'origin', '+refs/heads/t1-branch:refs/remotes/origin/t1-branch'], clone)
   const lines = await cleanupLines(landedOnly, landedOnly.batch!)
   expect(lines.join('\n')).not.toContain('--delete t1-branch')
   expect(lines).toContain(`  t1-branch has commits that did not land: ${handoff.slice(0, 8)}; review before deleting`)

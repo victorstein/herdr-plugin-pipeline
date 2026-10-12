@@ -49,6 +49,15 @@ test('the root package\'s sections win over the top level, and no config means r
   expect(checkReleaseTitle('perf: faster', DEFAULT_RELEASE_SECTIONS)).toEqual({ ok: true, note: null })
 })
 
+test('the default list is conventional-changelog-conventionalcommits\', which release-please uses unconfigured', () => {
+  const shown = DEFAULT_RELEASE_SECTIONS.filter((s) => s.hidden !== true).map((s) => s.type)
+  const hidden = DEFAULT_RELEASE_SECTIONS.filter((s) => s.hidden === true).map((s) => s.type)
+  expect(shown).toEqual(['feat', 'feature', 'fix', 'perf', 'revert'])
+  expect(hidden).toEqual(['docs', 'style', 'chore', 'refactor', 'test', 'build', 'ci'])
+  expect(checkReleaseTitle('feature: bookmarks', DEFAULT_RELEASE_SECTIONS)).toEqual({ ok: true, note: null })
+  expect(checkReleaseTitle('deps: bump bun', DEFAULT_RELEASE_SECTIONS).ok).toBe(false)
+})
+
 test('this repo\'s own config is read: chore is hidden, refactor is shown', () => {
   const sections = releaseSections(join(import.meta.dir, '..'))
   expect(checkReleaseTitle('refactor: x', sections)).toEqual({ ok: true, note: null })

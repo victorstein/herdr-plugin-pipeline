@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
@@ -565,7 +566,9 @@ export function formatStatus(
 
 function shipLines(run: Run, batch: Batch): string[] {
   const ci = batch.ci === null ? '' : ` ci:${batch.ci}${batch.ci_head ? ` (on ${sha8(batch.ci_head.sha)})` : ''}`
-  const pr = batch.pr === null ? '  · final PR: not opened' : `  · PR #${batch.pr}${ci}`
+  const pr = batch.pr === null
+    ? '  · final PR: none seen yet — the supervisor records it on its first tick after GitHub lists it'
+    : `  · PR #${batch.pr}${ci}`
   if (run.phase === 'ship') {
     return [pr, '  YOUR move: check the batch and open its PR (the ship prompt has the commands)']
   }
@@ -580,6 +583,15 @@ function shipLines(run: Run, batch: Batch): string[] {
  * How a single-PR run ships, on every phase: a landing is invisible on the default
  * branch until the batch PR merges, and nothing else in status would say where it is.
  */
+/**
+ * Where to read what the batch declares: a task checkout cut from it, or the batch
+ * checkout, before the user's working copy, which may sit on any branch.
+ */
+function batchLineage(run: Run, batch: Batch): string {
+  const checkouts = [...run.tasks.map((t) => t.checkout_path), batch.checkout]
+  return checkouts.find((path): path is string => path !== null && existsSync(path)) ?? run.repo_root
+}
+
 function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number): string[] {
   const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).length
   const holder = landingSlotHolder(run.tasks)
@@ -591,7 +603,7 @@ function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: 
     ...(next.length === 0 ? [] : [`next: ${next.join(', ')}`]),
   ].join(' · ')
   const warnings: string[] = []
-  if (repoCheck(run.repo_root).kind === 'none') {
+  if (repoCheck(batchLineage(run, batch)).kind === 'none') {
     warnings.push(`  ⚠ no ${CHECK_REL} in this repo: each landing is checked only by its worker's own test run`)
   }
   if (batch.fetch_error) {
@@ -690,7 +702,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     ...verdicts.map(([key, path]) => `  ${key}: ${path}`),
     ...(run.batch === undefined ? [
       `pr:         ${task.pr === null ? 'none' : `#${task.pr}`}`,
-      `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${task.ci_head.sha.slice(0, 8)})` : ''}`,
+      `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${sha8(task.ci_head.sha)})` : ''}`,
     ] : landingDetail(task, run.batch, now)),
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
     `notes:      ${orNone(task.notes)}`,

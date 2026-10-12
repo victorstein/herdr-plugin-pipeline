@@ -1,7 +1,6 @@
 import { fetchFromOrigin, trackingRefspec } from '../lib/dispatch-base'
-import type { Run, TaskPhase } from '../lib/types'
-
-const LANDING_PHASES: ReadonlySet<TaskPhase> = new Set(['land-queue', 'sync', 'merge'])
+import { LANDING_PHASES } from '../lib/phases'
+import type { Run } from '../lib/types'
 
 /**
  * One fetch of the batch branch alone, by explicit refspec, for each single-PR run

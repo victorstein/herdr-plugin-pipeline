@@ -75,6 +75,14 @@ test('a declared check is named, and the ruleset that makes the gate server-side
   expect(out.text).toContain('batch/*')
 })
 
+test('the ruleset recommended names the batch branch\'s own pattern, not batch/* for a name outside it', async () => {
+  const { clone } = cloneOfRemote('main')
+  const out = await cmdStart(ctx(), input(clone, { batchBranch: 'release/reader-menu' }))
+  expect(out.ok).toBe(true)
+  expect(out.text).toContain('ruleset: protect release/reader-menu from force-pushes and deletion')
+  expect(out.text).not.toContain('batch/*')
+})
+
 test('a retry after a start whose save failed adopts the branch it already pushed', async () => {
   const { remote, clone } = cloneOfRemote('main')
   const head = revParse(clone, 'origin/main')

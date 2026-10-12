@@ -84,6 +84,17 @@ export class Gh {
     return rows?.[0]?.number ?? null
   }
 
+  /** For a refusal that must not fail open, where `prForBranch`'s null would read a gh outage as "no PR". */
+  async openPrForBranch(branch: string): Promise<{ pr: number | null } | { error: string }> {
+    const { code, text, stderr } = await this.run(['pr', 'list', '--head', branch, '--json', 'number', '--limit', '1'])
+    if (code !== 0) return { error: stderr.trim() || `gh exited ${code}` }
+    try {
+      return { pr: (JSON.parse(text) as { number: number }[])[0]?.number ?? null }
+    } catch {
+      return { error: `gh pr list printed no JSON: ${text.trim()}` }
+    }
+  }
+
   /**
    * The head's rollup and its workflow runs come from the same head sha, so a push
    * between the calls cannot pair one commit's checks with another's. A run still

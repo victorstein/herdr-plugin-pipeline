@@ -223,14 +223,18 @@ release-please's defaults with no config): `feet:` is refused, and a type the co
 with a note. `submit` also refuses uncommitted or untracked work, a head origin does not have, a
 branch with nothing to land outside `docs/superpowers/`, a re-entry that only merged the batch since
 the review sent it back, and a branch with an open PR, which would carry every sibling's commits
-into the default branch. Then it runs the repo's check.
+into the default branch; when GitHub cannot say whether there is one, it refuses too. Then it runs
+the repo's check. Because the pipeline's own documents do not count as something to land, a task
+whose whole deliverable is a document under `docs/superpowers/` can never be submitted: run such a
+task per-task, or keep its document elsewhere.
 
 **`.claude/pipeline-check`.** An executable the repo declares beside `.claude/pipeline-bootstrap`,
 run by `submit` on the pushed tree, with its output logged under the run's `.checks/` directory and
 the last 40 lines printed on failure. With no per-task CI it is the only test a landed tree gets
 before the final PR, so a repo wants one before its first single-PR run. With none, `submit` records
 the landing as unchecked, the workers fall back to running the tests themselves, and `hpipe status`
-says so. A check longer than an agent's 10-minute Bash timeout does not fit.
+says so. `submit` stops a check still running after 9 minutes, with everything it started, and
+refuses: an agent's Bash call times out at 10, so a longer suite does not fit.
 
 **Landing, one at a time.** A task whose last review clears waits in `land-queue`. One task at a
 time takes the landing slot, oldest first, among the tasks that have an agent or need no sync:
@@ -247,7 +251,8 @@ review sends the task back through `sync`, so it lands reviewed. A **clean** syn
 the reviewed head an automatic merge of the batch, by `git merge-tree` — lands without another
 review. Anything else, a hand-resolved conflict or a new commit, goes back through the task's reviews
 first. A holder that has not submitted within `STALL_MINUTES` while another task waits gives the slot
-up, and a paneless task that must sync waits for an agent the orchestrator starts in its worktree.
+up, unless its worker is still at work, and a paneless task that must sync waits for an agent the
+orchestrator starts in its worktree.
 A task's bead closes when it lands, naming the batch branch; its code reaches the default branch only
 with the batch PR.
 

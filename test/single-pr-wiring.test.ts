@@ -83,7 +83,7 @@ async function phases(runId: string): Promise<Record<string, TaskPhase>> {
 async function workAndSubmit(runId: string, taskId: string, worktree: string, rel: string, title: string | null) {
   commitAs(worktree, rel, `${rel}\n`)
   git(['push', '-q', 'origin', 'HEAD'], worktree)
-  return cmdSubmit(ctx(), { taskId, title, repoKey: null, runId }, { openPr: async () => null })
+  return cmdSubmit(ctx(), { taskId, title, repoKey: null, runId }, { openPr: async () => ({ pr: null }) })
 }
 
 /** A reviewer: its verdict file is committed and pushed onto the branch it reviewed. */
@@ -109,7 +109,8 @@ async function closeBead(runId: string, taskId: string): Promise<string> {
   return closeReason(taskOf(run, taskId), run)
 }
 
-test('two tasks land one at a time on the batch branch, which ships as one squash-merged PR', async () => {
+/** `start --single-pr`, then each task registered, dispatched and in `implement` in a worktree of its own. */
+async function startedRun(taskIds: string[]) {
   stateDir = mkdtempSync(join(tmpdir(), 'single-pr-wiring-'))
   const { remote, clone } = cloneOfRemote('main')
   mkdirSync(join(clone, '.claude', 'agents'), { recursive: true })
@@ -120,7 +121,6 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   git(['commit', '-qm', 'chore: declare the check'], clone)
   git(['push', '-q', 'origin', 'HEAD:main'], clone)
 
-  // start --single-pr
   const started = await cmdStart(ctx(), {
     title: 'reader menu', repoKey: clone, repoRoot: clone, socketPath: '/s', paneId: 'w1:p1', workspaceId: 'w1',
     singlePr: true, batchBranch: 'batch/menu',
@@ -130,33 +130,35 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   const base = revParse(clone, 'refs/remotes/origin/main')
   expect(started.text).toContain(`batch: batch/menu at ${base.slice(0, 8)}`)
 
-  // two tasks, registered and dispatched from the batch as just fetched
-  for (const [id, bead] of [['t1', 'hp-1'], ['t2', 'hp-2']]) {
+  for (const [index, id] of taskIds.entries()) {
     const registered = await cmdTask(ctx(), {
-      branch: `${id}-branch`, bead, surface: 'core', notes: '', dependsOn: [], files: [], keepWorktree: false,
-      repoKey: clone, runId, tier: 'light',
+      branch: `${id}-branch`, bead: `hp-${index + 1}`, surface: 'core', notes: '', dependsOn: [], files: [],
+      keepWorktree: false, repoKey: clone, runId, tier: 'light',
     })
     expect(registered.text, id).toContain(`base: ${base} (origin/batch/menu as just fetched)`)
   }
 
   const worktrees: Record<string, string> = {}
-  {
-    const run = await loaded(runId)
-    for (const task of run.tasks) {
-      const worktree = join(tempDir('hpipe-wt-'), task.task_id)
-      git(['worktree', 'add', '-q', '-b', task.branch, worktree, base], clone)
-      git(['push', '-q', '-u', 'origin', task.branch], worktree)
-      worktrees[task.task_id] = worktree
-      Object.assign(task, {
-        phase: 'implement', phase_entered_at: Date.now() - 1_000, checkout_path: worktree,
-        workspace_id: `w-${task.task_id}`, pane_id: `w-${task.task_id}:p1`, adopted_at: Date.now(),
-      })
-      delete task.awaiting_brief
-    }
-    run.intake_closed = true
-    run.phase = 'execute'
-    await saveRun(stateDir, run)
+  const run = await loaded(runId)
+  for (const task of run.tasks) {
+    const worktree = join(tempDir('hpipe-wt-'), task.task_id)
+    git(['worktree', 'add', '-q', '-b', task.branch, worktree, base], clone)
+    git(['push', '-q', '-u', 'origin', task.branch], worktree)
+    worktrees[task.task_id] = worktree
+    Object.assign(task, {
+      phase: 'implement', phase_entered_at: Date.now() - 1_000, checkout_path: worktree,
+      workspace_id: `w-${task.task_id}`, pane_id: `w-${task.task_id}:p1`, adopted_at: Date.now(),
+    })
+    delete task.awaiting_brief
   }
+  run.intake_closed = true
+  run.phase = 'execute'
+  await saveRun(stateDir, run)
+  return { remote, clone, runId, worktrees }
+}
+
+test('two tasks land one at a time on the batch branch, which ships as one squash-merged PR', async () => {
+  const { remote, clone, runId, worktrees } = await startedRun(['t1', 't2'])
 
   // implement → pr-review on each submission
   expect((await workAndSubmit(runId, 't1', worktrees.t1!, 'src/menu.ts', "fix(menu): don't re-render")).ok).toBe(true)
@@ -196,7 +198,7 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   git(['fetch', '-q', 'origin', '+refs/heads/batch/menu:refs/remotes/origin/batch/menu'], worktrees.t1!)
   git(['merge', '-q', '--no-edit', 'origin/batch/menu'], worktrees.t1!)
   git(['push', '-q', 'origin', 'HEAD'], worktrees.t1!)
-  const synced = await cmdSubmit(ctx(), { taskId: 't1', title: null, repoKey: null, runId }, { openPr: async () => null })
+  const synced = await cmdSubmit(ctx(), { taskId: 't1', title: null, repoKey: null, runId }, { openPr: async () => ({ pr: null }) })
   expect(synced.text).toContain('a clean merge of batch/menu: it lands next')
   await supervisorTick(runId, verdicts)
   expect(await phases(runId)).toEqual({ t1: 'merge', t2: 'done' })
@@ -227,10 +229,10 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   const verdictPath = absoluteArtifactPath(toReview.run, null)!
   mkdirSync(join(verdictPath, '..'), { recursive: true })
   writeFileSync(verdictPath, 'VERDICT: CLEAR\n')
-  // Fresh means written after the phase entry, to the millisecond; a reviewer is
-  // never that quick, but this write was, about one run in three.
-  const reviewedAt = new Date(toReview.run.phase_entered_at + 1_000)
-  utimesSync(verdictPath, reviewedAt, reviewedAt)
+  // A verdict is fresh only when written after the phase entry; written in the same millisecond, as
+  // a fast test can, it reads as stale. A reviewer takes minutes.
+  const writtenAfterEntry = new Date(toReview.run.phase_entered_at + 1_000)
+  utimesSync(verdictPath, writtenAfterEntry, writtenAfterEntry)
 
   const toShip = await evaluate()
   expect(toShip.run.phase).toBe('ship')
@@ -268,4 +270,28 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   expect(shipped.result.nextPrompt).toContain(`git -C '${clone}' push origin --delete t1-branch t2-branch`)
   expect((await listRuns(stateDir, 'personal'))[0]?.batch?.merge_commit).toBe('f00dfeed00')
   expect(remote.length).toBeGreaterThan(0)
+}, 60_000)
+
+test('a branch tip landed in place of the reviewed head is recorded and closes, rather than wedging in sync', async () => {
+  const { clone, runId, worktrees } = await startedRun(['t1'])
+  const worktree = worktrees.t1!
+  expect((await workAndSubmit(runId, 't1', worktree, 'src/menu.ts', 'fix(menu): close on escape')).ok).toBe(true)
+  const verdicts = new Map<string, 'CLEAR'>()
+  await supervisorTick(runId, verdicts)
+  pushVerdict(worktree, 'hp-1')
+  verdicts.set('t1', 'CLEAR')
+  await supervisorTick(runId, verdicts)
+  await supervisorTick(runId, verdicts)
+  expect(await phases(runId)).toEqual({ t1: 'merge' })
+  const landSha = taskOf(await loaded(runId), 't1').land_sha!
+
+  // a commit pushed after the review, and the orchestrator lands the branch tip instead of the printed sha
+  commitAs(worktree, 'src/late.ts', 'late\n')
+  git(['push', '-q', 'origin', 'HEAD'], worktree)
+  sh(`git push origin ${revParse(worktree, 'HEAD')}:refs/heads/batch/menu`, clone)
+
+  const run = await supervisorTick(runId, verdicts)
+  expect(taskOf(run, 't1').phase).toBe('close')
+  expect(taskOf(run, 't1').landed?.map((l) => l.land_sha)).toEqual([landSha])
+  expect(taskOf(run, 't1').merge_commit).toBe(landSha)
 }, 60_000)

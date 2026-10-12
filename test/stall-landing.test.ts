@@ -46,6 +46,12 @@ test('with no holder, a waiting task is probed, and the clause says the run is n
   expect(clause).toContain('git -C')
 })
 
+test('with no holder, only the queue head is told it is first in line; one behind it is told who is', () => {
+  const run = singlePr([mkTask({ task_id: 't2', phase_entered_at: LONG_AGO + 1 }), mkTask({ task_id: 't3' })])
+  expect(stallAwaiting(run, run.tasks[1]!, 'hp', NOW).clause).toContain('this one is first in line, yet it has not')
+  expect(stallAwaiting(run, run.tasks[0]!, 'hp', NOW).clause).toContain('t3 is first in line, ahead of this one, yet')
+})
+
 test('the land-queue clause names a failing fetch of the batch', () => {
   const run = singlePr([mkTask({ task_id: 't2' })])
   run.batch!.fetch_error = { reason: "couldn't find remote ref batch/x", since: NOW - 12 * 60_000 }

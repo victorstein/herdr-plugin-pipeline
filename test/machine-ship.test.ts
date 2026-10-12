@@ -38,8 +38,9 @@ test('a cleared branch review ships a single-PR run', () => {
 
 test('ship clears once the PR is found at a head that moved and was checked, and records the PR', () => {
   const run = fixture('ship', { checked: { head_sha: 'h1', at: 1, check: 'passed' } })
-  expect(advanceRun(run, signals({ actorIdle: false, batchPr: pr() }))).toBeNull()
   expect(advanceRun(run, signals({ batchPr: null }))).toBeNull()
+  expect(advanceRun(run, signals({ actorIdle: false, batchPr: pr() }))).toBeNull()
+  expect(run.batch?.pr).toBe(301)
   expect(advanceRun(run, signals({ batchPr: pr() }))?.phase).toBe('ship-ci')
   expect(run.batch?.pr).toBe(301)
 })

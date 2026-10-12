@@ -1066,43 +1066,107 @@ None needed the owner. These answers hold over §1–§9 wherever the two disagr
 
 Where the code departs from the text above, and why.
 
-- **`merge` reads the branch head first, and `sync`'s shortcut is narrower.** Read literally, `merge`
-  sends a moved branch to `sync`, and `sync` sends a `land_sha` already on the batch to `merge`: a task
-  whose head landed while its branch moved past it would bounce between the two every tick. So `sync`
-  goes straight to `merge` only when `land_sha` is on the batch **and** the branch has not moved past
-  it. A moved branch waits for the worker's sync, whose walk meets the extra commit, so it lands
-  reviewed.
+- **A landing is always recorded, and a branch head already on the batch has not moved.** Read
+  literally, `merge` sends a moved branch to `sync`, and `sync` sends a `land_sha` already on the batch to
+  `merge`: a task whose head landed while its branch moved past it would bounce between the two every
+  tick. The first cut read the branch head first in `merge`, which dropped the landing of a head that
+  had landed, and wedged a task whose whole tip the orchestrator pushed: `sync` then had nothing to
+  merge, and `submit` refused it as "nothing to land" for good. Now:
+  - The branch counts as moved only when its head adds more than review verdicts to `land_sha` **and**
+    `origin/<batch>` does not already contain it. A tip landed in place of `land_sha` therefore closes
+    the task, its unreviewed commits on the batch as §7 accepts.
+  - Whenever `land_sha` is on the batch, `merge` (and `land-queue`, meeting the same case) appends its
+    `landed` line first. A branch that has not moved then closes the task. One that has goes to `sync`
+    with the line already recorded, and `merged_at_ms` stays unset, so the bead stays open while the
+    extra commits go through review and land as a second landing.
+  - `sync` goes straight to `merge` only when `land_sha` is on the batch and the branch has not moved,
+    so the two rows never bounce: a moved branch waits for the worker's sync, whose walk meets the extra
+    commit, so it lands reviewed.
 - **"Moved" and "checked" ignore review verdicts.** A branch head that adds only files under
   `docs/superpowers/reviews/` to `land_sha` has not moved, and a `land_sha` that adds only those to the
   submitted head is checked (the after-pass-2 rule). Both diffs run in `repo_root`'s object store; a
   diff git cannot read, for a commit pushed from another clone, counts as moved and unchecked, which
   costs a sync and never a wrong landing.
+- **The tick's `ls-remote` cools down after a failure.** Landing reads one branch head per task in
+  `merge`, `land-queue` and a landed `sync` on every tick, and the `done` notice one per task, each under
+  the 15 s network budget. With origin unreachable that cost every run in the session 15 s per read per
+  tick, so a failure answers for the repo's origin for 60 s, as a failed default-branch lookup does.
+  `submit`'s reads are not cooled. The `done` notice also names a branch whose head it could not compare
+  with the batch as unknown, not as "has commits that did not land".
 - **Yielding, and the queue head, consider only tasks that can take the slot.** A holder yields only
   to a waiting task with a pane, or one that lands without a sync. Yielding to a paneless task that
   must sync would hand the slot to nobody and let the holder take it back at once, re-sending its sync
   prompt every window.
+- **A holder whose worker is at work never yields.** M3's window counts from the sync's entry, and a
+  conflict resolution plus a long check can outlast it: the yield then turned away the submit the check
+  was for, after the check ran. A `sync` holder yields only with no pane, or with its worker read idle;
+  one that never finishes is escalated by its own stall ladder, which passes the slot on. A `submit` from
+  `land-queue` says the task waits for the slot, and that the sync prompt comes when it must sync.
 - **A paneless `sync` is still evaluated.** Its prompt and brief are queued for the next agent, and its
   edge still runs with the worker read as busy, so it can yield the slot or record a landing that
   already happened. A transition into `sync` with no pane queues the same entry instead of handing
   `main.ts` a prompt with no pane to drop.
 - **`hpipe task --branch` refuses the batch and default names in a single-PR run only.** The run
   records both; refusing the default name per-task would need a network lookup on every registration.
+- **Phase labels are managed per mode.** The reconciler removes every managed label a bead's task does
+  not want, and deriving the set from every `TASK_ROWS` phase made `sync` and `land-queue` managed in a
+  per-task run too, so a human's `sync` label was stripped from any bead such a run claimed. A run now
+  manages only the phase names of rows its mode enters, so a per-task run manages exactly the labels it
+  did before, and §6's "on v4 runs' beads only" holds for removing the labels as well as adding them.
 - **The worker brief keeps its per-task wording.** "Not into this PR" became `{{change_noun}}` rather
   than a fixed "change", so a per-task run renders exactly today's text, as the edited prompts must.
   The `handoff-pr`/`handoff-batch` fragments carry the paragraph after step 4 too, since it names the
   PR head. A single-PR review names its subject by the range, `` `batch/x...t3-branch` ``.
-- **A task rewound while the run ships moves it to `execute` without reopening intake.** The rewound
-  task holds `execute` until it finishes; registration still reopens intake, as it always has.
+- **A task rewound while the run reviews or ships moves it to `execute` without reopening intake.** m4
+  named the three ship phases; `branch-review` is in the set too, as it is for registration, since a run
+  left there would go on to `ship` with the task in flight. The rewound task holds `execute` until it
+  finishes; registration still reopens intake, as it always has. Whether the batch PR has merged is asked
+  of GitHub once, before the retried save, for the reason `submit`'s checks run there.
+- **The batch checkout gets the bootstrap a task worktree gets.** Creating it ends with
+  `(cd '<checkout>' && ./.claude/pipeline-bootstrap)` when the repo declares one, as §4 says, and the
+  pull path adds the same line "if the pull changed what it builds", as `sync.md` does. Without it,
+  `batch-check` ran the check in a tree with no dependencies installed, and `ship.md` sent a subagent to
+  fix a toolchain as though it were a defect.
+- **The check runs under a 9-minute deadline, in its own process group.** `submit` and `batch-check`
+  run inside the agent's 10-minute Bash timeout, which killed the CLI with nothing said and left a hung
+  check's children running. At the deadline the whole group is killed and the refusal says the check did
+  not finish, with its log's tail. Making a slow suite fit is still the repo's business.
+- **`ship`'s conflict check fetches `<into>` first.** The ship steps fetch only the batch, so §4's
+  `merge-tree` read an `origin/<into>` as old as its last fetch, perhaps the start, and a PR opened with
+  conflicts against a moved default branch gets no CI, leaving `ship-ci` to wait for good. The step now
+  renders the explicit-refspec fetch of `<into>` and the `merge-tree` as one command, in the checkout.
 - **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
   that holds uncommitted work, so the head it records is the tree it checked. With no check declared
   it still records the head, as `check: 'none'`, so `ship` can clear.
+- **`submit`'s open-PR refusal fails closed.** `prForBranch` reads any gh failure as "no PR", so a gh
+  outage let a branch with an open PR through, and that PR would carry every sibling into the default
+  branch. `submit` asks through `openPrForBranch`, which tells the two apart, and refuses with gh's error
+  when it cannot say.
+- **Branch names are quoted where a command needs it.** `--batch-branch` is checked only by
+  `git check-ref-format --branch`, which accepts `batch/it's`, `batch/$(id)` and `batch/a;b`, and m6
+  quoted titles and paths but not branches. Every pasted command now passes a branch, a refspec or a
+  range through `shellWord`, which quotes only a word the shell would split or run, so an ordinary name,
+  and so every per-task render, reads exactly as before.
+- **A document-only task cannot be submitted, and the docs say so.** m3's "nothing to land" excludes all
+  of `docs/superpowers/`, so a task whose deliverable is a design doc there, this repo's own convention,
+  is refused every time. The exclusion stands, since a merge that brings only sibling docs must not count
+  as work; the README and the skill now say to run such a task per-task or keep its document elsewhere.
 - **Small additions to the records.** `Submission.dirty_at` names the first commit the walk could not
-  account for, for the review's resync note. `start` prints the `batch/*` ruleset recommendation as a
-  third line. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
+  account for, for the review's resync note. `start` prints the ruleset recommendation as a third
+  line, naming `batch/*`, or the branch itself when `--batch-branch` names one outside it. Status reads
+  whether a check is declared from a task checkout or the batch checkout, since the user's working copy
+  may sit on any branch, and the `land-queue` probe names the task first in line rather than telling
+  every waiting task it is. `closeReason` takes the run as an optional second argument. `evaluateRun` and the run
   renders take the state dir explicitly, since `ship` and `ship-merge` write the PR body and squash
   body beside the run.
 - **`ship-merge` records a merge whatever the orchestrator is doing**: the merge is GitHub's fact, as
-  a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle.
-- **release-please's default sections** are coded from memory of its conventional-commit defaults
-  (`feat`, `fix`, `perf`, `revert` shown; `docs`, `style`, `chore`, `refactor`, `test`, `build`, `ci`
-  hidden). Verify 6 settles them on the smoke repo.
+  a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle to clear,
+  and it records the PR it finds whatever the orchestrator is doing: on the smoke run, status said "final
+  PR: not opened" for seconds after `gh pr create`, while the orchestrator's turn went on. Status now says
+  "none seen yet" until the supervisor has seen one.
+- **release-please's default sections** are read from source, not memory. With no `changelog-sections`
+  configured, release-please passes none to its `conventional-changelog-conventionalcommits` preset (^6),
+  whose list shows `feat`, `feature`, `fix`, `perf` and `revert` and hides `docs`, `style`, `chore`,
+  `refactor`, `test`, `build` and `ci`; the writer drops any other type. release-please's own heading
+  map, which names `deps` and gives `docs` a heading, only labels sections a repo configures. The first
+  cut missed `feature`.
