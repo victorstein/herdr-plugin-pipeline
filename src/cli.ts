@@ -10,19 +10,25 @@ import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
+import { defaultBatchBranch, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
 import { runChangeVars } from './lib/change-prompt'
+import { checkLine, repoCheck } from './lib/check'
 import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
-import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
+import {
+  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, freshDispatchBase, pushToOrigin,
+  remoteBranchHead,
+} from './lib/dispatch-base'
+import { Gh } from './lib/gh'
 import { detectCycle, gateStatus } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
+  BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
   runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  wasAborted, writeOrchestrator,
+  wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
@@ -32,7 +38,7 @@ import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
   isTier, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow, taskRow, tierOf,
 } from './lib/phases'
-import { supervisorState } from './lib/pidfile'
+import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
@@ -201,16 +207,99 @@ export interface StartBeads {
 
 const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
 
+/** What `start --single-pr` asks outside git: whether the supervisor can drive a batch, and whether GitHub can squash. */
+export interface StartBatch {
+  supervisor: () => Promise<SupervisorState>
+  squashMergeAllowed: (repoRoot: string) => Promise<{ allowed: boolean } | { error: string }>
+}
+
+const realStartBatch = (ctx: Ctx): StartBatch => ({
+  supervisor: () => supervisorState(ctx.stateDir, ctx.session),
+  squashMergeAllowed: (repoRoot) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).squashMergeAllowed(),
+})
+
+interface BatchPlan { branch: string; into: string; commit: string; adopted: boolean }
+
+/**
+ * Every check `start --single-pr` makes before anything is written: each only
+ * reads, so a refusal leaves no Beads store, no branch and no run behind.
+ */
+async function planBatch(
+  ctx: Ctx, run: Run, requested: string | null, deps: StartBatch,
+): Promise<{ ok: true; plan: BatchPlan } | { ok: false; error: string }> {
+  const refuse = (error: string) => ({ ok: false as const, error: `${error}; nothing was started` })
+
+  const supervisor = await deps.supervisor()
+  if (supervisor.state === 'live' && !drivenSchemas(supervisor.info).includes(BATCH_SCHEMA_VERSION)) {
+    return refuse(`the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates single-PR runs ` +
+      'and would never advance this one: close its `Pipeline supervisor` pane and run the plugin\'s `supervisor` ' +
+      'action, then start again')
+  }
+
+  const fetched = await fetchDefaultBranch(run.repo_root)
+  if (fetched.fetchError !== null || fetched.commit === null) {
+    return refuse(`could not fetch the default branch from origin (${fetched.fetchError ?? 'no commit resolved'}), ` +
+      'and a stale base would put work already on it into the batch PR')
+  }
+
+  const branch = requested ?? defaultBatchBranch(run.run_id, run.repo_root)
+  if (branch === fetched.branch) {
+    return refuse(`${branch} is the default branch, which the batch ships into; name a branch of its own`)
+  }
+  const badName = await branchNameRefusal(run.repo_root, branch)
+  if (badName !== null) return refuse(badName)
+
+  const squash = await deps.squashMergeAllowed(run.repo_root)
+  if ('error' in squash) return refuse(`could not ask GitHub whether this repo allows squash merges: ${squash.error}`)
+  if (!squash.allowed) {
+    return refuse('this repo does not allow squash merges, and the batch PR must be squash-merged for its ' +
+      "release notes to apply: allow them in the repo's settings, or start without --single-pr")
+  }
+
+  const onOrigin = await remoteBranchHead(run.repo_root, branch)
+  if (!onOrigin.ok) return refuse(`could not ask origin about ${branch}: ${onOrigin.reason}`)
+  if (onOrigin.sha !== null && onOrigin.sha !== fetched.commit) {
+    return refuse(`${branch} already exists on origin at ${sha8(onOrigin.sha)}, not at ${fetched.branch}'s ` +
+      `${sha8(fetched.commit)}: name another with --batch-branch, or delete it if it is a leftover`)
+  }
+  return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
+}
+
+function batchLines(plan: BatchPlan, repoRoot: string): string[] {
+  const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
+  return [
+    `batch: ${plan.branch} at ${sha8(plan.commit)} (origin/${plan.into} as just fetched${adopted}) — ` +
+      `this run ships as one PR into ${plan.into}`,
+    checkLine(repoCheck(repoRoot)),
+    'ruleset: protect batch/* from force-pushes and deletion (GitHub → Settings → Rules → Rulesets): git ' +
+      'refuses only a landing that is not a fast-forward, and a --force push gets through without one',
+  ]
+}
+
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
-  prefix: string | null
-}, beads: StartBeads = REAL_START_BEADS): Promise<CmdResult> {
+  prefix: string | null; singlePr: boolean; batchBranch: string | null
+}, beads: StartBeads = REAL_START_BEADS, batch: StartBatch = realStartBatch(ctx)): Promise<CmdResult> {
+  if (input.batchBranch !== null && !input.singlePr) {
+    return fail('--batch-branch only goes with --single-pr: a per-task run has no batch branch')
+  }
   const existing = await runForRepo(ctx.stateDir, ctx.session, input.repoKey)
   if (existing.kind !== 'free') {
     const blocker = existing.kind === 'ambiguous' ? existing.runs[0] as Run : existing.run
     return fail(`a run is already active for this repo: ${blocker.run_id} (phase ${blocker.phase}). ` +
       `Finish it, or run: ${hpipeCommand(ctx.pluginRoot)} abort ${blocker.run_id}`)
+  }
+
+  const run = newRun({
+    session: ctx.session, socketPath: input.socketPath,
+    repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
+  })
+  let plan: BatchPlan | null = null
+  if (input.singlePr) {
+    const planned = await planBatch(ctx, run, input.batchBranch, batch)
+    if (!planned.ok) return fail(planned.error)
+    plan = planned.plan
   }
 
   const tools = await beads.tools()
@@ -222,10 +311,18 @@ export async function cmdStart(ctx: Ctx, input: {
   if (!setup.ok) return fail(setup.error)
   const bvBroken = bvProblem(tools.bv)
 
-  const run = newRun({
-    session: ctx.session, socketPath: input.socketPath,
-    repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
-  })
+  // After the Beads setup, so a Beads failure leaves no branch behind.
+  if (plan !== null && !plan.adopted) {
+    const refused = await pushToOrigin(input.repoRoot, plan.commit, plan.branch)
+    if (refused !== null) return fail(`could not push ${plan.branch} to origin: ${refused}; nothing was started`)
+  }
+  if (plan !== null) {
+    withBatch(run, {
+      branch: plan.branch, into: plan.into, base_commit: plan.commit,
+      checkout: join(resolve(ctx.stateDir), 'checkouts', run.run_id),
+      pr: null, head_sha_at_entry: null, ci: null, merged_at_ms: null, merge_commit: null,
+    })
+  }
   run.orchestrator_pane = input.paneId
   await saveRun(ctx.stateDir, run)
   await writeOrchestrator(ctx.stateDir, ctx.session, input.repoKey, {
@@ -240,6 +337,7 @@ export async function cmdStart(ctx: Ctx, input: {
   const preface = [
     ...setupLines(setup, ctx.stateDir),
     ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
+    ...(plan === null ? [] : batchLines(plan, input.repoRoot)),
   ]
   return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }
@@ -1628,7 +1726,7 @@ function positionals(argv: string[]): string[] {
 }
 
 const USAGE: Record<string, string[]> = {
-  start: ['hpipe start <title> [--prefix <bead-prefix>]'],
+  start: ['hpipe start <title> [--prefix <bead-prefix>] [--single-pr [--batch-branch <name>]]'],
   task: ['hpipe task --branch <branch> (--bead <id> | --title <title> --body-file <path> ' +
     '[--acceptance-file <path>]) --surface <surface> [--tier light|standard|heavy] ' +
     '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
@@ -1664,7 +1762,7 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
@@ -1751,9 +1849,17 @@ async function dispatch(argv: string[]): Promise<number> {
         out = fail('--prefix needs a value: hpipe start <title> --prefix <bead-prefix>')
         break
       }
+      const batchBranch = flag(rest, 'batch-branch')
+      if (rest.includes('--batch-branch') && (batchBranch === null || batchBranch.startsWith('--'))) {
+        out = fail('--batch-branch needs a value: hpipe start <title> --single-pr --batch-branch <name>')
+        break
+      }
+      const words = withoutFlag(withoutFlag(rest.filter((arg) => arg !== '--single-pr'), 'prefix'), 'batch-branch')
       out = await cmdStart(ctx, {
-        title: withoutFlag(rest, 'prefix').join(' ').trim(),
+        title: words.join(' ').trim(),
         prefix,
+        singlePr: rest.includes('--single-pr'),
+        batchBranch,
         repoKey: repo!.repoKey, repoRoot: repo!.repoRoot,
         socketPath: process.env.HERDR_SOCKET_PATH ?? '',
         paneId: process.env.HERDR_PANE_ID ?? '',

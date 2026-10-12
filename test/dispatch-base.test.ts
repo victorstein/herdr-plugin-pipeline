@@ -2,7 +2,8 @@ import { afterEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  baseLine, dependencyMerges, describeBase, fetchFromOrigin, forgetDispatchBases, freshDispatchBase, mainlineBranch,
+  baseLine, branchNameRefusal, dependencyMerges, describeBase, fetchDefaultBranch, fetchFromOrigin, forgetDispatchBases,
+  freshDispatchBase, mainlineBranch, pushToOrigin, remoteBranchHead,
 } from '../src/lib/dispatch-base'
 import type { Task } from '../src/lib/types'
 import {
@@ -270,4 +271,37 @@ test('a fetch from origin says why it failed, and nothing when it worked', async
   const missing = await fetchFromOrigin(clone, '+refs/heads/batch/gone:refs/remotes/origin/batch/gone')
   expect(missing).toContain('batch/gone')
   expect(await fetchFromOrigin(tempDir('hpipe-nogit-'), '+refs/heads/main:refs/remotes/origin/main')).not.toBeNull()
+})
+
+test('start reads the default branch and its commit from a fresh fetch, never the cache', async () => {
+  const { remote, clone } = cloneOfRemote('trunk')
+  await freshDispatchBase(clone)
+  const merged = landOnRemote(remote, 'trunk')
+  expect(await fetchDefaultBranch(clone)).toEqual({ branch: 'trunk', commit: merged, fetchError: null })
+})
+
+test('a branch head on origin is read with ls-remote, absent when there is no such branch', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const landed = landOnRemote(remote, 'batch/x')
+  expect(await remoteBranchHead(clone, 'batch/x')).toEqual({ ok: true, sha: landed })
+  expect(await remoteBranchHead(clone, 'batch/none')).toEqual({ ok: true, sha: null })
+  git(['remote', 'set-url', 'origin', join(tempDir('hpipe-gone-'), 'missing.git')], clone)
+  expect((await remoteBranchHead(clone, 'batch/x')).ok).toBe(false)
+})
+
+test('a push to origin never forces: it says why a non-fast-forward was refused', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  const base = revParse(clone, 'HEAD')
+  expect(await pushToOrigin(clone, base, 'batch/x')).toBeNull()
+  expect(await remoteBranchHead(clone, 'batch/x')).toEqual({ ok: true, sha: base })
+  landOnRemote(remote, 'batch/x')
+  const refused = await pushToOrigin(clone, base, 'batch/x')
+  expect(refused).not.toBeNull()
+})
+
+test('a branch name is checked the way git checks one', async () => {
+  const { clone } = cloneOfRemote('main')
+  expect(await branchNameRefusal(clone, 'batch/x')).toBeNull()
+  expect(await branchNameRefusal(clone, 'batch..x')).toContain('batch..x')
+  expect(await branchNameRefusal(clone, 'has space')).toContain('has space')
 })

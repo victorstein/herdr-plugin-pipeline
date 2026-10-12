@@ -90,3 +90,12 @@ test('prForBranch returns the first PR number or null', async () => {
   const bin = await makeFakeBin(dir, { 'pr list': [{ number: 412 }] })
   expect(await new Gh(bin, dir).prForBranch('feat/x')).toBe(412)
 })
+
+test('whether the repo allows squash merges is read from gh, and a gh failure says why', async () => {
+  const allowed = await makeFakeBin(dir, { 'repo view': { squashMergeAllowed: true } })
+  expect(await new Gh(allowed, dir).squashMergeAllowed()).toEqual({ allowed: true })
+  const off = await makeFakeBin(dir, { 'repo view': { squashMergeAllowed: false } })
+  expect(await new Gh(off, dir).squashMergeAllowed()).toEqual({ allowed: false })
+  const broken = await makeFakeBin(dir, { 'repo view': { error: { code: 'auth', message: 'gh auth login' } } })
+  expect(await new Gh(broken, dir).squashMergeAllowed()).toMatchObject({ error: expect.stringContaining('gh auth login') })
+})

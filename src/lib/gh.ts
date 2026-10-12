@@ -104,6 +104,17 @@ export class Gh {
     return { bucket: rollUpBucket(rows), headSha: view.headRefOid }
   }
 
+  /** A batch PR must be squash-merged for its override block to apply, so a run that cannot is refused at start. */
+  async squashMergeAllowed(): Promise<{ allowed: boolean } | { error: string }> {
+    const { code, text, stderr } = await this.run(['repo', 'view', '--json', 'squashMergeAllowed'])
+    if (code !== 0) return { error: stderr.trim() || `gh exited ${code}` }
+    try {
+      return { allowed: (JSON.parse(text) as { squashMergeAllowed?: boolean }).squashMergeAllowed === true }
+    } catch {
+      return { error: `gh repo view printed no JSON: ${text.trim()}` }
+    }
+  }
+
   async prChecksDetail(pr: number): Promise<string> {
     const rows = await this.json<{ bucket: string; name: string; link?: string }[]>(
       ['pr', 'checks', String(pr), '--json', 'bucket,name,state,link'],
