@@ -86,7 +86,7 @@ test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, the
     'dispatch, in order:',
     "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
+    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
     '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
   ])
 })
@@ -111,6 +111,18 @@ test('every recovery path starts the agent with the same flags as the dispatch â
     remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
   ]) {
     expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions --effort xhigh`')
+  }
+})
+
+test('every path names the agent by its bead, so the line runs as printed and `herdr agent list` says whose it is', () => {
+  for (const text of [
+    dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'none' }, 'hp'),
+    startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
+  ]) {
+    expect(text).toContain('herdr agent start hp-1 --kind claude')
+    expect(text).not.toContain('<name>')
   }
 })
 

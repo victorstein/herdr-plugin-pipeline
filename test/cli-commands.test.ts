@@ -1256,7 +1256,7 @@ test('the dispatched return keeps every header line above the one blank line', a
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
+    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
     expect.stringMatching(/ dispatch --task t1 --pane <\.result\.root_pane\.pane_id>$/),
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,

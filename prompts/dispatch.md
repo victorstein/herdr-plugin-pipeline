@@ -12,7 +12,9 @@ it the brief:
     {{hpipe}} dispatch --task <task_id> --pane <root_pane_id>
 
 Both `{{hpipe}} task` and the `Dispatch tN …` prompt print this sequence for the task, under
-`dispatch, in order:`, with its branch, task id, base and effort filled in — run that copy. The effort
+`dispatch, in order:`, with its branch, task id, base, name and effort filled in — run that copy.
+`<name>` is the agent's name in `herdr agent list`; the printed copy uses the task's bead id, which no
+other task shares. The effort
 follows the tier (light `medium`, standard `high`, heavy `xhigh`): without it the worker inherits the
 user's default, and seven workers at `xhigh` used up a 5-hour usage window in 31 minutes. Measured on a
 live run.
