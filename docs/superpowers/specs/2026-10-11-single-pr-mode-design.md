@@ -1,6 +1,6 @@
 # Single-PR batch mode — design
 
-Pass 2. Written against `bb48694`, the `fix/live-run-bugs` tip, which carries the head-SHA CI fix for
+Pass 3: pass 2 plus "After the pass-2 review" at the end, which holds where the two disagree. Pass 2. Written against `bb48694`, the `fix/live-run-bugs` tip, which carries the head-SHA CI fix for
 finding #16 that this design reuses. It records the owner's decisions on pass 1's open questions and
 answers every finding of `docs/superpowers/reviews/2026-10-11-single-pr-mode-adversarial-1.md`
 (traced in "Review findings → this design" at the end).
@@ -952,21 +952,11 @@ it.
 | Bumping every run to schema 4 | §5 |
 | Routing a red final CI to the task whose `--files` match | That task is torn down, and the match is a guess |
 
-## Open questions for the owner
+## The owner's answers to pass 2's open questions
 
-1. **Who lands.** Landing stays the orchestrator's move, the established "merging is yours, nothing
-   merges automatically" (`merge.md:13`, README). With one landing at a time, the orchestrator's
-   latency on `merge` now holds up every other landing, and on berean-os t3 sat in `merge` for 4h57m
-   (#19). The alternative: the supervisor pushes `land_sha` itself as soon as a task holds the slot
-   and is up to date. The server still enforces the gate, but this puts a network write on the
-   serial tick and skips any before-merge condition (#17/#24). **Recommended: keep it the
-   orchestrator's**, and revisit if the smoke run or the next real batch shows the slot sitting in
-   `merge`.
-2. **Whether `--single-pr` needs a check.** With no `.claude/pipeline-check`, the re-test at sync is
-   prose, as `implement`'s is, and `status` marks landings unverified. Requiring the file would make
-   "re-test" enforceable, at the cost of refusing single-PR runs in a repo until it adds one.
-   **Recommended: do not require it.** `start` warns, `status` says unverified, and berean-os adds a
-   check before its next batch.
+1. **Who lands: the orchestrator.** Landing stays the orchestrator's move, "merging is yours, nothing merges
+   automatically". Revisit if the smoke run or the next real batch shows the slot sitting in `merge`.
+2. **The check is optional.** With no `.claude/pipeline-check`, `start` warns and `status` marks landings unverified.
 
 ## Out of scope
 
@@ -1011,3 +1001,63 @@ it.
 `src/supervisor/{tasks,ci,deliver,main,stall,teardown,tick,beads-sync}.ts`, `prompts/` (the new and
 edited files in §8), `README.md`, `skills/herdr-pipeline/SKILL.md`, `test/` (§9),
 `test/integration/smoke.md`.
+
+## After the pass-2 review
+
+`docs/superpowers/reviews/2026-10-11-single-pr-mode-adversarial-2.md` found pass 2 CLEAR, with 3 majors and 8 minors.
+None needed the owner. These answers hold over §1–§9 wherever the two disagree. The implementation follows this section.
+
+### M1: the check covers exactly what lands
+
+- **"Checked".** `submission.check === 'passed'` (or `'none'` in a repo with no check), and one of:
+  - `submission.head_sha === land_sha`;
+  - `git diff --name-only <submission.head_sha> <land_sha>` lists only paths under `docs/superpowers/reviews/`, which is
+    the reviewers' verdict files.
+- **`land-queue` routing.** A task goes to `merge` only when it is up to date with `origin/<batch>` and checked. Anything else
+  goes to `sync`, including a task that is up to date but unchecked, for example after a reviewer fixed a finding inline.
+- **A sync with nothing to merge.** `git merge` reports "Already up to date", so `HEAD == land_sha`. The walk is trivially
+  clean, and `submit` runs the check on exactly the tree that lands. No new row and no new edge are needed.
+- **Untracked files.** `submit` refuses untracked files that are not ignored (`git status --porcelain --untracked-files=normal`).
+  The check must test the pushed tree.
+- §3's sentence "every landed tree has passed the check, apart from the reviewers' verdict commits" now holds, and is true
+  because of this rule.
+
+### M2: no pushed commit is dropped silently
+
+- **When the reviewed head is recorded.** `land_sha` must contain `submission.head_sha` (`git merge-base --is-ancestor`).
+  If it does not, the branch lost the submitted work during review, for example a force-push. The task goes back to
+  `implement` with that reason instead of into `land-queue`.
+- **When a task takes the slot, and on every `merge` tick.** `git ls-remote origin refs/heads/<branch>` is compared with
+  `land_sha`.
+  - If they differ, the task goes to `sync` with the reason "`<branch>` moved to `<sha8>` after its reviewed head". The walk
+    then meets the extra commits, the sync is dirty, and they go to review. Whatever was pushed lands reviewed and checked.
+  - A failed read skips the tick, as `withSendBackHead` does.
+  - In `merge` this check comes before the landing check, so a landing already done still records as landed.
+- **The `done` notice.** It prints `git push origin --delete` only for task branches whose remote head is contained in
+  `origin/<batch>`. It names the rest: "`<branch>` has commits that did not land: `<sha8>`; review before deleting".
+
+### M3: one stuck task cannot stall every landing
+
+- **The queue head.** It is chosen only from tasks in `land-queue` that are either up to date and checked (they go straight to
+  `merge`, which needs no worker) or have a live pane. A paneless task that must sync waits, and status says why: "needs an
+  agent in its worktree to sync: `<start command>`". When no eligible task exists but paneless ones wait, the orchestrator's
+  `land-queue` probe names the start commands.
+- **Yielding.** A `sync` holder that has no `sync` submission after `STALL_MINUTES` (15) since entering `sync`, while another
+  task waits in `land-queue`, gives up the slot.
+  - It goes back to `land-queue` with its `land_sha` kept.
+  - Its re-entry takes its `phase_entered_at`, so it goes to the back of the queue.
+  - The history reason is "yielded the landing slot: no sync after 15m, t5 waiting".
+- **Naming the waiters.** The holder's probe, and its status line, name them: "t5, t6 wait on this sync".
+
+### Minors
+
+| # | Answer |
+|---|---|
+| m1 | `merge-batch.md`: "If the push is refused for any reason (`rejected`, `fetch first`, `non-fast-forward`, `remote rejected`), end your turn. Never `git pull` in `<repo_root>`: it is the user's working copy." Verify 5 is reworded: the gate is git's client-side ancestry check plus the server's compare-and-swap. A `--force` push is accepted unless a ruleset forbids it. The README and `start` recommend a ruleset blocking force-push and deletion on `batch/*`, and the smoke run creates one |
+| m2 | The `sync` edge first asks whether `land_sha` is already in `origin/<batch>`. If it is, the task goes to `merge`, which records the landing |
+| m3 | `submit` uses the clean-sync predicate for the `implement` re-entry rule. "Nothing to land" is tree-based: an empty `git diff --name-only origin/<batch>...HEAD` outside `docs/superpowers/` |
+| m4 | A task rewind into a non-finished phase, while the run is in `ship`, `ship-ci` or `ship-merge`, moves the run back to `execute`, as registration does. Registration and that rewind are refused once `batch.pr` is merged ("the batch already shipped as PR #n"). The combined check becomes mechanical: a new `hpipe batch-check` runs `.claude/pipeline-check` in the batch checkout at the fetched `origin/<batch>`, and records `batch.checked = { head_sha, at, check }`. `ship` clears only when the PR's head equals `batch.checked.head_sha`, so a fix-task landing forces a new check before CI |
+| m5 | One rule per reader. `merged_at_ms` is the machine's: "landed now", and it drives `merge` and the bead. `landed.length > 0` is the record's: "its commits are on the batch", which drives the PR body, "Not in this PR", `UNLANDED_MEANING` in a single-PR run, and the abort message |
+| m6 | Every rendered title goes through `shellQuoted` (`unstarted.ts:86-88`): `--title`, `--subject` and the `ship` suggestion |
+| m7 | Implementation notes: the paneless `sync` queue runs before `tasks.ts:231`'s `continue`. The `land-queue` clause also names a failing git read and `fetch_error`. The skill says a dirty-sync review spends the task's review counter |
+| m8 | §9 gains the unit tests and real-git `submit` cases the review lists, and two smoke steps: a reviewer's inline fix must be checked before it lands, and an orchestrator push in `merge` must land reviewed |
