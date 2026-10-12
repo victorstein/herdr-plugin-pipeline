@@ -2,7 +2,7 @@ import type { PaneHold, PersistedLimits } from '../lib/delivery-health'
 import { isAgentReady } from '../lib/machine'
 import { SCREEN_LINES } from '../lib/screen'
 import type { AgentStatus, QueuedEvent } from '../lib/types'
-import { type LimitLine, limitLineOn, resetAt } from '../lib/usage-limit'
+import { FRESH_SIGHT_TOLERANCE_MS, type LimitLine, limitLineOn, resetAt } from '../lib/usage-limit'
 import { warnToTick } from './deliver'
 
 /** The message shows minutes only, so the real reset can come up to 59 s after the minute it names. */
@@ -11,6 +11,8 @@ export const LIFT_GRACE_MS = 90_000
 export const RECHECK_MS = 2 * 60_000
 /** A pane read this recently is not read again for a stall candidate. */
 export const FRESH_MS = 60_000
+/** A limit line read this soon after the pane was seen working, or sent a prompt, was printed since. */
+export const ACTIVITY_FRESH_MS = 15 * 60_000
 
 export const USAGE_LIMIT = 'usage_limit'
 
@@ -27,8 +29,6 @@ export interface PaneLimit {
   resetsAt: number | null
   /** When this supervisor, or the one before it, first saw the line. */
   since: number
-  /** The last reading that confirmed it; 0 for a mark carried over from a restart, so it is read at once. */
-  checkedAt: number
   autoContinue: boolean
   release?: 'moved-on' | 'nudge'
 }
@@ -48,7 +48,10 @@ export class UsageLimits {
    */
   private readonly stale = new Map<string, string>()
   private readonly nudgedUnmarked = new Set<string>()
+  /** Every reading, conclusive or not, so a pane is re-read on schedule rather than every tick. */
   private readonly readAt = new Map<string, number>()
+  /** The pane was last seen working, or took a prompt: a limit line read soon after was printed since. */
+  private readonly activeAt = new Map<string, number>()
   revision = 0
 
   constructor(
@@ -58,9 +61,7 @@ export class UsageLimits {
     private readonly localZone?: string,
   ) {
     for (const [pane, mark] of Object.entries(persisted?.marks ?? {})) {
-      this.marks.set(pane, {
-        line: mark.line, resetsAt: mark.resets_at, since: mark.since, checkedAt: 0, autoContinue: false,
-      })
+      this.marks.set(pane, { line: mark.line, resetsAt: mark.resets_at, since: mark.since, autoContinue: false })
     }
     for (const [pane, text] of Object.entries(persisted?.stale ?? {})) this.stale.set(pane, text)
   }
@@ -102,7 +103,8 @@ export class UsageLimits {
     }
     if (!ready || reading.line === null) return
     if (reading.line.text === mark.line.text) {
-      mark.checkedAt = now
+      // Seen working and then stopped on the same line again: rejected again, still limited.
+      if (mark.release === 'moved-on') delete mark.release
       mark.autoContinue = reading.autoContinue
       return
     }
@@ -111,9 +113,11 @@ export class UsageLimits {
 
   /** Marks the pane unless the line's reset has already passed, which makes it an old line. */
   private markIfCurrent(pane: string, line: LimitLine, autoContinue: boolean, now: number): boolean {
-    const resetsAt = resetAt(line, now, this.localZone)
+    const active = this.activeAt.get(pane)
+    const fresh = active !== undefined && now - active <= ACTIVITY_FRESH_MS
+    const resetsAt = resetAt(line, now, this.localZone, fresh ? FRESH_SIGHT_TOLERANCE_MS : undefined)
     if (resetsAt !== null && resetsAt + LIFT_GRACE_MS <= now) return false
-    this.marks.set(pane, { line, resetsAt, since: now, checkedAt: now, autoContinue })
+    this.marks.set(pane, { line, resetsAt, since: now, autoContinue })
     this.revision += 1
     this.log(`usage limit in ${pane}${resetsAt === null ? ', its reset unreadable' : ` until ${resetText(line)}`}: ` +
       'holding what is addressed to it — `hpipe status` lists it')
@@ -142,6 +146,18 @@ export class UsageLimits {
       : mark.release === 'nudge' ? 'nudged' : 'it moved on'}); its stall clocks restarted`)
   }
 
+  /**
+   * The pane was seen working, or herdr confirmed a prompt into it. Whatever limit
+   * line it shows next was printed since, so a line lifted earlier is no longer the
+   * one on screen. Called for every `working` event in a drained batch, not only the
+   * last: the pair a rejected prompt leaves, `working` then `done`, arrives in one.
+   */
+  noteActivity(pane: string): void {
+    this.activeAt.set(pane, this.now())
+    this.stale.delete(pane)
+    this.nudgedUnmarked.delete(pane)
+  }
+
   /** `hpipe nudge` queued a resume: release the hold, and keep the line on screen from holding it again. */
   nudge(pane: string): void {
     const mark = this.marks.get(pane)
@@ -149,17 +165,15 @@ export class UsageLimits {
     else this.release(mark, 'nudge')
   }
 
-  /** Marked panes due a fresh reading. */
+  /** Marked panes due a fresh reading; a mark carried over from a restart is due at once. */
   recheckDue(): string[] {
-    const now = this.now()
-    return [...this.marks].flatMap(([pane, mark]) => (now - mark.checkedAt >= RECHECK_MS ? [pane] : []))
+    return [...this.marks.keys()].filter((pane) => this.needsRead(pane))
   }
 
-  /** For a stall candidate: whether the pane's last reading is too old to answer from. */
+  /** Whether the pane's last reading is too old to answer from. */
   needsRead(pane: string): boolean {
-    const mark = this.marks.get(pane)
-    if (mark !== undefined) return this.now() - mark.checkedAt >= RECHECK_MS
-    return this.now() - (this.readAt.get(pane) ?? 0) >= FRESH_MS
+    const age = this.now() - (this.readAt.get(pane) ?? 0)
+    return age >= (this.marks.has(pane) ? RECHECK_MS : FRESH_MS)
   }
 
   /** An empty list is a failed `pane list`, not a session with no panes. */
@@ -170,7 +184,7 @@ export class UsageLimits {
       this.marks.delete(pane)
       this.revision += 1
     }
-    for (const map of [this.stale, this.readAt]) {
+    for (const map of [this.stale, this.readAt, this.activeAt]) {
       for (const pane of [...map.keys()]) if (!livePanes.has(pane)) map.delete(pane)
     }
   }
@@ -231,20 +245,23 @@ export function limitedNow(limits: UsageLimits, io: LimitIO): (pane: string) => 
 }
 
 /**
- * The tick's limit step, before anything is delivered. Reads every pane whose agent
- * went idle or done in this drain (the orchestrator's too: `applyEvents` drops its
- * events, this does not), and every mark due a re-check; applies `hpipe nudge`'s
- * events. A pane that went `working` needs no read: there is nothing to detect, and
- * a mark on it is released.
+ * The tick's limit step, before anything is delivered. Reads every run pane whose
+ * agent went idle or done in this drain (the orchestrator's too: `applyEvents` drops
+ * its events, this does not), and every mark due a re-check; applies `hpipe nudge`'s
+ * events. A pane whose last event is `working` needs no read: there is nothing to
+ * detect, and a mark on it is released. A pane that belongs to no run is never read.
  */
-export async function checkLimits(limits: UsageLimits, io: LimitIO, drained: readonly QueuedEvent[]): Promise<void> {
+export async function checkLimits(
+  limits: UsageLimits, io: LimitIO, drained: readonly QueuedEvent[], runPanes: ReadonlySet<string>,
+): Promise<void> {
   const lastStatus = new Map<string, AgentStatus>()
   for (const event of drained) {
     if (event.pane_id === undefined) continue
     if (event.kind === 'pipeline.nudge') limits.nudge(event.pane_id)
-    if (event.kind === 'pane.agent_status_changed' && event.agent_status !== undefined) {
-      lastStatus.set(event.pane_id, event.agent_status)
-    }
+    if (event.kind !== 'pane.agent_status_changed' || event.agent_status === undefined) continue
+    if (!runPanes.has(event.pane_id)) continue
+    if (event.agent_status === 'working') limits.noteActivity(event.pane_id)
+    lastStatus.set(event.pane_id, event.agent_status)
   }
 
   const toRead = new Map<string, AgentStatus | undefined>()

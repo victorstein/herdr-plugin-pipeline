@@ -237,7 +237,10 @@ async function main(): Promise<void> {
       gate.beginTick(livePanes)
       for (const pane of readyPanes(drained)) gate.wake(pane)
       // Before the wake lines and delivery, so both already see a pane the limit stopped.
-      await checkLimits(gate.limits, herdr, drained)
+      await checkLimits(gate.limits, herdr, drained, new Set([
+        ...panes,
+        ...allRuns.flatMap((run) => [run.orchestrator_pane, ...run.tasks.map((task) => task.pane_id)]),
+      ].filter((pane): pane is string => pane !== null)))
       const events = tickEvents(tickRuns, drained, {
         panes: { absence: paneAbsence, listed },
         workspaces: { absence: workspaceAbsence, listed: await herdr.workspaceList() },

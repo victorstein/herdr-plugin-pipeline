@@ -441,6 +441,7 @@ export function makeCourier(
     const boxHeld = await boxHold(io, gate, paneId, text, clears, humanTypesIn(paneId))
     if (boxHeld !== null) return boxHeld
     const result = await sendConfirmed(io, paneId, text, confirmMs, clears, humanTypesIn(paneId))
+    if (result.ok) gate.limits.noteActivity(paneId)
     if (result.boxClear === true) gate.forgetStalled(paneId)
     else if (!result.ok && MAY_HAVE_LANDED.has(result.code ?? '')) gate.noteStalled(paneId, text)
     gate.record(paneId, result)

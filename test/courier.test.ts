@@ -999,3 +999,20 @@ test('a limited pane reports usage_limit in holds() even while stuck or failing,
   gate.limits.lifted('w4:p1')
   expect(gate.holds()['w4:p1']?.code).toBe(STUCK_INPUT)
 })
+
+test('a prompt herdr confirmed counts as activity: the pane\'s next limit line is not an old one', async () => {
+  const gate = gateAt({ now: LIMIT_SEEN })
+  gate.beginTick(new Set(['w4:p1']))
+  gate.limits.observe('w4:p1', {
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  })
+  gate.limits.nudge('w4:p1')
+  gate.limits.lifted('w4:p1')
+  await makeCourier(gate, fakeIO(), 15000)('w4:p1', 'carry on')
+  gate.limits.observe('w4:p1', {
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  })
+  expect(gate.limits.isLimited('w4:p1')).toBe(true)
+})

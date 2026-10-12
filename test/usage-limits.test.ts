@@ -61,17 +61,52 @@ test('a marked pane is released once it is seen working, or idle with the line g
   }
 })
 
-test('an inconclusive reading keeps the mark and does not count as a check', () => {
+test('an inconclusive reading keeps the mark, and still waits its turn before the next read', () => {
   const { limits, clock } = limitsAt()
   limits.observe('w4:p1', reading())
   clock.now += RECHECK_MS
+  expect(limits.recheckDue()).toEqual(['w4:p1'])
   for (const seen of [reading({ status: 'blocked', line: null }), reading({ line: null, boxSeen: false })]) {
     limits.observe('w4:p1', seen)
     expect(limits.get('w4:p1')?.release).toBeUndefined()
   }
-  expect(limits.recheckDue()).toEqual(['w4:p1'])
-  limits.observe('w4:p1', reading())
   expect(limits.recheckDue()).toEqual([])
+})
+
+test('seen working and then stopped on the same line again, a mark stays limited', () => {
+  const { limits } = limitsAt()
+  limits.observe('w4:p1', reading())
+  limits.noteActivity('w4:p1')
+  limits.observe('w4:p1', reading({ status: 'working', line: null }))
+  limits.observe('w4:p1', reading())
+  expect(limits.due()).toEqual([])
+})
+
+test('a resume rejected again after a nudge is marked again: its working and done arrive in one batch', async () => {
+  const { limits } = limitsAt()
+  const io = fakeIO({ 'w4:p1': SCREEN })
+  limits.observe('w4:p1', reading())
+  limits.nudge('w4:p1')
+  limits.lifted('w4:p1')
+  await checkLimits(limits, io, [
+    { kind: 'pane.agent_status_changed', session: 's', at: 1, pane_id: 'w4:p1', agent_status: 'working' },
+    { kind: 'pane.agent_status_changed', session: 's', at: 2, pane_id: 'w4:p1', agent_status: 'done' },
+  ], new Set(['w4:p1']))
+  expect(limits.isLimited('w4:p1')).toBe(true)
+})
+
+test('a line printed after the pane was seen working is dated as fresh, so a reset just under a day away is tomorrow', () => {
+  // A weekly limit hit at 10:05 local that resets at 9:55 tomorrow reads time-only.
+  const hit = at('2026-10-11T16:05:00Z')
+  const weekly = reading({ line: line('9:55am', 'weekly limit') })
+  const undated = limitsAt(hit)
+  undated.limits.observe('w4:p1', weekly)
+  expect(undated.limits.isLimited('w4:p1')).toBe(false)
+
+  const fresh = limitsAt(hit)
+  fresh.limits.noteActivity('w4:p1')
+  fresh.limits.observe('w4:p1', weekly)
+  expect(fresh.limits.get('w4:p1')?.resetsAt).toBe(at('2026-10-12T15:55:00Z'))
 })
 
 test('a new limit line replaces the mark, dated from when it was seen', () => {
@@ -222,16 +257,18 @@ test('checkLimits reads panes that went idle or done, re-checks marks, and appli
     { kind: 'pane.agent_status_changed', session: 's', at: 2, pane_id: 'w4:p1', agent_status: 'done' },
     { kind: 'pane.agent_status_changed', session: 's', at: 3, pane_id: 'w1:p1', agent_status: 'idle' },
     { kind: 'pane.agent_status_changed', session: 's', at: 4, pane_id: 'w6:p1', agent_status: 'working' },
-  ])
+    { kind: 'pane.agent_status_changed', session: 's', at: 5, pane_id: 'w9:p9', agent_status: 'done' },
+  ], new Set(['w4:p1', 'w1:p1', 'w6:p1']))
   expect(limits.isLimited('w4:p1')).toBe(true)
   expect(limits.isLimited('w1:p1')).toBe(true)
   expect(limits.isLimited('w6:p1')).toBe(false)
   expect(io.calls).not.toContain('read w6:p1')
+  expect(io.calls).not.toContain('read w9:p9')
   expect(io.calls.filter((c) => c.startsWith('status'))).toEqual([])
 
   io.calls.length = 0
   clock.now += RECHECK_MS
-  await checkLimits(limits, io, [{ kind: 'pipeline.nudge', session: 's', at: 5, pane_id: 'w1:p1' }])
+  await checkLimits(limits, io, [{ kind: 'pipeline.nudge', session: 's', at: 5, pane_id: 'w1:p1' }], new Set())
   expect(io.calls.sort()).toEqual(['read w1:p1', 'read w4:p1', 'status w1:p1', 'status w4:p1'])
   expect(limits.get('w1:p1')?.release).toBe('nudge')
 })

@@ -99,11 +99,14 @@ const MINUTE_MS = 60_000
 const HOUR_MS = 60 * MINUTE_MS
 
 /**
- * A line first seen just after its own displayed reset is that reset, not
- * tomorrow's: the message shows minutes only, and a request re-rejected because
- * the server's reset came a little later prints the same time again.
+ * How far before first sight a time-only reset may fall and still be the one the
+ * line means. A line with no evidence of when it was printed may be minutes old,
+ * so one just past its reset is that reset, not tomorrow's. A line the caller saw
+ * printed is fresh, and its reset is still ahead of it: a weekly limit hit at
+ * 10:05 that resets at 9:55 tomorrow reads "resets 9:55am".
  */
-const FIRST_SIGHT_TOLERANCE_MS = 15 * MINUTE_MS
+export const UNDATED_SIGHT_TOLERANCE_MS = 15 * MINUTE_MS
+export const FRESH_SIGHT_TOLERANCE_MS = MINUTE_MS
 
 /** A session window is five hours; the quarter hour covers the minute rounding and the tolerance. */
 const SESSION_AHEAD_MAX_MS = 5 * HOUR_MS + 15 * MINUTE_MS
@@ -125,6 +128,7 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
 export function resetAt(
   line: LimitLine, firstSeenAt: number,
   localZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
+  toleranceMs: number = UNDATED_SIGHT_TOLERANCE_MS,
 ): number | null {
   if (line.when === null) return null
   const zone = line.zone ?? localZone
@@ -133,7 +137,7 @@ export function resetAt(
   const time = TIME_ONLY.exec(line.when)
   if (time !== null) {
     const [, hour, minute, meridiem] = time
-    return timeOnlyReset(line.resetting ?? line.label, clock(hour, minute, meridiem), zone, firstSeenAt)
+    return timeOnlyReset(line.resetting ?? line.label, clock(hour, minute, meridiem), zone, firstSeenAt, toleranceMs)
   }
   const dated = DATED.exec(line.when)
   if (dated === null) return null
@@ -153,7 +157,7 @@ function clock(hour = '0', minute = '0', meridiem = 'a'): { h: number; m: number
 }
 
 function timeOnlyReset(
-  resetting: string, { h, m }: { h: number; m: number }, zone: string, firstSeenAt: number,
+  resetting: string, { h, m }: { h: number; m: number }, zone: string, firstSeenAt: number, toleranceMs: number,
 ): number | null {
   const seenDay = zonedParts(firstSeenAt, zone)
   if (seenDay === null) return null
@@ -161,7 +165,7 @@ function timeOnlyReset(
     const day = new Date(Date.UTC(seenDay.year, seenDay.month - 1, seenDay.day + offset))
     return zonedWallTimeToUtc(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), h, m, zone)
   })
-  const next = occurrences.findIndex((at) => at > firstSeenAt - FIRST_SIGHT_TOLERANCE_MS)
+  const next = occurrences.findIndex((at) => at > firstSeenAt - toleranceMs)
   if (next <= 0) return null
   const reset = occurrences[next] as number
   if (resetting === SESSION_LABEL && reset - firstSeenAt > SESSION_AHEAD_MAX_MS) return occurrences[next - 1] as number

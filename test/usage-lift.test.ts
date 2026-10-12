@@ -43,7 +43,7 @@ const LINE: LimitLine = {
 }
 const lift = (pane: string, over: Partial<Lift> = {}): Lift => ({
   pane, resume: true,
-  limit: { line: LINE, resetsAt: RESET, since: SINCE, checkedAt: SINCE, autoContinue: false },
+  limit: { line: LINE, resetsAt: RESET, since: SINCE, autoContinue: false },
   ...over,
 })
 const texts = (...tasks: Task[]): LiftTexts => textsFor(tasks.map((t) => [t, t.phase]))
