@@ -1103,6 +1103,11 @@ Where the code departs from the text above, and why.
   PR head. A single-PR review names its subject by the range, `` `batch/x...t3-branch` ``.
 - **A task rewound while the run ships moves it to `execute` without reopening intake.** The rewound
   task holds `execute` until it finishes; registration still reopens intake, as it always has.
+- **The batch checkout gets the bootstrap a task worktree gets.** Creating it ends with
+  `(cd '<checkout>' && ./.claude/pipeline-bootstrap)` when the repo declares one, as §4 says, and the
+  pull path adds the same line "if the pull changed what it builds", as `sync.md` does. Without it,
+  `batch-check` ran the check in a tree with no dependencies installed, and `ship.md` sent a subagent to
+  fix a toolchain as though it were a defect.
 - **`hpipe batch-check`** refuses a batch checkout that is not at the freshly fetched batch head, or
   that holds uncommitted work, so the head it records is the tree it checked. With no check declared
   it still records the head, as `check: 'none'`, so `ship` can clear.

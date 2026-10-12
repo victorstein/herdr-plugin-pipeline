@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   batchPrBody, checkoutSteps, defaultBatchBranch, fetchBatchCommand, landCommand, mergeBatchCommand,
   releaseLines, squashBody, squashSubject, suggestedPrTitle,
@@ -50,6 +53,24 @@ test('the batch checkout is created once at its absolute path, and only pulled a
     "git -C '/code/o'\\''brien' worktree add --track -B batch/x '/state/checkouts/r1' origin/batch/x",
   ])
   expect(checkoutSteps(run, true)).toEqual(["git -C '/state/checkouts/r1' pull --ff-only"])
+})
+
+test('a repo that declares a bootstrap has it run in the new batch checkout, and again after a pull that needs it', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "batch-boot o'k-"))
+  try {
+    mkdirSync(join(repoRoot, '.claude'))
+    writeFileSync(join(repoRoot, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\nbun install\n')
+    chmodSync(join(repoRoot, '.claude', 'pipeline-bootstrap'), 0o755)
+    const run = runOf([])
+    run.repo_root = repoRoot
+    expect(checkoutSteps(run, false).at(-1)).toBe("(cd '/state/checkouts/r1' && ./.claude/pipeline-bootstrap)")
+    expect(checkoutSteps(run, true)).toEqual([
+      "git -C '/state/checkouts/r1' pull --ff-only",
+      "(cd '/state/checkouts/r1' && ./.claude/pipeline-bootstrap)  # if the pull changed what it builds",
+    ])
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true })
+  }
 })
 
 test('release lines are every landing in landing order, a re-landing of one sha once', () => {

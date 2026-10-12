@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { BOOTSTRAP_REL, repoBootstrap } from './bootstrap'
 import { trackingRefspec } from './dispatch-base'
 import { parseTitle } from './release-title'
 import type { Batch, Landing, Run, Task } from './types'
@@ -26,15 +27,25 @@ export function landCommand(run: Run, landSha: string): string {
 
 /**
  * The orchestrator's checkout is the user's working copy, so the batch is patched
- * and checked in a worktree of its own, at the absolute path `start` recorded.
+ * and checked in a worktree of its own, at the absolute path `start` recorded. A
+ * fresh worktree has no dependencies installed, and `batch-check` runs the repo's
+ * check there, so it gets the bootstrap every task worktree gets.
  */
 export function checkoutSteps(run: Run, exists: boolean): string[] {
   const batch = run.batch as Batch
-  if (exists) return [`git -C ${shellQuoted(batch.checkout)} pull --ff-only`]
+  const checkout = shellQuoted(batch.checkout)
+  const bootstrap = repoBootstrap(run.repo_root).kind === 'none' ? null : `(cd ${checkout} && ./${BOOTSTRAP_REL})`
+  if (exists) {
+    return [
+      `git -C ${checkout} pull --ff-only`,
+      ...(bootstrap === null ? [] : [`${bootstrap}  # if the pull changed what it builds`]),
+    ]
+  }
   const repo = shellQuoted(run.repo_root)
   return [
     `git -C ${repo} fetch origin ${trackingRefspec(batch.branch)}`,
-    `git -C ${repo} worktree add --track -B ${batch.branch} ${shellQuoted(batch.checkout)} origin/${batch.branch}`,
+    `git -C ${repo} worktree add --track -B ${batch.branch} ${checkout} origin/${batch.branch}`,
+    ...(bootstrap === null ? [] : [bootstrap]),
   ]
 }
 
