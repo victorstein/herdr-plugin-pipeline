@@ -14,6 +14,8 @@ export type EventKind =
   | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
   | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited' | 'pane.closed'
   | 'pane.moved' | 'workspace.closed'
+  /** Written by `hpipe nudge`, not herdr: release the supervisor's usage-limit hold on `pane_id`. */
+  | 'pipeline.nudge'
 
 export interface QueuedEvent {
   kind: EventKind

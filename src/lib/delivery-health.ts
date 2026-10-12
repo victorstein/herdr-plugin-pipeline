@@ -9,8 +9,15 @@ export interface PaneHold {
   /** Start of the current streak of failed or held sends. */
   since: number
   failures: number
-  /** The last herdr code, or `stuck_input` while the box holds text the supervisor did not write. */
+  /**
+   * The last herdr code, `stuck_input` while the box holds text the supervisor did
+   * not write, or `usage_limit` while Claude's usage limit stops the pane.
+   */
   code: string
+  /** `usage_limit` only: when it resets, or null when the pane's message could not be dated. */
+  until?: number | null
+  /** `usage_limit` only: the reset as Claude printed it, e.g. `10:20am (America/Managua)`. */
+  reset?: string | null
 }
 
 /**
