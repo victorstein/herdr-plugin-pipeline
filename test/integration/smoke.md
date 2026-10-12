@@ -186,8 +186,11 @@ that merge even though nobody pulled local `main` (`git -C <worktree> merge-base
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
 --abbrev-ref @{u}` fails with `no upstream configured`). Under that line both print the same
 `dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
-declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
-dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
+declares one, `agent start <bead> … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
+dispatched at registration is started with the flag too (#118). The `agent start` line names the agent
+by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr agent list` shows the
+agent under that name. A refusal of the name, or of a second start under it after a rewind, is a
+finding. Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
 in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
 is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
