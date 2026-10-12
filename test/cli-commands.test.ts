@@ -594,6 +594,7 @@ test('dispatch --done closes intake', async () => {
 
   const result = await cmdDispatchDone(ctx(), { runId: run.run_id, repoKey: 'k' })
   expect(result.ok).toBe(true)
+  expect(result.text).toContain('the run leaves intake once you end your turn')
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.intake_closed).toBe(true)
@@ -1229,6 +1230,20 @@ test('task echoes the repo bootstrap on the dispatched return', async () => {
   expect(result.text).toContain('bootstrap: .claude/pipeline-bootstrap')
 })
 
+test('registration says which live task a --files declaration overlaps, and what that costs', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  const register = (branch: string, bead: string, files: string[]) => cmdTask(ctx(), {
+    branch, bead, surface: 'core', notes: '', dependsOn: [], files, keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect((await register('feat/one', 'hp-1', ['src/lib/text.ts'])).text).toContain('files: src/lib/text.ts\n')
+  const second = await register('feat/two', 'hp-2', ['src/lib/'])
+  expect(second.text).toContain('files: src/lib/ — overlaps t1: whichever reaches implement second waits there ' +
+    'until the other finishes')
+  expect((await register('feat/three', 'hp-3', ['docs/'])).text).toContain('files: docs/\n')
+})
+
 const fetchedBase = async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null })
 
 test('the dispatched return keeps every header line above the one blank line', async () => {
@@ -1350,6 +1365,12 @@ test('show prints the recorded task without touching the ledger', async () => {
     'pr:         #58', 'ci:         pending', 'checkout:   /wt/show',
   ]) expect(result.text).toContain(line)
   expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
+})
+
+test('show marks a finished task\'s checkout that teardown has removed', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1', phase: 'done', checkout_path: join(dir, 'gone-wt') }]))
+  const result = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.text).toContain(`checkout:   ${join(dir, 'gone-wt')} (removed)`)
 })
 
 test('show says none rather than printing null for what a task has not reached', async () => {

@@ -386,6 +386,11 @@ async function main(): Promise<void> {
           // on the same pane still produces a digest — which is the tick a task
           // advances off the CI poll rather than a pane event. `deliveriesFor`
           // renders it once.
+          // A task whose own prompt rides in this digest is covered by it: the merge
+          // prompt was followed by "also waiting on you" naming the same merge.
+          for (const prompt of taskPrompts) {
+            if (prompt.paneId === run.orchestrator_pane) covered.add(prompt.taskId)
+          }
           const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds())
           footers.set(run, footer)
 

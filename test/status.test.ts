@@ -350,6 +350,16 @@ test('nothing waiting on you prints no section at all', () => {
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('waiting on you')
 })
 
+test('a run in branch-review lists the review itself under waiting on you', () => {
+  const now = 100_000_000
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.phase_entered_at = now - 3 * 60_000
+  run.tasks = [mkTask({ task_id: 't1', phase: 'done' })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('  waiting on you:\n    run [branch-review 3m] — YOUR move: the whole-branch review')
+})
+
 test('an idle worker sitting on uncommitted work is waiting on you, not thinking', () => {
   const now = 100_000_000
   const run = mkRun()

@@ -51,5 +51,8 @@ judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed
 trailer at the **start of the line** — not indented, and not inside a code fence. An indented or
 fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 
+The supervisor reads the review from disk once you are idle. Leave it uncommitted: it is the run's record, not
+part of the work, and committing it would put a review file on the base branch.
+
 A BLOCKER sends this phase round again and you patch the branch directly — there is no task left to
 send it back to.

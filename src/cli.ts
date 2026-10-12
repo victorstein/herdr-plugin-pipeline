@@ -15,7 +15,7 @@ import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
-import { detectCycle, gateStatus } from './lib/gating'
+import { detectCycle, filesOverlap, gateStatus } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
@@ -551,7 +551,7 @@ async function registerTask(
   // the only other place task.files reaches a human is the blocked-on-files
   // warning in status.ts, which speaks only once overlap has already fired — so a
   // declaration that matches nothing is silent by construction.
-  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
+  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(task, run.tasks)}`
 
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
@@ -572,6 +572,18 @@ async function registerTask(
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sequence = dispatchSequence(run, task, base, bootstrap, hpipeCommand(ctx.pluginRoot))
   return ok(`${header}\n${baseLine(base)}\n${sequence}\n\n${prompt}`)
+}
+
+/**
+ * Said at registration, where the overlap is chosen: the lock only bites at
+ * `implement`, so nothing else mentions it until the task is already waiting.
+ */
+function overlapNote(task: Task, all: readonly Task[]): string {
+  const sharers = all.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
+    taskRow(t.phase).terminal !== true && filesOverlap(task.files, t.files))
+  if (sharers.length === 0) return ''
+  return ` — overlaps ${sharers.map((t) => t.task_id).join(', ')}: whichever reaches implement second ` +
+    'waits there until the other finishes'
 }
 
 export async function cmdTask(
@@ -826,7 +838,13 @@ async function closeIntake(ctx: Ctx, input: {
   const run = found.value
   run.intake_closed = true
   await saveRun(ctx.stateDir, run)
-  return ok(`intake closed for ${run.run_id}`)
+  // An orchestrator that went on working after this saw `[intake]` in status and
+  // digests for as long as its turn lasted, and had to read the source to learn
+  // why. Measured on a live run.
+  const whenItMoves = run.phase === 'intake'
+    ? '; the run leaves intake once you end your turn — the supervisor reads intake only while you are idle'
+    : ''
+  return ok(`intake closed for ${run.run_id}${whenItMoves}`)
 }
 export const cmdDispatchDone = retryingOnStale(closeIntake)
 

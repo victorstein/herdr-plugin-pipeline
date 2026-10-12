@@ -8,7 +8,7 @@ import {
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
-import { actionFor, ageMinutes } from '../src/lib/status'
+import { actionFor, ageMinutes, waitsOnYou } from '../src/lib/status'
 import { makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
 import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
@@ -424,6 +424,7 @@ test('actionFor answers whose move it is, by rung', () => {
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
   expect(at('implement')).toBe("worker's move: waiting for a pushed PR for feat/x (hp-1)")
+  expect(at('implement', { pr: 48 })).toBe("worker's move: waiting for a new push to PR #48")
   for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
     expect(at(phase)).toBe('nothing for you — the supervisor is driving')
     // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
@@ -471,7 +472,8 @@ test('a blocked-on-files task held by a live task is still the supervisor\'s', (
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const holder = mkTask({ task_id: 't2', phase: 'implement', files: ['src/a.ts'] })
   run.tasks = [blocked, holder]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — waiting for t2 (implement) to finish with these files')
+  expect(waitsOnYou(run, blocked)).toBe(false)
 })
 
 test('a blocked-on-files task whose holder touches other files is not blamed on it', () => {
@@ -479,7 +481,7 @@ test('a blocked-on-files task whose holder touches other files is not blamed on 
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const unrelated = mkTask({ task_id: 't2', phase: 'failed', files: ['src/z.ts'] })
   run.tasks = [blocked, unrelated]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — its files are free; it implements next tick')
 })
 
 test('every row in TASK_ROWS gets a clause that matches who its actor is', () => {

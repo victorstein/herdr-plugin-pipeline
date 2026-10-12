@@ -58,6 +58,12 @@ test('a digest with no phase change still delivers the events', () => {
   expect(text).toContain('blocked')
 })
 
+test('a digest carrying only a prompt has no empty events heading', () => {
+  const run = mkRun()
+  expect(buildDigest({ run, eventLines: [], phaseNote: ' → merge', nextPrompt: 'MERGE IT' }))
+    .toBe(`[pipeline] run ${run.run_id} → merge\n\nMERGE IT`)
+})
+
 test('three prompts for three panes produce three deliveries', () => {
   const run = mkRun()
   const out = deliveriesFor([

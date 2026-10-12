@@ -978,7 +978,7 @@ hpipe next
 
 **Expect** (`bv` is run by `hpipe` on your machine, so this is **(human)**): any `warning:` lines, then
 `now (parallel when their --files are disjoint):` — which does **not** list `bsm-2`, because task `t2` holds
-it — or, with nothing else open, `nothing to pick up: every open bead is held, blocked or filtered out`.
+it — or, with nothing else open, `nothing to pick up: no open bead is claimable — the backlog is empty, or every open bead is held, blocked or filtered out`.
 `hpipe next --limit 1` prints at most one pick.
 
 ### 8d. Abort releases, resume re-claims
