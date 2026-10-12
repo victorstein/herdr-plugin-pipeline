@@ -166,3 +166,44 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
   run.batch.merged_at_ms = null
   expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
 })
+
+// Smoke run 14: a per-task run's done notice had no clean-up block at all.
+test('a per-task run\'s done notice cleans up the branches of merged PRs and the stale default branch', async () => {
+  const { renderRunPhasePrompt } = await import('../src/supervisor/deliver')
+  const { clone, other, t1 } = landingRepo()
+  const t3Merged = revParse(other, 't3-branch')
+  git(['checkout', '-q', 't3-branch'], other)
+  commitAs(other, 'src/after.ts', 'pushed after PR #56 merged\n')
+  git(['push', '-q', 'origin', 't3-branch'], other)
+  const t3After = revParse(other, 't3-branch')
+  git(['fetch', '-q', 'origin'], clone)
+  git(['branch', 't1-branch', 'origin/t1-branch'], clone)
+  git(['branch', 't3-branch', 'origin/t3-branch'], clone)
+
+  const merged = (over: Partial<Task>) => mkTask({ phase: 'done', merged_at_ms: 1, ...over })
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: clone, repoRoot: clone, title: 'a' })
+  run.phase = 'done'
+  run.tasks = [
+    merged({
+      task_id: 't1', branch: 't1-branch', pr: 55, ci_head: { sha: t1, seen_at: 0 }, merge_commit: 'f00dfeed'.repeat(5),
+    }),
+    merged({ task_id: 't3', branch: 't3-branch', pr: 56, ci_head: { sha: t3Merged, seen_at: 0 } }),
+    mkTask({ task_id: 't4', branch: 't4-branch', phase: 'failed', pr: 57 }),
+  ]
+  const text = await renderRunPhasePrompt(run, join(import.meta.dir, '..'))
+  expect(text).toContain('- t1 t1-branch (hp-1): done, PR #55 merged\n')
+  expect(text).toContain('- t4 t4-branch (hp-1): failed\n')
+  expect(text.slice(text.indexOf('Clean up when you are done with it:'))).toBe([
+    'Clean up when you are done with it:',
+    `  git -C '${clone}' push origin --delete t1-branch`,
+    `  t3-branch has commits PR #56 did not merge: ${t3After.slice(0, 8)}; review before deleting`,
+    `  git -C '${clone}' branch -D t1-branch`,
+    `  local t3-branch has commits PR #56 did not merge: ${t3After.slice(0, 8)}; review before deleting`,
+    `  git -C '${clone}' pull --ff-only  # main predates PR #55's merge`,
+  ].join('\n'))
+
+  git(['push', '-q', 'origin', '--delete', 't1-branch', 't3-branch'], other)
+  git(['branch', '-D', 't1-branch', 't3-branch'], clone)
+  run.tasks[0]!.merge_commit = revParse(clone, 'main')
+  expect(await renderRunPhasePrompt(run, join(import.meta.dir, '..'))).not.toContain('Clean up')
+})

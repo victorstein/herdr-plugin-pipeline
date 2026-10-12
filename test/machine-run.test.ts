@@ -1,13 +1,24 @@
 import { expect, test } from 'bun:test'
 import { advanceRun, enterRunPhase, counterFor, type RunSignals } from '../src/lib/machine'
-import { newRun } from '../src/lib/ledger'
-import type { Run, RunPhase } from '../src/lib/types'
+import { newRun, withBatch } from '../src/lib/ledger'
+import type { Run, RunPhase, Task } from '../src/lib/types'
+import { batchFixture } from './helpers/batch'
+import { beadTaskFields } from './helpers/bead-fields'
 
 function fixture(phase: RunPhase): Run {
   const run = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
   enterRunPhase(run, phase, 'test')
   return run
 }
+
+const mkTask = (over: Partial<Task>): Task => ({
+  task_id: 't1', branch: 'feat/x', bead: 'hp-1', surface: 'core', depends_on: [], files: [], keep_worktree: false,
+  workspace_id: null, pane_id: null, agent_status: 'unknown', phase: 'queued', phase_entered_at: 0,
+  escalated_from: null, head_sha_at_entry: null, pr: null, ci: null, checkout_path: null, registered_at: 0,
+  adopted_at: null,
+  artifacts: { research: null, spec: null, plan: null, verdicts: {} }, merged_at_ms: null, ...beadTaskFields(),
+  passes: {}, decisions: [], decision_from: null, pending_answer: null, delivery_attempts: 0, notes: '', ...over,
+})
 
 const signals = (over: Partial<RunSignals> = {}): RunSignals => ({
   actorIdle: false, artifactFresh: false, verdict: null, maxPasses: 2,
@@ -68,7 +79,21 @@ test('execute finishes the run without a branch review when exactly one task lan
   const run = fixture('execute')
   run.intake_closed = true
   expect(advanceRun(run, signals({ tasksAllTerminal: true, landedTaskCount: 1 }))?.phase).toBe('done')
-  expect(run.history.at(-1)?.why).toBe('one task landed; branch-review skipped')
+  expect(run.history.at(-1)?.why).toBe('one task merged; branch-review skipped')
+})
+
+// Smoke run 14 told a per-task run "one task landed" for a merged PR.
+test('a per-task run ends naming the one PR that merged; a single-PR run says landed', () => {
+  const perTask = fixture('execute')
+  perTask.intake_closed = true
+  perTask.tasks = [mkTask({ task_id: 't1', phase: 'done', pr: 55, merged_at_ms: 1 })]
+  advanceRun(perTask, signals({ tasksAllTerminal: true, landedTaskCount: 1 }))
+  expect(perTask.history.at(-1)?.why).toBe('one task merged (PR #55); branch-review skipped')
+
+  const singlePr = withBatch(fixture('execute'), batchFixture())
+  singlePr.intake_closed = true
+  advanceRun(singlePr, signals({ tasksAllTerminal: true, landedTaskCount: 1 }))
+  expect(singlePr.history.at(-1)?.why).toBe('one task landed; branch-review skipped')
 })
 
 test('execute escalates when no task landed', () => {

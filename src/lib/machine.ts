@@ -1,4 +1,5 @@
 import { sha8 } from './batch'
+import { hasLanded } from './ledger'
 import { LANDING_PHASES, modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
 import { describeReviewSkip, prReviewsOn } from './review-skip'
@@ -69,6 +70,13 @@ export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
   return run
 }
 
+/** A per-task landing is a merged PR: "one task landed" read as a batch's. Measured on a live run. */
+function oneLanded(run: Run): string {
+  if (modeOf(run) === 'single-pr') return 'one task landed'
+  const pr = run.tasks.find(hasLanded)?.pr ?? null
+  return pr === null ? 'one task merged' : `one task merged (PR #${pr})`
+}
+
 export function advanceRun(run: Run, s: RunSignals): Run | null {
   switch (run.phase) {
     case 'intake': {
@@ -94,7 +102,7 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
       if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
       if (s.landedTaskCount === 1) {
         return enterRunPhase(
-          run, nextRunPhase(modeOf(run), runRow('branch-review')), 'one task landed; branch-review skipped',
+          run, nextRunPhase(modeOf(run), runRow('branch-review')), `${oneLanded(run)}; branch-review skipped`,
         )
       }
       return enterRunPhase(run, 'escalated', 'every task finished without one landing')

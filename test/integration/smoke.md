@@ -908,7 +908,7 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    `research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done`.
 3. **`branch-review` is skipped.** One task landed, so the run goes straight from `execute` to `done`:
    the orchestrator never receives a final-review prompt, and the ledger's last run entry reads
-   `execute → done` with why `one task landed; branch-review skipped`:
+   `execute → done` with why `one task merged (PR #<n>); branch-review skipped`:
 
    ```bash
    jq '.history | map(select(.task_id == null)) | last' "$STATE/runs/$SMOKE/<run_id>.json"
@@ -919,7 +919,9 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    (`pane read … --lines 40`) a tick or two after the run reads `done` and write down the last thing
    the pipeline sent it — a digest naming the run's end, the task's `teardown → done` line alone, or
    nothing — and whether `hpipe status` then shows the run as ended. A silent end is data for that
-   question, not a failure of this step.
+   question, not a failure of this step. A done notice that arrives lists `t1 … : done, PR #<n> merged`
+   and ends with a `Clean up when you are done with it:` block: the task branch on origin (unless
+   GitHub deleted it on merge), the local task branch, and a `pull --ff-only` of `main`.
 
 `hpipe tier` never lowers from a pipeline pane: `lowering a tier needs a human; run this from your own
 pane`. If you want the live check of that guard, have the orchestrator run `hpipe tier --task t1 light

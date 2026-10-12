@@ -586,7 +586,7 @@ export async function renderRunPhasePrompt(
     case 'ship':
     case 'ship-merge':
       return run.batch === undefined ? '' : shipPrompt(run, run.batch, pluginRoot, extras)
-    case 'done': return run.batch === undefined ? runDoneNotice(run) : batchDoneNotice(run, run.batch)
+    case 'done': return run.batch === undefined ? perTaskDoneNotice(run) : batchDoneNotice(run, run.batch)
     default: return ''
   }
 }
@@ -600,8 +600,68 @@ function runDoneNotice(run: Run): string {
   const why = run.history.findLast((h) => h.task_id === undefined && h.to === 'done')?.why
   return [
     `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
-    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}`),
+    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}${mergedPrNote(t)}`),
   ].join('\n')
+}
+
+const mergedPrNote = (task: Task): string => (hasLanded(task) && task.pr !== null ? `, PR #${task.pr} merged` : '')
+
+async function perTaskDoneNotice(run: Run): Promise<string> {
+  const merged = run.tasks.filter((t) => hasLanded(t) && t.pr !== null)
+  const repo = shellQuoted(run.repo_root)
+  const leftovers = [...(await mergedBranchLines(run, merged, repo)), ...(await mergedMainlineLines(run, merged, repo))]
+  return [
+    runDoneNotice(run), ...(leftovers.length === 0 ? [] : ['Clean up when you are done with it:', ...leftovers]),
+  ].join('\n')
+}
+
+/**
+ * GitHub deletes a merged PR's head branch only when the repo is set to, and
+ * herdr's worktree removal keeps the local one. A squash merge leaves none of a
+ * branch's commits on the default branch, so only a branch still at the head its
+ * PR merged is safe to delete: `merge` holds that head to the one CI passed on.
+ */
+async function mergedBranchLines(run: Run, merged: Task[], repo: string): Promise<string[]> {
+  const remoteDeletable: string[] = []
+  const localDeletable: string[] = []
+  const remoteKept: string[] = []
+  const localKept: string[] = []
+  for (const task of merged) {
+    const mergedHead = task.ci_head?.sha ?? null
+    const unmerged = (where: string, sha: string) => mergedHead === null
+      ? `  ${where} is at ${sha8(sha)}, and the head PR #${task.pr} merged is not on record; check before deleting`
+      : `  ${where} has commits PR #${task.pr} did not merge: ${sha8(sha)}; review before deleting`
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
+    if (!remote.ok) {
+      remoteKept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
+    } else if (remote.sha !== null) {
+      if (remote.sha === mergedHead) remoteDeletable.push(task.branch)
+      else remoteKept.push(unmerged(task.branch, remote.sha))
+    }
+    // A kept worktree still has its branch checked out, and `branch -D` refuses that.
+    if (task.checkout_path !== null && existsSync(task.checkout_path)) continue
+    const local = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
+    if (local === null) continue
+    if (local === mergedHead) localDeletable.push(task.branch)
+    else localKept.push(unmerged(`local ${task.branch}`, local))
+  }
+  const deleteLine = (command: string, branches: string[]) =>
+    (branches.length === 0 ? [] : [`  git -C ${repo} ${command} ${branches.map(shellWord).join(' ')}`])
+  return [
+    ...deleteLine('push origin --delete', remoteDeletable), ...remoteKept,
+    ...deleteLine('branch -D', localDeletable), ...localKept,
+  ]
+}
+
+/** The latest merge stands for every earlier one: the default branch's history is linear. */
+async function mergedMainlineLines(run: Run, merged: Task[], repo: string): Promise<string[]> {
+  const latest = merged
+    .filter((t): t is Task & { merge_commit: string } => typeof t.merge_commit === 'string')
+    .sort((a, b) => (b.merged_at_ms ?? 0) - (a.merged_at_ms ?? 0))[0]
+  if (latest === undefined) return []
+  const mainline = await mainlineBranch(run.repo_root)
+  if (mainline === null) return []
+  return staleBranchLines(run, repo, mainline, latest.merge_commit, `PR #${latest.pr}'s merge`)
 }
 
 /**
@@ -647,9 +707,10 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
  */
 async function shippedLeftovers(run: Run, batch: Batch): Promise<string[]> {
   const repo = shellQuoted(run.repo_root)
+  const squashMerge = `PR #${batch.pr ?? 'unknown'}'s squash merge`
   return [
     ...(await localTaskBranchLines(run, batch, repo)),
-    ...(await staleDefaultBranchLines(run, batch, repo)),
+    ...(await staleBranchLines(run, repo, batch.into, batch.merge_commit, squashMerge)),
     ...(await originBatchLines(run, batch, repo)),
     ...branchReviewLines(run),
   ]
@@ -678,14 +739,15 @@ async function localTaskBranchLines(run: Run, batch: Batch, repo: string): Promi
 }
 
 /** `pull` only on the branch checked out; any other is moved by fetch, which refuses anything but a fast-forward. */
-async function staleDefaultBranchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
-  const into = `refs/heads/${batch.into}`
-  if (batch.merge_commit !== null && await isAncestor(run.repo_root, batch.merge_commit, into) === true) return []
+async function staleBranchLines(
+  run: Run, repo: string, branch: string, mergeCommit: string | null, merge: string,
+): Promise<string[]> {
+  if (mergeCommit !== null && await isAncestor(run.repo_root, mergeCommit, `refs/heads/${branch}`) === true) return []
   const current = await git(run.repo_root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
-  const why = `  # ${batch.into} predates PR #${batch.pr ?? 'unknown'}'s squash merge`
-  return [current.code === 0 && current.text.trim() === batch.into
+  const why = `  # ${branch} predates ${merge}`
+  return [current.code === 0 && current.text.trim() === branch
     ? `  git -C ${repo} pull --ff-only${why}`
-    : `  git -C ${repo} fetch origin ${shellWord(`${batch.into}:${batch.into}`)}${why}`]
+    : `  git -C ${repo} fetch origin ${shellWord(`${branch}:${branch}`)}${why}`]
 }
 
 async function originBatchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {

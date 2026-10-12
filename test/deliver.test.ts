@@ -277,7 +277,7 @@ test('a run that ends without branch-review tells the orchestrator it is done �
   const run = closedExecuteRun([mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 2_000 })])
   expect(executeAdvance(run)?.phase).toBe('done')
   expect(await renderRunPhasePrompt(run, ROOT)).toBe(
-    `Run ${run.run_id} is done — one task landed; branch-review skipped. Nothing more is sent for it.\n` +
+    `Run ${run.run_id} is done — one task merged; branch-review skipped. Nothing more is sent for it.\n` +
     '- t1 feat/x (hp-1): done',
   )
 })
