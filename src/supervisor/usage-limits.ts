@@ -2,7 +2,7 @@ import type { PaneHold, PersistedLimits } from '../lib/delivery-health'
 import { isAgentReady } from '../lib/machine'
 import { SCREEN_LINES } from '../lib/screen'
 import type { AgentStatus, QueuedEvent } from '../lib/types'
-import { autoContinues, type LimitLine, limitLineOn, resetAt } from '../lib/usage-limit'
+import { type LimitLine, limitLineOn, resetAt } from '../lib/usage-limit'
 import { warnToTick } from './deliver'
 
 /** The message shows minutes only, so the real reset can come up to 59 s after the minute it names. */
@@ -204,7 +204,7 @@ export interface LimitIO {
 
 export function readingFrom(screen: string, status: AgentStatus): LimitReading {
   const scan = limitLineOn(screen)
-  return { status, line: scan.line, boxSeen: scan.boxSeen, autoContinue: autoContinues(screen) }
+  return { status, line: scan.line, boxSeen: scan.boxSeen, autoContinue: scan.autoContinue }
 }
 
 /** herdr's failed `pane read` comes back as an empty screen, which says nothing either way: null. */

@@ -3,6 +3,8 @@ import { inputBoxBounds, withoutEscapes } from './screen'
 /** Claude's usage-limit line as a pane shows it: `⎿ You've hit your <label> · resets <when> (<zone>)`. */
 export interface LimitLine {
   label: string
+  /** A team or org budget names the limit whose reset it gives: `your session limit resets …`. */
+  resetting?: string
   /** `5:20am`, `Sep 22 at 3am`, `Jan 2, 2027 at 3:30 AM`; null when the line names no reset. */
   when: string | null
   zone: string | null
@@ -14,16 +16,30 @@ export interface LimitScan {
   line: LimitLine | null
   /** Whether a Claude input box was found. Without one the screen says nothing either way. */
   boxSeen: boolean
+  /** Claude's own auto-continue is armed below the line, so it resumes the pane itself at the reset. */
+  autoContinue: boolean
 }
 
 /**
- * The `⎿` is Claude's own response prefix, two columns in. Tool output nested under
- * a call is indented further, and a background agent's failure quoting the message
- * is a `⏺` line, so neither matches.
+ * The `⎿` is Claude's own response prefix, two columns in. A background agent's
+ * failure quoting the message is a `⏺` line, which ends the walk first. Claude Code
+ * builds it as `You've hit your <label>` and ` · `-separated segments: `resets
+ * <when>`, or for a team or org budget `your <limit> resets <when>`, and
+ * `progress saved`. A credits block opens with one of the other two phrases.
  */
-const LIMIT_LINE = /^\s{0,2}⎿\s+You've hit your (.+?)(?: · resets (.+?))?\s*$/
+const LIMIT_LINE = /^\s{0,2}⎿\s+(?:You've hit your|You've reached your|You're out of) (.+?)\s*$/
+const LIMIT_OPENER = /You've hit your|You've reached your|You're out of/
+const RESET_SEGMENT = /^(?:your (.+?) )?resets (.+)$/
 const ASSISTANT_OUTPUT = /^[⏺●]\s/
 const ZONE_SUFFIX = /^(.*?) \(([^()]+)\)$/
+/** A wrapped line's tail: indented text, not the `/upgrade` hint or another transcript element. */
+const CONTINUATION = /^\s+[^\s/⎿❯✻⏺●]/
+/**
+ * Claude's auto-continue notices, in the order they can follow the line. Only the
+ * last one says what will happen: a cancelled or finished wait continues nothing.
+ */
+const AUTO_CONTINUE_NOTICE = /continuing automatically|automatic continue cancelled|limit has reset/i
+const AUTO_CONTINUE_ARMED = /continuing automatically/i
 
 /**
  * The limit the pane is stopped on: the last limit line above the input box, with
@@ -35,38 +51,48 @@ const ZONE_SUFFIX = /^(.*?) \(([^()]+)\)$/
 export function limitLineOn(screen: string): LimitScan {
   const lines = withoutEscapes(screen).split('\n')
   const bounds = inputBoxBounds(lines)
-  if (bounds === null) return { line: null, boxSeen: false }
+  if (bounds === null) return { line: null, boxSeen: false, autoContinue: false }
+  let lastNotice: string | null = null
   for (let index = bounds.open - 1; index >= 0; index -= 1) {
     const line = lines[index] ?? ''
-    if (ASSISTANT_OUTPUT.test(line)) return { line: null, boxSeen: true }
-    const joined = joinWrappedZone(line, index + 1 < bounds.open ? lines[index + 1] : undefined)
+    if (ASSISTANT_OUTPUT.test(line)) return { line: null, boxSeen: true, autoContinue: false }
+    const joined = joinWrapped(line, index + 1 < bounds.open ? lines[index + 1] : undefined)
     const match = LIMIT_LINE.exec(joined)
-    if (match !== null) return { line: limitLineFrom(match, joined), boxSeen: true }
+    if (match !== null) {
+      return {
+        line: limitLineFrom(match, joined), boxSeen: true,
+        autoContinue: lastNotice !== null && AUTO_CONTINUE_ARMED.test(lastNotice),
+      }
+    }
+    lastNotice ??= AUTO_CONTINUE_NOTICE.test(line) ? line : null
   }
-  return { line: null, boxSeen: true }
+  return { line: null, boxSeen: true, autoContinue: false }
 }
 
-/** A narrow pane breaks the zone mid-name, where there is no space to break on. */
-function joinWrappedZone(line: string, next: string | undefined): string {
+/**
+ * A narrow pane wraps the line: mid-zone, where there is no space to break on, or
+ * at a space before the reset or the zone.
+ */
+function joinWrapped(line: string, next: string | undefined): string {
+  if (next === undefined || !LIMIT_OPENER.test(line) || line.trimEnd().endsWith(')')) return line
+  if (!CONTINUATION.test(next)) return line
   const open = line.lastIndexOf('(')
-  if (open === -1 || line.indexOf(')', open) !== -1 || next === undefined) return line
-  return line + next.trim()
+  const midZone = open !== -1 && line.indexOf(')', open) === -1
+  return midZone ? line + next.trim() : `${line.trimEnd()} ${next.trim()}`
 }
 
 function limitLineFrom(match: RegExpExecArray, line: string): LimitLine {
-  const reset = match[2]?.trim()
-  const zoned = reset === undefined ? null : ZONE_SUFFIX.exec(reset)
+  const [label = '', ...segments] = (match[1] ?? '').split(' · ')
+  const reset = segments.map((segment) => RESET_SEGMENT.exec(segment.trim())).find((m) => m !== null)
+  const when = reset?.[2]?.trim()
+  const zoned = when === undefined ? null : ZONE_SUFFIX.exec(when)
   return {
-    label: match[1] ?? '',
-    when: zoned?.[1] ?? reset ?? null,
+    label: label.replace(/\.$/, ''),
+    ...(reset?.[1] === undefined ? {} : { resetting: reset[1] }),
+    when: zoned?.[1] ?? when ?? null,
     zone: zoned?.[2] ?? null,
     text: line.trim(),
   }
-}
-
-/** Claude continues on its own at the reset; the supervisor must not resume it too. */
-export function autoContinues(screen: string): boolean {
-  return /continuing automatically/i.test(withoutEscapes(screen))
 }
 
 const MINUTE_MS = 60_000
@@ -107,7 +133,7 @@ export function resetAt(
   const time = TIME_ONLY.exec(line.when)
   if (time !== null) {
     const [, hour, minute, meridiem] = time
-    return timeOnlyReset(line.label, clock(hour, minute, meridiem), zone, firstSeenAt)
+    return timeOnlyReset(line.resetting ?? line.label, clock(hour, minute, meridiem), zone, firstSeenAt)
   }
   const dated = DATED.exec(line.when)
   if (dated === null) return null
@@ -127,7 +153,7 @@ function clock(hour = '0', minute = '0', meridiem = 'a'): { h: number; m: number
 }
 
 function timeOnlyReset(
-  label: string, { h, m }: { h: number; m: number }, zone: string, firstSeenAt: number,
+  resetting: string, { h, m }: { h: number; m: number }, zone: string, firstSeenAt: number,
 ): number | null {
   const seenDay = zonedParts(firstSeenAt, zone)
   if (seenDay === null) return null
@@ -138,7 +164,7 @@ function timeOnlyReset(
   const next = occurrences.findIndex((at) => at > firstSeenAt - FIRST_SIGHT_TOLERANCE_MS)
   if (next <= 0) return null
   const reset = occurrences[next] as number
-  if (label === SESSION_LABEL && reset - firstSeenAt > SESSION_AHEAD_MAX_MS) return occurrences[next - 1] as number
+  if (resetting === SESSION_LABEL && reset - firstSeenAt > SESSION_AHEAD_MAX_MS) return occurrences[next - 1] as number
   return reset
 }
 

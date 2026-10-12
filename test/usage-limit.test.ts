@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { autoContinues, type LimitLine, limitLineOn, resetAt } from '../src/lib/usage-limit'
+import { type LimitLine, limitLineOn, resetAt } from '../src/lib/usage-limit'
 
 const MANAGUA = 'America/Managua'
 const RULE = '─'.repeat(60)
@@ -55,7 +55,7 @@ const lineOf = (screen: string): LimitLine => {
 
 test('the live capture reads as a session limit with its reset and zone', () => {
   expect(limitLineOn(WORKER_AT_THE_LIMIT)).toEqual({
-    boxSeen: true,
+    boxSeen: true, autoContinue: false,
     line: {
       label: 'session limit', when: '5:20am', zone: MANAGUA,
       text: "⎿  You've hit your session limit · resets 5:20am (America/Managua)",
@@ -84,15 +84,35 @@ test('every label Claude Code renders is a limit', () => {
   }
 })
 
+test('a team or org budget names the limit whose reset it gives, and a saved-progress note is ignored', () => {
+  const team = claude(["  ⎿  You've hit your team's shared budget · ask your admin to raise it at https://claude.ai/admin · " +
+    'your session limit resets 5:20am (America/Managua)'])
+  expect(lineOf(team)).toMatchObject({
+    label: "team's shared budget", resetting: 'session limit', when: '5:20am', zone: MANAGUA,
+  })
+  expect(lineOf(claude([`${limit()} · progress saved`]))).toMatchObject({ label: 'session limit', when: '5:20am', zone: MANAGUA })
+  expect(lineOf(claude(["  ⎿  You've reached your Fable limit."]))).toMatchObject({ label: 'Fable limit', when: null })
+  expect(lineOf(claude(["  ⎿  You're out of usage credits · Switch to another model"]))).toMatchObject({ label: 'usage credits' })
+})
+
 test('a line with no reset is still a limit, with nothing to date it by', () => {
   expect(lineOf(claude(["  ⎿  You've hit your usage credit limit"]))).toMatchObject({
     label: 'usage credit limit', when: null, zone: null,
   })
 })
 
-test('a line a narrow pane wrapped is joined back before it is read', () => {
-  const wrapped = claude(["  ⎿  You've hit your session limit · resets 10:20am (America/", '     Managua)'])
-  expect(lineOf(wrapped)).toMatchObject({ when: '10:20am', zone: MANAGUA })
+test('a line a narrow pane wrapped is joined back before it is read, wherever it broke', () => {
+  const wraps = [
+    ["  ⎿  You've hit your session limit · resets 10:20am (America/", '     Managua)'],
+    ["  ⎿  You've hit your session limit · resets 10:20am", '     (America/Managua)'],
+    ["  ⎿  You've hit your session limit · resets", '     10:20am (America/Managua)'],
+  ]
+  for (const wrapped of wraps) {
+    expect(lineOf(claude([...wrapped, '     /upgrade to increase your usage limit.'])), wrapped[1])
+      .toMatchObject({ label: 'session limit', when: '10:20am', zone: MANAGUA })
+  }
+  expect(lineOf(claude(["  ⎿  You've hit your usage credit limit", '     /upgrade to increase your usage limit.'])))
+    .toMatchObject({ label: 'usage credit limit', when: null })
 })
 
 test('assistant output after the line means the agent has moved on, on macOS and elsewhere', () => {
@@ -125,17 +145,23 @@ test('the box and the status line can neither fake nor mask a limit', () => {
 
 test('with no input box on screen nothing is read, and the caller is told so', () => {
   expect(limitLineOn([limit(), '', 'Wait here, then continue automatically when the limit resets'].join('\n')))
-    .toEqual({ line: null, boxSeen: false })
-  expect(limitLineOn('')).toEqual({ line: null, boxSeen: false })
+    .toEqual({ line: null, boxSeen: false, autoContinue: false })
+  expect(limitLineOn('')).toEqual({ line: null, boxSeen: false, autoContinue: false })
 })
 
 test('a screen with no message is no limit', () => {
-  expect(limitLineOn(claude(['⏺ Wrote the plan.']))).toEqual({ line: null, boxSeen: true })
+  expect(limitLineOn(claude(['⏺ Wrote the plan.']))).toEqual({ line: null, boxSeen: true, autoContinue: false })
 })
 
-test('Claude\'s own auto-continue notice is recognised', () => {
-  expect(autoContinues('Usage limit reached · continuing automatically at 10:20am · esc to cancel')).toBe(true)
-  expect(autoContinues(WORKER_AT_THE_LIMIT)).toBe(false)
+test('Claude\'s own auto-continue counts only while its last notice below the line says it is armed', () => {
+  const armed = (...notices: string[]) => limitLineOn(claude([limit(), ...notices])).autoContinue
+  expect(armed('  Usage limit reached · continuing automatically at 10:20am · esc to cancel')).toBe(true)
+  expect(armed('  Continuing automatically at 10:20am')).toBe(true)
+  expect(armed('  Usage limit reached · continuing automatically at 10:20am · esc to cancel',
+    '  Automatic continue cancelled')).toBe(false)
+  expect(armed('  Continuing automatically at 10:20am', '  Usage limit has reset · press enter to continue')).toBe(false)
+  expect(limitLineOn(claude(['  Continuing automatically at 5:20am', '⏺ Resumed.', limit()])).autoContinue).toBe(false)
+  expect(limitLineOn(WORKER_AT_THE_LIMIT).autoContinue).toBe(false)
 })
 
 // Managua is UTC−6 all year.
@@ -163,6 +189,11 @@ test('a line first seen up to 15 minutes after its own reset dates to the reset 
   expect(resetAt(time('10:20am', 'weekly limit'), at('2026-10-11T16:36:00Z'))).toBe(at('2026-10-12T16:20:00Z'))
 })
 
+test('a team budget that resets with the session window is dated by the session rule', () => {
+  const team: LimitLine = { label: "team's shared budget", resetting: 'session limit', when: '10:20am', zone: MANAGUA, text: '' }
+  expect(resetAt(team, at('2026-10-12T10:00:00Z'))).toBe(at('2026-10-11T16:20:00Z'))
+})
+
 test('a session limit is never more than five hours away, so a later time is the one already gone', () => {
   // 04:00 local; 10:20am is 6h20m ahead, past a session window.
   expect(resetAt(time('10:20am'), at('2026-10-12T10:00:00Z'))).toBe(at('2026-10-11T16:20:00Z'))
@@ -178,7 +209,7 @@ test('a weekly limit in its last day reads time-only and dates up to a day ahead
 test('a dated reset takes the year nearest first sight, or the year it names', () => {
   expect(resetAt(time('Sep 22 at 3am', 'weekly limit'), at('2026-09-20T12:00:00Z'))).toBe(at('2026-09-22T09:00:00Z'))
   expect(resetAt(time('Jan 2 at 9:30pm', 'weekly limit'), at('2026-12-30T12:00:00Z'))).toBe(at('2027-01-03T03:30:00Z'))
-  expect(resetAt(time('Jan 2, 2027 at 3:30 AM', 'weekly limit'), at('2026-12-28T12:00:00Z')))
+  expect(resetAt(time('Jan 2, 2027 at 3:30am', 'weekly limit'), at('2026-12-28T12:00:00Z')))
     .toBe(at('2027-01-02T09:30:00Z'))
 })
 

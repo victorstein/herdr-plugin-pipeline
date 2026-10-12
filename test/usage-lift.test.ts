@@ -208,7 +208,10 @@ test('a pane found working, with the line gone, or continuing by itself is re-ar
   const cases: Array<[string, ReturnType<typeof io>]> = [
     ['working', io('working')],
     ['line gone', io('done', ['⏺ carried on', '', '─'.repeat(40), '❯ ', '─'.repeat(40)].join('\n'))],
-    ['auto-continue', io('done', `${SCREEN}\nUsage limit reached · continuing automatically · esc to cancel`)],
+    ['auto-continue', io('done', [
+      `  ${LINE.text}`, '  Usage limit reached · continuing automatically at 10:20am · esc to cancel', '',
+      '─'.repeat(40), '❯ ', '─'.repeat(40),
+    ].join('\n'))],
   ]
   for (const [why, paneIO] of cases) {
     const run = runWith(mkTask())
