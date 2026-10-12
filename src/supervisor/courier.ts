@@ -6,8 +6,10 @@ import { runRow } from '../lib/phases'
 import {
   inputBoxText, PASTE_PLACEHOLDER, SCREEN_LINES, withoutFaintText,
 } from '../lib/screen'
+import { limitLineOn } from '../lib/usage-limit'
 import type { AgentStatus, QueuedEvent, Run } from '../lib/types'
 import { type Delivery, isRetryable, type PendingPrompt, warnToTick } from './deliver'
+import { readingFrom, USAGE_LIMIT, UsageLimits } from './usage-limits'
 
 export interface PromptIO {
   agentPromptConfirmed(target: string, text: string, timeoutMs: number): Promise<CallResult<unknown>>
@@ -150,7 +152,7 @@ export async function sendConfirmed(
   return box === 'cleared' || box === 'empty' ? { ...sent, boxClear: true } : sent
 }
 
-export type HoldReason = 'pane_gone' | 'backoff' | 'budget' | typeof STUCK_INPUT
+export type HoldReason = 'pane_gone' | 'backoff' | 'budget' | typeof STUCK_INPUT | typeof USAGE_LIMIT
 
 export interface SendOutcome {
   ok: boolean
@@ -238,14 +240,22 @@ export class DeliveryGate {
   private sentThisTick = 0
   private firstSendAt: number | null = null
   private budgetReported = false
-  /** Bumped whenever `holds()` would read differently, so the supervisor rewrites it only then. */
-  revision = 0
+  private ownRevision = 0
+  readonly limits: UsageLimits
 
   constructor(
     private readonly config: GateConfig,
     private readonly now: () => number = Date.now,
     private readonly log: (message: string) => void = warnToTick,
-  ) {}
+    limits?: UsageLimits,
+  ) {
+    this.limits = limits ?? new UsageLimits(now, log)
+  }
+
+  /** Bumped whenever `holds()` would read differently, so the supervisor rewrites it only then. */
+  get revision(): number {
+    return this.ownRevision + this.limits.revision
+  }
 
   /**
    * `livePanes` is herdr's global pane list. An empty one is a failed `pane list`,
@@ -254,6 +264,7 @@ export class DeliveryGate {
    */
   beginTick(livePanes: ReadonlySet<string>): void {
     this.livePanes = livePanes
+    this.limits.forgetGone(livePanes)
     this.sentThisTick = 0
     this.firstSendAt = null
     this.budgetReported = false
@@ -311,14 +322,14 @@ export class DeliveryGate {
   markStuck(paneId: string): void {
     if (this.stuck.has(paneId)) return
     this.stuck.set(paneId, this.now())
-    this.revision += 1
+    this.ownRevision += 1
     this.log(`stuck input in ${paneId}: its input box holds text the supervisor did not send, ` +
       'so nothing more is sent there until it is submitted or cleared — `hpipe status` lists it')
   }
 
   unstick(paneId: string): void {
     if (!this.stuck.delete(paneId)) return
-    this.revision += 1
+    this.ownRevision += 1
     this.log(`input box of ${paneId} is clear again; delivering to it`)
   }
 
@@ -366,7 +377,7 @@ export class DeliveryGate {
       this.stalledSends.delete(paneId)
       if (health) {
         this.health.delete(paneId)
-        this.revision += 1
+        this.ownRevision += 1
         this.log(`delivery to ${paneId} recovered after ${health.failures} failed attempt(s)`)
       }
       return
@@ -380,7 +391,7 @@ export class DeliveryGate {
     this.health.set(paneId, {
       failures, nextAttemptAt: now + delay, lastCode: code, since: health?.since ?? now,
     })
-    this.revision += 1
+    this.ownRevision += 1
     if (failures === 1) {
       this.log(`delivery to ${paneId} failed (${code}); retrying with backoff, what is owed stays queued`)
     }
@@ -390,7 +401,11 @@ export class DeliveryGate {
     return this.health.get(paneId)?.failures ?? 0
   }
 
-  /** Every pane the gate is holding sends for, and why — what `hpipe status` reads. */
+  /**
+   * Every pane the gate is holding sends for, and why — what `hpipe status` reads.
+   * A usage limit wins over anything else wrong with the pane: nothing else can be
+   * fixed while it stands, and the rest shows again once it is lifted.
+   */
   holds(): Record<string, PaneHold> {
     const out: Record<string, PaneHold> = {}
     for (const [pane, health] of this.health) {
@@ -402,7 +417,7 @@ export class DeliveryGate {
         since: Math.min(since, failing?.since ?? since), failures: failing?.failures ?? 0, code: STUCK_INPUT,
       }
     }
-    return out
+    return { ...out, ...this.limits.holds() }
   }
 }
 
@@ -419,6 +434,7 @@ export function makeCourier(
   const humanTypesIn = options.humanTypesIn ?? (() => false)
   const heldStuck: SendOutcome = { ok: false, code: STUCK_INPUT, held: STUCK_INPUT }
   return async (paneId, text, sendOptions = {}) => {
+    if (gate.limits.isLimited(paneId)) return HELD_BY_LIMIT
     if (gate.isStuck(paneId) && gate.boxReadAlready(paneId)) return heldStuck
     const held = gate.admit(paneId, sendOptions.overBudget === true)
     if (held !== null) return { ok: false, code: held, held }
@@ -450,7 +466,13 @@ async function boxHold(
   humanTypesIn: boolean,
 ): Promise<SendOutcome | null> {
   gate.boxReadAlready(paneId)
-  const box = await readInputBox(io, paneId)
+  const screen = await io.paneReadStyled(paneId, SCREEN_LINES)
+  // Ahead of the box: a limited pane rejects whatever is sent, so its box is not ours to clear either.
+  if (limitLineOn(screen).line !== null) {
+    gate.limits.observe(paneId, readingFrom(screen, await io.agentStatus(paneId)))
+    if (gate.limits.isLimited(paneId)) return HELD_BY_LIMIT
+  }
+  const box = inputBoxText(withoutFaintText(screen))
   if (box === null || box.length === 0) {
     if (box !== null) gate.forgetStalled(paneId)
     gate.unstick(paneId)
@@ -468,6 +490,8 @@ async function boxHold(
   gate.forgetStalled(paneId)
   return null
 }
+
+const HELD_BY_LIMIT: SendOutcome = { ok: false, code: USAGE_LIMIT, held: USAGE_LIMIT }
 
 /** Whether any line of the box carries a paste placeholder or a piece of the sent text. */
 function boxHoldsAnyOf(box: string, sent: string): boolean {
