@@ -13,6 +13,7 @@ export interface BoardPaneDeps {
   sleep: (ms: number) => Promise<void>
   /** The export's text, or null while the file does not exist yet. */
   readExport: (path: string) => Promise<string | null>
+  /** The pane and the tab it opened in. */
   renamePane: (paneId: string, label: string) => Promise<unknown>
   updateBoards: typeof updateBoards
   which: (bin: string) => string | null
@@ -29,7 +30,11 @@ const processDeps = (): BoardPaneDeps => ({
     const file = Bun.file(path)
     return (await file.exists()) ? file.text() : null
   },
-  renamePane: (paneId, label) => new Herdr().paneRename(paneId, label),
+  renamePane: async (paneId, label) => {
+    const herdr = new Herdr()
+    await herdr.paneRename(paneId, label)
+    await herdr.renameTabOf(paneId, label)
+  },
   updateBoards,
   which: (bin) => Bun.which(bin),
   runBv: (argv, { cwd, env }) =>

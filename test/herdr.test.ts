@@ -132,6 +132,22 @@ test('an opened plugin pane reports its new pane id', async () => {
   expect(opened.result?.plugin_pane?.pane?.pane_id).toBe('w1A:p2')
 })
 
+test('renameTabOf finds the pane\'s tab and renames it, since herdr labels tabs only by number — #2', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pane get w1:p3': { result: { pane: { pane_id: 'w1:p3', tab_id: 'w1:t2' } } },
+    'tab rename': { result: {} },
+  })
+  expect((await new Herdr(bin).renameTabOf('w1:p3', 'Board: meter abc123')).ok).toBe(true)
+  expect((await Bun.file(join(dir, 'calls.log')).text()).trim().split('\n'))
+    .toEqual(['pane get w1:p3', 'tab rename w1:t2 Board: meter abc123'])
+})
+
+test('renameTabOf renames nothing when the pane cannot be read', async () => {
+  const bin = await makeFakeBin(dir, { 'pane get': { error: { code: 'pane_not_found', message: 'gone' } } })
+  expect(await new Herdr(bin).renameTabOf('w1:p3', 'Board')).toMatchObject({ ok: false, code: 'pane_not_found' })
+  expect((await Bun.file(join(dir, 'calls.log')).text()).trim()).toBe('pane get w1:p3')
+})
+
 test('paneRename renames the pane to the label it is given', async () => {
   const bin = await makeFakeBin(dir, { 'pane rename': { result: {} } })
   expect((await new Herdr(bin).paneRename('w1:p3', 'Board: meter abc123')).ok).toBe(true)

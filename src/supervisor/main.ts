@@ -18,7 +18,7 @@ import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
-import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
+import { crashLogPath, readWorkspaceId, reapSupervisorSiblings, SUPERVISOR_LABEL } from '../startup'
 import { type LockContention, SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { syncBoards } from './boards'
 import {
@@ -167,6 +167,7 @@ async function main(): Promise<void> {
     pane_id: process.env.HERDR_PANE_ID ?? '',
   })
   if (!claimed) process.exit(EXIT_DUPLICATE)
+  if (process.env.HERDR_PANE_ID) await herdr.renameTabOf(process.env.HERDR_PANE_ID, SUPERVISOR_LABEL)
 
   const config = await loadConfig(configDir)
 

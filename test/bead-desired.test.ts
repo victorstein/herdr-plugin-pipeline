@@ -33,7 +33,8 @@ test('a merged task wants its bead closed by hpipe, carrying no managed label an
   for (const phase of ['close', 'teardown', 'done', 'orphaned'] as const) {
     const task = mkTask({ phase, merged_at_ms: 5 })
     expect(desiredBead(task, runWith(task)), phase).toEqual({
-      bead: 'hp-1', status: 'closed', assignee: 'hpipe', labels: [], metadata: RUN_METADATA, blockedBy: [], comments: [],
+      bead: 'hp-1', status: 'closed', assignee: 'hpipe', labels: [], metadata: RUN_METADATA, blockedBy: [], unblockedBy: [],
+      comments: [],
     })
   }
 })
@@ -72,9 +73,34 @@ test('a run that ended on its own releases an unfinished task under that task\'s
   expect(desiredBead(task, run)).toMatchObject({ status: 'open', labels: ['failed'] })
 })
 
-test('an escalated task keeps its claim: the human may resume it', () => {
+test('an escalated task keeps its claim, and sits in BLOCKED marked for the human', () => {
   const task = mkTask({ phase: 'escalated', escalated_from: 'plan' })
-  expect(desiredBead(task, runWith(task))).toMatchObject({ status: 'in_progress', assignee: 'hpipe' })
+  expect(desiredBead(task, runWith(task))).toMatchObject({
+    status: 'blocked', assignee: 'hpipe', labels: ['escalated', AWAITING_HUMAN_LABEL],
+  })
+})
+
+test('a task waiting on another task\'s files is blocked by that task\'s bead — #20', () => {
+  // berean-os: t2, t3 and t7 waited on t4 and t6 in IN PROGRESS while BLOCKED stood
+  // empty, and nothing said which task they waited on. Measured on a live run.
+  const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'implement', files: ['src/reader/'] })
+  const other = mkTask({ task_id: 't6', bead: 'hp-6', phase: 'implement', files: ['src/search/'] })
+  const waiting = mkTask({
+    task_id: 't2', bead: 'hp-2', phase: 'blocked-on-files', files: ['src/reader/Menu.cpp'], pr: null,
+  })
+  const run = runWith(holder, other, waiting)
+  expect(desiredBead(waiting, run)).toMatchObject({
+    status: 'blocked', assignee: 'hpipe', labels: ['blocked-on-files'], blockedBy: ['hp-4'], unblockedBy: ['hp-6'],
+  })
+})
+
+test('a wait that ended wants its file edge gone, while a depends_on edge stays for good', () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
+  const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'done', merged_at_ms: 2, files: ['src/a.ts'] })
+  const task = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement', depends_on: ['t1'], files: ['src/a.ts'] })
+  expect(desiredBead(task, runWith(first, holder, task))).toMatchObject({
+    status: 'in_progress', blockedBy: ['hp-1'], unblockedBy: ['hp-4'],
+  })
 })
 
 test('a registered task its worker has not been briefed on stays open and unassigned', () => {

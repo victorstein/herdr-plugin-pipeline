@@ -29,11 +29,12 @@ export type BeadCall =
   | { kind: 'reopen' }
   | { kind: 'update'; change: BeadUpdate }
   | { kind: 'depAdd'; dependsOn: string }
+  | { kind: 'depRemove'; dependsOn: string }
   | { kind: 'comment'; marker: string; text: string }
   | { kind: 'close'; reason: string }
 
 export type SyncBd = Pick<
-  Bd, 'readExport' | 'refreshExport' | 'reopen' | 'update' | 'depAdd' | 'comment' | 'close' | 'exportNow'
+  Bd, 'readExport' | 'refreshExport' | 'reopen' | 'update' | 'depAdd' | 'depRemove' | 'comment' | 'close' | 'exportNow'
 >
 
 export interface SyncDeps {
@@ -99,6 +100,10 @@ export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: str
     const linked = (actual.dependencies ?? []).some((d) => d.depends_on_id === dependsOn)
     if (!linked) calls.push({ kind: 'depAdd', dependsOn })
   }
+  for (const dependsOn of desired.unblockedBy) {
+    const linked = (actual.dependencies ?? []).some((d) => d.depends_on_id === dependsOn && d.type === 'blocks')
+    if (linked) calls.push({ kind: 'depRemove', dependsOn })
+  }
   for (const comment of desired.comments) {
     if (!(actual.comments ?? []).some((c) => c.text.includes(comment.marker))) calls.push({ kind: 'comment', ...comment })
   }
@@ -111,6 +116,7 @@ function applyCall(bd: SyncBd, bead: string, call: BeadCall): Promise<Done | BdF
     case 'reopen': return bd.reopen(bead)
     case 'update': return bd.update(bead, call.change)
     case 'depAdd': return bd.depAdd(bead, call.dependsOn)
+    case 'depRemove': return bd.depRemove(bead, call.dependsOn)
     case 'comment': return bd.comment(bead, call.text)
     case 'close': return bd.close(bead, call.reason, { force: false })
   }

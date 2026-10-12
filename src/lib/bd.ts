@@ -264,6 +264,10 @@ export class Bd {
     return this.#write(['dep', 'add', from, to, '--type', 'blocks'], () => DONE)
   }
 
+  async depRemove(from: string, to: string): Promise<Done | BdFailure> {
+    return this.#write(['dep', 'remove', from, to], () => DONE)
+  }
+
   async close(id: string, reason: string, options: { force: boolean }): Promise<Done | BdFailure> {
     return this.#withTempFile(reason, (reasonFile) => this.#write(
       ['close', id, '--reason-file', reasonFile, ...(options.force ? ['--force'] : [])], () => DONE,

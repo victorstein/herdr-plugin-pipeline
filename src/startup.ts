@@ -8,7 +8,7 @@ import { gcStaleTmp } from './lib/queue'
 import { sessionKey } from './lib/session'
 import { checkTools, toolsLine, type Tools } from './lib/tools'
 
-const SUPERVISOR_LABEL = 'Pipeline supervisor'
+export const SUPERVISOR_LABEL = 'Pipeline supervisor'
 const ONE_HOUR_MS = 60 * 60 * 1000
 
 const workspaceIdPath = (stateDir: string, session: string) =>
