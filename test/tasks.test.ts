@@ -215,13 +215,13 @@ test('a queued task whose dependency is escalated stays queued until it finishes
   expect(run.tasks[1]?.phase).toBe('research')
 })
 
-test('an idle worker with a fresh PR advances to pr-review-intent', async () => {
+test('an idle worker with a fresh PR advances to pr-review', async () => {
   const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(run.tasks[0]?.phase).toBe('pr-review')
   expect(run.tasks[0]?.pr).toBe(42)
 })
 
@@ -234,12 +234,12 @@ test('LIVELOCK: a task re-entering implement does not advance on the same sha', 
   expect(run.tasks[0]?.phase).toBe('implement')
 })
 
-test('a cleared task review advances to the second stage', async () => {
+test('a task already in pr-review-intent clears straight to ci, past the retired second stage', async () => {
   const run = mkRun([mkTask({ phase: 'pr-review-intent' })])
   await advanceTasks(run, deps({
     verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-quality')
+  expect(run.tasks[0]?.phase).toBe('ci')
 })
 
 test('orchestrator-owned task phases are not evaluated while the orchestrator is busy', async () => {
@@ -298,13 +298,13 @@ test('teardown removes the worktree and completes the task', async () => {
   expect(run.tasks[0]?.phase).toBe('done')
 })
 
-test('entering pr-review-intent yields that row\'s review prompt', async () => {
+test('entering pr-review yields that row\'s review prompt', async () => {
   const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   const prompts = await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(prompts.map((p) => p.text).join('\n')).toContain('pr-review-intent')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('# `pr-review` — PR #42')
 })
 
 test('entering merge yields the merge prompt', async () => {
@@ -341,7 +341,7 @@ test('a worker-owned phase addresses its prompt to the worker pane, not the orch
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(run.tasks[0]?.phase).toBe('pr-review')
   expect(prompts[0]?.paneId).toBe('w7:p1')
 })
 
@@ -1161,7 +1161,7 @@ for (const { phase, tier } of [
 
     head = 'bbb'
     await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
-    expect(task.phase).toBe(phase)
+    expect(task.phase).toBe('pr-review')
   })
 }
 
@@ -1198,9 +1198,9 @@ test('a send-back whose PR head cannot be read waits a tick instead of disarming
 
 test('a cleared review or a green CI reads no PR head', async () => {
   const { reads, prView } = headReads(() => 'aaa')
-  const review = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  const review = mkRun([mkTask({ phase: 'pr-review', tier: 'heavy', pr: 42 })])
   await advanceTasks(review, deps({ verdictFor: async () => clear, prView }))
-  expect(review.tasks[0]?.phase).toBe('pr-review-quality')
+  expect(review.tasks[0]?.phase).toBe('ci')
 
   const green = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass', tier: 'heavy' })])
   await advanceTasks(green, deps({ prView }))
@@ -1245,7 +1245,7 @@ test('implement holds while its prompt is undelivered, so a lagging head read ca
   settleOutbox(run, [{ id: prompt.id, ok: true }], Date.now())
   head = 'F'
   await advanceTasks(run, deps({ prView }))
-  expect(task.phase).toBe('pr-review-intent')
+  expect(task.phase).toBe('pr-review')
 })
 
 test('a send-back on the last allowed pass escalates without waiting on the PR head', async () => {

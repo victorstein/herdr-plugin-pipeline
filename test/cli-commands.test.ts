@@ -691,7 +691,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
 
   head = 'I'
   await advanceTasks(saved, deps)
-  expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(saved.tasks[0]?.phase).toBe('pr-review')
 })
 
 test('rewind after a merge onto a phase that works the current PR keeps the PR but forgets the merge and the close', async () => {

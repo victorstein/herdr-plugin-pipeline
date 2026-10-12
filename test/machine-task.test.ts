@@ -29,7 +29,7 @@ test('implement advances when the worker is idle, a PR exists, and the head sha 
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'bbb', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
-  expect(next?.phase).toBe('pr-review-intent')
+  expect(next?.phase).toBe('pr-review')
 })
 
 test('implement does NOT advance when the head sha is unchanged', () => {
@@ -41,14 +41,14 @@ test('implement does NOT advance when the head sha is unchanged', () => {
   expect(next).toBeNull()
 })
 
-test('stage 1 CLEAR moves to stage 2, not straight to ci', () => {
+test('a task already in stage 1 of the retired heavy pair clears straight to ci, never to stage 2', () => {
   const { run, task } = fixture('pr-review-intent')
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: true,
     verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 },
     prNumber: 5, headSha: 'aaa', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
-  expect(next?.phase).toBe('pr-review-quality')
+  expect(next?.phase).toBe('ci')
 })
 
 test('a task escalates alone at MAX_PASSES', () => {
@@ -275,14 +275,14 @@ test('an artifact row does not advance on a stale artifact', () => {
   expect(advanceTask(run, task, s)).toBeNull()
 })
 
-test('implement advances only when the head sha moved, and goes to pr-review-intent', () => {
+test('implement advances only when the head sha moved, and goes to pr-review', () => {
   const { run, task } = fixture('implement')
   const s = {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5,
     headSha: 'bbb', merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
-  expect(advanceTask(run, task, s)?.phase).toBe('pr-review-intent')
+  expect(advanceTask(run, task, s)?.phase).toBe('pr-review')
   const stale = fixture('implement')
   expect(advanceTask(stale.run, stale.task, { ...s, headSha: 'aaa' })).toBeNull()
 })
@@ -427,11 +427,10 @@ function tiered(phase: TaskPhase, tier: Tier): { run: Run; task: Task } {
   return fixed
 }
 
-test('implement opens the combined pr-review on light and standard, and pr-review-intent on heavy', () => {
-  const expected: Record<Tier, TaskPhase> = { light: 'pr-review', standard: 'pr-review', heavy: 'pr-review-intent' }
-  for (const [tier, phase] of Object.entries(expected) as [Tier, TaskPhase][]) {
+test('implement opens the one combined pr-review on every tier', () => {
+  for (const tier of ['light', 'standard', 'heavy'] as const) {
     const { run, task } = tiered('implement', tier)
-    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe(phase)
+    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe('pr-review')
   }
 })
 
@@ -443,8 +442,8 @@ test('a finished plan skips plan-review on light only', () => {
   }
 })
 
-test('a cleared pr-review goes to ci on light and standard', () => {
-  for (const tier of ['light', 'standard'] as const) {
+test('a cleared pr-review goes to ci on every tier', () => {
+  for (const tier of ['light', 'standard', 'heavy'] as const) {
     const { run, task } = tiered('pr-review', tier)
     expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe('ci')
   }
@@ -455,11 +454,9 @@ test('a heavy task lowered to light finishes pr-review-intent, then skips pr-rev
   expect(advanceTask(run, task, clearedSignals)?.phase).toBe('ci')
 })
 
-test('a light task raised to heavy finishes pr-review, then runs both heavy stages', () => {
+test('a light task raised to heavy finishes pr-review and goes to ci, as heavy itself does', () => {
   const { run, task } = tiered('pr-review', 'heavy')
-  const route: TaskPhase[] = []
-  for (let lap = 0; lap < 3; lap++) route.push(advanceTask(run, task, clearedSignals)!.phase)
-  expect(route).toEqual(['pr-review-intent', 'pr-review-quality', 'ci'])
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('ci')
 })
 
 test('a green ci goes to merge on light', () => {
@@ -479,7 +476,7 @@ test('a BLOCKER on pr-review sends the task back to implement', () => {
 
 test('a task from a ledger without a tier routes as heavy and is not written back', () => {
   const { run, task } = fixture('implement')
-  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review-intent')
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review')
   expect('tier' in task).toBe(false)
   expect(task.tier_history).toBeUndefined()
 })

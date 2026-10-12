@@ -67,7 +67,10 @@ test('entering implement by any route forgets the reviewed head', () => {
 // ——— the last review's CLEAR records what lands ———
 
 test('the CLEAR that leads into land-queue records the branch head as the reviewed head', () => {
-  for (const [tier, phase] of [['light', 'pr-review'], ['standard', 'pr-review'], ['heavy', 'pr-review-quality']] as const) {
+  for (const [tier, phase] of [
+    ['light', 'pr-review'], ['standard', 'pr-review'], ['heavy', 'pr-review'],
+    ['heavy', 'pr-review-intent'], ['heavy', 'pr-review-quality'],
+  ] as const) {
     const { run, task } = fixture(phase, { tier: tier as Tier, submission: submitted() })
     const next = advanceTask(run, task, signals({
       artifactFresh: true, verdict: CLEAR, headSha: 'bbbb2222', headContainsSubmission: true,
@@ -92,11 +95,6 @@ test('a reviewed head that lost the submitted work goes back to implement, not i
   expect(task.head_sha_at_entry).toBe('cccc3333')
   expect(task.land_sha).toBeUndefined()
   expect(run.history.at(-1)?.why).toContain('no longer contains its submitted head aaaa1111')
-})
-
-test('a heavy task\'s first stage CLEAR moves on to the second without reading the head', () => {
-  const { run, task } = fixture('pr-review-intent', { tier: 'heavy' })
-  expect(advanceTask(run, task, signals({ artifactFresh: true, verdict: CLEAR }))?.phase).toBe('pr-review-quality')
 })
 
 // ——— land-queue ———
@@ -141,13 +139,13 @@ test('sync: a clean submission advances the reviewed head and goes to merge', ()
   expect(task.land_sha).toBe('eeee5555')
 })
 
-test('sync: a dirty submission goes to the tier\'s first review row and keeps the reviewed head', () => {
-  for (const [tier, review] of [['light', 'pr-review'], ['standard', 'pr-review'], ['heavy', 'pr-review-intent']] as const) {
+test('sync: a dirty submission goes back to pr-review in every tier and keeps the reviewed head', () => {
+  for (const tier of ['light', 'standard', 'heavy'] as const) {
     const { run, task } = fixture('sync', {
       tier: tier as Tier, land_sha: 'aaaa1111',
       submission: submitted({ kind: 'sync', merge: 'dirty', head_sha: 'eeee5555', dirty_at: 'ffff6666' }),
     })
-    expect(advanceTask(run, task, signals())?.phase, tier).toBe(review)
+    expect(advanceTask(run, task, signals())?.phase, tier).toBe('pr-review')
     expect(task.land_sha, tier).toBe('aaaa1111')
     expect(run.history.at(-1)?.why).toBe('sync of batch/x was not a clean merge: ffff6666')
   }

@@ -274,7 +274,11 @@ Every task carries a tier that decides which reviews it runs:
 |---|---|---|---|
 | `light` | ✓ | – | one combined `pr-review` |
 | `standard` | ✓ | ✓ | one combined `pr-review` |
-| `heavy` | ✓ | ✓ | `pr-review-intent`, then `pr-review-quality` |
+| `heavy` | ✓ | ✓ | one combined `pr-review` |
+
+Heavy used to review the PR twice, `pr-review-intent` then `pr-review-quality`. The intent stage
+cleared all 66 of its reviews and the one PR-stage defect on record came from a combined review, so
+heavy now differs from standard in review effort, not in review count (see **Models**).
 
 The orchestrator sets it at registration with `--tier light|standard|heavy`; a new task defaults to
 `standard`. A bead labelled `pipeline:tier-light`, `pipeline:tier-standard` or `pipeline:tier-heavy`
@@ -412,6 +416,11 @@ The Beads release moves the ledger to `schema_version: 3`. Runs started before i
 and are no longer advanced: finish them on the previous release, then upgrade and restart the
 supervisor. They do not block `hpipe start`, and the commands that address a task or its
 discoveries do not see them.
+
+The combined-PR-review release keeps the `pr-review-intent` and `pr-review-quality` rows but routes
+no task into them. A heavy task already in one when you upgrade finishes that review and goes on to
+`ci` (or `land-queue` in a single-PR run), skipping the second stage; a BLOCKER from it sends the task
+back to `implement`, which then opens the combined `pr-review`. No ledger format changes.
 
 Single-PR runs are written as `schema_version: 4`, and per-task runs stay at 3, so every run in
 flight carries on across the upgrade and a rollback still reads them. A supervisor that predates

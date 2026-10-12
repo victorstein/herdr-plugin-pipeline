@@ -70,8 +70,9 @@ behaviour; this skill does.
    consumes, a data migration, security/auth, concurrency or state-machine code — or you are
    unsure. **standard**: the rest. When unsure, go higher. A `pipeline:tier-<name>` bead label
    overrides `--tier`; two tier labels are refused. The `tier:` line under `task_id:` says what was
-   recorded and why. light skips `plan-review`; light and standard get one combined `pr-review`;
-   heavy runs `pr-review-intent` then `pr-review-quality`.
+   recorded and why. light skips `plan-review`; every tier gets one combined `pr-review`, and heavy
+   runs its reviews at the highest effort. A heavy task already in `pr-review-intent` or
+   `pr-review-quality` from before an upgrade finishes it and goes on to `ci` (or `land-queue`).
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
    `Dispatch tN` prompt carrying the same block — run it then) or a brief with a
    **`dispatch, in order:`** block. **Run that block exactly

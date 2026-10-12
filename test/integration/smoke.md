@@ -387,9 +387,8 @@ tier passes through it on the way to `implement`: a heavy or standard task enter
    moving, so only a release clears it` instead, and then `t2` also appears under `waiting on
    you:` carrying the rendered `<hpipe> release --task t1` — once, not on both lines.
 
-   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (light and
-   standard), `pr-review-intent` and `pr-review-quality` (heavy), `ci`, `merge`, `close`, `teardown`
-   all hold files. Pinned heavy, `t1` passes through the heavy pair.
+   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (every
+   tier), `ci`, `merge`, `close`, `teardown` all hold files.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.
@@ -615,8 +614,8 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
 
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 
-**The question.** During `spec-review`, `plan-review`, `pr-review`, `pr-review-intent` and
-`pr-review-quality`, the worker dispatches a *review subagent*, and during `implement` the Sonnet
+**The question.** During `spec-review`, `plan-review` and `pr-review`, the worker dispatches a
+*review subagent*, and during `implement` the Sonnet
 subagent that writes the code; either way it is told to wait for it within its own turn. The
 supervisor gates every artifact-and-verdict row, and `implement`, on the worker pane reading `idle`
 or `done` (via `herdr agent get`, double-checked after `ACTOR_SETTLE_MS`). Three adversarial rounds could not
@@ -739,10 +738,8 @@ worker would block once. Not a plugin bug, but it will stall a first run.
 
 ## 6. Finish the run
 
-Let `t1` go all the way. The route after `implement` follows the tier: pinned heavy, it is
-`implement` → PR → `pr-review-intent` → `pr-review-quality` → `ci` → `merge` → `close` → `teardown` →
-`done`; a task on the `standard` default goes `implement` → PR → `pr-review` → `ci` → … instead. Then
-`t2` releases and follows. When both are `done` and
+Let `t1` go all the way. After `implement` every tier takes the same route: `implement` → PR →
+`pr-review` → `ci` → `merge` → `close` → `teardown` → `done`. Then `t2` releases and follows. When both are `done` and
 intake is closed, the run advances to `branch-review`, whose prompt goes to the orchestrator; it
 clears to `done`.
 
@@ -794,7 +791,7 @@ review rows it visits:
 | --- | --- | --- |
 | `light` | `blocked-on-files` — no `plan-review` | `pr-review` → `ci` |
 | `standard` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
-| `heavy` | `plan-review` → `blocked-on-files` | `pr-review-intent` → `pr-review-quality` → `ci` |
+| `heavy` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
 
 §1–§6 pin both tasks heavy, so none of that routing is exercised there. These two batches are its only
 live check. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
@@ -803,9 +800,9 @@ live check. Run them against `victorstein/hpipe-smoke`, each in a fresh session:
 **Upgrade first.** The supervisor is long-lived and keeps the code it started with. If any session
 that will drive these batches was up before this build was installed or linked, close its `Pipeline
 supervisor` pane and run the plugin's `supervisor` action (or restart the session), then check that
-`hpipe status` reads `supervisor: live (pid N)` with a new pid. A supervisor still on the old phase
-table routes every task as heavy while the CLI briefs it for its tier: a `light` or `standard` task
-reaching `pr-review-intent` is that, not a routing bug.
+`hpipe status` reads `supervisor: live (pid N)` with a new pid. A supervisor still on an old phase
+table routes by it while the CLI briefs the task by the new one: a task of any tier reaching
+`pr-review-intent` is that, not a routing bug.
 
 ### 7a. Batch A — one task per tier
 
@@ -837,7 +834,7 @@ otherwise removes before you can read them.
    ```
    light     research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
    standard  research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review-intent → pr-review-quality → ci → merge → close → teardown → done
+   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
    ```
 
    A returned review shows as a repeat (`… → spec-review → spec → spec-review → …`) and a decision as

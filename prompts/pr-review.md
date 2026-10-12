@@ -1,8 +1,8 @@
 # `pr-review` — {{subject}}, {{branch}} ({{bead}}), pass {{pass}}
 
-{{subject}} is open. This one review asks both questions the heavy tier splits across two stages:
-does {{the_change}} do what was asked, completely, and nothing it was not asked to do — and is it written the
-way this codebase is already written?
+{{subject}} is open. This one review asks both questions: does {{the_change}} do what was asked,
+completely, and nothing it was not asked to do — and is it written the way this codebase is already
+written?
 
 You do not review it yourself. Hand the brief below to a subagent with a fresh context, verbatim, and
 route its output — the plugin owns every word of review instruction; you only carry it.

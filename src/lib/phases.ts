@@ -84,9 +84,10 @@ export interface PhaseRow<P extends string> {
   terminal?: boolean
   releasesPane?: boolean
   /**
-   * The tiers that run this row; absent means every tier. Never set on a row
-   * that is any row's `onBlocker`, so blocker routing stays tier-blind — asserted
-   * by table.test.ts.
+   * The tiers that run this row; absent means every tier, and empty means a
+   * retired row that a task already in it still leaves by its route. Never set on
+   * a row that is any row's `onBlocker`, so blocker routing stays tier-blind —
+   * asserted by table.test.ts.
    */
   tiers?: readonly Tier[]
   /**
@@ -185,18 +186,20 @@ export const TASK_ROWS: readonly PhaseRow<TaskPhase>[] = [
   // A worker whose pane hangs without emitting `pane.exited` goes unnoticed otherwise.
   { phase: 'implement', actor: 'worker', signal: 'pr',
     onClear: 'pr-review', prompt: 'implement', stallable: true, holdsFiles: true },
-  // One review where heavy runs two: across the 18 tasks tallied before tiers,
-  // neither PR stage ever returned a BLOCKER, and two passes over one diff was
-  // the clearest redundancy in the pipeline.
+  // One review for every tier. Heavy's split pair cleared 66 of 66 intent reviews,
+  // and the only PR-stage defect in 254 berean-os verdicts came from this combined
+  // review, so the second pass over one diff bought nothing. Measured on live runs.
   { phase: 'pr-review', actor: 'worker', signal: 'verdict',
-    onClear: 'pr-review-intent', onBlocker: 'implement', counter: 'pr-review',
-    prompt: 'pr-review', stallable: true, holdsFiles: true, tiers: ['light', 'standard'] },
+    onClear: 'ci', onBlocker: 'implement', counter: 'pr-review',
+    prompt: 'pr-review', stallable: true, holdsFiles: true },
+  // No route enters these two any more. They stay so a task already in one when
+  // the plugin is upgraded finishes it, and leaves for what follows the PR review.
   { phase: 'pr-review-intent', actor: 'worker', signal: 'verdict',
     onClear: 'pr-review-quality', onBlocker: 'implement', counter: 'pr-review-intent',
-    prompt: 'pr-review-intent', stallable: true, holdsFiles: true, tiers: ['heavy'] },
+    prompt: 'pr-review-intent', stallable: true, holdsFiles: true, tiers: [] },
   { phase: 'pr-review-quality', actor: 'worker', signal: 'verdict',
     onClear: 'ci', onBlocker: 'implement', counter: 'pr-review-quality',
-    prompt: 'pr-review-quality', stallable: true, holdsFiles: true, tiers: ['heavy'] },
+    prompt: 'pr-review-quality', stallable: true, holdsFiles: true, tiers: [] },
 
   // #19. Each waits on something outside the pipeline — GitHub, or a person — and
   // none of their signals is escalatable, so each is nudged forever and can never

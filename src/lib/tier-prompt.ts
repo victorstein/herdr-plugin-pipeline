@@ -19,8 +19,6 @@ function loopStep(phase: TaskPhase, task: Task, mode: RunMode): string {
     case 'implement': return '`implement` — a subagent writes the code and tests; you verify, push and ' +
       (mode === 'single-pr' ? 'run `hpipe submit`' : 'open the PR')
     case 'pr-review': return `\`pr-review\` — one review of ${change}, intent then quality`
-    case 'pr-review-intent': return `\`pr-review-intent\` — does ${change} do what was asked`
-    case 'pr-review-quality': return '`pr-review-quality` — is it written the way this codebase is'
     case 'sync': return '`sync` — if the batch moves before you land: merge it in, check, push, submit'
     default: return `\`${phase}\``
   }

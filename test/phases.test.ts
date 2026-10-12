@@ -90,34 +90,48 @@ test('a task with no recorded tier reads as heavy, which is every review it ran 
   expect(tierOf({ tier: 'light' })).toBe('light')
 })
 
-test('pr-review sits between implement and the heavy tier\'s two PR reviews', () => {
+test('every tier opens one pr-review after implement, and it clears to ci', () => {
   const phases = TASK_ROWS.map((r) => r.phase)
   expect(phases.indexOf('pr-review')).toBe(phases.indexOf('implement') + 1)
   expect(taskRow('implement').onClear).toBe('pr-review')
   expect(taskRow('pr-review')).toMatchObject({
-    actor: 'worker', signal: 'verdict', onClear: 'pr-review-intent', onBlocker: 'implement',
+    actor: 'worker', signal: 'verdict', onClear: 'ci', onBlocker: 'implement',
     counter: 'pr-review', prompt: 'pr-review', stallable: true, holdsFiles: true,
-    tiers: ['light', 'standard'],
   })
+  expect(taskRow('pr-review').tiers).toBeUndefined()
 })
 
-test('only the skippable reviews carry tiers', () => {
+test('only the skippable reviews carry tiers, and no tier runs the heavy pair any more', () => {
   const tiered = Object.fromEntries(
     TASK_ROWS.filter((r) => r.tiers !== undefined).map((r) => [r.phase, r.tiers]),
   )
   expect(tiered).toEqual({
     'plan-review': ['standard', 'heavy'],
-    'pr-review': ['light', 'standard'],
-    'pr-review-intent': ['heavy'],
-    'pr-review-quality': ['heavy'],
+    'pr-review-intent': [],
+    'pr-review-quality': [],
   })
+})
+
+test('a task already in either retired heavy stage leaves for what follows the PR review on its route', () => {
+  for (const tier of TIERS) {
+    for (const phase of ['pr-review-intent', 'pr-review-quality'] as const) {
+      expect(nextPhase({ tier, mode: 'per-task' }, taskRow(phase)), `${tier} per-task ${phase}`).toBe('ci')
+      expect(nextPhase({ tier, mode: 'single-pr' }, taskRow(phase)), `${tier} single-pr ${phase}`).toBe('land-queue')
+    }
+  }
+})
+
+test('the retired heavy stages keep their prompts and send-backs, for a task already in one', () => {
+  for (const phase of ['pr-review-intent', 'pr-review-quality'] as const) {
+    expect(taskRow(phase)).toMatchObject({
+      actor: 'worker', signal: 'verdict', onBlocker: 'implement', counter: phase, prompt: phase, holdsFiles: true,
+    })
+  }
 })
 
 const TIERED_EXITS: Partial<Record<TaskPhase, Record<Tier, TaskPhase>>> = {
   'plan': { light: 'blocked-on-files', standard: 'plan-review', heavy: 'plan-review' },
-  'implement': { light: 'pr-review', standard: 'pr-review', heavy: 'pr-review-intent' },
-  'pr-review': { light: 'ci', standard: 'ci', heavy: 'pr-review-intent' },
-  'pr-review-intent': { light: 'ci', standard: 'ci', heavy: 'pr-review-quality' },
+  'pr-review-intent': { light: 'ci', standard: 'ci', heavy: 'ci' },
   // A per-task route skips the single-PR rows, so it leaves `ci` for `merge` as it always did.
   'ci': { light: 'merge', standard: 'merge', heavy: 'merge' },
   'land-queue': { light: 'merge', standard: 'merge', heavy: 'merge' },
@@ -151,9 +165,8 @@ test('each tier walks exactly the rows the tier table names', () => {
     .toEqual([...head, 'blocked-on-files', 'implement', 'pr-review', 'ci'])
   expect(routeFromQueued('standard'))
     .toEqual([...head, 'plan-review', 'blocked-on-files', 'implement', 'pr-review', 'ci'])
-  expect(routeFromQueued('heavy')).toEqual([
-    ...head, 'plan-review', 'blocked-on-files', 'implement', 'pr-review-intent', 'pr-review-quality', 'ci',
-  ])
+  expect(routeFromQueued('heavy'))
+    .toEqual([...head, 'plan-review', 'blocked-on-files', 'implement', 'pr-review', 'ci'])
 })
 
 function singlePrRoute(tier: Tier): TaskPhase[] {
@@ -170,8 +183,7 @@ test('a single-PR route skips ci and lands through land-queue and sync, in every
   expect(singlePrRoute('light'))
     .toEqual([...head, 'blocked-on-files', 'implement', 'pr-review', 'land-queue', 'sync', 'merge'])
   expect(singlePrRoute('heavy')).toEqual([
-    ...head, 'plan-review', 'blocked-on-files', 'implement', 'pr-review-intent', 'pr-review-quality',
-    'land-queue', 'sync', 'merge',
+    ...head, 'plan-review', 'blocked-on-files', 'implement', 'pr-review', 'land-queue', 'sync', 'merge',
   ])
 })
 

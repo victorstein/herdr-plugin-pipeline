@@ -66,13 +66,12 @@ test('the standard loop keeps plan-review and the combined PR review', () => {
   ].join('\n'))
 })
 
-test('the heavy loop runs both PR stages, as every task did before tiers', () => {
+test('the heavy loop runs the same combined PR review as every other tier', () => {
   expect(phaseLoop(PER_TASK, mkTask())).toBe([
     ...HEAD,
     '5. `plan-review` — you dispatch the reviewer again',
     '6. `implement` — a subagent writes the code and tests; you verify, push and open the PR',
-    '7. `pr-review-intent` — does the PR do what was asked',
-    '8. `pr-review-quality` — is it written the way this codebase is',
+    '7. `pr-review` — one review of the PR, intent then quality',
   ].join('\n'))
 })
 
@@ -85,7 +84,7 @@ test('a single-PR loop ends implement with hpipe submit and gains the sync step'
     '6. `pr-review` — one review of the change, intent then quality',
     '7. `sync` — if the batch moves before you land: merge it in, check, push, submit',
   ].join('\n'))
-  expect(phaseLoop(singlePr, mkTask())).toContain('`pr-review-intent` — does the change do what was asked')
+  expect(phaseLoop(singlePr, mkTask())).toContain('7. `pr-review` — one review of the change, intent then quality')
 })
 
 test('the loop carries its paths as text, never as a token render() would pass through', () => {

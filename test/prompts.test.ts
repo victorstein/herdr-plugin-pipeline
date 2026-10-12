@@ -460,7 +460,7 @@ test('both reviews that judge the plan are told when no plan review ran', async 
 })
 
 test('a light task raised to heavy after skipping plan-review is told its plan went unreviewed', async () => {
-  expect(await renderPhase('pr-review-intent', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
+  expect(await renderPhase('pr-review', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
     .toContain('No plan review ran')
 })
 
@@ -522,8 +522,9 @@ test('the brief lists only the phases its tier runs, with the paths written in',
 
   const heavy = await renderBriefFor([briefTask({ tier: 'heavy' })], 0)
   expect(heavy).toContain('5. `plan-review` — you dispatch the reviewer again')
-  expect(heavy).toContain('8. `pr-review-quality`')
-  expect(heavy).not.toContain('`pr-review` —')
+  expect(heavy).toContain('7. `pr-review` — one review of the PR, intent then quality')
+  expect(heavy).not.toContain('pr-review-intent')
+  expect(heavy).not.toContain('pr-review-quality')
 })
 
 test('the brief names the tier, forbids lowering it, and says how to raise it', async () => {
@@ -751,4 +752,16 @@ test('the README documents Beads setup, backups, the br and reclaim warnings and
   expect(readme).not.toContain('--issue <n>')
   expect(readme).not.toContain('gh issue create')
   expect(readme).not.toContain('independent tracks')
+})
+
+test('the README, the skill and intake give heavy the same one combined PR review', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).toContain('| `heavy` | ✓ | ✓ | one combined `pr-review` |')
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('every tier gets one combined `pr-review`')
+  expect(skill).not.toContain('heavy runs `pr-review-intent` then `pr-review-quality`')
+  const intake = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(intake).toContain('Every tier gets one combined PR review')
+  expect(intake).not.toContain('two separate stages')
+  expect(await Bun.file(join(ROOT, 'prompts', 'pr-review.md')).text()).not.toContain('the heavy tier splits')
 })
