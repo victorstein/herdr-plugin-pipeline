@@ -760,6 +760,9 @@ clears to `done`.
   before the worker's fix push appears on the PR.
 - If CI goes red and the task returns to `ci`, `hpipe show` reads `ci: none` until the new head is
   polled; a failure, `ci` pass count bump or escalation within 30s of re-entry is the stale result.
+- The merge prompt's command is `gh pr merge <n> --squash --match-head-commit <sha>`, `<sha>` being the
+  head `hpipe show` prints as `ci: pass (on <sha8>)`, and it reads `Green is for <sha8>, the head CI
+  ran on`. The merge it renders goes through.
 - `teardown` removes the worktree unless the task was registered `--keep-worktree`.
 - No plugin commands were dropped:
 

@@ -170,12 +170,23 @@ export function ciCheckFirst(pr: string): string {
   return `Check it first, and merge only once every check passes:\n\n    gh pr checks ${pr}\n`
 }
 
+/**
+ * Pinned to the head the pass was read on, so a push between the prompt and the
+ * merge makes GitHub refuse it rather than merge a head CI never passed.
+ */
 export function mergePromptVars(task: Task): Record<string, string> {
   const pr = task.pr === null ? 'unknown' : String(task.pr)
+  const green = task.ci === 'pass'
+  const passedOn = green ? task.ci_head?.sha : undefined
   return {
-    ci_status: task.ci === 'pass'
+    ci_status: green
       ? ` and CI is green on PR #${pr}.`
       : `, but no green CI is recorded on PR #${pr}. ${ciCheckFirst(pr)}`,
+    green_head: passedOn === undefined
+      ? 'the head CI ran on'
+      : `\`${sha8(passedOn)}\`, the head CI ran on: the command below merges only while the PR's head is still ` +
+        'that commit',
+    match_head: passedOn === undefined ? '' : ` --match-head-commit ${shellWord(passedOn)}`,
   }
 }
 

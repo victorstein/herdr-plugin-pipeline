@@ -620,7 +620,27 @@ test('the decision prompt tells the orchestrator to raise the tier when an answe
 test('the per-task merge prompt renders the merge command, with the way out when squash is off', async () => {
   const text = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } })
   expect(text).toContain('\n    gh pr merge 7 --squash\n')
-  expect(prose(text)).toContain('If this repo does not allow squash merges, merge with the method it does allow')
+  expect(prose(text)).toContain('Green is for the head CI ran on. If you push to the branch')
+  expect(prose(text)).toContain('If this repo does not allow squash merges, swap `--squash` for the method it does ' +
+    'allow, `--merge` or `--rebase`.')
+})
+
+// Smoke run 15: the merge prompt said "green is for the head CI ran on" without naming it,
+// and its command would merge whatever head the PR had by then.
+test('the per-task merge prompt pins the head CI passed on, and names it', async () => {
+  const sha = 'c0ffee12' + '0'.repeat(32)
+  const pinned = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass',
+    ci_head: { sha, seen_at: 1 } })
+  expect(pinned).toContain(`\n    gh pr merge 7 --squash --match-head-commit ${sha}\n`)
+  expect(prose(pinned)).toContain('Green is for `c0ffee12`, the head CI ran on: the command below merges only while ' +
+    "the PR's head is still that commit. If you push to the branch")
+
+  const noHead = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' })
+  expect(noHead).toContain('\n    gh pr merge 7 --squash\n')
+  const notGreen = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'fail',
+    ci_head: { sha, seen_at: 1 } })
+  expect(notGreen).toContain('\n    gh pr merge 7 --squash\n')
+  expect(notGreen).not.toContain('--match-head-commit')
 })
 
 test('the per-task merge prompt calls CI green only when a pass is recorded', async () => {
