@@ -54,29 +54,23 @@ const NOT_FORWARD: ReadonlySet<string> = new Set<TaskPhase>([
   'escalated', 'blocked-on-decision', 'failed', 'orphaned', 'blocked-on-failure', 'done',
 ])
 
-/**
- * Read off the run's history, not the pass counters: `hpipe rewind` clears every
- * counter, and a send-back before it still happened.
- */
-function clearedFirstPass(history: readonly HistoryEntry[], review: TaskPhase): boolean {
+function passed(history: readonly HistoryEntry[], review: TaskPhase): boolean {
   const sentBackTo = taskRow(review).onBlocker
-  const exits = history.filter((entry) => entry.from === review)
-  const sentBack = exits.some((entry) => entry.to === sentBackTo || entry.to === 'escalated')
-  return !sentBack && exits.some((entry) => entry.to !== sentBackTo && !NOT_FORWARD.has(entry.to))
+  return history.some((entry) => entry.from === review && entry.to !== sentBackTo && !NOT_FORWARD.has(entry.to))
 }
 
-const PR_REVIEW_ROWS: ReadonlySet<string> = new Set(
-  TASK_ROWS.filter((row) => row.signal === 'verdict' && row.onBlocker === 'implement').map((row) => row.phase),
-)
-
-const sentBackFromPrReview = (entry: HistoryEntry): boolean =>
-  PR_REVIEW_ROWS.has(entry.from) && (entry.to === 'implement' || entry.to === 'escalated')
+const REVIEW_ROWS = TASK_ROWS.filter((row) => row.signal === 'verdict')
 
 /**
- * Whether a task leaving `implement` may skip its PR review, from the ledger alone:
- * the git measurement is only worth a fetch once this says yes. A PR review that
- * already sent the task back must see the fix, however small it is.
+ * Read off the run's history, not the pass counters: `hpipe rewind` clears every
+ * counter, and a send-back before it still happened. Over every review row, not
+ * only the route's: a plan review's send-back still counts once a human lowers
+ * the tier past it, and a PR review that sent the task back must see the fix.
  */
+const sentBackByAReview = (entry: HistoryEntry): boolean =>
+  REVIEW_ROWS.some((row) => row.phase === entry.from && (entry.to === row.onBlocker || entry.to === 'escalated'))
+
+/** Whether a task leaving `implement` may skip its PR review, from the ledger alone: the fetch waits on a yes. */
 export function skipCandidate(run: Run, task: Task): SkipCandidate | null {
   const route = routeOf(run, task)
   if (route.tier === 'heavy') return null
@@ -84,8 +78,7 @@ export function skipCandidate(run: Run, task: Task): SkipCandidate | null {
   if (reviews.length === 0) return null
   const history = run.history.filter((entry) => entry.task_id === task.task_id)
   const design = designReviewsOn(route)
-  if (!design.every((review) => clearedFirstPass(history, review))) return null
-  if (history.some(sentBackFromPrReview)) return null
+  if (!design.every((review) => passed(history, review)) || history.some(sentBackByAReview)) return null
   return { skipped: reviews, next, cleared: design }
 }
 
@@ -125,13 +118,18 @@ export function alwaysReviewPrefixes(text: string): string[] {
   return prefixes
 }
 
-/** Null on any doubt: an unmeasured change, or an unread always-review list, is reviewed. */
+/**
+ * Null on any doubt: an unmeasured change, or an unread always-review list, is
+ * reviewed. The list is always on itself: in a single-PR run it is read from the
+ * batch branch, so one skipped edit to it would decide for every later sibling.
+ */
 export function reviewSkip(
   candidate: SkipCandidate, size: ChangeSize | null, alwaysReview: string[] | null, at: number,
 ): ReviewSkip | null {
   if (size === null || alwaysReview === null) return null
   if (size.added >= PR_REVIEW_SKIP_BELOW_ADDED_LINES) return null
-  if (size.paths.some((path) => alwaysReview.some((prefix) => path.startsWith(prefix)))) return null
+  const listed = [ALWAYS_REVIEW_REL, ...alwaysReview]
+  if (size.paths.some((path) => listed.some((prefix) => path.startsWith(prefix)))) return null
   return { at, skipped: candidate.skipped, added_lines: size.added, cleared: candidate.cleared }
 }
 

@@ -96,6 +96,11 @@ test('a PR review that already sent the task back must see the fix', () => {
   }
 })
 
+test('a design review that sent the work back still counts after the tier is lowered past it', () => {
+  const { run, task } = runOf('light', [...CLEARED_DESIGN, step('plan-review', 'plan')])
+  expect(skipCandidate(run, task)).toBeNull()
+})
+
 test('another task\'s history is not this task\'s', () => {
   const { run, task } = runOf('standard', [...CLEARED_DESIGN, step('spec-review', 'spec', 't2')])
   expect(skipCandidate(run, task)).not.toBeNull()
@@ -131,6 +136,10 @@ test('a small change touching nothing on the always-review list skips', () => {
   expect(reviewSkip(CANDIDATE, { added: 149, paths: ['src/a.ts'] }, ['src/auth/'], 5)).toEqual({
     at: 5, skipped: ['pr-review'], added_lines: 149, cleared: ['spec-review'],
   })
+})
+
+test('a change to the always-review list itself is always reviewed, listed or not', () => {
+  expect(reviewSkip(CANDIDATE, { added: 1, paths: ['.claude/pipeline-always-review'] }, [], 5)).toBeNull()
 })
 
 test('a change at the threshold, an unmeasured one, or one touching the list does not skip', () => {

@@ -171,6 +171,16 @@ test('sync: a dirty submission goes back to pr-review in every tier and keeps th
   }
 })
 
+test('sync: a dirty submission after a skipped review forgets the head nobody reviewed', () => {
+  const { run, task } = fixture('sync', {
+    tier: 'light', land_sha: 'aaaa1111', review_skip: SKIP,
+    submission: submitted({ kind: 'sync', merge: 'dirty', head_sha: 'eeee5555', dirty_at: 'ffff6666' }),
+  })
+  expect(advanceTask(run, task, signals())?.phase).toBe('pr-review')
+  expect(task.land_sha).toBeUndefined()
+  expect(task.review_skip).toBeUndefined()
+})
+
 test('sync: a stale submission, or a busy worker, is not read', () => {
   const stale = fixture('sync', { land_sha: 'a', submission: submitted({ kind: 'sync', merge: 'clean', at: ENTERED - 1 }) })
   expect(advanceTask(stale.run, stale.task, signals())).toBeNull()

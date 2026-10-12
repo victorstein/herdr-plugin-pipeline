@@ -111,8 +111,13 @@ Effort after these changes:
   BLOCKER fix is exactly the code a reviewer asked to see, however few lines it is.
 - **The always-review list is read at the base, not on the branch**, with `git ls-tree`/`git show` at
   `origin/<base>` (per-task) or `origin/<batch>` (single-PR). Read from the branch, a change could take
-  itself off the list. A glob is cut to its literal prefix, as `FILES:` entries are, which can only
-  widen the list.
+  itself off the list. The file is always on its own list: a single-PR run reads it from the batch
+  branch, where one skipped edit would otherwise decide for every later sibling. A glob is cut to its
+  literal prefix, as `FILES:` entries are, which can only widen the list.
+- **A send-back from any review row blocks the skip**, not only from the rows on the current route, so
+  a plan review's BLOCKER still counts after a human lowers the tier past it.
+- **A dirty sync after a skip forgets `land_sha`.** Nobody reviewed that head, so the review the sync
+  sends the task to reads the whole change rather than "what changed since the last reviewed head".
 - **Per-task sizing uses the PR's own base.** `gh pr view` now also reads `baseRefName`, and the
   supervisor fetches that branch and the task branch before `git diff --numstat -z --no-renames
   origin/<base>...<head>`. With no base from gh the review runs.
@@ -129,6 +134,17 @@ Effort after these changes:
   new task field, `review_skip`, is optional. An older supervisor ignores it and reviews every PR; an
   older one meeting a heavy task in `pr-review` routes it on through its own table. `CLAUDE.md` asks
   that a `phases.ts` change be called out as an on-disk format change; this is that note.
+
+### Known consequences, left as they are
+
+- **Only added lines count.** A change that is mostly deletions (removing a check, −800/+20) can skip.
+  The brief sized changes by lines added; deletions were never where the PR-stage findings were.
+- **A one-task run can finish with no automated code review.** With at most one task landed, the
+  run skips `branch-review`, so a task that also skipped its PR review reaches the human merge
+  unreviewed past its plan. The merge prompt says the review was skipped.
+- **The measurement is serial in the tick.** Up to three network calls (an `ls-remote` and two
+  fetches, each on its own 15 s budget) on an exit that passes the ledger rules; a slow origin slows
+  the tick once per such exit.
 
 ## What was deliberately not changed
 

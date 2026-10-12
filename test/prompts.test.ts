@@ -616,6 +616,15 @@ test('sync tells a worker whose review was skipped that it was, not that it was 
     .toContain('Your change was reviewed, and it is next in line to land')
 })
 
+test('a review after a skipped review and a dirty sync reads the whole change, not a range since a review', async () => {
+  const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
+    merge: 'dirty' as const, dirty_at: 'ffff6666' }
+  expect(await renderPhase('pr-review', { tier: 'light', land_sha: 'aaaa1111', submission: sync }, 'sync', 'single-pr'))
+    .toContain('since the last reviewed head')
+  expect(await renderPhase('pr-review', { tier: 'light', submission: sync }, 'sync', 'single-pr'))
+    .not.toContain('since the last reviewed head')
+})
+
 test('intake explains the tiers and registers with --tier', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'intake.md')).text()
   expect(text).toContain('[--tier light|standard|heavy]')

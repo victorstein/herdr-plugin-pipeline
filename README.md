@@ -322,7 +322,9 @@ reads every change either way. On berean-os, none of the 13 tasks with a sound p
 **`.claude/pipeline-always-review`** lists what is always reviewed: one path prefix per line, `#`
 starts a comment, and a glob is cut to the prefix before its first wildcard. It is read from the
 base the change is sized against, not from the task's branch, so a change cannot take itself off the
-list. No file means an empty list.
+list, and a change to the file itself is always reviewed. A single-PR run reads it from its batch
+branch, cut from the default branch at `hpipe start`, so add to it before the run starts. No file
+means an empty list.
 
 A run in which at most one task landed skips the final `branch-review` and finishes. Either way,
 the orchestrator is sent a short notice when its run reaches `done`, saying where each task ended.

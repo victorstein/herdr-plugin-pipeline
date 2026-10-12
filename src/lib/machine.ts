@@ -382,6 +382,9 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
         task.land_sha = sync.head_sha
         return enterTaskPhase(run, task, 'merge', `clean sync of ${batch} at ${sha8(sync.head_sha)}`)
       }
+      // A skipped review left no reviewed head, so the review this sends it to is
+      // its first and must read the whole change, not a range since a review.
+      if (task.review_skip !== undefined) delete task.land_sha
       return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')),
         `sync of ${batch} was not a clean merge: ${sha8(sync.dirty_at ?? sync.head_sha)}`)
     }

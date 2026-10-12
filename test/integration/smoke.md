@@ -1280,9 +1280,8 @@ In the same run, register three more small standard tasks:
 
 - t3, after committing `.claude/pipeline-always-review` on `main` with a line naming t3's file. It
   enters `pr-review`.
-- t4, whose change also adds a line naming its own file to `.claude/pipeline-always-review` on its
-  branch. It still skips: the list is read from the base, so a change cannot put itself on it, or
-  take itself off.
+- t4, whose change also edits `.claude/pipeline-always-review` on its branch. It enters `pr-review`:
+  a change to the list is always reviewed, whatever the base's copy names.
 - t5 with a change of 200 added lines outside `docs/`. It enters `pr-review`.
 - If any task in the run had a `spec-review` or `plan-review` send-back, it entered `pr-review` however
   small its change was. Record whether one did.
