@@ -1290,6 +1290,10 @@ async function prepareSubmission(
   if (batch === undefined) {
     return refused(`${run.run_id} is a per-task run: its tasks open PRs, and there is nothing to submit`)
   }
+  if (task.phase === 'land-queue') {
+    return refused(`${task.task_id} waits in land-queue for the landing slot; if it must sync when its turn comes, ` +
+      'you are sent the sync prompt then — end your turn')
+  }
   if (task.phase !== 'implement' && task.phase !== 'sync') {
     return refused(`${task.task_id} is in ${task.phase}; submit answers only implement and sync`)
   }

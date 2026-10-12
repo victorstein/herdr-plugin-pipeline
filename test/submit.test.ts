@@ -290,6 +290,15 @@ test('a task that moves on while submit runs its checks records nothing', async 
   expect((await saved(f)).submission).toBeUndefined()
 })
 
+test('a task waiting for the landing slot tells its worker to end the turn, not to submit again', async () => {
+  const f = await fixture({ phase: 'land-queue', land_sha: 'L1' })
+  work(f)
+  const out = await submit(f)
+  expect(out.ok).toBe(false)
+  expect(out.text).toContain('t1 waits in land-queue for the landing slot; if it must sync when its turn comes, ' +
+    'you are sent the sync prompt then — end your turn')
+})
+
 // ——— sync ———
 
 async function reviewedAndBehind(): Promise<{ f: Fixture; reviewed: string }> {

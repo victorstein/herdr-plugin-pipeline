@@ -230,13 +230,27 @@ test('a task sent to sync with no agent has its prompt queued, not dropped', asy
 })
 
 test('a sync holder with nothing submitted past its window yields the slot to a waiting task', async () => {
-  const stuck = mkTask({ task_id: 't1', phase: 'sync', land_sha: 'L1', phase_entered_at: Date.now() - 16 * 60_000 })
-  const run = singlePrRun([stuck, waiting('t2')])
-  await advanceTasks(run, deps({ landingGit: fakeGit(), syncYieldMs: 15 * 60_000, liveIdle: async () => false }))
-  expect(run.tasks[0]?.phase).toBe('land-queue')
-  expect(run.tasks[0]?.land_sha).toBe('L1')
-  expect(run.history.find((h) => h.task_id === 't1')?.why).toBe('yielded the landing slot: no sync after 15m, t2 waiting')
-  expect(run.tasks[1]?.phase).toBe('sync')
+  for (const paneId of ['w7:p1', null]) {
+    const stuck = mkTask({
+      task_id: 't1', phase: 'sync', land_sha: 'L1', phase_entered_at: Date.now() - 16 * 60_000, pane_id: paneId,
+    })
+    const run = singlePrRun([stuck, waiting('t2')])
+    await advanceTasks(run, deps({ landingGit: fakeGit(), syncYieldMs: 15 * 60_000, liveIdle: async () => true }))
+    expect(run.tasks[0]?.phase, String(paneId)).toBe('land-queue')
+    expect(run.tasks[0]?.land_sha, String(paneId)).toBe('L1')
+    expect(run.history.find((h) => h.task_id === 't1')?.why, String(paneId))
+      .toBe('yielded the landing slot: no sync after 15m, t2 waiting')
+    expect(run.tasks[1]?.phase, String(paneId)).toBe('sync')
+  }
+})
+
+test('a sync holder whose worker is at work keeps the slot past its window: a resolution and a check can outlast it', async () => {
+  const working = mkTask({ task_id: 't1', phase: 'sync', land_sha: 'L1', phase_entered_at: Date.now() - 16 * 60_000 })
+  const run = singlePrRun([working, waiting('t2')])
+  await advanceTasks(run, deps({
+    landingGit: fakeGit(), syncYieldMs: 15 * 60_000, liveIdle: async (pane) => pane !== 'w7:p1',
+  }))
+  expect(run.tasks.map((t) => t.phase)).toEqual(['sync', 'land-queue'])
 })
 
 test('a landed task rewound into sync records its landing instead of waiting on a no-op merge', async () => {

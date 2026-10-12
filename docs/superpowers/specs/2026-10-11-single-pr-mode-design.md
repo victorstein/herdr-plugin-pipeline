@@ -1097,6 +1097,11 @@ Where the code departs from the text above, and why.
   to a waiting task with a pane, or one that lands without a sync. Yielding to a paneless task that
   must sync would hand the slot to nobody and let the holder take it back at once, re-sending its sync
   prompt every window.
+- **A holder whose worker is at work never yields.** M3's window counts from the sync's entry, and a
+  conflict resolution plus a long check can outlast it: the yield then turned away the submit the check
+  was for, after the check ran. A `sync` holder yields only with no pane, or with its worker read idle;
+  one that never finishes is escalated by its own stall ladder, which passes the slot on. A `submit` from
+  `land-queue` says the task waits for the slot, and that the sync prompt comes when it must sync.
 - **A paneless `sync` is still evaluated.** Its prompt and brief are queued for the next agent, and its
   edge still runs with the worker read as busy, so it can yield the slot or record a landing that
   already happened. A transition into `sync` with no pane queues the same entry instead of handing

@@ -247,7 +247,8 @@ review sends the task back through `sync`, so it lands reviewed. A **clean** syn
 the reviewed head an automatic merge of the batch, by `git merge-tree` — lands without another
 review. Anything else, a hand-resolved conflict or a new commit, goes back through the task's reviews
 first. A holder that has not submitted within `STALL_MINUTES` while another task waits gives the slot
-up, and a paneless task that must sync waits for an agent the orchestrator starts in its worktree.
+up, unless its worker is still at work, and a paneless task that must sync waits for an agent the
+orchestrator starts in its worktree.
 A task's bead closes when it lands, naming the batch branch; its code reaches the default branch only
 with the batch PR.
 

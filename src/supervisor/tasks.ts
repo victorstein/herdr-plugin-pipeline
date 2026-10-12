@@ -542,7 +542,10 @@ async function gatherSignals(
       const landing = landed ? await landingFor(task) : undefined
       if (landing === null) return null
       const yieldAfterMs = deps.syncYieldMs ?? DEFAULT_SYNC_YIELD_MS
-      return { ...base, landing, yieldAfterMs, yieldTo: await yieldCandidates(run, task, yieldAfterMs, landingFor) }
+      const atWork = task.pane_id !== null && !actorIdle
+      return {
+        ...base, landing, yieldAfterMs, yieldTo: atWork ? [] : await yieldCandidates(run, task, yieldAfterMs, landingFor),
+      }
     }
     case 'merge': {
       if (singlePr) {
@@ -627,7 +630,12 @@ async function withReviewedHead<S extends { headSha: string | null }>(
   return { ...signals, headSha: remote.sha, headContainsSubmission: contains }
 }
 
-/** Only once the holder is past its window with nothing submitted: before that it is working, and costs no read. */
+/**
+ * Only once the holder is past its window with nothing submitted, and never while its
+ * worker is at work: a conflict resolution and a long check can outlast the window, and
+ * a yield then turns away the submit the check was for. A worker that never finishes
+ * has its own stall ladder, which escalates it and passes the slot on.
+ */
 async function yieldCandidates(
   run: Run, task: Task, yieldAfterMs: number, landingFor: LandingFor,
 ): Promise<string[]> {
