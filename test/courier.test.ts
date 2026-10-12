@@ -7,10 +7,11 @@ import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
   BACKOFF_BASE_MS, boundedProbeSend, boxHoldsOnly, CatchUps, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate,
   flushDeliveries,
-  inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
+  makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
   makeSubmissionCheck, PROBE_DEFERRALS_MAX, sendConfirmed, STALLED_SEND_TTL_MS, STUCK_INPUT,
-  submissionOf, withoutFaintText,
+  submissionOf,
 } from '../src/supervisor/courier'
+import { inputBoxText, withoutFaintText } from '../src/lib/screen'
 import { deliveriesFor, type PendingPrompt } from '../src/supervisor/deliver'
 import { beadTaskFields } from './helpers/bead-fields'
 

@@ -1,93 +1,203 @@
 import { expect, test } from 'bun:test'
-import { UNPARSED_RESET_MS, usageLimitOn } from '../src/lib/usage-limit'
+import { autoContinues, type LimitLine, limitLineOn, resetAt } from '../src/lib/usage-limit'
 
 const MANAGUA = 'America/Managua'
-const SESSION = (spec: string, zone = MANAGUA) => `You've hit your session limit · resets ${spec} (${zone})`
+const RULE = '─'.repeat(60)
+const ESC = '\x1b'
+const GREY = `${ESC}[38;2;153;153;153m`
+const RED = `${ESC}[38;2;255;107;128m`
+const RESET = `${ESC}[0m`
 
-const screen = (...lines: string[]) => [
-  '⏺ Pushed the spec and opened the review.',
-  ...lines,
+/** A Claude screen: the transcript lines, then an input box, then a status line. */
+const claude = (transcript: string[], box = '❯ ', status = '  ⏵⏵ bypass permissions on (shift+tab to cycle)') =>
+  [...transcript, '', RULE, box, RULE, status].join('\n')
+
+const limit = (when = `5:20am (${MANAGUA})`, label = 'session limit') =>
+  `  ⎿  You've hit your ${label} · resets ${when}`
+
+// Reconstructed from the orchestrator's `herdr pane read` of wD:p1 at 2026-10-11T11:21:23Z, with the blank
+// lines and rules its grep removed put back.
+const WORKER_AT_THE_LIMIT = claude([
+  '  If you are back here from a BLOCKER verdict (pass 0), the review is the newest file for this',
+  '  bead under docs/superpowers/reviews/. Fix every BLOCKER and every MAJOR you accept before',
+  '  rewriting anything else.',
+  '  Commit and push the plan, then stop.',
+  "  ⎿  You've hit your session limit · resets 5:20am (America/Managua)",
+  '     /upgrade to increase your usage limit.',
   '',
-  '────────────────────────────────────────',
-  '❯ ',
-  '────────────────────────────────────────',
-  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
-].join('\n')
+  '✻ Worked for 0s · done 4:07 AM',
+  '',
+  '❯ Still working? — run berean-os-20261011-responsiveness-fixes-from-the-device-bas-y98z, phase plan (t1, perf/r20-fast-entry-refresh)',
+  '  This phase has been open 45 minutes. Nothing has appeared at:',
+  '  This is probe 1 of 3. After 3 unanswered probes this phase is escalated to the human and stops moving on its own.',
+  "  ⎿  You've hit your session limit · resets 5:20am (America/Managua)",
+  '     /upgrade to increase your usage limit.',
+  '',
+  '✻ Brewed for 0s · done 4:52 AM',
+], '❯ ', '  [Opus 5.5 (1M context)] │ Ctx ██░░░░░░░░ 27% │ 7d ██░░░░░░░░ 23% ~1d21h')
 
-// Managua is UTC−6 all year.
+// wE:p1 at the same moment: its background reviewer failed on the limit first, as assistant output.
+const REVIEWER_FAILED_FIRST = claude([
+  '⏺ Agent "Adversarial spec review pass 0" failed: Agent terminated early due to an API error: You\'ve hit your session limit · resets 5:20am (America/Managua)',
+  '(error type rate_limit, HTTP 429, request id req_011CfvGNxc5A8cBbwtEfCTfE, model sent to the API: claude-opus-5-5)',
+  "  ⎿  You've hit your session limit · resets 5:20am (America/Managua)",
+  '     /upgrade to increase your usage limit.',
+  '',
+  '✻ Brewed for 10m 33s · done 4:13 AM · 2 shells still running',
+])
+
 const at = (iso: string) => Date.parse(iso)
+const lineOf = (screen: string): LimitLine => {
+  const { line } = limitLineOn(screen)
+  if (line === null) throw new Error('no limit line')
+  return line
+}
 
-test('a session limit resets at the named wall time in the named zone', () => {
-  const limit = usageLimitOn(screen(`  ⎿  ${SESSION('10:20am')}`), at('2026-10-11T12:34:14Z'))
-  expect(limit).toEqual({
-    kind: 'session', resetsAt: at('2026-10-11T16:20:00Z'), text: SESSION('10:20am'),
+test('the live capture reads as a session limit with its reset and zone', () => {
+  expect(limitLineOn(WORKER_AT_THE_LIMIT)).toEqual({
+    boxSeen: true,
+    line: {
+      label: 'session limit', when: '5:20am', zone: MANAGUA,
+      text: "⎿  You've hit your session limit · resets 5:20am (America/Managua)",
+    },
+  })
+  expect(lineOf(REVIEWER_FAILED_FIRST).label).toBe('session limit')
+})
+
+test('the styled screen reads the same: the dim or grey anchor is kept, every escape dropped', () => {
+  const styled = claude([
+    `${RESET}${GREY}⏺ ${RESET}Opened the PR.`,
+    `  ${GREY}⎿  ${RESET}${RED}You've hit your session limit · resets 10:20am (America/Managua)${RESET}\r`,
+    `     ${GREY}/upgrade to increase your usage limit.${RESET}\r`,
+  ])
+  expect(limitLineOn(styled).line?.when).toBe('10:20am')
+  const faint = claude([`  ${ESC}[2m⎿${ESC}[22m  You've hit your session limit · resets 10:20am (America/Managua)`])
+  expect(limitLineOn(faint).line?.when).toBe('10:20am')
+})
+
+test('every label Claude Code renders is a limit', () => {
+  for (const label of [
+    'session limit', 'weekly limit', 'Opus limit', 'Sonnet limit', 'Fable limit', 'usage credit limit', 'limit',
+    'usage limit',
+  ]) {
+    expect(lineOf(claude([limit(`3am (${MANAGUA})`, label)])).label, label).toBe(label)
+  }
+})
+
+test('a line with no reset is still a limit, with nothing to date it by', () => {
+  expect(lineOf(claude(["  ⎿  You've hit your usage credit limit"]))).toMatchObject({
+    label: 'usage credit limit', when: null, zone: null,
   })
 })
 
-test('the hour alone, noon and midnight all parse', () => {
-  const seenAt = at('2026-10-11T13:00:00Z')
-  expect(usageLimitOn(screen(SESSION('8am')), seenAt)?.resetsAt).toBe(at('2026-10-11T14:00:00Z'))
-  expect(usageLimitOn(screen(SESSION('12pm')), seenAt)?.resetsAt).toBe(at('2026-10-11T18:00:00Z'))
-  // 12:40am tomorrow is too far ahead for a session limit, so it is the one just gone.
-  expect(usageLimitOn(screen(SESSION('12:40am')), seenAt)?.resetsAt).toBe(at('2026-10-11T06:40:00Z'))
+test('a line a narrow pane wrapped is joined back before it is read', () => {
+  const wrapped = claude(["  ⎿  You've hit your session limit · resets 10:20am (America/", '     Managua)'])
+  expect(lineOf(wrapped)).toMatchObject({ when: '10:20am', zone: MANAGUA })
 })
 
-test('a reset just past midnight local is the next day', () => {
-  // 22:30 local on the 11th; resets 2:20am local on the 12th.
-  expect(usageLimitOn(screen(SESSION('2:20am')), at('2026-10-12T04:30:00Z'))?.resetsAt)
-    .toBe(at('2026-10-12T08:20:00Z'))
+test('assistant output after the line means the agent has moved on, on macOS and elsewhere', () => {
+  for (const glyph of ['⏺', '●']) {
+    const answered = claude([limit(), '', '❯ carry on', '', `${glyph} Picking up the review where it stopped.`])
+    expect(limitLineOn(answered).line, glyph).toBeNull()
+  }
 })
 
-test('a reset already past is read as past, so the pane is resumable now', () => {
-  // Seen at 16:25Z, ten minutes after a 10:20am-local reset.
-  const limit = usageLimitOn(screen(SESSION('10:20am')), at('2026-10-11T16:30:00Z'))
-  expect(limit?.resetsAt).toBe(at('2026-10-11T16:20:00Z'))
+test('a user turn after the line does not hide it: a rejected probe is followed by the line again', () => {
+  expect(lineOf(WORKER_AT_THE_LIMIT).when).toBe('5:20am')
+  expect(limitLineOn(claude([limit(), '', '❯ /model sonnet', '  ⎿  Set model to Sonnet'])).line).not.toBeNull()
 })
 
-test('a session reset is never read as more than six hours ahead', () => {
-  // A session window is five hours, rounded on the clock; 10:20am is 6h20m away from 04:00 local,
-  // so it must be the one that has passed.
-  const limit = usageLimitOn(screen(SESSION('10:20am')), at('2026-10-12T10:00:00Z'))
-  expect(limit?.resetsAt).toBe(at('2026-10-11T16:20:00Z'))
+test('a quoted copy is not a limit: assistant output, deeper tool output, or prose', () => {
+  const quoted = [
+    '⏺ Agent "review" failed: You\'ve hit your session limit · resets 5:20am (America/Managua)',
+    "      ⎿  You've hit your session limit · resets 5:20am (America/Managua)",
+    "  The message reads You've hit your session limit · resets 5:20am (America/Managua).",
+  ]
+  for (const line of quoted) expect(limitLineOn(claude([line])).line, line).toBeNull()
+})
+
+test('the box and the status line can neither fake nor mask a limit', () => {
+  const draft = claude(['⏺ Done.'], "❯   ⎿  You've hit your session limit · resets 5:20am (America/Managua)")
+  expect(limitLineOn(draft).line).toBeNull()
+  const glyphInStatus = claude([limit()], '❯ ', '  ⏺ 3 background tasks')
+  expect(limitLineOn(glyphInStatus).line).not.toBeNull()
+})
+
+test('with no input box on screen nothing is read, and the caller is told so', () => {
+  expect(limitLineOn([limit(), '', 'Wait here, then continue automatically when the limit resets'].join('\n')))
+    .toEqual({ line: null, boxSeen: false })
+  expect(limitLineOn('')).toEqual({ line: null, boxSeen: false })
+})
+
+test('a screen with no message is no limit', () => {
+  expect(limitLineOn(claude(['⏺ Wrote the plan.']))).toEqual({ line: null, boxSeen: true })
+})
+
+test('Claude\'s own auto-continue notice is recognised', () => {
+  expect(autoContinues('Usage limit reached · continuing automatically at 10:20am · esc to cancel')).toBe(true)
+  expect(autoContinues(WORKER_AT_THE_LIMIT)).toBe(false)
+})
+
+// Managua is UTC−6 all year.
+const time = (when: string, label = 'session limit', zone: string | null = MANAGUA): LimitLine =>
+  ({ label, when, zone, text: '' })
+
+test('a time-only reset is the first occurrence after it was first seen', () => {
+  expect(resetAt(time('10:20am'), at('2026-10-11T12:34:14Z'))).toBe(at('2026-10-11T16:20:00Z'))
+  // 22:30 local on the 11th; 2:20am is the 12th.
+  expect(resetAt(time('2:20am'), at('2026-10-12T04:30:00Z'))).toBe(at('2026-10-12T08:20:00Z'))
+})
+
+test('the hour alone, noon, midnight and a spaced upper-case meridiem all parse', () => {
+  const seen = at('2026-10-11T13:00:00Z')
+  expect(resetAt(time('8am'), seen)).toBe(at('2026-10-11T14:00:00Z'))
+  expect(resetAt(time('12pm'), seen)).toBe(at('2026-10-11T18:00:00Z'))
+  expect(resetAt(time('3:30 PM', 'weekly limit'), seen)).toBe(at('2026-10-11T21:30:00Z'))
+  expect(resetAt(time('12am', 'weekly limit'), seen)).toBe(at('2026-10-12T06:00:00Z'))
+})
+
+test('a line first seen up to 15 minutes after its own reset dates to the reset just passed', () => {
+  expect(resetAt(time('10:20am'), at('2026-10-11T16:31:00Z'))).toBe(at('2026-10-11T16:20:00Z'))
+  expect(resetAt(time('10:20am', 'weekly limit'), at('2026-10-11T16:34:00Z'))).toBe(at('2026-10-11T16:20:00Z'))
+  // Past the tolerance a weekly time is tomorrow's: its last day reads time-only.
+  expect(resetAt(time('10:20am', 'weekly limit'), at('2026-10-11T16:36:00Z'))).toBe(at('2026-10-12T16:20:00Z'))
+})
+
+test('a session limit is never more than five hours away, so a later time is the one already gone', () => {
+  // 04:00 local; 10:20am is 6h20m ahead, past a session window.
+  expect(resetAt(time('10:20am'), at('2026-10-12T10:00:00Z'))).toBe(at('2026-10-11T16:20:00Z'))
+  // 05:30 local; 10:20am is 4h50m ahead.
+  expect(resetAt(time('10:20am'), at('2026-10-12T11:30:00Z'))).toBe(at('2026-10-12T16:20:00Z'))
+})
+
+test('a weekly limit in its last day reads time-only and dates up to a day ahead', () => {
+  // 08:00 local; 10pm is 14h ahead.
+  expect(resetAt(time('10pm', 'weekly limit'), at('2026-10-11T14:00:00Z'))).toBe(at('2026-10-12T04:00:00Z'))
+})
+
+test('a dated reset takes the year nearest first sight, or the year it names', () => {
+  expect(resetAt(time('Sep 22 at 3am', 'weekly limit'), at('2026-09-20T12:00:00Z'))).toBe(at('2026-09-22T09:00:00Z'))
+  expect(resetAt(time('Jan 2 at 9:30pm', 'weekly limit'), at('2026-12-30T12:00:00Z'))).toBe(at('2027-01-03T03:30:00Z'))
+  expect(resetAt(time('Jan 2, 2027 at 3:30 AM', 'weekly limit'), at('2026-12-28T12:00:00Z')))
+    .toBe(at('2027-01-02T09:30:00Z'))
 })
 
 test('a zone with daylight saving converts on the right side of the change', () => {
   // New York: EDT (UTC−4) until 2026-11-01 06:00Z, then EST (UTC−5).
-  const zone = 'America/New_York'
-  expect(usageLimitOn(screen(SESSION('3pm', zone)), at('2026-10-31T16:00:00Z'))?.resetsAt)
-    .toBe(at('2026-10-31T19:00:00Z'))
-  expect(usageLimitOn(screen(SESSION('3pm', zone)), at('2026-11-01T17:00:00Z'))?.resetsAt)
-    .toBe(at('2026-11-01T20:00:00Z'))
+  const ny = (when: string) => time(when, 'session limit', 'America/New_York')
+  expect(resetAt(ny('3pm'), at('2026-10-31T16:00:00Z'))).toBe(at('2026-10-31T19:00:00Z'))
+  expect(resetAt(ny('3pm'), at('2026-11-01T17:00:00Z'))).toBe(at('2026-11-01T20:00:00Z'))
 })
 
-test('a weekly limit names its date, in the year nearest when it was seen', () => {
-  const text = "You've hit your weekly limit · resets Sep 22 at 3am (America/Managua)"
-  expect(usageLimitOn(screen(text), at('2026-09-20T12:00:00Z'))).toEqual({
-    kind: 'weekly', resetsAt: at('2026-09-22T09:00:00Z'), text,
-  })
-  const acrossNewYear = "You've hit your weekly limit · resets Jan 2 at 9:30pm (America/Managua)"
-  expect(usageLimitOn(screen(acrossNewYear), at('2026-12-30T12:00:00Z'))?.resetsAt)
-    .toBe(at('2027-01-03T03:30:00Z'))
+test('a line with no zone is read in the local zone', () => {
+  expect(resetAt(time('10:20am', 'session limit', null), at('2026-10-11T12:34:14Z'), MANAGUA))
+    .toBe(at('2026-10-11T16:20:00Z'))
 })
 
-test('a reset it cannot read still holds, for a short while, and is re-read then', () => {
-  const seenAt = at('2026-10-11T12:00:00Z')
-  for (const line of [SESSION('soon'), SESSION('10:20am', 'Mars/Olympus_Mons')]) {
-    expect(usageLimitOn(screen(line), seenAt)?.resetsAt, line).toBe(seenAt + UNPARSED_RESET_MS)
-  }
-})
-
-test('a message the agent has answered since is history, not a limit', () => {
-  const answered = screen(SESSION('10:20am'), '', '❯ carry on', '', '⏺ Picking up the review where it stopped.')
-  expect(usageLimitOn(answered, at('2026-10-11T12:40:00Z'))).toBeNull()
-})
-
-test('the last of two messages is the one that counts', () => {
-  const twice = screen(SESSION('5:20am'), '⏺ Resumed the spec review.', `  ⎿  ${SESSION('10:20am')}`)
-  expect(usageLimitOn(twice, at('2026-10-11T12:40:00Z'))?.resetsAt).toBe(at('2026-10-11T16:20:00Z'))
-})
-
-test('a screen with no message is no limit', () => {
-  expect(usageLimitOn(screen('⏺ Wrote the plan.'), at('2026-10-11T12:00:00Z'))).toBeNull()
-  expect(usageLimitOn('', at('2026-10-11T12:00:00Z'))).toBeNull()
+test('a reset it cannot read is null, never a guess', () => {
+  const seen = at('2026-10-11T12:00:00Z')
+  expect(resetAt(time('soon'), seen)).toBeNull()
+  expect(resetAt(time('10:20am', 'session limit', 'Mars/Olympus_Mons'), seen)).toBeNull()
+  expect(resetAt({ label: 'usage credit limit', when: null, zone: null, text: '' }, seen)).toBeNull()
+  expect(resetAt(time('Smarch 3 at 3am', 'weekly limit'), seen)).toBeNull()
 })
