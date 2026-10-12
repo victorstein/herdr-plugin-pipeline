@@ -277,8 +277,9 @@ Every task carries a tier that decides which reviews it runs:
 | `heavy` | ✓ | ✓ | one combined `pr-review` |
 
 Heavy used to review the PR twice, `pr-review-intent` then `pr-review-quality`. The intent stage
-cleared all 66 of its reviews and the one PR-stage defect on record came from a combined review, so
-heavy now differs from standard in review effort, not in review count (see **Models**).
+cleared all 66 of its reviews, and the one PR-stage defect in 254 berean-os verdicts came from a
+combined review, so heavy now differs from standard in review effort, not in review count (see
+**Models**).
 
 The orchestrator sets it at registration with `--tier light|standard|heavy`; a new task defaults to
 `standard`. A bead labelled `pipeline:tier-light`, `pipeline:tier-standard` or `pipeline:tier-heavy`
@@ -314,8 +315,9 @@ Heavy never skips, and a git read that fails means the review runs. The history 
 shows `[implement → ci, pr-review skipped]`, and the merge prompt says the review was skipped. In a
 single-PR run the head that lands is recorded exactly as a clearing review records it, so a push
 after `submit` still goes through `sync` and the check. A run's final `branch-review`, when it runs,
-reads every change either way. On berean-os, none of the 13 tasks with a sound plan and a change under ~150 lines drew a
-behavioural PR finding; the one real PR-stage defect after a sound plan came on a 784-line diff.
+reads every change either way. On berean-os, none of the 13 tasks with a sound plan and a change under
+~150 lines drew a behavioural PR finding; the one real PR-stage defect after a sound plan came on a
+784-line diff.
 
 **`.claude/pipeline-always-review`** lists what is always reviewed: one path prefix per line, `#`
 starts a comment, and a glob is cut to the prefix before its first wildcard. It is read from the
