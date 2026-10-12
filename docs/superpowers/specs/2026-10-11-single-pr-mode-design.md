@@ -1123,6 +1123,9 @@ Where the code departs from the text above, and why.
   body beside the run.
 - **`ship-merge` records a merge whatever the orchestrator is doing**: the merge is GitHub's fact, as
   a task's `merge` is evaluated with no orchestrator agent. Only `ship` waits for it to be idle.
-- **release-please's default sections** are coded from memory of its conventional-commit defaults
-  (`feat`, `fix`, `perf`, `revert` shown; `docs`, `style`, `chore`, `refactor`, `test`, `build`, `ci`
-  hidden). Verify 6 settles them on the smoke repo.
+- **release-please's default sections** are read from source, not memory. With no `changelog-sections`
+  configured, release-please passes none to its `conventional-changelog-conventionalcommits` preset (^6),
+  whose list shows `feat`, `feature`, `fix`, `perf` and `revert` and hides `docs`, `style`, `chore`,
+  `refactor`, `test`, `build` and `ci`; the writer drops any other type. release-please's own heading
+  map, which names `deps` and gives `docs` a heading, only labels sections a repo configures. The first
+  cut missed `feature`.

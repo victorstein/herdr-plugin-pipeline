@@ -17,11 +17,14 @@ export function parseTitle(title: string): ConventionalTitle | null {
 export interface ReleaseSection { type: string; hidden?: boolean }
 
 /**
- * release-please's own list for a repo that configures none. Its version on the
- * target repos is not pinned here; the smoke run checks it (Verify 6).
+ * What release-please reads in a repo that configures no sections: it passes none
+ * to its conventional-changelog-conventionalcommits preset (^6), whose default
+ * list this is. A type outside it is dropped from the notes, as a hidden one is.
+ * Its own heading map, which names `deps` and shows `docs`, only labels sections
+ * a repo configures. Read from both packages' source on 2026-10-12.
  */
 export const DEFAULT_RELEASE_SECTIONS: readonly ReleaseSection[] = [
-  { type: 'feat' }, { type: 'fix' }, { type: 'perf' }, { type: 'revert' },
+  { type: 'feat' }, { type: 'feature' }, { type: 'fix' }, { type: 'perf' }, { type: 'revert' },
   { type: 'docs', hidden: true }, { type: 'style', hidden: true }, { type: 'chore', hidden: true },
   { type: 'refactor', hidden: true }, { type: 'test', hidden: true }, { type: 'build', hidden: true },
   { type: 'ci', hidden: true },
