@@ -71,10 +71,12 @@ export async function runTrackedBootstrap(
       stop: (pgid) => stopGroup(pgid),
       onStart: (pgid) => {
         children.bootstrapPgid = pgid
+        // Best effort: unrecorded, the group is still stopped by a trapped signal, and a
+        // rejection left unhandled here would end the process with the bootstrap still running.
         recorded = (async () => {
           const startedAt = await processStartedAtMs(pgid)
           if (startedAt !== null) await lock.bootstrapStarted(pgid, startedAt)
-        })()
+        })().catch(() => {})
       },
     })
   } finally {

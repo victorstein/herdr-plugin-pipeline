@@ -157,7 +157,8 @@ class TaskDispatch {
     }
     const onBranch = worktrees.items.find((entry) => entry.branch === this.task.branch)
     if (onBranch !== undefined) {
-      if (await this.awaitBinding()) return this.boundWorktree()
+      const canBind = onBranch.is_linked_worktree && !onBranch.is_prunable
+      if (canBind && await this.awaitBinding()) return this.boundWorktree()
       throw new Stop('worktree', this.unboundCheckout(onBranch))
     }
     await this.refuseForeignBranch(base)
@@ -170,51 +171,56 @@ class TaskDispatch {
    * workspace; `worktree list` carries no workspace id and can only confirm it.
    */
   private async boundWorktree(): Promise<Placed> {
-    const { task, run } = this
-    const workspaceId = task.workspace_id as string
-    const checkout = task.checkout_path
+    const workspaceId = this.task.workspace_id as string
+    const checkout = this.task.checkout_path
     if (checkout === null) {
       throw new Stop('worktree', nothingStarted(`the ledger binds ${this.id} to ${workspaceId} but records no ` +
         'checkout for it, so herdr cannot confirm it'))
     }
+    await this.confirm('worktree', workspaceId, checkout)
+    return { workspaceId, checkout, created: null }
+  }
+
+  /** Both of herdr's lists must agree with the ledger's binding. */
+  private async confirm(step: DispatchStep, workspaceId: string, checkout: string): Promise<void> {
+    const { task, run } = this
     const [workspaces, worktrees] = await Promise.all([
       this.deps.herdr.workspaceListing(), this.deps.herdr.worktreeList(run.repo_root),
     ])
     if (!workspaces.ok) {
-      throw new Stop('worktree', nothingStarted(`herdr workspace list could not be read (${workspaces.reason})`))
+      throw new Stop(step, nothingStarted(`herdr workspace list could not be read (${workspaces.reason})`))
     }
     if (!worktrees.ok) {
-      throw new Stop('worktree', nothingStarted(`herdr worktree list --cwd ${shellQuoted(run.repo_root)} could not ` +
+      throw new Stop(step, nothingStarted(`herdr worktree list --cwd ${shellQuoted(run.repo_root)} could not ` +
         `be read (${worktrees.reason})`))
     }
     const said = `the ledger binds ${this.id} to ${workspaceId} at ${checkout}`
     const listed = workspaces.items.find((workspace) => workspace.workspace_id === workspaceId)
     if (listed === undefined) {
-      throw new Stop('worktree', `${said}, but herdr lists no workspace ${workspaceId}. If it closed, ` +
+      throw new Stop(step, `${said}, but herdr lists no workspace ${workspaceId}. If it closed, ` +
         `\`${this.deps.hpipe} forget ${workspaceId}\` and bind the kept checkout with ${this.openRoute()}, then run ` +
         'this again. Nothing was started')
     }
     if (listed.worktree?.is_linked_worktree !== true) {
-      throw new Stop('worktree', nothingStarted(`${said}, but herdr lists ${workspaceId} as no linked worktree`))
+      throw new Stop(step, nothingStarted(`${said}, but herdr lists ${workspaceId} as no linked worktree`))
     }
     if (!samePath(listed.worktree.repo_root, checkout)) {
-      throw new Stop('worktree', nothingStarted(`${said}, but herdr says ${workspaceId} is the checkout at ` +
+      throw new Stop(step, nothingStarted(`${said}, but herdr says ${workspaceId} is the checkout at ` +
         `${listed.worktree.repo_root}`))
     }
     const entry = worktrees.items.find((candidate) => samePath(candidate.path, checkout))
     if (entry === undefined) {
-      throw new Stop('worktree', nothingStarted(`${said}, but herdr worktree list --cwd ` +
+      throw new Stop(step, nothingStarted(`${said}, but herdr worktree list --cwd ` +
         `${shellQuoted(run.repo_root)} has no checkout at ${checkout}`))
     }
     if (entry.branch !== task.branch) {
-      throw new Stop('worktree', nothingStarted(`${said}, but that checkout is on ${entry.branch ?? 'no branch'}, ` +
+      throw new Stop(step, nothingStarted(`${said}, but that checkout is on ${entry.branch ?? 'no branch'}, ` +
         `not ${task.branch}`))
     }
     if (entry.is_prunable || !entry.is_linked_worktree) {
-      throw new Stop('worktree', nothingStarted(`${said}, but herdr lists that checkout as ` +
+      throw new Stop(step, nothingStarted(`${said}, but herdr lists that checkout as ` +
         (entry.is_prunable ? 'prunable: its directory is gone' : 'no linked worktree')))
     }
-    return { workspaceId, checkout, created: null }
   }
 
   /** A re-run straight after this command's own create usually beats the supervisor's binding by a tick. */
@@ -288,7 +294,7 @@ class TaskDispatch {
     if (created === null) {
       this.line('worktree', `${placed.workspaceId} at ${placed.checkout} exists (pane ${chosen.paneId}) — skipped`)
     }
-    await this.guard(chosen.paneId)
+    await this.guard('pane', chosen.paneId)
     return chosen
   }
 
@@ -325,17 +331,20 @@ class TaskDispatch {
   }
 
   /** An agent that skips permissions must never start in a pane that is not this task's. */
-  private async guard(paneId: string): Promise<void> {
+  private async guard(step: DispatchStep, paneId: string): Promise<void> {
     const runs = await this.deps.ledger.sessionRuns()
     const orchestrators = await this.deps.ledger.orchestratorPanes()
+    const byHand = `start ${this.id}'s agent in its own pane by hand and ` +
+      `\`${this.deps.hpipe} dispatch --task ${this.id} --pane <pane>\``
     if (orchestrators.has(paneId) || runs.some((run) => run.orchestrator_pane === paneId)) {
-      throw new Stop('pane', nothingStarted(`${paneId} is an orchestrator's pane`))
+      throw new Stop(step, nothingStarted(`${paneId} is an orchestrator's pane: ${byHand}`))
     }
     for (const run of runs) {
       const holder = run.tasks.find((task) => task.pane_id === paneId && !this.isThisTask(run, task) &&
         task.phase !== 'done' && !taskPhaseIsTerminal(task.phase))
       if (holder !== undefined) {
-        throw new Stop('pane', nothingStarted(`${paneId} is ${holder.task_id}'s worker pane (run ${run.run_id})`))
+        const whose = `${paneId} is ${holder.task_id}'s worker pane (run ${run.run_id})`
+        throw new Stop(step, nothingStarted(`${whose}: ${byHand}`))
       }
     }
   }
@@ -415,6 +424,7 @@ class TaskDispatch {
         `${this.id}?): close it, or \`${this.deps.hpipe} dispatch --task ${this.id} --pane ${named}\` to brief ` +
         'that one')
     }
+    await this.recheck(placed, paneId)
     const started = await this.deps.herdr.agentStart({
       name: this.task.bead, kind: 'claude', paneId, timeoutMs: AGENT_START_TIMEOUT_MS, args: workerAgentArgs(this.task),
     })
@@ -428,6 +438,33 @@ class TaskDispatch {
   }
 
   /**
+   * A bootstrap can run for twenty minutes, and the workspace, the ledger and the
+   * session's panes can all change meanwhile: a workspace closed and its id reused,
+   * the task abandoned. An agent that skips permissions starts only on what holds now.
+   */
+  private async recheck(placed: Placed, paneId: string): Promise<void> {
+    if (!(await this.reread())) throw new Stop('agent', nothingStarted(`${this.id} is gone from the ledger`))
+    if (unbriefedWorker(this.run, this.task) === null) {
+      throw new Stop('agent', nothingStarted(`${this.id} is now in ${this.task.phase}, no longer owed its brief`))
+    }
+    if (placed.created !== null && this.task.workspace_id === null && !(await this.awaitBinding())) {
+      throw new Stop('agent', nothingStarted(`herdr created ${placed.workspaceId}, but the ledger has not bound ` +
+        `${this.id} to it, so it cannot be checked again; run this again once \`${this.deps.hpipe} show --task ` +
+        `${this.id}\` names a workspace (is the supervisor running?)`))
+    }
+    const { workspace_id: workspaceId, checkout_path: checkout } = this.task
+    if (workspaceId === null) {
+      throw new Stop('agent', nothingStarted(`the ledger no longer binds ${this.id} to ${placed.workspaceId}`))
+    }
+    if (workspaceId !== placed.workspaceId || checkout === null || !samePath(checkout, placed.checkout)) {
+      throw new Stop('agent', nothingStarted(`the ledger now binds ${this.id} to ${workspaceId} at ` +
+        `${checkout ?? 'no checkout'}, not ${placed.workspaceId} at ${placed.checkout}`))
+    }
+    await this.confirm('agent', workspaceId, placed.checkout)
+    await this.guard('agent', paneId)
+  }
+
+  /**
    * The box, not a memory of an earlier send, decides: after an uncertain send the
    * manual path's rule is to read the pane before retrying, since a retry sends the
    * brief twice, and no worker finishes research in the seconds since a send.
@@ -435,12 +472,16 @@ class TaskDispatch {
   private async brief(paneId: string, startedHere: boolean): Promise<void> {
     await this.deps.at(this.id, 'brief')
     if (!(await this.reread())) throw new Stop('brief', `${this.id} is gone from the ledger; nothing was sent`)
+    // The supervisor clears the flag on `working`, which an agent this run just
+    // started can read before any brief has reached it.
     if (unbriefedWorker(this.run, this.task) === null) {
       if (this.task.phase !== taskRow('queued').onClear) {
         throw new Stop('brief', `${this.id} is now in ${this.task.phase}; nothing was sent`)
       }
-      this.line('brief', `${this.id}'s worker already has it — skipped`)
-      return
+      if (!startedHere) {
+        this.line('brief', `${this.id}'s worker already has it — skipped`)
+        return
+      }
     }
     if (!startedHere && await this.deps.herdr.agentStatus(paneId) === 'working') {
       const unrecorded = await this.deps.ledger.recordPane(this.run.run_id, this.id, paneId)
@@ -483,7 +524,6 @@ class TaskDispatch {
   }
 }
 
-/** Runs every step a task still needs, saying each as it goes; false when one stopped. */
 export function dispatchTask(run: Run, task: Task, deps: DispatchDeps): Promise<boolean> {
   return new TaskDispatch(run, task, deps).dispatch()
 }

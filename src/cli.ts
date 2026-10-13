@@ -27,7 +27,7 @@ import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHo
 import { Herdr, type CallResult } from './lib/herdr'
 import {
   type DispatchLock, type DispatchMode, type HeldDispatchLock, holderLine, type LockDeps, type LockTaken,
-  readDispatchLocks, takeDispatchLock,
+  readDispatchLocks, REAL_LOCK_DEPS, takeDispatchLock,
 } from './lib/dispatch-lock'
 import {
   dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
@@ -48,7 +48,7 @@ import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
 } from './lib/phases'
-import { drivenSchemas, processStartedAtMs, type SupervisorState, supervisorState } from './lib/pidfile'
+import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
@@ -964,15 +964,23 @@ async function handOverBrief(ctx: Ctx, run: Run, task: Task, paneId: string, dep
   return { ok: true, unrecorded }
 }
 
-/** This process, as a dispatch lock names its holder. */
+/**
+ * Null when `ps` cannot say when this process started. A guess would not match the
+ * time later readers get, and the live lock would read as stale and be taken over.
+ */
 async function dispatchHolder(
-  ctx: Ctx, run: Run, mode: DispatchMode, task: string | null, now: number,
-): Promise<DispatchLock> {
+  ctx: Ctx, run: Run, mode: DispatchMode, task: string | null, now: number, lockDeps: LockDeps,
+): Promise<DispatchLock | null> {
+  const startedAt = await lockDeps.startedAt(process.pid)
+  if (startedAt === null) return null
   return {
     session: ctx.session, run_id: run.run_id, mode, task, step: null, since: now,
-    pid: process.pid, started_at_ms: (await processStartedAtMs(process.pid)) ?? now, bootstrap: null,
+    pid: process.pid, started_at_ms: startedAt, bootstrap: null,
   }
 }
+
+const UNKNOWN_START = "could not read this process's start time with `ps`, which the dispatch lock needs to tell " +
+  'a live dispatch from a dead one; nothing was started'
 
 function lockRefusal(ctx: Ctx, run: Run, taken: Exclude<LockTaken, { ok: true }>, wanted: string | null): string {
   if ('refusal' in taken) return taken.refusal
@@ -988,7 +996,7 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
   claim: ClaimBead = cliClaimBead(ctx.stateDir), readPaneLimit: ReadPaneLimit = cliReadPaneLimit,
-  lockDeps?: LockDeps,
+  lockDeps: LockDeps = REAL_LOCK_DEPS,
 ): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
@@ -1038,14 +1046,28 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
 
   // Re-checking `awaiting_brief` just before the send cannot close the window in
   // which a one-command dispatch sends the same brief; only exclusion can.
-  const wanted = { ...(await dispatchHolder(ctx, run, 'pane', task.task_id, Date.now())), step: 'brief' as const }
-  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, wanted, lockDeps)
+  const holding = await dispatchHolder(ctx, run, 'pane', task.task_id, Date.now(), lockDeps)
+  if (holding === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, { ...holding, step: 'brief' }, lockDeps)
   if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task.task_id))
+  const untrap = trapDispatchSignals({
+    lock: taken.lock, children: noChildren(), interrupt: new DispatchInterrupt(), say: (line) => { console.log(line) },
+  })
   let handed: HandedOver
   try {
-    handed = await handOverBrief(ctx, run, task, input.paneId, { send, recordPane, claim, readPaneLimit })
+    // Read again under the lock: a dispatch that held it may have handed this pane its brief.
+    const fresh = await runById(ctx.stateDir, ctx.session, run.run_id)
+    const current = fresh?.tasks.find((t) => t.task_id === task.task_id)
+    if (!fresh || !current) return fail(`${task.task_id} is gone from the ledger; nothing was sent`)
+    if (current.phase !== briefedPhase) return fail(`${task.task_id} is now in ${current.phase}; nothing was sent`)
+    if (current.pane_id === input.paneId && current.awaiting_brief !== true) {
+      return fail(`${task.task_id}'s worker in ${input.paneId} already has the brief; ` +
+        `\`${hpipeCommand(ctx.pluginRoot)} brief --task ${task.task_id}\` prints it to reread`)
+    }
+    handed = await handOverBrief(ctx, fresh, current, input.paneId, { send, recordPane, claim, readPaneLimit })
   } finally {
     taken.lock.release()
+    untrap()
   }
   if (!handed.ok) return fail(handed.text)
 
@@ -1232,21 +1254,29 @@ export async function cmdDispatchSteps(
     if (refusal !== null) return fail(refusal)
   }
 
-  const wanted = await dispatchHolder(ctx, run, task === null ? 'ready' : 'task', task?.task_id ?? null, wiring.now())
-  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, wanted, wiring.lock)
+  const lockDeps = wiring.lock ?? REAL_LOCK_DEPS
+  const mode = task === null ? 'ready' : 'task'
+  const wanted = await dispatchHolder(ctx, run, mode, task?.task_id ?? null, wiring.now(), lockDeps)
+  if (wanted === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, wanted, lockDeps)
   if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task?.task_id ?? null))
   const lock = taken.lock
   const untrap = wiring.trap(lock)
+  // A child a signal stopped answers with a failure, and the handler, not that answer, says what happened.
+  const afterGate = async <T>(answer: T): Promise<T> => {
+    await wiring.gate()
+    return answer
+  }
   const deps: DispatchDeps = {
-    herdr: wiring.herdr,
+    herdr: { ...wiring.herdr, agentStart: async (request) => afterGate(await wiring.herdr.agentStart(request)) },
     git: wiring.git,
     ledger: dispatchLedger(ctx),
     base: (r, t) => wiring.base(r.repo_root, dependencyMerges(t, r.tasks), r.batch?.branch ?? null),
-    runBootstrap: (checkout, logPath) => wiring.runBootstrap(checkout, logPath, lock),
+    runBootstrap: async (checkout, logPath) => afterGate(await wiring.runBootstrap(checkout, logPath, lock)),
     bootstrapLog: (t) =>
       join(ctx.stateDir, 'runs', ctx.session, `${run.run_id}.dispatch`, `${t.task_id}-bootstrap.log`),
     brief: async (r, t, paneId) => {
-      const handed = await handOverBrief(ctx, r, t, paneId, wiring.handOver)
+      const handed = await afterGate(await handOverBrief(ctx, r, t, paneId, wiring.handOver))
       if (!handed.ok) return handed
       const delivered = `claimed ${t.bead}; delivered to ${paneId}, and the worker is working on it`
       if (handed.unrecorded === null) return { ok: true, text: delivered }

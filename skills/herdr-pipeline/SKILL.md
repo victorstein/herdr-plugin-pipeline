@@ -93,8 +93,9 @@ behaviour; this skill does.
    failure. Read its step lines when the completion notice arrives. One dispatch runs per repo at a
    time: a second is refused, naming the first. The block is the manual fallback — run it exactly as
    printed, ending in `hpipe dispatch --task <id> --pane <root pane>`, which submits the brief to the
-   agent you started and confirms it landed. Either form only takes a task in `research` that is
-   still owed its brief.
+   agent you started and confirms it landed. `hpipe dispatch --task` only takes a task in `research`
+   that is still owed its brief; the `--pane` form takes a task in `research`, but never a pane that
+   already has the brief.
 4. After the last task: `hpipe dispatch --done`. Until then the run can never finish. Registering
    another task later reopens intake — run `dispatch --done` again afterwards.
 

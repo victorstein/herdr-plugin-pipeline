@@ -63,12 +63,15 @@ interface Fakes {
   orchestratorPanes: string[]
   /** The ledger's task as a re-read finds it, from the n-th re-read on. */
   rereads: Array<Partial<Task>>
+  /** What herdr's hook and lists do once `worktree create` succeeds: bind the task, list the new checkout. */
+  createAppears: boolean
 }
 
 interface World {
   run: Run
   task: Task
   deps: DispatchDeps
+  fakes: Fakes
   calls: string[]
   said: string[]
   slept: number[]
@@ -99,6 +102,7 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
     otherRuns: [],
     orchestratorPanes: [],
     rereads: [],
+    createAppears: true,
     ...fakeOver,
   }
   const calls: string[] = []
@@ -106,6 +110,7 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
   const slept: number[] = []
   const bootstrapped: World['bootstrapped'] = []
   let rereadCount = 0
+  let boundByHook: Partial<Task> = {}
   let statusIndex = 0
   let screenIndex = 0
   const next = <T>(list: T[], index: number): T => list[Math.min(index, list.length - 1)] as T
@@ -115,6 +120,14 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
     worktreeList: async (cwd) => { calls.push(`worktree list --cwd ${cwd}`); return fakes.worktrees },
     worktreeCreate: async (cwd, branch, base) => {
       calls.push(`worktree create --cwd ${cwd} --branch ${branch} --base ${base}`)
+      const made = fakes.created.result
+      if (fakes.created.ok && made !== undefined && fakes.createAppears) {
+        boundByHook = { workspace_id: made.workspaceId, checkout_path: made.path }
+        if (fakes.worktrees.ok) fakes.worktrees = { ok: true, items: [...fakes.worktrees.items, LINKED(made.path)] }
+        if (fakes.workspaces.ok) {
+          fakes.workspaces = { ok: true, items: [...fakes.workspaces.items, WORKSPACE(made.path, { workspace_id: made.workspaceId })] }
+        }
+      }
       return fakes.created
     },
     paneListing: async (ws) => {
@@ -140,6 +153,8 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
       reread: async () => {
         const over = fakes.rereads[Math.min(rereadCount, fakes.rereads.length - 1)]
         rereadCount++
+        Object.assign(task, boundByHook)
+        boundByHook = {}
         if (over !== undefined) Object.assign(task, over)
         return { run, task }
       },
@@ -163,7 +178,7 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
     sleep: async (ms) => { slept.push(ms) },
     hpipe: 'hp',
   }
-  return { run, task, deps, calls, said, slept, bootstrapped }
+  return { run, task, deps, fakes, calls, said, slept, bootstrapped }
 }
 
 const BOUND = { workspace_id: 'w5', checkout_path: '', pane_id: null }
@@ -459,12 +474,13 @@ test('herdr refusing the start stops with its code and the pane to read', async 
 })
 
 test('the brief re-reads the ledger, and a task already briefed is not sent another', async () => {
-  const w = bound({}, { rereads: [{ awaiting_brief: undefined }] })
+  const agentInPane = { w5: { ok: true as const, items: [{ pane_id: 'w5:p1', agent: 'claude', agent_status: 'idle' as const }] } }
+  const w = bound({}, { panes: agentInPane, rereads: [{ awaiting_brief: undefined }] })
   expect(await dispatchTask(w.run, w.task, w.deps)).toBe(true)
   expect(w.calls.some((c) => c.startsWith('brief'))).toBe(false)
   expect(w.said).toContain('  brief      t1\'s worker already has it — skipped')
 
-  const moved = bound({}, { rereads: [{ phase: 'failed', awaiting_brief: undefined }] })
+  const moved = bound({}, { panes: agentInPane, rereads: [{ phase: 'failed', awaiting_brief: undefined }] })
   expect(await dispatchTask(moved.run, moved.task, moved.deps)).toBe(false)
   expect(moved.said.at(-1)).toBe('stopped t1 at brief: t1 is now in failed; nothing was sent')
 })
@@ -527,4 +543,85 @@ test('a re-run after the agent failed skips the worktree and the recorded bootst
   expect(await dispatchTask(w.run, w.task, w.deps)).toBe(true)
   expect(w.calls.some((c) => c.startsWith('worktree create') || c.startsWith('bootstrap'))).toBe(false)
   expect(w.calls.some((c) => c.startsWith('agent start'))).toBe(true)
+})
+
+const agentStarted = (w: World) => w.calls.some((c) => c.startsWith('agent start'))
+
+test('a workspace that closes during the bootstrap is caught before agent start', async () => {
+  writeBootstrap(checkout)
+  const w = bound()
+  w.deps.runBootstrap = async () => {
+    w.fakes.workspaces = { ok: true, items: [] }
+    return { code: 0, tail: '' }
+  }
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.said.at(-1)).toStartWith('stopped t1 at agent: ')
+  expect(w.said.at(-1)).toContain('herdr lists no workspace w5')
+  expect(agentStarted(w)).toBe(false)
+})
+
+test('a task the ledger unbinds, abandons or briefs during the bootstrap gets no agent', async () => {
+  const cases: Array<[string, Partial<Task>, string]> = [
+    ['unbound', { workspace_id: null }, 'the ledger no longer binds t1 to w5'],
+    ['abandoned', { phase: 'failed', awaiting_brief: undefined }, 't1 is now in failed, no longer owed its brief'],
+    ['rebound elsewhere', { workspace_id: 'w9', checkout_path: '/elsewhere' }, 'the ledger now binds t1 to w9'],
+  ]
+  for (const [name, change, message] of cases) {
+    const w = bound({}, { rereads: [change] })
+    expect(await dispatchTask(w.run, w.task, w.deps), name).toBe(false)
+    expect(w.said.at(-1), name).toStartWith('stopped t1 at agent: ')
+    expect(w.said.at(-1), name).toContain(message)
+    expect(w.said.at(-1), name).toContain('nothing was started')
+    expect(agentStarted(w), name).toBe(false)
+  }
+})
+
+test('a pane another task takes during the bootstrap is caught before agent start', async () => {
+  const other = newRun({ session: 's', socketPath: '/sock', repoKey: '/other', repoRoot: '/other', title: 'b' })
+  other.tasks = [mkTask({ task_id: 't7', pane_id: 'w5:p1', phase: 'implement' })]
+  writeBootstrap(checkout)
+  const w = bound()
+  w.deps.runBootstrap = async () => {
+    w.fakes.otherRuns.push(other)
+    return { code: 0, tail: '' }
+  }
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.said.at(-1)).toStartWith('stopped t1 at agent: ')
+  expect(w.said.at(-1)).toContain("w5:p1 is t7's worker pane")
+  expect(agentStarted(w)).toBe(false)
+})
+
+test('after its own create, the agent waits for the ledger to bind the new worktree, and stops if it never does', async () => {
+  const w = world({}, { createAppears: false })
+  w.deps.herdr.workspaceListing = async () => ({ ok: true, items: [WORKSPACE(checkout)] })
+  w.deps.herdr.worktreeList = async () => ({ ok: true, items: [] })
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.slept.reduce((a, b) => a + b, 0)).toBe(15_000)
+  expect(w.said.at(-1)).toBe('stopped t1 at agent: herdr created w5, but the ledger has not bound t1 to it, so it ' +
+    'cannot be checked again; run this again once `hp show --task t1` names a workspace (is the supervisor ' +
+    'running?); nothing was started')
+  expect(agentStarted(w)).toBe(false)
+})
+
+test('an agent this dispatch started gets the brief even if the supervisor saw it working and cleared the flag', async () => {
+  const w = world({}, { rereads: [{}, {}, { awaiting_brief: undefined }] })
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(true)
+  expect(w.calls).toContain('brief w5:p1')
+})
+
+test('a checkout that can never bind is named at once, without waiting for a binding', async () => {
+  for (const entry of [
+    { path: repo, branch: 'feat/x', is_linked_worktree: false, is_prunable: false },
+    LINKED(checkout, { is_prunable: true }),
+  ]) {
+    const w = world({}, { worktrees: { ok: true, items: [entry] } })
+    expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+    expect(w.slept).toEqual([])
+  }
+})
+
+test('the pane guard names --pane as the way to give the task its own pane', async () => {
+  const w = bound({}, { orchestratorPanes: ['w5:p1'] })
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.said.at(-1)).toContain("start t1's agent in its own pane by hand and `hp dispatch --task t1 --pane <pane>`")
 })

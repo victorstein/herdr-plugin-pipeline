@@ -444,8 +444,8 @@ export function applyEvents(
         found.task.adopted_at = Date.now()
         // herdr reuses workspace ids and a re-created worktree can sit at the same
         // path, so only a bootstrap recorded after herdr made this worktree is proof
-        // for it. One faster than the hook is cleared too, which costs one bootstrap
-        // more on a re-run.
+        // for it. A bootstrap recorded before the hook ran is cleared too, which costs
+        // one bootstrap more on a re-run.
         const bootstrapped = found.task.bootstrapped
         if (bootstrapped !== undefined && bootstrapped.at <= event.at) delete found.task.bootstrapped
         changed = true

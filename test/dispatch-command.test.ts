@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { cmdDispatchSteps, cmdStatus, type DispatchWiring, recordWorkerPane } from '../src/cli'
 import { dispatchLockPath, type DispatchLock, readDispatchLocks, takeDispatchLock } from '../src/lib/dispatch-lock'
 import type { DispatchHerdr } from '../src/lib/dispatch-steps'
-import type { CallResult } from '../src/lib/herdr'
+import type { CallResult, CreatedWorktree } from '../src/lib/herdr'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import { processStartedAtMs } from '../src/lib/pidfile'
 import { hpipeCommand } from '../src/lib/render'
@@ -57,13 +57,32 @@ function wired(
   const calls: string[] = []
   const traps: string[] = []
   let workspaces = 1
+  const created: CreatedWorktree[] = []
   const herdr: DispatchHerdr = {
-    workspaceListing: async () => ({ ok: true, items: [] }),
-    worktreeList: async () => ({ ok: true, items: [] }),
+    workspaceListing: async () => ({
+      ok: true,
+      items: created.map((made) => ({
+        workspace_id: made.workspaceId, label: made.path, worktree: { repo_key: 'k', repo_root: made.path, is_linked_worktree: true },
+      })),
+    }),
+    worktreeList: async () => ({
+      ok: true,
+      items: created.map((made) => ({
+        path: made.path, branch: made.path.slice('/wt/'.length), is_linked_worktree: true, is_prunable: false,
+      })),
+    }),
+    // Stands in for the supervisor's tick too, which binds a new worktree to its task from herdr's hook.
     worktreeCreate: async (_repo, branch) => {
       workspaces += 1
       calls.push(`create ${branch}`)
-      return { ok: true, result: { workspaceId: `w${workspaces}`, paneId: `w${workspaces}:p1`, path: `/wt/${branch}` } }
+      const made = { workspaceId: `w${workspaces}`, paneId: `w${workspaces}:p1`, path: `/wt/${branch}` }
+      created.push(made)
+      const [run] = await listRuns(dir, 's')
+      const task = run!.tasks.find((t) => t.branch === branch)!
+      task.workspace_id = made.workspaceId
+      task.checkout_path = made.path
+      await saveRun(dir, run!)
+      return { ok: true, result: made }
     },
     paneListing: async (ws) => ({ ok: true, items: [{ pane_id: `${ws}:p1`, agent: null, agent_status: 'unknown' }] }),
     agentPane: async () => null,
@@ -289,4 +308,44 @@ test('status names a dispatch lock its holder left behind, and keeps the advice'
   expect(text).toContain('YOUR move: no worktree and no agent')
   expect(text).toContain(`⚠ a dispatch lock for this repo is left by pid ${dead.pid}, which is gone; the next ` +
     `\`${hpipeCommand(ctx().pluginRoot)} dispatch\` cleans it up`)
+})
+
+test('the --pane form will not hand a second brief to the pane that already has one', async () => {
+  await seed([owed('t1', { awaiting_brief: undefined, pane_id: 'w5:p1' })])
+  let sent = false
+  const result = await cmdDispatchTask(ctx(), { taskId: 't1', paneId: 'w5:p1', repoKey: '/repo', runId: null },
+    async () => { sent = true; return { ok: true } })
+  expect(result).toEqual({
+    ok: false,
+    text: `t1's worker in w5:p1 already has the brief; \`${hpipeCommand(ctx().pluginRoot)} brief --task t1\` prints ` +
+      'it to reread',
+  })
+  expect(sent).toBe(false)
+})
+
+test('a dispatch refuses when its own start time cannot be read, since the lock could not tell it from a dead one', async () => {
+  await seed([owed('t1')])
+  const w = wired({ lock: { startedAt: async () => null, groupExists: () => false, stopGroup: async () => {} } })
+  const result = await cmdDispatchSteps(ctx(), input('t1'), w.wiring)
+  expect(result.ok).toBe(false)
+  expect(result.text).toContain("could not read this process's start time")
+  expect(w.calls).toEqual([])
+})
+
+test('after a signal, a killed child\'s answer is not judged: the dispatch waits on the handler instead', async () => {
+  await seed([owed('t1')])
+  let interrupted = false
+  const w = wired({
+    gate: async () => { if (interrupted) await new Promise<never>(() => {}) },
+  }, async () => {
+    interrupted = true
+    return { ok: false, code: 'spawn_failed', message: 'killed' }
+  })
+  let settled = false
+  void cmdDispatchSteps(ctx(), input('t1'), w.wiring).then(() => { settled = true })
+  for (let i = 0; i < 20 && !w.calls.some((c) => c.startsWith('start')); i++) await Bun.sleep(10)
+  await Bun.sleep(50)
+  expect(w.calls).toContain('start hp-1')
+  expect(settled).toBe(false)
+  expect(w.said.some((line) => line.startsWith('stopped t1'))).toBe(false)
 })

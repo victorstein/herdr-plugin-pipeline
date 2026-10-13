@@ -1548,6 +1548,11 @@ bootstrap sleeps:
 - `kill -TERM <pid>`. **Assert** within 10 s: `ps -g <pgid>` lists nothing, the lock file is gone,
   and the dispatch's output ends `stopped t9 at bootstrap: interrupted` (exit 143).
 - Remove the slow marker. `hpipe dispatch --task t9` carries on from the worktree.
+- Slow marker on again, register t13 and `hpipe dispatch --task t13`. While its bootstrap sleeps,
+  `herdr --session "$SMOKE" workspace close <t13's workspace>`, then remove the marker. **Assert** the
+  dispatch stops `at agent` (herdr lists no workspace, or the ledger no longer binds it) and that no
+  agent started anywhere: the workspace, the ledger and the pane are all checked again just before
+  `agent start`, since a bootstrap can take twenty minutes.
 
 A dispatch killed with `kill -KILL` leaves its lock: `hpipe status` then says `⚠ a dispatch lock for
 this repo is left by pid <pid>, which is gone`, and the next dispatch stops the dead one's bootstrap

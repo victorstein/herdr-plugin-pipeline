@@ -92,7 +92,7 @@ export interface LockDeps {
   stopGroup: (pgid: number) => Promise<void>
 }
 
-const REAL_LOCK_DEPS: LockDeps = { startedAt: processStartedAtMs, groupExists, stopGroup }
+export const REAL_LOCK_DEPS: LockDeps = { startedAt: processStartedAtMs, groupExists, stopGroup }
 
 /** The lock this process holds. Every write is a compare-and-swap on the holder, so it never rewrites another's. */
 export class HeldDispatchLock {
