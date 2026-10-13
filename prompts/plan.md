@@ -14,6 +14,11 @@ committable.
 Assume the implementer has no context for this codebase beyond `{{spec_path}}` and this plan. You are
 that implementer, several phases from now, with your reasoning gone.
 
+The plan ends at implementation. Write no step that pushes, opens a PR or runs `{{hpipe}} submit`: in
+`implement` a subagent works through this plan and commits but never pushes, and the push and the
+hand-off after it are yours, once you have verified its work. If a planning skill writes the plan,
+leave out its execution hand-off too; `implement` says how this plan is carried out.
+
 Declare every file any step creates, edits or deletes — tests and docs included — on `FILES:` lines
 at the start of a line, outside any code block, comma-separated, one line or several. Each entry is a
 repo-relative file path or a directory prefix ending in `/` — no globs, no absolute paths. A glob is

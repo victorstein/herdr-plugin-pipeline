@@ -371,9 +371,11 @@ test('dispatch --task submits the brief through herdr agent prompt and waits for
 
   expect(r.code).toBe(0)
   expect(r.out).toContain('brief for t1 delivered to w1-2')
-  const calls = await Bun.file(log).text()
-  expect(calls).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
-  expect(calls).toContain('--wait --until working --until blocked --timeout')
+  const calls = (await Bun.file(log).text()).split('\n')
+  // The pane is read first, for a usage limit that would reject the brief on arrival.
+  expect(calls[0]).toBe('pane read w1-2 --source visible --lines 40 --format ansi')
+  expect(calls[1]).toStartWith('agent prompt w1-2 # smoke/one — argv-1')
+  expect(calls.join('\n')).toContain('--wait --until working --until blocked --timeout')
   expect(bdCalls(f)).toContain('--json --actor hpipe update argv-1 --claim')
 })
 
@@ -491,4 +493,23 @@ test('start with a flag where the --prefix value belongs refuses and opens no ru
   expect(r.code).toBe(1)
   expect(r.out).toContain('--prefix needs a value')
   expect(existsSync(join(f.stateDir, 'runs', 'argv-fixture'))).toBe(false)
+})
+
+test('start --single-pr --batch-branch takes the flags out of the title and records the batch', async () => {
+  const f = fixture()
+  const { bareRemote } = await import('./helpers/git-worktree')
+  const remote = bareRemote('main')
+  git(['remote', 'add', 'origin', remote], f.repo)
+  git(['fetch', '-q', 'origin'], f.repo)
+  f.env.GH_BIN = makeFakeBinSync(tempDir('hpipe-argv-gh-'), { 'repo view': { squashMergeAllowed: true } })
+
+  const r = hpipe(['start', 'argv', '--single-pr', 'batch', '--batch-branch', 'batch/argv'], f)
+  expect(r.code).toBe(0)
+  expect(r.out).toContain('batch: batch/argv at ')
+  const runsDir = join(f.stateDir, 'runs', 'argv-fixture')
+  const run = JSON.parse(readFileSync(join(runsDir, readdirSync(runsDir)[0]!), 'utf8'))
+  expect(run.title).toBe('argv batch')
+  expect(run.batch.branch).toBe('batch/argv')
+
+  expect(hpipe(['start', 'x', '--single-pr', '--batch-branch'], fixture()).out).toContain('--batch-branch needs a value')
 })

@@ -1,22 +1,23 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
-import { type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
+import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
+import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
-import { enterRunPhase, enterTaskPhase } from '../lib/machine'
+import { artifactFreshAfter, enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { probeRecipient } from '../lib/outbox'
+import { isFreshNow } from '../lib/predicates'
 import {
-  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
+  briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker, shellQuoted, shellWord,
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
-import type { AgentStatus, Run, StallState, Task } from '../lib/types'
+import { type BackgroundWork, NO_WORK, SUBAGENT_HOLD_MAX_MS } from './pane-background'
+import type { AgentStatus, Batch, Run, StallState, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
-
-/** Signals the probed actor produces by its own work. Only these escalate. */
-const ESCALATING_SIGNALS: ReadonlySet<string> = new Set(['artifact', 'verdict', 'pr'])
 
 export type StallAction = 'probe' | 'escalate'
 
@@ -48,8 +49,19 @@ export interface StallCandidate {
  * consulting anyone" — consulting `probeRecipient`'s fallback would gate a
  * worker's escalation on an unrelated agent's status.
  */
-function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
+export function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null): string | null {
   return row.actor === 'worker' ? (task?.pane_id ?? null) : run.orchestrator_pane
+}
+
+/**
+ * The pane whose background work its row waits on, when the probe is sent there.
+ * A worker owed its brief is probed in the orchestrator's pane while its row reads
+ * the worker's, so the orchestrator's own work said nothing about it.
+ */
+export function probedRowPane(c: StallCandidate): string | null {
+  const row = c.task === null ? runRow(c.run.phase) : taskRow(c.task.phase)
+  const owner = actorPaneFor(c.run, row, c.task)
+  return owner !== null && owner === c.paneId ? owner : null
 }
 
 /**
@@ -75,7 +87,7 @@ function candidateFor(
   // makes every rung due at once for a record first seen past its threshold.
   if (now - state.last_probe_at < thresholdMs) return null
 
-  const escalatable = ESCALATING_SIGNALS.has(row.signal)
+  const escalatable = producedByActor(row)
   return {
     run,
     task,
@@ -105,6 +117,18 @@ export function stallCandidates(
 }
 
 /**
+ * A holder still moving frees the files on its own, and an escalated one has its
+ * own probes and escalation prompt, so a probe about the waiting task says nothing
+ * new: berean-os drew 17 of them in four hours, each answered "nothing to act on".
+ * Measured on a live run (#22). A task with no holder left is stranded, and a
+ * failed holder frees nothing until a human releases it; both are still probed.
+ */
+function waitsOnLiveHolders(task: Task, all: Task[]): boolean {
+  const holders = fileHolders(task, all)
+  return holders.length > 0 && holders.every((holder) => taskRow(holder.phase).terminal !== true)
+}
+
+/**
  * `unstartedThresholdMinutes` is the orchestrator's own cadence: a worktree with
  * no agent in it is the orchestrator's fault and its probe goes there, so waiting
  * out a worker's threshold would only leave the pane empty for longer.
@@ -121,6 +145,10 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
+      if (task.phase === 'blocked-on-files' && waitsOnLiveHolders(task, run.tasks)) continue
+      // #22 again otherwise: the holder has its own ladder, and a probe about each
+      // task behind it says nothing new.
+      if (task.phase === 'land-queue' && landingSlotHolder(run.tasks) !== null) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
@@ -235,6 +263,11 @@ export function stallAwaiting(
       `${run.run_id} implement --task ${t.task_id}\`.`,
   })
 
+  if (task === null && run.batch !== undefined) {
+    const shipping = shipClause(run, run.batch, hpipe)
+    if (shipping !== null) return shipping
+  }
+
   // A human-owned row waits on a person, not on the pane being probed. Checked
   // before the `manual` branch, which `blocked-on-decision` shares with it and
   // which would otherwise tell an escalated task it is waiting for an answer to a
@@ -281,8 +314,13 @@ export function stallAwaiting(
     }
   }
 
+  if (task !== null && modeOf(run) === 'single-pr') {
+    const landing = landingClause(run, task, hpipe, now)
+    if (landing !== null) return landing
+  }
+
   if (row.signal === 'artifact' || row.signal === 'verdict') {
-    const short =task ? awaitedFor(task) : 'its review verdict'
+    const short =task ? awaitedFor(run, task) : 'its review verdict'
     // With no worktree `absoluteArtifactPath` falls back to the main checkout,
     // which is the orchestrator's tree and holds every sibling's merged docs — so
     // naming it sends the reader at the wrong file when the real fault is that
@@ -292,6 +330,15 @@ export function stallAwaiting(
       return sentence('a worktree for this task, which has never been dispatched')
     }
     const path = absoluteArtifactPath(run, task)
+    // A fresh verdict with its worker idle is taken once it is committed, so "nothing
+    // has appeared" would be false here, and the worker could rewrite a sound review.
+    if (path !== null && task !== null && row.signal === 'verdict' && isFreshNow(path, artifactFreshAfter(task))) {
+      return {
+        short: `${short}, committed`,
+        clause: `Your verdict is written at:\n\n    ${path}\n\nThis phase clears once you are idle with it ` +
+          'committed and pushed, and no subagent of yours is running.',
+      }
+    }
     if (path !== null) {
       // An `onBlocker` re-entry leaves the previous pass's file in place, so
       // "nothing has appeared" is simply false there. What the phase waits for is
@@ -310,7 +357,7 @@ export function stallAwaiting(
     }
   }
   if (row.signal === 'pr' && task) {
-    return sentence(awaitedFor(task))
+    return sentence(awaitedFor(run, task))
   }
   if (row.signal === 'ci' && task) {
     // `ciTransitions` skips a `ci` row with no PR (ci.ts:12), so that row is never
@@ -320,7 +367,7 @@ export function stallAwaiting(
     // NOT "cancelled": rollUpBucket maps `cancel` to `fail` (gh.ts:19), which
     // advances the row back to `implement` — one of the fastest ways OUT of ci.
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `This phase is waiting for CI to report on PR #${task.pr}. Check it with ` +
         `\`gh pr checks ${task.pr}\` — a run that is queued or was never triggered reports no ` +
         'conclusion, and this phase waits on it forever.',
@@ -333,7 +380,7 @@ export function stallAwaiting(
     // Not "the PR is unmerged": this row is evaluated only while the orchestrator
     // is idle or has no agent, so a merged PR can sit here as long as it stays busy.
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `This phase is waiting for you to merge PR #${task.pr} (${task.branch}). ` +
         "Merging is yours, not the plugin's; nothing merges automatically. If it is already " +
         'merged, end your turn: this phase is read only while you are idle.',
@@ -342,20 +389,20 @@ export function stallAwaiting(
   if (row.signal === 'closed' && task) {
     if (task.merged_at_ms === null) {
       return {
-        short: awaitedFor(task),
+        short: awaitedFor(run, task),
         clause: `No merge is recorded for ${task.task_id}, so the supervisor will not close bead ${task.bead} ` +
           `and this phase cannot clear: \`${hpipe} rewind ${run.run_id} merge --task ${task.task_id}\` records it.`,
       }
     }
     if (!beadOutOfSync(task)) {
       return {
-        short: awaitedFor(task),
+        short: awaitedFor(run, task),
         clause: `This phase is waiting on the Beads close of ${task.bead}, which the supervisor retries every ` +
           'tick. Nothing is needed from you yet.',
       }
     }
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: `The last ${task.bead_sync.streak} of the supervisor's Beads calls for ${task.bead} have failed in a row; ` +
         `the last said:\n\n    ${task.bead_sync.last_error}\n\nFix what it names, or close the bead by hand: ` +
         `\`${hpipe} close --task ${task.task_id}\`. Add \`--force\` only to override bd's close guards, ` +
@@ -364,14 +411,16 @@ export function stallAwaiting(
   }
   if (row.signal === 'files' && task) {
     return {
-      short: awaitedFor(task),
+      short: awaitedFor(run, task),
       clause: 'This phase is waiting for another task to release the files this one declared.',
     }
   }
-  if (row.signal === 'manual' && task) return sentence(awaitedFor(task))
+  if ((row.signal === 'manual' || row.signal === 'synced' || row.signal === 'slot') && task) {
+    return sentence(awaitedFor(run, task))
+  }
   if (row.signal === 'worktree') {
     return task
-      ? { short: awaitedFor(task),
+      ? { short: awaitedFor(run, task),
           clause: "This phase is waiting for this task's worktree to be removed. Teardown is " +
             'unconditional and runs first in every tick, so a task still here means this run is ' +
             "not being advanced — check the supervisor pane's log, and check whether another run " +
@@ -388,17 +437,124 @@ export function stallAwaiting(
   return sentence(`whatever clears ${phase}`)
 }
 
+function shipClause(run: Run, batch: Batch, hpipe: string): Awaiting | null {
+  const pr = batch.pr === null ? 'the batch PR' : `PR #${batch.pr}`
+  switch (run.phase) {
+    case 'ship':
+      return {
+        short: 'the batch PR, opened at a checked head',
+        clause: `This phase is waiting for the batch PR: check ${batch.branch} with \`${hpipe} batch-check\`, then ` +
+          'open or update the PR, as the ship prompt says. It clears only once the PR\'s head is the head ' +
+          '`batch-check` recorded.',
+      }
+    case 'ship-ci':
+      return {
+        short: `CI on ${pr}`,
+        clause: `This phase is waiting for CI on ${pr}: \`gh pr checks ${batch.pr ?? '<pr>'}\`. A run that is queued ` +
+          'or was never triggered reports nothing, and this phase waits on it.',
+      }
+    case 'ship-merge':
+      return {
+        short: `${pr} to be squash-merged`,
+        clause: `This phase is waiting for you to squash-merge ${pr} with the commands the ship-merge prompt ` +
+          'rendered. If GitHub refuses, a required review means getting one, and "branches must be up to date" ' +
+          `means \`gh pr update-branch ${batch.pr ?? '<pr>'}\`, which moves the head back through ship-ci. If ${pr} ` +
+          `was closed unmerged, reopen it, or \`${hpipe} rewind ${run.run_id} ship\`. Until ${pr} merges this run ` +
+          `holds the repo, and no other \`${hpipe} start\` can begin here.`,
+      }
+    default:
+      return null
+  }
+}
+
+/** "t5, t6 wait on this sync": the tasks a stuck holder is keeping from landing. */
+function waitersOn(run: Run, holder: Task, what: string): string {
+  const ids = landingQueue(run.tasks).filter((t) => t !== holder).map((t) => t.task_id)
+  if (ids.length === 0) return ''
+  return ` ${ids.join(', ')} ${ids.length === 1 ? 'waits' : 'wait'} on this ${what}.`
+}
+
+/** The single-PR forms of the rows a batch changes; null leaves the row to the shared clauses. */
+function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiting | null {
+  const batch = run.batch
+  if (batch === undefined) return null
+  const short = awaitedFor(run, task)
+  switch (task.phase) {
+    case 'implement':
+      return {
+        short,
+        clause: `This phase is waiting for a submission: push, then \`${hpipe} submit --task ${task.task_id} ` +
+          `--title "<conventional title>"\`. It refuses, with the reason, until the work is committed, pushed, ` +
+          `checked and not already on ${batch.branch}.`,
+      }
+    case 'land-queue': {
+      if (task.pane_id === null) {
+        const start = task.workspace_id === null
+          ? dispatchWorkerCommand(run, task, hpipe)
+          : startWorkerCommand(run, task, task.workspace_id, hpipe)
+        return {
+          short: 'an agent in its worktree to sync',
+          clause: `${task.task_id} waits to land, but ${batch.branch} has moved past it, so it needs an agent in ` +
+            `its worktree to sync before it can take the landing slot: ${start}.`,
+        }
+      }
+      const fetchError = batch.fetch_error
+      const unseen = fetchError
+        ? ` ${batch.branch} has not fetched for ${ageMinutes(fetchError.since, now)}m (${fetchError.reason}), so ` +
+          'landings are not being seen.'
+        : ''
+      // A paneless task ahead is passed over until an agent is started for it, and has its own clause.
+      const head = landingQueue(run.tasks).find((t) => t.pane_id !== null)
+      const inLine = head === undefined || head === task
+        ? 'this one is first in line, yet it has not taken it'
+        : `${head.task_id} is first in line, ahead of this one, yet nothing has taken it`
+      return {
+        short,
+        clause: `No task holds the landing slot and ${inLine}, so this run is not being advanced.${unseen} ` +
+          "Check the supervisor pane's log, whether another run holds this " +
+          `orchestrator pane, and whether git can read the batch: \`git -C ${shellQuoted(run.repo_root)} ` +
+          `merge-base --is-ancestor ${shellWord(`origin/${batch.branch}`)} ${task.land_sha ?? '<land sha>'}\` ` +
+          'must exit 0 or 1.',
+      }
+    }
+    case 'sync':
+      if (task.pane_id === null) return null
+      return {
+        short,
+        clause: `This phase is waiting for ${batch.branch} merged into ${task.branch}, checked, pushed and ` +
+          `submitted: \`${mergeBatchCommand(batch)}\`, then \`${hpipe} submit --task ${task.task_id}\`.` +
+          waitersOn(run, task, 'sync'),
+      }
+    case 'merge':
+      return {
+        short,
+        clause: `This phase is waiting for you to land ${task.branch}: ` +
+          `\`${landCommand(run, task.land_sha ?? '<land sha>')}\`. If the push is refused for any reason, end ` +
+          `your turn: ${batch.branch} has moved, and the task goes back to sync. Landing is yours, not the ` +
+          "plugin's; nothing lands automatically. If it has landed, end your turn: this phase is read only while " +
+          'you are idle.' + waitersOn(run, task, 'landing'),
+      }
+    default:
+      return null
+  }
+}
+
 /**
  * The ladder sentence, composed here rather than templated, because a bare
  * "probe N of M" is false for every row escalation excludes: those keep being
- * probed past the cap and are never escalated.
+ * probed past the cap and are never escalated. It names the cadence in force, which
+ * a config can shorten, and what does and does not answer a probe: the trial's
+ * orchestrator, told only "after 3 unanswered probes", busy-waited in a shell so its
+ * pane would read working while its reviewer subagent ran. Measured on a live run.
  */
 export function ladderFor(
-  c: { probes: number; undelivered: number; escalatable: boolean }, probeMax: number,
+  c: { probes: number; undelivered: number; escalatable: boolean; thresholdMs: number }, probeMax: number,
+  work: BackgroundWork = NO_WORK,
 ): string {
+  const every = `${Math.round(c.thresholdMs / MS_PER_MINUTE)} minutes`
   if (!c.escalatable) {
-    return 'This is a standing nudge — this phase is not escalated automatically, and clears ' +
-      'when whatever it is waiting for arrives.'
+    return `This is a standing nudge, sent every ${every} until whatever this phase is waiting for arrives; ` +
+      'this phase is not escalated automatically.'
   }
   // Numbered by rung, not by delivered probe: undelivered rungs count toward the
   // cap, so a delivered-only count would promise the agent probes it will not get.
@@ -406,8 +562,19 @@ export function ladderFor(
     ? ''
     : ` ${c.undelivered === 1 ? 'One earlier probe' : `${c.undelivered} earlier probes`} ` +
       'could not be delivered to this pane and still counted.'
-  return `This is probe ${c.probes + 1} of ${probeMax}.${missed} After ${probeMax} unanswered ` +
-    'probes this phase is escalated to the human and stops moving on its own.'
+  // Never "this phase waits for it" of a shell: an orchestrator's background poller
+  // waiting on `hpipe status` for the phase change was told to keep running.
+  const background = work.running.length === 0
+    ? ''
+    : ` Your pane shows background work running now (${work.running.join(', ')}).` + (work.subagents.length === 0
+      ? ' This phase does not wait for it.'
+      : ` Once what this phase waits for is there, it waits up to ${SUBAGENT_HOLD_MAX_MS / MS_PER_MINUTE} minutes ` +
+        `for ${work.subagents.join(', ')} to finish, and no longer.`)
+  return `This is probe ${c.probes + 1} of ${probeMax}, sent every ${every} while this phase is open.${missed} ` +
+    'A reply does not answer it; only what this phase is waiting for does. ' +
+    `After probe ${probeMax} the next check escalates this phase to the human, and it stops moving on its own, ` +
+    'unless your pane is busy then — mid-turn, or running a subagent, shell or monitor that Claude Code lists ' +
+    `under its prompt — which puts the escalation off ${every} at a time, up to ${probeMax} times.${background}`
 }
 
 /**
@@ -446,10 +613,21 @@ export interface StallDeps {
   queueEscalation: (c: StallCandidate, text: string) => void
   agentStatus: (paneId: string) => Promise<AgentStatus>
   /**
+   * What Claude Code shows running in the background of the pane. An actor idle at
+   * its prompt while a subagent it dispatched works is as busy as a working one.
+   */
+  backgroundWork?: (paneId: string) => Promise<readonly string[]>
+  /**
    * `effect` re-records an action already taken — a probe that was sent — should
    * the save lose to a CLI write; see `saveOrReapply`.
    */
   persist: (run: Run, effect?: RunEffect) => Promise<SaveOutcome | void>
+  /**
+   * Whether Claude's usage limit has stopped the pane. A probe there is rejected on
+   * arrival, and an escalation would be a quota pause dressed as a stall: berean-os
+   * escalated three tasks in the middle of a 3 h 46 min limit. Measured on a live run.
+   */
+  limited: (paneId: string) => Promise<boolean>
 }
 
 /**
@@ -502,6 +680,8 @@ function stallEffectFor(
 
 async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutcome | void> {
   const record: Run | Task = c.task ?? c.run
+  if (await deps.limited(c.paneId)) return
+  if (c.actorPaneId !== null && c.actorPaneId !== c.paneId && await deps.limited(c.actorPaneId)) return
 
   // An undeliverable probe must still climb eventually: the ladder exists to
   // end silence, and a pane that cannot be reached is the case escalation
@@ -519,15 +699,17 @@ async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutco
   }
 
   const { holds } = stallStateFor(c.run, record)
-  if (
-    holds < deps.probeMax && c.actorPaneId !== null &&
-    (await deps.agentStatus(c.actorPaneId)) === 'working'
-  ) {
+  if (holds < deps.probeMax && c.actorPaneId !== null && await actorBusy(deps, c.actorPaneId)) {
     bumpStall(c.run, record, 'holds', deps.now())
     return deps.persist(c.run)
   }
 
   await escalate(c, deps)
+}
+
+async function actorBusy(deps: StallDeps, paneId: string): Promise<boolean> {
+  if ((await deps.agentStatus(paneId)) === 'working') return true
+  return ((await deps.backgroundWork?.(paneId)) ?? []).length > 0
 }
 
 /**

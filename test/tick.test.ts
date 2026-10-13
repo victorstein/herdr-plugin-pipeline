@@ -3,18 +3,20 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
-  pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence, workerStillNeeded,
+  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, FILES_PASS_HOLD_MS,
+  FilesPassHolds, noteBackgroundWork, PaneAbsence, parkedFooter, pickOneAdvance, saveEventedRuns, tickEvents,
+  type WakeLine, WorkspaceAbsence, workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
-import { actionFor, ageMinutes } from '../src/lib/status'
+import { actionFor, ageMinutes, waitsOnYou } from '../src/lib/status'
 import { makeSettledIdleReader, refreshingIdleReader } from '../src/supervisor/main'
-import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { isCurrentSchemaRun, loadRun, newRun, saveRun, StaleRunError, withBatch } from '../src/lib/ledger'
 import { enqueue } from '../src/lib/outbox'
 import { TASK_ROWS, TIERS } from '../src/lib/phases'
 import { overdueUnstartedWorker, UNSTARTED_GRACE_MS } from '../src/lib/unstarted'
 import type { AgentStatus, QueuedEvent, Run, Task, TaskPhase } from '../src/lib/types'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
@@ -413,7 +415,7 @@ test('actionFor answers whose move it is, by rung', () => {
   // flagged; with no worktree yet the steps left start at the worktree.
   expect(at('research', { awaiting_brief: true, pane_id: null }))
     .toBe("dispatch under way — once the repo's bootstrap has run in its checkout, " +
-      '`herdr agent start <name> --kind claude --pane <root pane> -- --dangerously-skip-permissions`, ' +
+      '`herdr agent start hp-1 --kind claude --pane <root pane> -- --dangerously-skip-permissions --effort xhigh`, ' +
       'then `hp dispatch --task t1 --pane <root pane>`')
   const justDispatched = {
     awaiting_brief: true as const, pane_id: null, workspace_id: null, checkout_path: null, phase_entered_at: Date.now(),
@@ -424,6 +426,7 @@ test('actionFor answers whose move it is, by rung', () => {
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
   expect(at('implement')).toBe("worker's move: waiting for a pushed PR for feat/x (hp-1)")
+  expect(at('implement', { pr: 48 })).toBe("worker's move: waiting for a new push to PR #48")
   for (const phase of ['queued', 'ci', 'teardown'] as TaskPhase[]) {
     expect(at(phase)).toBe('nothing for you — the supervisor is driving')
     // Never `intake to be closed`: that is stallAwaiting's run-level `gate`
@@ -444,26 +447,40 @@ test('actionFor renders the CLI it is given, never a literal hpipe', () => {
 })
 
 test('a blocked-on-files task held by a dead task names the release command', () => {
-  // `failed` and `escalated` both hold files forever (holdsFiles: true), so
-  // filesClearFor never goes true and only `hpipe release` clears it. Telling the
-  // orchestrator "the supervisor is driving" there is false, permanently.
-  for (const holderPhase of ['failed', 'escalated'] as TaskPhase[]) {
-    const run = mkRun([])
-    const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
-    const holder = mkTask({ task_id: 't2', phase: holderPhase, files: ['src/a.ts'] })
-    run.tasks = [blocked, holder]
-    expect(actionFor(run, blocked, 'hp')).toBe('YOUR move: `hp release --task t2`')
-  }
-})
-
-test('a blocked-on-files task held by a live task is still the supervisor\'s', () => {
-  // `hpipe release` refuses an in-flight holder, so offering it against a healthy
-  // one sends the orchestrator at a command that will bounce.
+  // `failed` holds files forever (holdsFiles: true), so filesClearFor never goes
+  // true and only `hpipe release` clears it. Telling the orchestrator "the
+  // supervisor is driving" there is false, permanently.
   const run = mkRun([])
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
-  const holder = mkTask({ task_id: 't2', phase: 'implement', files: ['src/a.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'failed', files: ['src/a.ts'] })
   run.tasks = [blocked, holder]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('YOUR move: `hp release --task t2`')
+})
+
+test('a blocked-on-files task held by an escalated task points at the holder, not at release — #21', () => {
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'escalated', escalated_from: 'implement', files: ['src/a.ts'] })
+  run.tasks = [blocked, holder]
+  expect(actionFor(run, blocked, 'hp')).toBe(
+    'nothing for you here — t2 holds these files and is escalated; its own line says how to resume or abandon it',
+  )
+})
+
+test('a blocked-on-files task held by a live task is still the supervisor\'s, and names who holds them', () => {
+  // `hpipe release` refuses an in-flight holder, so offering it against a healthy
+  // one sends the orchestrator at a command that will bounce. Unnamed, the holder
+  // left an orchestrator to guess the files were free while status still showed
+  // the wait. Measured on a live run.
+  const run = mkRun([])
+  const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts', 'src/b.ts'] })
+  const holder = mkTask({ task_id: 't2', phase: 'close', files: ['src/a.ts'] })
+  run.tasks = [blocked, holder]
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — waiting for t2 (close) to free the files it holds')
+  expect(waitsOnYou(run, blocked)).toBe(false)
+  run.tasks = [blocked, holder, mkTask({ task_id: 't3', phase: 'implement', files: ['src/b.ts'] })]
+  expect(actionFor(run, blocked, 'hp'))
+    .toBe('nothing for you — waiting for t2 (close), t3 (implement) to free the files they hold')
 })
 
 test('a blocked-on-files task whose holder touches other files is not blamed on it', () => {
@@ -471,7 +488,8 @@ test('a blocked-on-files task whose holder touches other files is not blamed on 
   const blocked = mkTask({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a.ts'] })
   const unrelated = mkTask({ task_id: 't2', phase: 'failed', files: ['src/z.ts'] })
   run.tasks = [blocked, unrelated]
-  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — the supervisor is driving')
+  expect(actionFor(run, blocked, 'hp')).toBe('nothing for you — no task holds its files now; the supervisor\'s ' +
+    'file gate passes it to implement unless another task takes them first')
 })
 
 test('every row in TASK_ROWS gets a clause that matches who its actor is', () => {
@@ -589,6 +607,18 @@ test('a phase that moved this tick renders as a transition and drops the age', (
   })
   expect(describeWake(line, now, 'hp'))
     .toBe("t1 feat/x (hp-1) [research → spec] agent:idle — worker's move: waiting for its spec artifact")
+})
+
+test('a digest line that crossed a skipped PR review says so in its transition', () => {
+  const now = 1_000_000
+  const line = wakeLine({
+    phaseAtEvent: 'implement',
+    task: mkTask({
+      phase: 'ci', phase_entered_at: now, pr: 7,
+      review_skip: { at: now, skipped: ['pr-review'], added_lines: 9, cleared: ['spec-review'] },
+    }),
+  })
+  expect(describeWake(line, now, 'hp')).toStartWith('t1 feat/x (hp-1) [implement → ci, pr-review skipped] agent:idle — ')
 })
 
 test('a blocked line indents its pane tail four spaces under the bullet', () => {
@@ -785,8 +815,82 @@ test('the footer agrees with hpipe status on the rows no actor column can see', 
     'also waiting on you:\n' +
     '- t2 feat/x (hp-1) [blocked-on-files 0m] — YOUR move: `hp release --task t1`\n' +
     '- t3 feat/x (hp-1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
-    '(src/b.ts) — have it commit and push',
+    '(src/b.ts) — `hp nudge --task t3` tells it to commit, push and finish implement',
   )
+})
+
+test('a worker reported idle or done says what it still runs in the background', () => {
+  // The trial's orchestrator read `agent:done` on t3 as a stopped worker while its subagent built firmware.
+  // Measured on a live run.
+  const run = mkRun([])
+  const task = mkTask({ phase: 'implement', agent_status: 'done' })
+  const quiet = mkTask({ task_id: 't2', pane_id: 'w8:p1', agent_status: 'done' })
+  run.tasks = [task, quiet]
+  const wake: WakeLine[] = [
+    { run, task, event: 'agent:done', phaseAtEvent: 'implement' },
+    { run, task, event: 'agent:blocked', phaseAtEvent: 'implement' },
+    { run, task: quiet, event: 'agent:idle', phaseAtEvent: 'implement' },
+  ]
+  noteBackgroundWork(wake, (pane) => (pane === 'w7:p1' ? ['1 shell', '4 monitors', 'ui-dev subagent'] : []))
+  expect(wake.map((line) => line.event)).toEqual([
+    'agent:done, background work running (1 shell, 4 monitors, ui-dev subagent)', 'agent:blocked', 'agent:idle',
+  ])
+  expect(describeWake(wake[0]!, 0, 'hp')).toStartWith(
+    't1 feat/x (hp-1) [implement 0m] agent:done, background work running (1 shell, 4 monitors, ui-dev subagent) — ')
+})
+
+test('a pass through blocked-on-files that nothing holds is folded into the phase after it', () => {
+  // The trial reported `[plan-review → blocked-on-files] … no task holds its files now` for a task that was
+  // in implement a tick later. Measured on a live run.
+  const holds = new FilesPassHolds()
+  const t2 = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: 1_000 })
+  const queued = mkTask({ task_id: 't4', phase: 'queued', files: ['src/a.ts'] })
+  const run = mkRun([t2, queued])
+  const idle: WakeLine = { run, task: t2, event: 'agent:idle', phaseAtEvent: 'plan-review' }
+  expect(holds.sift(run, [idle], 1_000)).toEqual([])
+
+  const next = structuredClone(run)
+  next.tasks[0]!.phase = 'implement'
+  const sent = holds.sift(next, [], 2_000)
+  expect(sent.map((line) => describeWake(line, 2_000, 'hp'))).toEqual([
+    expect.stringMatching(/^t2 feat\/x \(hp-1\) \[plan-review → implement\] agent:idle — /),
+  ])
+  expect(holds.sift(next, [], 3_000)).toEqual([])
+})
+
+test('a real wait in blocked-on-files is reported at once, and a pass held too long is sent anyway', () => {
+  const holder = mkTask({ task_id: 't1', phase: 'implement', files: ['src/a.ts'] })
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const waiting = mkRun([holder, waiter])
+  const line: WakeLine = { run: waiting, task: waiter, event: 'agent:idle', phaseAtEvent: 'plan-review' }
+  expect(new FilesPassHolds().sift(waiting, [line], 0)).toHaveLength(1)
+
+  const holds = new FilesPassHolds()
+  const free = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const stuck = mkRun([free])
+  expect(holds.sift(stuck, [{ ...line, run: stuck, task: free }], 0)).toEqual([])
+  expect(holds.sift(stuck, [], FILES_PASS_HOLD_MS)).toHaveLength(1)
+})
+
+test('a block or a lost pane during the pass is never held, only the idle that ended the phase before', () => {
+  const holds = new FilesPassHolds()
+  const t2 = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const run = mkRun([t2])
+  const lines: WakeLine[] = [
+    { run, task: t2, event: 'agent:blocked', phaseAtEvent: 'plan-review', detail: 'Do you want to proceed?' },
+    { run, task: t2, event: 'pane exited', phaseAtEvent: 'plan-review' },
+    { run, task: t2, event: 'agent:done, background work running (1 shell)', phaseAtEvent: 'plan-review' },
+  ]
+  expect(holds.sift(run, lines, 0).map((line) => line.event)).toEqual(['agent:blocked', 'pane exited'])
+})
+
+test('lines of other runs and other tasks are not held', () => {
+  const holds = new FilesPassHolds()
+  const t1 = mkTask({ task_id: 't1', phase: 'implement' })
+  const run = mkRun([t1])
+  const other = mkRun([mkTask({ task_id: 't1', phase: 'blocked-on-files' })])
+  const line: WakeLine = { run, task: t1, event: 'agent:done', phaseAtEvent: 'implement' }
+  expect(holds.sift(run, [line, { ...line, run: other, task: other.tasks[0]! }], 0)).toEqual([line])
 })
 
 test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12', () => {
@@ -994,13 +1098,13 @@ test('a pane.moved that keeps the id changes nothing — #86', () => {
 })
 
 test('the worker is needed exactly while some reachable row is the worker\'s — #86', () => {
-  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: 'close' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'blocked-on-decision', decision_from: null }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'implement' }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'ci' }))).toBe(true)
-  expect(workerStillNeeded(mkTask({ phase: 'merge' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'merge' }))).toBe(false)
-  expect(workerStillNeeded(mkTask({ phase: 'escalated', escalated_from: 'spec' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'blocked-on-decision', decision_from: 'close' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'blocked-on-decision', decision_from: null }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'implement' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'ci' }))).toBe(true)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'escalated', escalated_from: 'merge' }))).toBe(false)
+  expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'escalated', escalated_from: 'spec' }))).toBe(true)
 })
 
 test('pane.moved rebinds the task to the pane\'s new id and fails nothing — #86', () => {
@@ -1154,9 +1258,9 @@ test('the worker is still needed from every worker row in every tier, and past m
   ] as const
   for (const tier of TIERS) {
     for (const phase of workerRows) {
-      expect(workerStillNeeded(mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
+      expect(workerStillNeeded(mkRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
     }
-    expect(workerStillNeeded(mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
+    expect(workerStillNeeded(mkRun([]), mkTask({ phase: 'merge', tier })), `${tier}: merge`).toBe(false)
   }
 })
 
@@ -1211,4 +1315,44 @@ test('a line about a briefed worker is not held — #148', () => {
   const run = unbriefedRun(false)
   const line = idleLine(run)
   expect(holds.sift([line], [run], 0)).toEqual([line])
+})
+
+// ——— single-PR: a reviewed task waiting to land needs no particular worker ———
+
+const singlePrRun = (tasks: Task[]): Run => withBatch(mkRun(tasks), batchFixture())
+
+test('in a single-PR run the worker is not needed once the reviews are behind the task', () => {
+  for (const tier of TIERS) {
+    for (const phase of ['land-queue', 'sync', 'merge', 'close'] as const) {
+      expect(workerStillNeeded(singlePrRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(false)
+    }
+    for (const phase of ['implement', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+      expect(workerStillNeeded(singlePrRun([]), mkTask({ phase, tier })), `${tier}: ${phase}`).toBe(true)
+    }
+  }
+})
+
+test('a worker pane lost in land-queue, sync or merge is released, not failed', () => {
+  for (const phase of ['land-queue', 'sync', 'merge'] as const) {
+    const run = singlePrRun([mkTask({ phase })])
+    applyEvents([run], [{ kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1' }], 'personal', new Set())
+    expect(run.tasks[0]?.phase, phase).toBe(phase)
+    expect(run.tasks[0]?.pane_id, phase).toBeNull()
+  }
+})
+
+test('a worker pane lost in implement or a review row still fails a single-PR task, worded for a submission', () => {
+  const run = singlePrRun([
+    mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w7:p1' }),
+    mkTask({ task_id: 't2', phase: 'pr-review', pane_id: 'w8:p1', workspace_id: 'w8',
+      submission: { kind: 'implement', title: 'fix: a', head_sha: 'abc', at: 1, check: 'passed' } }),
+  ])
+  const { wake } = applyEvents([run], [
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w7:p1' },
+    { kind: 'pane.exited', session: 'personal', at: 1, pane_id: 'w8:p1' },
+  ], 'personal', new Set())
+  expect(run.tasks.map((t) => t.phase)).toEqual(['failed', 'failed'])
+  expect(run.history.filter((h) => h.to === 'failed').map((h) => h.why))
+    .toEqual(['pane exited before it submitted', 'pane exited after it submitted'])
+  expect(wake.map((w) => w.event)).toEqual(['pane exited, nothing submitted', 'pane exited'])
 })

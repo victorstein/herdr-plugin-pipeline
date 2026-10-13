@@ -2,11 +2,25 @@
 
 You are the orchestrator. Intake is yours: understand the problem, cut it into tasks, back each task
 with one bead, and register them. You do **not** write specs or plans — each worker researches, specs
-and plans its own bead.
+and plans its own bead.{{mode_note}}
+
+0. **Before anything else, make sure the run can do its work.** It needs Claude Code to let this pane
+   run `git push`, `gh pr create`, `gh pr merge`, `git pull`, `herdr worktree create`,
+   `herdr agent start` and `{{hpipe}}`. If your permission mode or Claude Code's auto-mode classifier
+   could refuse any of them, ask the user now to allow them (for example `Bash(gh pr merge:*)` under
+   `permissions.allow` in `.claude/settings.local.json`), not halfway through the run. A denial is
+   Claude Code's own check, not GitHub or herdr refusing; when one comes, stop and ask on the spot.
+   Name the command, why the run needs it, and the allow rule that would cover it. Don't carry on
+   with other steps first: the run stalls on whatever you skipped. Measured on a live run.
 
 1. **Understand the problem first.** If the user handed you a report, verify it against the code
    before you decompose: the files that actually own the behaviour, what already exists, what is
    really broken. A task cut from an unverified report sends a worker down a path nobody checked.
+
+   Land whatever the briefs depend on before you register anything: a docs PR they cite, a
+   baseline, a setup branch. Every task's `base:` commit is fixed when it is registered, so a
+   prerequisite merged later is missing from every worktree, and a brief that sends workers to a
+   local branch sends them somewhere their checkout cannot see. Measured on a live run.
 
 2. **Cut it into tasks** that can be worked independently. Two tasks that must touch the same file
    are serialized, not parallel — say so with `--files` (the plugin holds the second one until the
@@ -41,9 +55,11 @@ and plans its own bead.
    later layer is blocked by an open bead and cannot be adopted until that bead closes: adopt the
    blocker in this batch and leave the rest for a later one.
 
-   `--tier` decides which reviews the task runs. `light` skips `plan-review` and gets one combined
-   PR review; `standard` keeps `plan-review` and the combined PR review; `heavy` runs every review,
-   with the PR reviewed in two separate stages. Pick it from the brief:
+   `--tier` decides which reviews the task runs, and how hard. `light` skips `plan-review`;
+   `standard` and `heavy` keep it. Every tier gets one combined PR review, except that a light or
+   standard task whose change turns out small skips it (the herdr-pipeline skill's
+   `pr-review skipped` row has the rule); `heavy` never skips it, and runs its reviews at the
+   highest effort. Pick it from the brief:
 
    - **light** — one surface, a handful of files, and the brief already pins down the exact change:
      no API, contract or schema decision left open.

@@ -1,3 +1,4 @@
+import { Bd, CLI_LOCK_WAIT_MS } from './lib/bd'
 import { beadsExportPath, beadsHome } from './lib/beads-project'
 import { boardLabel, updateBoards } from './lib/boards'
 import { bvSpawnEnv } from './lib/bv'
@@ -13,9 +14,12 @@ export interface BoardPaneDeps {
   sleep: (ms: number) => Promise<void>
   /** The export's text, or null while the file does not exist yet. */
   readExport: (path: string) => Promise<string | null>
+  /** The pane and the tab it opened in. */
   renamePane: (paneId: string, label: string) => Promise<unknown>
   updateBoards: typeof updateBoards
   which: (bin: string) => string | null
+  /** Commits an export the store's history lacks, since bv's history view reads that history. */
+  recordHistory: (stateDir: string, slug: string) => Promise<unknown>
   runBv: (argv: string[], options: { cwd: string; env: Record<string, string | undefined> }) => Promise<number>
   error: (message: string) => void
 }
@@ -29,9 +33,15 @@ const processDeps = (): BoardPaneDeps => ({
     const file = Bun.file(path)
     return (await file.exists()) ? file.text() : null
   },
-  renamePane: (paneId, label) => new Herdr().paneRename(paneId, label),
+  renamePane: async (paneId, label) => {
+    const herdr = new Herdr()
+    await herdr.paneRename(paneId, label)
+    await herdr.renameTabOf(paneId, label)
+  },
   updateBoards,
   which: (bin) => Bun.which(bin),
+  recordHistory: (stateDir, slug) =>
+    new Bd({ stateDir, slug, lockWaitMs: CLI_LOCK_WAIT_MS, exportAfterWrites: false }).recordHistory(),
   runBv: (argv, { cwd, env }) =>
     Bun.spawn(argv, { cwd, env, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' }).exited,
   error: console.error,
@@ -84,6 +94,11 @@ export async function runBoardPane(deps: BoardPaneDeps = processDeps()): Promise
     if (!(await hasIssue())) {
       deps.error(`Waiting for the first bead in ${exportPath}…`)
       while (!(await hasIssue())) await deps.sleep(FIRST_ISSUE_POLL_MS)
+    }
+    try {
+      await deps.recordHistory(stateDir, slug)
+    } catch (error) {
+      deps.error(`[pipeline] the store's history could not be brought up to date, so bv's history view may lag: ${error}`)
     }
     const launchedAt = deps.now()
     const exitCode = await deps.runBv([bin, '--db', exportPath], {

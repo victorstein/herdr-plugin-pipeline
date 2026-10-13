@@ -1,8 +1,9 @@
 import { BOOTSTRAP_REL, type Bootstrap } from './bootstrap'
 import { baseArgument, type DispatchBase } from './dispatch-base'
+import { WORKER_EFFORT } from './models'
 import { queuedWorkerPrompt } from './outbox'
-import { runRow, taskRow } from './phases'
-import type { Run, Task } from './types'
+import { runRow, taskRow, tierOf } from './phases'
+import type { Run, StallState, Task } from './types'
 
 /**
  * A worker's pane is recorded only when herdr detects an agent in its worktree
@@ -83,18 +84,48 @@ export function overdueUndispatchedWorker(run: Run, task: Task, now: number): { 
 }
 
 /** Printed for pasting into a shell, where a repo path with a space would split. */
-function shellQuoted(path: string): string {
+export function shellQuoted(path: string): string {
   return `'${path.replaceAll("'", "'\\''")}'`
 }
 
-/** Workers run unattended: a permission prompt would hold one with nobody watching its pane. */
-function startAgentCommand(paneId: string): string {
-  return `herdr agent start <name> --kind claude --pane ${paneId} -- --dangerously-skip-permissions`
+/**
+ * A branch or ref for a pasted command, quoted only when it needs it: git accepts
+ * a branch named `batch/$(id)` or `a;b`, and a plain name renders as it always did.
+ */
+export function shellWord(word: string): string {
+  return /^[A-Za-z0-9_./:+@%,-]+$/.test(word) ? word : shellQuoted(word)
 }
 
-const START_AGENT = `\`${startAgentCommand('<root pane>')}\``
+/**
+ * Workers run unattended: a permission prompt would hold one with nobody watching its pane.
+ * The effort is fixed for the session's life, so a later tier change reaches only the reviews.
+ *
+ * herdr resolves a target by a unique agent name, and a bead id is unique across
+ * every repo's store, where a task id repeats in each run. Left as `<name>`, the
+ * line could not be run as printed.
+ */
+function startAgentCommand(task: Task, paneId: string): string {
+  return `herdr agent start ${shellWord(task.bead)} --kind claude --pane ${paneId} -- --dangerously-skip-permissions ` +
+    `--effort ${WORKER_EFFORT[tierOf(task)]}`
+}
+
+const startAgent = (task: Task): string => `\`${startAgentCommand(task, '<root pane>')}\``
 
 const CREATED_ROOT_PANE = '<.result.root_pane.pane_id>'
+const CREATED_CHECKOUT = '<.result.worktree.path>'
+
+/**
+ * herdr picks the checkout's path, so the plugin cannot print it before the
+ * worktree exists; a repo whose setup script was never wired in still gets a step
+ * that runs it there. Left out, the trial's orchestrator dug the path out of the
+ * create JSON by hand. Measured on a live run.
+ */
+function bootstrapSteps(bootstrap: Bootstrap): string[] {
+  if (bootstrap.kind !== 'none') return [`(cd "${CREATED_CHECKOUT}" && ./${BOOTSTRAP_REL})`]
+  if (bootstrap.unwired === undefined || bootstrap.notExecutable === true) return []
+  return [`(cd "${CREATED_CHECKOUT}" && ./${bootstrap.unwired})  # optional: the repo's own setup, which nothing ` +
+    'runs for you; run it if the worker will need what it sets up']
+}
 
 /**
  * The whole dispatch, in order, for both paths that dispatch: `hpipe task` at
@@ -107,9 +138,12 @@ export function dispatchSequence(
   run: Run, task: Task, base: DispatchBase, bootstrap: Bootstrap, hpipe: string,
 ): string {
   const steps = [
-    `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base ${baseArgument(base)}`,
-    ...(bootstrap.kind === 'none' ? [] : [`(cd "<.result.worktree.path>" && ./${BOOTSTRAP_REL})`]),
-    startAgentCommand(CREATED_ROOT_PANE),
+    `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${shellWord(task.branch)} ` +
+      `--base ${baseArgument(base)}`,
+    `# its JSON gives the new checkout as ${CREATED_CHECKOUT.slice(1, -1)} and its pane as ` +
+      `${CREATED_ROOT_PANE.slice(1, -1)}; \`${hpipe} show --task ${task.task_id}\` prints the checkout too`,
+    ...bootstrapSteps(bootstrap),
+    startAgentCommand(task, CREATED_ROOT_PANE),
     `${hpipe} dispatch --task ${task.task_id} --pane ${CREATED_ROOT_PANE}`,
   ]
   return ['dispatch, in order:', ...steps.map((step) => `    ${step}`)].join('\n')
@@ -138,14 +172,15 @@ function handoffPastBrief(run: Run, task: Task, hpipe: string): string {
  * base. Both measured on herdr 0.9.0.
  */
 export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): string {
-  const create = `\`herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch} --base <commit>\` ` +
+  const branch = shellWord(task.branch)
+  const create = `\`herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${branch} --base <commit>\` ` +
     `(the commit on the \`base:\` line \`${hpipe} show --task ${task.task_id}\` prints, never a base you pick)`
-  const open = `\`herdr worktree open --cwd ${shellQuoted(run.repo_root)} --branch ${task.branch}\``
+  const open = `\`herdr worktree open --cwd ${shellQuoted(run.repo_root)} --branch ${branch}\``
   const worktree = task.checkout_path === null
     ? `${create}, run the repo's bootstrap in the new checkout`
     : `${open}; if that answers \`worktree_not_found\` the checkout is gone, so ${create} and run ` +
       "the repo's bootstrap in it"
-  const setUp = `${worktree}, then ${START_AGENT}`
+  const setUp = `${worktree}, then ${startAgent(task)}`
   if (task.phase === taskRow('queued').onClear) {
     return `${setUp}, then ${briefCommand(task, '<root pane>', hpipe)}`
   }
@@ -158,7 +193,7 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
  */
 export function remainingDispatchSteps(run: Run, task: Task, hpipe: string): string {
   if (task.workspace_id === null) return dispatchWorkerCommand(run, task, hpipe)
-  return `once the repo's bootstrap has run in its checkout, ${START_AGENT}, then ` +
+  return `once the repo's bootstrap has run in its checkout, ${startAgent(task)}, then ` +
     briefCommand(task, '<root pane>', hpipe)
 }
 
@@ -174,11 +209,16 @@ export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number
   // Any other row's ladder probes the orchestrator, whose silence a new worker
   // pane does not change.
   if (taskRow(task.phase).actor !== 'worker') return true
-  task.stall = {
-    at: task.phase_entered_at, run_at: run.phase_entered_at,
+  task.stall = freshLadder(run, task, now)
+  return true
+}
+
+/** A stall ladder starting over now, stamped for the record's current phase entry. */
+export function freshLadder(run: Run, record: Run | Task, now: number): StallState {
+  return {
+    at: record.phase_entered_at, run_at: run.phase_entered_at,
     last_probe_at: now, probes: 0, undelivered: 0, holds: 0,
   }
-  return true
 }
 
 /**
@@ -207,8 +247,8 @@ export function startWorkerCommand(run: Run, task: Task, workspaceId: string, hp
     const dispatch = briefCommand(task, null, hpipe)
     return `${look}. If an agent is already there, its detection was missed: ${dispatch} records ` +
       'it and hands it the brief, so `herdr pane read` it before, in case it already has one. ' +
-      `If there is none, ${START_AGENT}, then ${dispatch}`
+      `If there is none, ${startAgent(task)}, then ${dispatch}`
   }
   // `dispatch --task` refuses every phase but the briefed one.
-  return `${look}. If there is none, ${START_AGENT}; ${handoffPastBrief(run, task, hpipe)}`
+  return `${look}. If there is none, ${startAgent(task)}; ${handoffPastBrief(run, task, hpipe)}`
 }

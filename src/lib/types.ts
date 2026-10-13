@@ -4,7 +4,7 @@ export type SessionKey = string
 
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done' | 'unknown'
 
-export type { RunPhase, TaskPhase, Tier } from './phases'
+export type { RunMode, RunPhase, TaskPhase, Tier } from './phases'
 
 export type Verdict = 'CLEAR' | 'BLOCKER'
 
@@ -14,6 +14,8 @@ export type EventKind =
   | 'worktree.created' | 'worktree.opened' | 'worktree.removed'
   | 'pane.agent_detected' | 'pane.agent_status_changed' | 'pane.exited' | 'pane.closed'
   | 'pane.moved' | 'workspace.closed'
+  /** Written by `hpipe nudge`, not herdr: release the supervisor's usage-limit hold on `pane_id`. */
+  | 'pipeline.nudge'
 
 export interface QueuedEvent {
   kind: EventKind
@@ -120,6 +122,13 @@ export interface OutboxEntry {
    */
   entered_at: number
   text: string
+  /**
+   * `resume`: carry on where Claude's usage limit stopped the worker. `carry-on`:
+   * `hpipe nudge` telling a worker that stopped with uncommitted work to finish it.
+   * Absent: the phase's own prompt, which a worker that has not read it cannot
+   * have answered.
+   */
+  kind?: 'resume' | 'carry-on'
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number
@@ -155,6 +164,59 @@ export interface Discovery {
   filed_bead: string | null
 }
 
+/** What `.claude/pipeline-check` said: `none` when the repo declares no check. */
+export type CheckOutcome = 'passed' | 'none'
+
+/**
+ * What `hpipe submit` recorded: the single-PR worker's equivalent of opening a PR.
+ * Kept across every rewind — an edge reads only one recorded at or after its
+ * phase entry, so a stale one can never clear anything.
+ */
+export interface Submission {
+  kind: 'implement' | 'sync'
+  /** The conventional title this task's change ships under in the batch PR. */
+  title: string
+  head_sha: string
+  at: number
+  check: CheckOutcome
+  /** `sync` only: whether every commit since `land_sha` is an automatic merge of the batch. */
+  merge?: 'clean' | 'dirty'
+  /** `sync` only, when dirty: the first commit the walk could not account for. */
+  dirty_at?: string
+  /**
+   * `sync` only, when clean: the merges of the batch since `land_sha`. None means the
+   * branch already contained the batch, and the head is the one that was judged.
+   */
+  merges?: number
+}
+
+/**
+ * Why a task's last `implement` exit went past its PR review. It describes only
+ * that exit: entering `implement` or any review row clears it.
+ */
+export interface ReviewSkip {
+  at: number
+  /** The PR review rows the route would have run. */
+  skipped: TaskPhase[]
+  /** Lines the change adds outside `docs/`, from `git diff --numstat` against its base. */
+  added_lines: number
+  /** The design reviews on the route, every one cleared on its first pass. */
+  cleared: TaskPhase[]
+}
+
+/** One landing on the batch branch, and so one line of the batch PR's release notes. */
+export interface Landing {
+  title: string
+  land_sha: string
+  at: number
+  /**
+   * The PR review rows this landing went in past. Kept here because `review_skip`
+   * is cleared once a later commit is reviewed, and with it any record that this
+   * landing never was. Absent on a reviewed landing and on older ledgers.
+   */
+  review_skipped?: TaskPhase[]
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -178,6 +240,8 @@ export interface Task {
   head_sha_at_entry: string | null
   pr: number | null
   ci: CiBucket | null
+  /** The head `ci` was read for, and when that head was first seen; a merge on any other head is unchecked. */
+  ci_head?: { sha: string; seen_at: number }
   /** Worktree checkout path. Task artifacts resolve against this, not repo_root. */
   checkout_path: string | null
   artifacts: {
@@ -232,6 +296,12 @@ export interface Task {
   /** Optional: ledgers written before #14 lack it. */
   uncommitted_work?: UncommittedWork
   /**
+   * The `phase_entered_at` of a `blocked-on-files` stay in which a tick held the
+   * task back, so the gate's exit can tell a wait from a pass-through. Keyed like
+   * `StallState`, so a re-entry retires it without anyone clearing it.
+   */
+  files_waited_at?: number
+  /**
    * Set when the gate opens and cleared once the worker has the brief. Marks the
    * pending state rather than stamping the briefed one so that a ledger written
    * before #89, which lacks it, reads as already briefed.
@@ -241,11 +311,48 @@ export interface Task {
   tier?: Tier
   /** Every tier this task has had, registration first. */
   tier_history?: TierChange[]
+  /** Single-PR only. */
+  submission?: Submission
+  /**
+   * Single-PR only: the reviewed head that lands, recorded when the last review
+   * clears and advanced only by a clean sync. Never re-read from the branch.
+   */
+  land_sha?: string | null
+  /** Single-PR only, append-only: no rewind clears it, because no rewind takes work off the batch branch. */
+  landed?: Landing[]
+  /** Absent unless the last `implement` exit skipped the PR review; older ledgers never carry it. */
+  review_skip?: ReviewSkip
   notes: string
 }
 
 export interface RunArtifacts {
   verdicts: Record<string, string>
+}
+
+/** The branch a single-PR run lands every task on, and the one PR it ships through. */
+export interface Batch {
+  branch: string
+  /** The default branch at start: the final PR's base. */
+  into: string
+  base_commit: string
+  /** Absolute: prompts render it, and the orchestrator's shell may not know the state dir. */
+  checkout: string
+  pr: number | null
+  head_sha_at_entry: string | null
+  ci: CiBucket | null
+  /** The head `ci` was read for, and when that head was first seen. */
+  ci_head?: { sha: string; seen_at: number }
+  /** What `hpipe batch-check` last ran on; `ship` clears only once the PR's head is this one. */
+  checked?: { head_sha: string; at: number; check: CheckOutcome }
+  merged_at_ms: number | null
+  merge_commit: string | null
+  /** Set when a fetch of the batch branch fails, cleared by the next good one. */
+  fetch_error?: { reason: string; since: number } | null
+  /**
+   * GitHub's answer at `start`: a ruleset refuses force-pushes and deletion on the
+   * branch. Absent when it said no or could not say, so the advice is still given.
+   */
+  ruleset_protected?: true
 }
 
 export interface Run {
@@ -275,6 +382,8 @@ export interface Run {
   stall?: StallState
   /** Optional: ledgers written before #24 lack it, which reads as empty. */
   outbox?: OutboxEntry[]
+  /** Present exactly when the run ships as one PR; see `modeOf`. */
+  batch?: Batch
 }
 
 export interface HistoryEntry {
@@ -316,4 +425,6 @@ export interface SupervisorPid {
   session: SessionKey
   socket_path: string
   pane_id: string
+  /** The run schemas this supervisor drives. Absent on a supervisor that predates it, which drives only 3. */
+  schemas?: number[]
 }

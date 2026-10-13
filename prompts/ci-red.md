@@ -13,11 +13,11 @@ sees only the PR head: a re-run from the Actions UI or `gh run rerun` moves noth
 task waiting.
 
 If it is a defect, you keep the judgment and one subagent writes the fix. Dispatch it with
-`model: {{implement_model}}`, and **wait for it within this turn**: a backgrounded subagent leaves this
-pane reading idle while the fix is still being written. If the dispatch is rejected for its model,
-dispatch without `model:` and say so in the PR. Its brief is the failing output, what you concluded
-from the log, and the implementer's brief below, verbatim. If it returns a question, raise it with
-`{{hpipe}} decide` as your brief describes, and end your turn without pushing: its partial work is
+`model: {{implement_model}}`; if the dispatch is rejected for its model, dispatch without `model:` and
+say so in the PR. Its brief is the failing output, what you concluded from the log, and the
+implementer's brief below, verbatim. If it runs in the background, end your turn and carry on when its
+completion notice arrives; never poll for it or sleep while it runs. If it returns a question, raise it
+with `{{hpipe}} decide` as your brief describes, and end your turn without pushing: its partial work is
 unverified, and the answer resumes it.
 
 When it returns, run the tests and the typecheck yourself and read their output. If either is red,
@@ -38,7 +38,8 @@ follow the tree and say so in your report.
 Work step by step, in order: the failing test first, run it, the minimum code that passes it, run it
 again, commit. One commit per step, with a conventional-commit message. Do not batch steps, and do
 not skip a step's test because the change looks obvious. Commit, but do not push: pushing is the
-worker's, once it has verified your work.
+worker's, once it has verified your work. If the plan has a step that pushes, opens a PR or runs
+`{{hpipe}} submit`, skip it and say so in your report.
 
 You cannot ask for decisions. On a choice you should not make alone — expensive to undo, changes
 scope, commits another surface to a contract, or invents a pattern this repo does not already

@@ -1,6 +1,7 @@
 import { briefNote, repoBootstrap } from './bootstrap'
 import { taskRow } from './phases'
-import { renderPrompt } from './render'
+import { changePromptVars } from './change-prompt'
+import { hpipeCommand, renderPrompt } from './render'
 import { tierPromptVars } from './tier-prompt'
 import type { BeadBrief, Run, Task } from './types'
 
@@ -27,7 +28,8 @@ export async function renderWorkerPrompt(
   pluginRoot: string, run: Run, task: Task,
 ): Promise<string> {
   const vars = {
-    ...tierPromptVars(task),
+    ...tierPromptVars(run, task),
+    ...(await changePromptVars(pluginRoot, hpipeCommand(pluginRoot), run, task)),
     run_id: run.run_id,
     branch: task.branch,
     ...beadPromptVars(task),

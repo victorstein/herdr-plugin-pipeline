@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import {
-  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, startWorkerCommand,
-  UNSTARTED_GRACE_MS, unstartedWorker,
+  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, remainingDispatchSteps,
+  startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -81,12 +81,16 @@ test('past the briefed phase the command does not offer the dispatch that would 
 
 const FETCHED = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
 
+const WHERE_CREATE_PUTS_IT = '    # its JSON gives the new checkout as .result.worktree.path and its pane as ' +
+  '.result.root_pane.pane_id; `hp show --task t1` prints the checkout too'
+
 test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, then the brief — #118', () => {
   expect(dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'ready' }, 'hp').split('\n')).toEqual([
     'dispatch, in order:',
     "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
+    WHERE_CREATE_PUTS_IT,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
     '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
   ])
 })
@@ -94,7 +98,30 @@ test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, the
 test('a repo with no bootstrap gets no bootstrap step; a failed fetch still names the stale commit', () => {
   const text = dispatchSequence(mkRun(), mkTask({}), { ...FETCHED, fetchError: 'timed out' }, { kind: 'none' }, 'hp')
   expect(text).not.toContain('pipeline-bootstrap')
+  expect(text).not.toContain('optional')
   expect(text).toContain('--base c0ffee1')
+})
+
+test('a setup script that is not executable is offered as no step', () => {
+  const text = dispatchSequence(mkRun(), mkTask({}), FETCHED,
+    { kind: 'none', unwired: 'scripts/bootstrap.sh', notExecutable: true }, 'hp')
+  expect(text).not.toContain('optional')
+  expect(text).not.toContain('bootstrap.sh')
+})
+
+test('a setup script the repo never wired in is an optional step in the new checkout, not dropped', () => {
+  // The trial's orchestrator dug the checkout path out of the create JSON to run ./bin/bootstrap by hand.
+  // Measured on a live run.
+  expect(dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'none', unwired: 'bin/bootstrap' }, 'hp').split('\n'))
+    .toEqual([
+      'dispatch, in order:',
+      "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
+      WHERE_CREATE_PUTS_IT,
+      '    (cd "<.result.worktree.path>" && ./bin/bootstrap)  # optional: the repo\'s own setup, which nothing ' +
+        'runs for you; run it if the worker will need what it sets up',
+      '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
+      '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
+    ])
 })
 
 test('a repo path is quoted for the shell it is pasted into', () => {
@@ -104,12 +131,39 @@ test('a repo path is quoted for the shell it is pasted into', () => {
   expect(text).toContain(`--cwd '/My Repos/it'\\''s' --branch`)
 })
 
-test('every recovery path starts the agent with the same flag as the dispatch — #118', () => {
+test('every recovery path starts the agent with the same flags as the dispatch — #118', () => {
   for (const text of [
     startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
     dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
   ]) {
-    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions`')
+    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions --effort xhigh`')
+  }
+})
+
+test('every path names the agent by its bead, so the line runs as printed and `herdr agent list` says whose it is', () => {
+  for (const text of [
+    dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'none' }, 'hp'),
+    startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
+  ]) {
+    expect(text).toContain('herdr agent start hp-1 --kind claude')
+    expect(text).not.toContain('<name>')
+  }
+})
+
+test('the worker starts at its tier\'s effort on every path', () => {
+  for (const [tier, effort] of [['light', 'medium'], ['standard', 'high'], ['heavy', 'xhigh']] as const) {
+    const task = mkTask({ tier })
+    for (const text of [
+      dispatchSequence(mkRun(), task, FETCHED, { kind: 'none' }, 'hp'),
+      startWorkerCommand(mkRun(), task, 'w23', 'hp'),
+      dispatchWorkerCommand(mkRun(), { ...task, workspace_id: null }, 'hp'),
+      remainingDispatchSteps(mkRun(), task, 'hp'),
+    ]) {
+      expect(text, tier).toContain(`-- --dangerously-skip-permissions --effort ${effort}`)
+    }
   }
 })
 

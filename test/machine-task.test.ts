@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
 import {
-  advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, noteWorkingAfterAnswer,
+  advanceTask, artifactFreshAfter, bumpCounter, counterFor, enterTaskPhase, FILES_FREE_ON_ARRIVAL,
+  noteWorkingAfterAnswer,
 } from '../src/lib/machine'
 import { newRun } from '../src/lib/ledger'
-import type { Run, Task, TaskPhase, Tier } from '../src/lib/types'
+import type { ReviewSkip, Run, Task, TaskPhase, Tier } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
 function fixture(phase: TaskPhase): { run: Run; task: Task } {
@@ -29,7 +30,7 @@ test('implement advances when the worker is idle, a PR exists, and the head sha 
     actorIdle: true, artifactFresh: false, verdict: null,
     prNumber: 5, headSha: 'bbb', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
-  expect(next?.phase).toBe('pr-review-intent')
+  expect(next?.phase).toBe('pr-review')
 })
 
 test('implement does NOT advance when the head sha is unchanged', () => {
@@ -41,14 +42,14 @@ test('implement does NOT advance when the head sha is unchanged', () => {
   expect(next).toBeNull()
 })
 
-test('stage 1 CLEAR moves to stage 2, not straight to ci', () => {
+test('a task already in stage 1 of the retired heavy pair clears straight to ci, never to stage 2', () => {
   const { run, task } = fixture('pr-review-intent')
   const next = advanceTask(run, task, {
     actorIdle: true, artifactFresh: true,
     verdict: { verdict: 'CLEAR', blockers: 0, majors: 0 },
     prNumber: 5, headSha: 'aaa', merged: false, ciBucket: null, filesClear: false, maxPasses: 2,
   })
-  expect(next?.phase).toBe('pr-review-quality')
+  expect(next?.phase).toBe('ci')
 })
 
 test('a task escalates alone at MAX_PASSES', () => {
@@ -103,6 +104,43 @@ test('a rewind into merge after the merge reaches teardown through close once th
   expect(advanceTask(run, task, s)).toBeNull()
   task.bead_closed_at_ms = mergedAtMs + 2_000
   expect(advanceTask(run, task, s)?.phase).toBe('teardown')
+})
+
+test('a push after CI passed sends merge back to ci for the new head — #16', () => {
+  const { run, task } = fixture('merge')
+  task.ci = 'pass'
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  const signals = {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: false,
+    ciBucket: 'pass' as const, filesClear: false, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, signals)?.phase).toBe('ci')
+  expect(task.ci).toBeNull()
+  expect(run.history.at(-1)?.why).toBe('head moved to bbb after CI passed on aaa')
+})
+
+test('merge stays put while the head is the one CI passed on, or no head was recorded', () => {
+  const { run, task } = fixture('merge')
+  const signals = {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'aaa', merged: false,
+    ciBucket: null, filesClear: false, maxPasses: 2,
+  }
+  expect(advanceTask(run, task, signals)).toBeNull()
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  expect(advanceTask(run, task, signals)).toBeNull()
+  expect(advanceTask(run, task, { ...signals, headSha: null })).toBeNull()
+})
+
+test('a merged PR closes even if its head moved after CI', () => {
+  const { run, task } = fixture('merge')
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  expect(advanceTask(run, task, {
+    actorIdle: true, artifactFresh: false, verdict: null,
+    prNumber: 5, headSha: 'bbb', merged: true, mergedAtMs: task.phase_entered_at + 1_000,
+    ciBucket: null, filesClear: false, maxPasses: 2,
+  })?.phase).toBe('close')
 })
 
 test('merge advances when mergedAt postdates phase entry', () => {
@@ -238,14 +276,14 @@ test('an artifact row does not advance on a stale artifact', () => {
   expect(advanceTask(run, task, s)).toBeNull()
 })
 
-test('implement advances only when the head sha moved, and goes to pr-review-intent', () => {
+test('implement advances only when the head sha moved, and goes to pr-review', () => {
   const { run, task } = fixture('implement')
   const s = {
     actorIdle: true, artifactFresh: false, verdict: null, prNumber: 5,
     headSha: 'bbb', merged: false, ciBucket: null,
     filesClear: false, maxPasses: 2,
   }
-  expect(advanceTask(run, task, s)?.phase).toBe('pr-review-intent')
+  expect(advanceTask(run, task, s)?.phase).toBe('pr-review')
   const stale = fixture('implement')
   expect(advanceTask(stale.run, stale.task, { ...s, headSha: 'aaa' })).toBeNull()
 })
@@ -302,6 +340,26 @@ test('blocked-on-files advances only when no sibling holds overlapping files', (
   }
   expect(advanceTask(run, task, { ...base, filesClear: false })).toBeNull()
   expect(advanceTask(run, task, { ...base, filesClear: true })?.phase).toBe('implement')
+})
+
+test('the file gate\'s exit says whether a tick ever held the task back', () => {
+  const base = {
+    actorIdle: true, artifactFresh: false, verdict: null, prNumber: null, headSha: null,
+    merged: false, ciBucket: null, filesClear: true, maxPasses: 2,
+  }
+  const passed = fixture('blocked-on-files')
+  advanceTask(passed.run, passed.task, base)
+  expect(passed.run.history.at(-1)?.why).toBe(FILES_FREE_ON_ARRIVAL)
+
+  const waited = fixture('blocked-on-files')
+  waited.task.files_waited_at = waited.task.phase_entered_at
+  advanceTask(waited.run, waited.task, base)
+  expect(waited.run.history.at(-1)?.why).toBe('no overlapping files in flight')
+
+  const earlierStay = fixture('blocked-on-files')
+  earlierStay.task.files_waited_at = earlierStay.task.phase_entered_at - 1
+  advanceTask(earlierStay.run, earlierStay.task, base)
+  expect(earlierStay.run.history.at(-1)?.why).toBe(FILES_FREE_ON_ARRIVAL)
 })
 
 // ——— resuming from a decision — #115 ———
@@ -390,11 +448,10 @@ function tiered(phase: TaskPhase, tier: Tier): { run: Run; task: Task } {
   return fixed
 }
 
-test('implement opens the combined pr-review on light and standard, and pr-review-intent on heavy', () => {
-  const expected: Record<Tier, TaskPhase> = { light: 'pr-review', standard: 'pr-review', heavy: 'pr-review-intent' }
-  for (const [tier, phase] of Object.entries(expected) as [Tier, TaskPhase][]) {
+test('implement opens the one combined pr-review on every tier', () => {
+  for (const tier of ['light', 'standard', 'heavy'] as const) {
     const { run, task } = tiered('implement', tier)
-    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe(phase)
+    expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe('pr-review')
   }
 })
 
@@ -406,8 +463,8 @@ test('a finished plan skips plan-review on light only', () => {
   }
 })
 
-test('a cleared pr-review goes to ci on light and standard', () => {
-  for (const tier of ['light', 'standard'] as const) {
+test('a cleared pr-review goes to ci on every tier', () => {
+  for (const tier of ['light', 'standard', 'heavy'] as const) {
     const { run, task } = tiered('pr-review', tier)
     expect(advanceTask(run, task, clearedSignals)?.phase, tier).toBe('ci')
   }
@@ -418,11 +475,9 @@ test('a heavy task lowered to light finishes pr-review-intent, then skips pr-rev
   expect(advanceTask(run, task, clearedSignals)?.phase).toBe('ci')
 })
 
-test('a light task raised to heavy finishes pr-review, then runs both heavy stages', () => {
+test('a light task raised to heavy finishes pr-review and goes to ci, as heavy itself does', () => {
   const { run, task } = tiered('pr-review', 'heavy')
-  const route: TaskPhase[] = []
-  for (let lap = 0; lap < 3; lap++) route.push(advanceTask(run, task, clearedSignals)!.phase)
-  expect(route).toEqual(['pr-review-intent', 'pr-review-quality', 'ci'])
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('ci')
 })
 
 test('a green ci goes to merge on light', () => {
@@ -442,7 +497,46 @@ test('a BLOCKER on pr-review sends the task back to implement', () => {
 
 test('a task from a ledger without a tier routes as heavy and is not written back', () => {
   const { run, task } = fixture('implement')
-  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review-intent')
+  expect(advanceTask(run, task, clearedSignals)?.phase).toBe('pr-review')
   expect('tier' in task).toBe(false)
   expect(task.tier_history).toBeUndefined()
+})
+
+const SKIP: ReviewSkip = { at: 1, skipped: ['pr-review'], added_lines: 42, cleared: ['spec-review', 'plan-review'] }
+
+test('an implement exit carrying a review skip goes past the PR review to ci, and says why', () => {
+  const { run, task } = tiered('implement', 'standard')
+  const next = advanceTask(run, task, { ...clearedSignals, reviewSkip: SKIP })
+  expect(next?.phase).toBe('ci')
+  expect(task.pr).toBe(5)
+  expect(task.review_skip).toEqual(SKIP)
+  expect(run.history.at(-1)?.why).toBe(
+    'PR #5 at bbb; pr-review skipped: 42 lines added outside docs/, spec-review and plan-review cleared first pass')
+})
+
+test('a skipped review spends no pass and reserves no verdict', () => {
+  const { run, task } = tiered('implement', 'light')
+  advanceTask(run, task, { ...clearedSignals, reviewSkip: SKIP })
+  expect(task.passes).toEqual({})
+  expect(task.verdict_seq).toBeUndefined()
+  expect(task.artifacts.verdicts).toEqual({})
+})
+
+test('an implement exit that is not ready ignores a review skip', () => {
+  const { run, task } = tiered('implement', 'standard')
+  expect(advanceTask(run, task, { ...clearedSignals, headSha: 'aaa', reviewSkip: SKIP })).toBeNull()
+  expect(task.review_skip).toBeUndefined()
+})
+
+test('entering implement or any review row forgets a review skip, and nothing else does', () => {
+  for (const phase of ['implement', 'pr-review', 'spec-review'] as const) {
+    const { run, task } = tiered('ci', 'standard')
+    task.review_skip = SKIP
+    enterTaskPhase(run, task, phase, 'test')
+    expect(task.review_skip, phase).toBeUndefined()
+  }
+  const { run, task } = tiered('ci', 'standard')
+  task.review_skip = SKIP
+  enterTaskPhase(run, task, 'merge', 'test')
+  expect(task.review_skip).toEqual(SKIP)
 })

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
@@ -56,6 +56,12 @@ test('a digest with no phase change still delivers the events', () => {
     run: mkRun(), eventLines: ['- feat/x (hp-1, t1) blocked'], phaseNote: '', nextPrompt: '',
   })
   expect(text).toContain('blocked')
+})
+
+test('a digest carrying only a prompt has no empty events heading', () => {
+  const run = mkRun()
+  expect(buildDigest({ run, eventLines: [], phaseNote: ' → merge', nextPrompt: 'MERGE IT' }))
+    .toBe(`[pipeline] run ${run.run_id} → merge\n\nMERGE IT`)
 })
 
 test('three prompts for three panes produce three deliveries', () => {
@@ -246,9 +252,25 @@ test('a dispatch with nothing left to do sends no prompt — #152', async () => 
   expect(await renderRunPhasePrompt(run, ROOT)).toBe('')
 })
 
+test('a dispatch whose only undispatched tasks are queued says so in a line, and explains no dispatch', async () => {
+  // The trial registered and dispatched t1–t3 from `hpipe task`'s blocks; the dispatch prompt arrived after,
+  // because t4 and t5 waited on them, and read as an instruction to act. Measured on a live run.
+  const queued = (id: string) => mkTask({ task_id: id, phase: 'queued', workspace_id: null, pane_id: null })
+  const run = enteringDispatch(true, [dispatched(), queued('t4'), queued('t5')])
+  expect(await renderRunPhasePrompt(run, ROOT)).toBe(`# Dispatch — run ${run.run_id}\n\n` +
+    'Every task that can start has its worktree and its brief: nothing to dispatch now. t4, t5 are queued; ' +
+    'each arrives as its own `Dispatch tN` prompt, carrying its dispatch block, once it can start.')
+
+  const stillOpen = enteringDispatch(false, [dispatched()])
+  const open = await renderRunPhasePrompt(stillOpen, ROOT)
+  expect(open).toStartWith(`# Dispatch — run ${stillOpen.run_id}\n\nEvery task registered so far has its worktree and ` +
+    'its brief: nothing to dispatch now.')
+  expect(open).toContain('Still registering?')
+  expect(open).not.toContain('Bootstrapping')
+})
+
 test('a dispatch still owed work keeps its prompt, but stops asking for registrations once intake closed — #152', async () => {
   for (const [what, task] of [
-    ['a queued task', mkTask({ task_id: 't2', phase: 'queued', workspace_id: null, pane_id: null })],
     ['a task with no worktree', mkTask({ task_id: 't2', phase: 'research', workspace_id: null, pane_id: null })],
     ['a worker not yet briefed', mkTask({ task_id: 't2', phase: 'research', awaiting_brief: true })],
   ] as const) {
@@ -271,7 +293,7 @@ test('a run that ends without branch-review tells the orchestrator it is done �
   const run = closedExecuteRun([mkTask({ task_id: 't1', phase: 'done', merged_at_ms: 2_000 })])
   expect(executeAdvance(run)?.phase).toBe('done')
   expect(await renderRunPhasePrompt(run, ROOT)).toBe(
-    `Run ${run.run_id} is done — one task landed; branch-review skipped. Nothing more is sent for it.\n` +
+    `Run ${run.run_id} is done — one task merged; branch-review skipped. Nothing more is sent for it.\n` +
     '- t1 feat/x (hp-1): done',
   )
 })
@@ -789,6 +811,17 @@ test('branch-review reserves a run-level verdict path under the run id', async (
     .toContain(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
+test('a run\'s branch review is excluded from git as it is reserved, in the working copy it is written to', async () => {
+  const worktree = repoWithWorktree(['README.md'])
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.repo_root = worktree
+  await promptForRunPhase(run, {} as Config)
+  const commonDir = (await Bun.$`git -C ${worktree} rev-parse --path-format=absolute --git-common-dir`.text()).trim()
+  expect(readFileSync(join(commonDir, 'info', 'exclude'), 'utf8'))
+    .toContain(`\n/docs/superpowers/reviews/${run.run_id}-branch-review-0.md\n`)
+})
+
 test('a run phase that is not a review reserves nothing', async () => {
   const run = mkRun()
   run.phase = 'dispatch'
@@ -848,4 +881,19 @@ test('branch-review does not claim a dependency failed when it has since landed'
   const text = await promptForRunPhase(run, {} as Config)
   expect(text).not.toContain('dependency failed')
   expect(text).toContain('a dependency that has since landed, and was never re-queued')
+})
+
+// A single-PR task is cut from the batch branch, which already holds every landed
+// sibling's docs; against origin/<default> alone the fork point is the batch's
+// base, and a fast-forward landing leaves no merge to subtract them by.
+test('in a single-PR run a sibling doc already on the batch branch is not a candidate', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  landOnRemote(remote, 'batch/x', SIBLING_DOC)
+  git(['fetch', '-q', 'origin', '+refs/heads/batch/x:refs/remotes/origin/batch/x'], clone)
+  const worktree = join(tempDir('hpipe-wt-'), 'wt')
+  git(['worktree', 'add', '-q', '-b', 'feat/x', worktree, revParse(clone, 'origin/batch/x')], clone)
+  commitAs(worktree, MY_DOC, 'mine\n')
+
+  expect(await adoptableArtifacts(worktree, new Set(), 'batch/x')).toEqual([MY_DOC])
+  expect(await adoptableArtifacts(worktree, new Set())).toEqual([SIBLING_DOC, MY_DOC].sort())
 })

@@ -8,6 +8,32 @@ export interface PrView {
   /** The commit the merge put on the base branch; null until merged. */
   mergeCommit?: string | null
   headSha: string | null
+  /** The branch the PR merges into, which a change is sized against. */
+  baseRef?: string | null
+}
+
+export interface HeadCi {
+  bucket: CiBucket
+  /** The commit the bucket was read for: a result is only ever about one head. */
+  headSha: string
+}
+
+interface RollupRow { __typename?: string; status?: string; conclusion?: string; state?: string }
+
+/** One entry of a commit's status rollup, bucketed the way `gh pr checks` buckets it. */
+function rollupBucket(row: RollupRow): string {
+  if (row.__typename === 'StatusContext') {
+    if (row.state === 'SUCCESS') return 'pass'
+    return row.state === 'FAILURE' || row.state === 'ERROR' ? 'fail' : 'pending'
+  }
+  if (row.status !== 'COMPLETED') return 'pending'
+  switch (row.conclusion) {
+    case 'SUCCESS':
+    case 'NEUTRAL': return 'pass'
+    case 'SKIPPED': return 'skipping'
+    case 'CANCELLED': return 'cancel'
+    default: return 'fail'
+  }
 }
 
 export function rollUpBucket(rows: CheckRow[]): CiBucket {
@@ -58,14 +84,61 @@ export class Gh {
     return rows?.[0]?.number ?? null
   }
 
-  /** Exit 8 means "checks pending" — a normal state, not an error. */
-  async prChecks(pr: number): Promise<CiBucket> {
-    const rows = await this.json<CheckRow[]>(
-      ['pr', 'checks', String(pr), '--json', 'bucket,name,state,link'],
-      [0, 8],
+  /** For a refusal that must not fail open, where `prForBranch`'s null would read a gh outage as "no PR". */
+  async openPrForBranch(branch: string): Promise<{ pr: number | null } | { error: string }> {
+    const { code, text, stderr } = await this.run(['pr', 'list', '--head', branch, '--json', 'number', '--limit', '1'])
+    if (code !== 0) return { error: stderr.trim() || `gh exited ${code}` }
+    try {
+      return { pr: (JSON.parse(text) as { number: number }[])[0]?.number ?? null }
+    } catch {
+      return { error: `gh pr list printed no JSON: ${text.trim()}` }
+    }
+  }
+
+  /**
+   * The head's rollup and its workflow runs come from the same head sha, so a push
+   * between the calls cannot pair one commit's checks with another's. A run still
+   * queued has no check of its own yet: `gh pr checks` listed only an older finished
+   * check and called the head green. Measured on a live run (#16).
+   */
+  async headCi(pr: number): Promise<HeadCi | null> {
+    const view = await this.json<{ headRefOid: string | null; statusCheckRollup: RollupRow[] | null }>(
+      ['pr', 'view', String(pr), '--json', 'headRefOid,statusCheckRollup'],
     )
-    if (rows === null) return 'unknown'
-    return rollUpBucket(rows)
+    if (!view?.headRefOid) return null
+    const runs = await this.json<{ status: string }[]>(
+      ['run', 'list', '--commit', view.headRefOid, '--json', 'status,conclusion', '--limit', '100'],
+    )
+    if (runs === null) return null
+    const rows = [
+      ...(view.statusCheckRollup ?? []).map((row) => ({ bucket: rollupBucket(row) })),
+      ...runs.filter((run) => run.status !== 'completed').map(() => ({ bucket: 'pending' })),
+    ]
+    return { bucket: rollUpBucket(rows), headSha: view.headRefOid }
+  }
+
+  /** A batch PR must be squash-merged for its override block to apply, so a run that cannot is refused at start. */
+  async squashMergeAllowed(): Promise<{ allowed: boolean } | { error: string }> {
+    const { code, text, stderr } = await this.run(['repo', 'view', '--json', 'squashMergeAllowed'])
+    if (code !== 0) return { error: stderr.trim() || `gh exited ${code}` }
+    try {
+      return { allowed: (JSON.parse(text) as { squashMergeAllowed?: boolean }).squashMergeAllowed === true }
+    } catch {
+      return { error: `gh repo view printed no JSON: ${text.trim()}` }
+    }
+  }
+
+  /**
+   * GitHub's own answer for a branch name, which need not exist yet: every active
+   * rule that applies to it, from any ruleset. A failed read counts as unprotected,
+   * so the advice to add a ruleset is shown rather than wrongly withheld.
+   */
+  async rulesetProtects(branch: string): Promise<boolean> {
+    const rules = await this.json<{ type: string }[]>(
+      ['api', `repos/{owner}/{repo}/rules/branches/${encodeURIComponent(branch)}`],
+    )
+    const types = new Set((rules ?? []).map((rule) => rule.type))
+    return types.has('non_fast_forward') && types.has('deletion')
   }
 
   async prChecksDetail(pr: number): Promise<string> {
@@ -82,8 +155,9 @@ export class Gh {
   async prView(pr: number): Promise<PrView | null> {
     const view = await this.json<{
       state: string; mergedAt: string | null; mergeCommit: { oid: string } | null; headRefOid: string | null
+      baseRefName?: string | null
     }>(
-      ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeCommit,headRefOid'],
+      ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeCommit,headRefOid,baseRefName'],
     )
     if (!view) return null
     return {
@@ -91,6 +165,7 @@ export class Gh {
       mergedAtMs: view.mergedAt ? Date.parse(view.mergedAt) : null,
       mergeCommit: view.mergeCommit?.oid ?? null,
       headSha: view.headRefOid,
+      baseRef: view.baseRefName ?? null,
     }
   }
 }

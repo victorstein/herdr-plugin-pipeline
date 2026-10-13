@@ -3,13 +3,15 @@ import { expect, test } from 'bun:test'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDecision } from '../src/lib/decisions'
-import { newRun } from '../src/lib/ledger'
-import { TASK_ROWS, TIERS } from '../src/lib/phases'
+import { newRun, withBatch } from '../src/lib/ledger'
+import { rowRunsIn, type RunMode, TASK_ROWS, taskRow, TIERS } from '../src/lib/phases'
+import { hpipeCommand } from '../src/lib/render'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
 import { renderWorkerPrompt } from '../src/lib/worker-prompt'
 import { renderRunPhasePrompt } from '../src/supervisor/deliver'
 import { announceDecisions, renderTaskPhasePrompt } from '../src/supervisor/tasks'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const ROOT = join(import.meta.dir, '..')
@@ -19,7 +21,8 @@ const REVIEW_PROMPTS = [
 const ALL = [
   'spec', 'plan', 'dispatch', 'dispatch-registering', 'worker-brief', 'ci-red', 'merge',
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
-  'intake', 'decision', 'answer', 'research', 'implement',
+  'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted', 'carry-on',
+  'sync', 'merge-batch', 'ship', 'ship-ci-red', 'ship-merge', 'handoff-pr', 'handoff-batch',
 ]
 
 test('every declared prompt file exists', () => {
@@ -46,7 +49,8 @@ test('the worker brief inlines the captured brief and ends the PR body with Refs
   const text = await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text()
   expect(text).toContain('{{agent_file}}')
   expect(text).toContain('{{brief}}')
-  expect(text).toContain('Refs {{bead}}')
+  expect(text).toContain('{{handoff_rule}}')
+  expect(await renderBriefFor([briefTask({})], 0)).toContain('      Refs hp-1\n')
   expect(text).not.toContain('gh issue')
   // `render()` throws on a placeholder no caller resolves, so an inherited
   // {{task_text}} kills the first dispatch.
@@ -84,6 +88,48 @@ test('no review prompt still demands a finding', async () => {
   }
 })
 
+const TASK_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality']
+
+// Eight of the eighteen berean-os BLOCKER verdicts prevented no defect: they were
+// BLOCKERs by rule — a missing FILES: line, a sound reversal, a question the
+// orchestrator answered in a minute — and each cost a full re-review.
+test('every task review ranks a BLOCKER as a shipping defect or an owner\'s call, never a process question', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text())
+    expect(text, name).toContain(
+      'A **BLOCKER** is a defect that would ship, or a product or scope decision only the owner can make.')
+    expect(text, name).toContain(
+      'A **MAJOR** changes shipped behaviour or a verification outcome; a wrong rationale behind a correct ' +
+      'conclusion, comment drift or citation drift is **MINOR**.')
+    expect(text, name).toContain('is at most a MAJOR, fixed inline or raised with `{{hpipe}} decide`, ' +
+      'and never a reason for another review pass.')
+    expect(text, name).toContain('`BLOCKER` means at least one BLOCKER finding.')
+    expect(text, name).not.toContain('any MAJOR that reverses a decision')
+  }
+})
+
+test('every task review reports at most five MINORs and skips drift that misleads nobody', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    expect(prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()), name).toContain(
+      'Report at most five MINORs, most consequential first; skip wording and line-citation drift unless it ' +
+      'would mislead the implementer or the tester.')
+  }
+})
+
+test('every BLOCKER trailer a task review shows carries at least one BLOCKER', async () => {
+  for (const name of TASK_REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    const shown = /^ {4}VERDICT: BLOCKER\n {4}BLOCKERS: (\d+)$/m.exec(text)
+    expect(Number(shown?.[1] ?? 0), name).toBeGreaterThan(0)
+  }
+})
+
+test('a file missing from FILES: is a MAJOR the plan review fixes inline, not a BLOCKER', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'plan-review.md')).text())
+  expect(text).toContain('a touched file missing from them is a MAJOR, fixed inline by adding it')
+  expect(text).not.toContain('missing from them is a BLOCKER')
+})
+
 test('the dispatch prompt pins the worktree to the run repo, not the focused workspace', async () => {
   // Live-run finding: without --cwd, herdr resolves the repo from the focused
   // workspace — the supervisor's own on a cold start — and the worker is
@@ -107,11 +153,14 @@ test('both dispatch paths point the orchestrator at the base: line, never a stal
 test('the dispatch prompt shows the same agent start line both dispatch paths print — #118', async () => {
   const text = await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text()
   const run = { repo_root: '/r' } as Run
-  const task = { task_id: 't1', branch: 'feat/x' } as Task
+  const task = { task_id: 't1', branch: 'feat/x', bead: 'hp-1' } as Task
   const base = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
   const printed = dispatchSequence(run, task, base, { kind: 'none' }, 'hp')
   const startLine = printed.split('\n').find((line) => line.includes('herdr agent start'))!.trim()
-  expect(text).toContain(startLine.replace('<.result.root_pane.pane_id>', '<root_pane_id>'))
+  expect(text).toContain(startLine.replace('start hp-1 ', 'start <name> ')
+    .replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort xhigh', '--effort <effort>'))
+  // The template is the one place the name stays a placeholder, so it says what goes there.
+  expect(text).toContain('`<name>` is')
 })
 
 test('the dispatch prompt hands the brief over through hpipe, never as an agent start argument', async () => {
@@ -205,12 +254,19 @@ test('the stall probe asserts nothing about the shape of what it is waiting for'
   expect(text).not.toContain('will not ask again')
 })
 
+test('the stall probe counts a subagent, shell or monitor the agent waits on as work', async () => {
+  const text = (await Bun.file(join(ROOT, 'prompts', 'stall-probe.md')).text()).replace(/\s+/g, ' ')
+  expect(text).toContain('If you are still working, ignore this')
+  expect(text).toContain('waiting on a subagent, shell or monitor you started counts as working')
+  expect(text).toContain('Never wait for a phase change with a background shell or monitor polling `{{hpipe}} status`')
+})
+
 test('a rendered probe leaves no placeholder behind', async () => {
   const { renderPrompt } = await import('../src/lib/render')
   const text = await renderPrompt(ROOT, 'stall-probe', {
     run_id: 'r1', phase: 'implement', minutes: '45',
     awaiting: 'This phase is waiting for a pushed PR for fix/x (hp-1).',
-    ladder: 'This is probe 1 of 3.',
+    ladder: 'This is probe 1 of 3.', hpipe: 'hp',
   })
   expect(text).not.toContain('{{')
 })
@@ -337,14 +393,67 @@ test('pr-review carries the intent checks, then the quality checks, word for wor
   expect(combined.split('VERDICT: CLEAR')).toHaveLength(2)
 })
 
+const MODES: readonly RunMode[] = ['per-task', 'single-pr']
+
+/** A run of `mode`, or of the one mode `phase` runs in. */
+function runIn(mode: RunMode): Run {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  return mode === 'single-pr' ? withBatch(run, batchFixture()) : run
+}
+
 async function renderPhase(
   phase: TaskPhase, over: Partial<Task> = {}, cameFrom: TaskPhase = phase,
+  mode: RunMode = rowRunsIn(taskRow(phase), 'per-task') ? 'per-task' : 'single-pr',
 ): Promise<string> {
-  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const run = runIn(mode)
   const task = briefTask({ phase, pr: 7, ...over })
   run.tasks = [task]
   return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
 }
+
+// Smoke run 14: a CLEAR carried a MINOR, the worker pushed only the verdict, and the
+// MINOR shipped while the land prompt said "Review cleared".
+test('every task review tells the worker to fix a CLEAR\'s findings and push them with the verdict', async () => {
+  const PUSHED_LATER = 'Pushed later, a fix moves the branch off the head the `CLEAR` recorded, and sends the ' +
+    'change through `sync` and another review.'
+  for (const phase of TASK_REVIEW_PROMPTS as TaskPhase[]) {
+    for (const mode of MODES) {
+      const workerPart = prose(await renderPhase(phase, { tier: 'standard' }, phase, mode))
+        .split("## The reviewer's brief")[0]!
+      expect(workerPart, `${phase} ${mode}`).toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists')
+      expect(workerPart, `${phase} ${mode}`).toContain('then commit and push the fixes with the verdict file')
+      expect(workerPart, `${phase} ${mode}`).toContain('so commit the verdict last, once the review is handled')
+      const landsNext = phase.startsWith('pr-review') && mode === 'single-pr'
+      expect(workerPart.includes(PUSHED_LATER), `${phase} ${mode}`).toBe(landsNext)
+    }
+  }
+  const run = runIn('single-pr')
+  run.phase = 'branch-review'
+  expect(prose(await renderRunPhasePrompt(run, ROOT)))
+    .toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists yourself once the reviewer has finished, before ' +
+      'you end that turn')
+})
+
+test('an answer says a verdict written before the question counts once it is committed', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'answer.md')).text())
+  expect(text).toContain('a review verdict once you have committed and pushed it')
+})
+
+// Smoke run 16: Claude Code ran every subagent in the background, and a worker told to wait for its
+// reviewer within the turn polled the verdict file in a foreground sleep loop.
+const DISPATCHING_PROMPTS = ['implement', 'ci-red', 'sync', 'ship', 'ship-ci-red', 'usage-resume', 'branch-review',
+  ...TASK_REVIEW_PROMPTS]
+
+test('every prompt that dispatches a subagent says to end the turn and carry on at its completion notice', async () => {
+  for (const name of DISPATCHING_PROMPTS) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text())
+    expect(text, name).toMatch(/end your turn and carry on when its completion notice arrives[.;] never poll/i)
+  }
+  for (const name of readdirSync(join(ROOT, 'prompts'))) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', name)).text())
+    expect(text, name).not.toMatch(/wait for it within/i)
+  }
+})
 
 test('every task reviewer brief opens its review with the task\'s tier', async () => {
   for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
@@ -369,6 +478,64 @@ test('no review prompt pins a model: every reviewer inherits the worker\'s', asy
   }
 })
 
+test('every reviewer is dispatched at the review effort, with a fallback if the effort is refused', async () => {
+  for (const name of REVIEW_PROMPTS) {
+    const text = await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text()
+    expect(text, name).toContain('`effort: {{review_effort}}`')
+    expect(text, name).toContain('If the dispatch is rejected for its effort, dispatch without `effort:`')
+  }
+})
+
+test('a review is dispatched at its task\'s tier effort for that review', async () => {
+  for (const phase of ['spec-review', 'pr-review'] as const) {
+    expect(await renderPhase(phase, { tier: 'standard' }), phase).toContain('`effort: high`')
+  }
+  expect(await renderPhase('plan-review', { tier: 'standard' })).toContain('`effort: medium`')
+  for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+    expect(await renderPhase(phase, { tier: 'heavy' }), phase).toContain('`effort: xhigh`')
+  }
+})
+
+// About 59% of berean-os plan-review BLOCKER/MAJOR findings were compile and
+// command errors the implementer's red/green loop hits minutes later, and
+// reviewers often applied the whole plan in a scratch copy to find them.
+test('the plan review reads the plan for what nothing downstream checks, and neither applies nor builds it', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'plan-review.md')).text())
+  expect(text).toContain('Read the plan; do not apply it or build it.')
+  expect(text).toContain('an error the plan\'s own red/green steps or the build would show at once')
+  for (const focus of [
+    '**Spec coverage.**', '**Behaviour the tests cannot see.**', '**The file lock.**',
+    '**Steps that would mislead the implementer.**',
+  ]) {
+    expect(text, focus).toContain(focus)
+  }
+  expect(text).not.toContain('execute this plan literally')
+  expect(text).toContain('a step that pushes, opens a PR or runs `{{hpipe}} submit` is a MINOR')
+})
+
+// "The plan tells the implementer to push and open the PR" recurred in eight or
+// more berean-os plan reviews, rated MAJOR, MINOR or no finding at all.
+test('a plan stops at implementation: pushing and the hand-off after it are the worker\'s', async () => {
+  for (const mode of MODES) {
+    const text = prose(await renderPhase('plan', {}, 'plan', mode))
+    expect(text, mode).toContain('The plan ends at implementation.')
+    expect(text, mode).toContain('Write no step that pushes, opens a PR or runs `')
+    expect(text, mode).toContain(' submit`')
+    expect(text, mode).toContain('leave out its execution hand-off')
+  }
+  const brief = prose(implementersBrief(await Bun.file(join(ROOT, 'prompts', 'implement.md')).text()))
+  expect(brief).toContain('If the plan has a step that pushes, opens a PR or runs `{{hpipe}} submit`, skip it')
+})
+
+test('the branch review runs at the effort of the heaviest task in the run', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  run.phase = 'branch-review'
+  run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier: 'light' })]
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: high`')
+  run.tasks.push(briefTask({ task_id: 't2', phase: 'done', tier: 'heavy' }))
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: xhigh`')
+})
+
 test('both reviews that judge the plan are told when no plan review ran', async () => {
   for (const phase of ['pr-review', 'pr-review-intent'] as const) {
     expect(await renderPhase(phase, { tier: 'light' }), phase)
@@ -379,7 +546,7 @@ test('both reviews that judge the plan are told when no plan review ran', async 
 })
 
 test('a light task raised to heavy after skipping plan-review is told its plan went unreviewed', async () => {
-  expect(await renderPhase('pr-review-intent', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
+  expect(await renderPhase('pr-review', { tier: 'heavy', verdict_seq: { 'spec-review': 1 } }))
     .toContain('No plan review ran')
 })
 
@@ -395,7 +562,7 @@ test('implement and ci-red hand the coding to a sonnet subagent carrying one sco
   expect(ciRed).toContain('# CI is red')
   for (const text of [implement, ciRed]) {
     expect(text).toContain('`model: sonnet`')
-    expect(text).toContain('wait for it within this turn')
+    expect(prose(text)).toContain('end your turn and carry on when its completion notice arrives')
     expect(text).toContain('Read `.claude/agents/core-dev.md` before your first edit')
   }
   expect(implementersBrief(ciRed)).toBe(implementersBrief(implement))
@@ -441,8 +608,9 @@ test('the brief lists only the phases its tier runs, with the paths written in',
 
   const heavy = await renderBriefFor([briefTask({ tier: 'heavy' })], 0)
   expect(heavy).toContain('5. `plan-review` — you dispatch the reviewer again')
-  expect(heavy).toContain('8. `pr-review-quality`')
-  expect(heavy).not.toContain('`pr-review` —')
+  expect(heavy).toContain('7. `pr-review` — one review of the PR, intent then quality')
+  expect(heavy).not.toContain('pr-review-intent')
+  expect(heavy).not.toContain('pr-review-quality')
 })
 
 test('the brief names the tier, forbids lowering it, and says how to raise it', async () => {
@@ -477,11 +645,163 @@ test('the decision prompt tells the orchestrator to raise the tier when an answe
   expect(sent[0]).toContain('Never lower a tier.')
 })
 
-test('merge counts the review stages that actually ran', async () => {
-  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 } }))
-    .toContain('Both review stages cleared and CI is green on PR #7.')
-  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } }))
+test('the per-task merge prompt renders the merge command, with the way out when squash is off', async () => {
+  const text = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 } })
+  expect(text).toContain('\n    gh pr merge 7 --squash\n')
+  expect(prose(text)).toContain('Green is for the head CI ran on. If you push to the branch')
+  expect(prose(text)).toContain('If this repo does not allow squash merges, swap `--squash` for the method it does ' +
+    'allow, `--merge` or `--rebase`.')
+})
+
+// Smoke run 15: the merge prompt said "green is for the head CI ran on" without naming it,
+// and its command would merge whatever head the PR had by then.
+test('the per-task merge prompt pins the head CI passed on, and names it', async () => {
+  const sha = 'c0ffee12' + '0'.repeat(32)
+  const pinned = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass',
+    ci_head: { sha, seen_at: 1 } })
+  expect(pinned).toContain(`\n    gh pr merge 7 --squash --match-head-commit ${sha}\n`)
+  expect(prose(pinned)).toContain('Green is for `c0ffee12`, the head CI ran on: the command below merges only while ' +
+    "the PR's head is still that commit. If you push to the branch")
+
+  const noHead = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' })
+  expect(noHead).toContain('\n    gh pr merge 7 --squash\n')
+  const notGreen = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'fail',
+    ci_head: { sha, seen_at: 1 } })
+  expect(notGreen).toContain('\n    gh pr merge 7 --squash\n')
+  expect(notGreen).not.toContain('--match-head-commit')
+})
+
+test('the per-task merge prompt calls CI green only when a pass is recorded', async () => {
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' }))
     .toContain('Review cleared and CI is green on PR #7.')
+  for (const ci of [null, 'pending', 'fail'] as const) {
+    const text = await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci })
+    expect(text, String(ci)).not.toContain('CI is green')
+    expect(text, String(ci)).toContain('Review cleared, but no green CI is recorded on PR #7. Check it first, and ' +
+      'merge only once every check passes:\n\n    gh pr checks 7\n')
+  }
+})
+
+test('merge counts the review stages that actually ran', async () => {
+  expect(await renderPhase('merge', { tier: 'heavy', verdict_seq: { 'pr-review-intent': 1, 'pr-review-quality': 1 }, ci: 'pass' }))
+    .toContain('Both review stages cleared and CI is green on PR #7.')
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, ci: 'pass' }))
+    .toContain('Review cleared and CI is green on PR #7.')
+})
+
+test('merge says the PR review was skipped, and the batch landing names the head as submitted, not reviewed', async () => {
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  const skipped = 'The PR review was skipped (12 lines added outside docs/, spec-review cleared first pass)'
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, ci: 'pass' })))
+    .toContain(`${skipped} and CI is green on PR #7.`)
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, land_sha: 'abcdef1234' }, 'merge', 'single-pr')))
+    .toContain(`${skipped}, and \`abcdef12\` is the head that was submitted`)
+  expect(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, land_sha: 'abcdef1234' }, 'merge', 'single-pr'))
+    .toContain('Review cleared, and `abcdef12` is the head that was reviewed')
+})
+
+test('the batch landing names a clean sync as one, on top of the head that was reviewed or submitted', async () => {
+  // Smoke run 14 called a clean sync's head "the head that was reviewed".
+  const sync = { kind: 'sync' as const, title: 't', head_sha: '13f910ea0000', at: 1, check: 'passed' as const,
+    merge: 'clean' as const }
+  const reviewed = { tier: 'light' as const, verdict_seq: { 'pr-review': 1 }, land_sha: '13f910ea0000', submission: sync }
+  expect(prose(await renderPhase('merge', reviewed, 'merge', 'single-pr'))).toContain('Review cleared, and ' +
+    '`13f910ea` is a clean sync of `batch/x` on top of the reviewed head, checked. It contains every landing')
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  expect(prose(await renderPhase('merge', { ...reviewed, review_skip }, 'merge', 'single-pr')))
+    .toContain('`13f910ea` is a clean sync of `batch/x` on top of the submitted head, checked.')
+  const implemented = { ...sync, kind: 'implement' as const, merge: undefined, head_sha: 'aaaa1111' }
+  expect(prose(await renderPhase('merge', { ...reviewed, land_sha: 'aaaa1111', submission: implemented }, 'merge',
+    'single-pr'))).toContain('`aaaa1111` is the head that was reviewed and checked.')
+})
+
+test('the batch landing calls a sync that merged nothing the head that was reviewed, not a clean sync', async () => {
+  // The trial's t4: "`46b096bc` is a clean sync of `batch/…` on top of the reviewed head", of a head
+  // nothing had been merged into. Measured on a live run.
+  const synced = (check: 'passed' | 'none') => ({ tier: 'light' as const, verdict_seq: { 'pr-review': 1 },
+    land_sha: '46b096bc0000', submission: { kind: 'sync' as const, title: 't', head_sha: '46b096bc0000', at: 1, check,
+      merge: 'clean' as const, merges: 0 } })
+  const unchecked = prose(await renderPhase('merge', synced('none'), 'merge', 'single-pr'))
+  expect(unchecked).toContain('Review cleared, and `46b096bc` is the head that was reviewed; its sync found ' +
+    'nothing on `batch/x` to merge. It contains every landing')
+  expect(unchecked).not.toContain('clean sync')
+  expect(prose(await renderPhase('merge', synced('passed'), 'merge', 'single-pr')))
+    .toContain('`46b096bc` is the head that was reviewed and checked; its sync found nothing on `batch/x` to merge.')
+})
+
+// Smoke run 15: the check ran on the sync submission, the CLEAR recorded the head that
+// adds the review file, and the land prompt called that head "reviewed and checked".
+test('the batch landing says where the check ran when the reviewed head only adds review verdicts to it', async () => {
+  const onlyVerdicts = 'The check ran on `e461a2f0`, and `ebcd8194` adds nothing to it but review verdicts under ' +
+    '`docs/superpowers/reviews/`, which no check tests. It contains every landing'
+  for (const [kind, merge] of [['implement', undefined], ['sync', 'dirty'], ['sync', 'clean']] as const) {
+    const submission = { kind, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'passed' as const,
+      ...(merge === undefined ? {} : { merge }) }
+    const text = prose(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 },
+      land_sha: 'ebcd81940000', submission }, 'merge', 'single-pr'))
+    expect(text, `${kind} ${merge}`).toContain(`Review cleared, and \`ebcd8194\` is the head that was reviewed. ${onlyVerdicts}`)
+    expect(text, `${kind} ${merge}`).not.toContain('clean sync')
+  }
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  const submitted = { kind: 'implement' as const, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'passed' as const }
+  expect(prose(await renderPhase('merge', { tier: 'light', review_skip, land_sha: 'ebcd81940000', submission: submitted },
+    'merge', 'single-pr'))).toContain(`\`ebcd8194\` is the head recorded when its PR review was skipped. ${onlyVerdicts}`)
+  const unchecked = { kind: 'implement' as const, title: 't', head_sha: 'e461a2f00000', at: 1, check: 'none' as const }
+  expect(prose(await renderPhase('merge', { tier: 'light', verdict_seq: { 'pr-review': 1 }, land_sha: 'ebcd81940000',
+    submission: unchecked }, 'merge', 'single-pr')))
+    .toContain('Review cleared, and `ebcd8194` is the head that was reviewed. It contains every landing')
+})
+
+test('sync tells a worker whose review was skipped that it was, not that it was reviewed', async () => {
+  const review_skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 12, cleared: ['spec-review'] as TaskPhase[] }
+  expect(prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc', review_skip })))
+    .toContain('Your change skipped its PR review as a small change, and it is next in line to land')
+  expect(prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc' })))
+    .toContain('Your change was reviewed, and it is next in line to land')
+})
+
+// Smoke run 15: a worker that resolved a conflict was told only that a commit beyond the
+// merge goes back to review, and read its resolved merge as one that would land as is.
+test('sync says a resolved conflict goes through review, like any commit beyond the automatic merge', async () => {
+  const text = prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc' }))
+  expect(text).toContain('A merge whose conflict you resolved is not a clean merge: `submit` sends the change ' +
+    'through review before it lands, because the resolution is code no reviewer has seen.')
+  expect(text).toContain('Only a merge git made on its own, left as git made it, lands without another review: a ' +
+    'resolved conflict, an edit to the merge, or any commit after it sends this branch through review. That ' +
+    'is expected, not a failure.')
+  expect(text).not.toContain('Any commit beyond the merge')
+})
+
+test('a review after a skipped review and a dirty sync reads the whole change, not a range since a review', async () => {
+  const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
+    merge: 'dirty' as const, dirty_at: 'ffff66660000' }
+  expect(await renderPhase('pr-review', { tier: 'light', land_sha: 'aaaa1111', submission: sync }, 'sync', 'single-pr'))
+    .toContain('since the last reviewed head')
+  expect(await renderPhase('pr-review', { tier: 'light', submission: sync }, 'sync', 'single-pr'))
+    .not.toContain('since the last reviewed head')
+})
+
+// Smoke run 15: the first review of a skipped-review change after a conflicted sync got
+// only the generic brief, and nothing pointed it at the resolution.
+test('the first review after a dirty sync is told to read the whole diff and the conflict resolution', async () => {
+  const sync = { kind: 'sync' as const, title: 't', head_sha: 'eeee5555', at: 1, check: 'passed' as const,
+    merge: 'dirty' as const, dirty_at: 'ffff66660000' }
+  const opening = 'This review was entered from a sync of `batch/x` that was not a clean merge'
+  const firstReview = 'No reviewed head is recorded, so this is the change\'s first review: read the whole diff.'
+  const atDirty = prose(await renderPhase('pr-review', { tier: 'light', submission: sync }, 'sync', 'single-pr'))
+  expect(atDirty).toContain(`${opening} (at \`ffff6666\`). ${firstReview} Then read the conflict resolution, ` +
+    'which no reviewer has seen, with `git show --remerge-diff ffff66660000`, and if that commit is not a merge, ' +
+    'the same for each merge in `git log --first-parent --merges origin/batch/x..origin/feat/x`.')
+
+  const { dirty_at: _, ...undated } = sync
+  const noDirtyAt = prose(await renderPhase('pr-review', { tier: 'light', submission: undated }, 'sync', 'single-pr'))
+  expect(noDirtyAt).toContain(`${opening}. ${firstReview} Then read each conflict resolution, which no reviewer ` +
+    'has seen, with `git show --remerge-diff <merge>` for each merge in ' +
+    '`git log --first-parent --merges origin/batch/x..origin/feat/x`.')
+
+  const clean = { ...sync, merge: 'clean' as const }
+  expect(await renderPhase('pr-review', { tier: 'light', submission: clean }, 'sync', 'single-pr'))
+    .not.toContain(opening)
 })
 
 test('intake explains the tiers and registers with --tier', async () => {
@@ -494,16 +814,17 @@ test('intake explains the tiers and registers with --tier', async () => {
 })
 
 test('every prompt renders for every tier on every path with no placeholder left', async () => {
-  for (const tier of TIERS) {
+  for (const [tier, mode] of TIERS.flatMap((t) => MODES.map((m) => [t, m] as const))) {
     const rendered: Array<[string, string]> = []
 
-    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined)) {
-      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' })])
+    for (const row of TASK_ROWS.filter((r) => r.prompt !== undefined && rowRunsIn(r, mode))) {
+      rendered.push([row.phase, await renderPhase(row.phase, { tier, escalated_from: 'implement' }, row.phase, mode)])
     }
-    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files')])
-    rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
+    rendered.push(['merge', await renderPhase('merge', { tier, land_sha: 'abc' }, 'merge', mode)])
+    rendered.push(['implement from blocked-on-files', await renderPhase('implement', { tier }, 'blocked-on-files', mode)])
+    if (mode === 'per-task') rendered.push(['implement from ci', await renderPhase('implement', { tier }, 'ci')])
 
-    const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+    const run = runIn(mode)
     run.orchestrator_pane = 'w1:p1'
     const task = briefTask({ tier })
     run.tasks = [task]
@@ -524,7 +845,7 @@ test('every prompt renders for every tier on every path with no placeholder left
     run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier })]
     rendered.push(['branch-review', await renderRunPhasePrompt(run, ROOT)])
 
-    for (const [what, text] of rendered) expect(text, `${tier}: ${what}`).not.toContain('{{')
+    for (const [what, text] of rendered) expect(text, `${tier} ${mode}: ${what}`).not.toContain('{{')
   }
 })
 
@@ -601,7 +922,10 @@ test('the decision prompt has the orchestrator escalate whatever it puts to the 
 test('the worker sends out-of-scope work to discover, and the branch review files it', async () => {
   const brief = prose(await Bun.file(join(ROOT, 'prompts', 'worker-brief.md')).text())
   expect(brief).toContain('{{hpipe}} discover --task {{task_id}} --title "<title>" --body-file <path>')
-  expect(brief).toContain('not into this PR')
+  expect(prose(await renderBriefFor([briefTask({})], 0))).toContain('not into this PR')
+  // A plugin bug recorded as a discovery was filed into the repo's own backlog. Measured on a live run.
+  expect(brief).toContain('Discoveries are follow-up work for this repo')
+  expect(brief).toContain('a problem with the pipeline itself')
   const review = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
   expect(review).toContain('{{hpipe}} discoveries')
   expect(review).toContain('{{hpipe}} discoveries --file')
@@ -635,8 +959,10 @@ test('dispatch says the bead\'s captured brief is the brief, and that dispatch c
 })
 
 test('the branch review finds the run\'s PRs in the ledger, not by searching GitHub issues', async () => {
-  const text = prose(await Bun.file(join(ROOT, 'prompts', 'branch-review.md')).text())
-  expect(text).toContain('`{{hpipe}} show --task <id>` prints each task\'s `pr:`')
+  const run = runIn('per-task')
+  run.phase = 'branch-review'
+  const text = prose(await renderRunPhasePrompt(run, ROOT))
+  expect(text).toContain(`\`${hpipeCommand(ROOT)} show --task <id>\` prints each task's \`pr:\``)
   expect(text).not.toContain('gh pr list')
 })
 
@@ -667,4 +993,44 @@ test('the README documents Beads setup, backups, the br and reclaim warnings and
   expect(readme).not.toContain('--issue <n>')
   expect(readme).not.toContain('gh issue create')
   expect(readme).not.toContain('independent tracks')
+})
+
+test('the README, the skill and intake give heavy the same one combined PR review', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).toContain('| `heavy` | ✓ | ✓ | one combined `pr-review`, never skipped |')
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('every tier gets one combined `pr-review`')
+  expect(skill).not.toContain('heavy runs `pr-review-intent` then `pr-review-quality`')
+  const intake = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(intake).toContain('Every tier gets one combined PR review')
+  expect(intake).not.toContain('two separate stages')
+  expect(await Bun.file(join(ROOT, 'prompts', 'pr-review.md')).text()).not.toContain('the heavy tier splits')
+})
+
+// Smoke run 15: intake and the skill said every tier gets a PR review, and the
+// orchestrator met the skip only when a task went past it.
+test('where tiers are introduced, the README, the skill and intake say a small change skips its PR review', async () => {
+  const readme = await Bun.file(join(ROOT, 'README.md')).text()
+  expect(readme).toContain('| `light` | ✓ | – | one combined `pr-review`, skipped for a small change (below) |')
+  expect(readme).toContain('| `standard` | ✓ | ✓ | one combined `pr-review`, skipped for a small change (below) |')
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('every tier gets one combined `pr-review`, except a light or standard task with a small ' +
+    'change, which skips it (the `pr-review skipped` row under **While it runs**); heavy never skips it')
+  const intake = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(intake).toContain('Every tier gets one combined PR review, except that a light or standard task whose ' +
+    "change turns out small skips it (the herdr-pipeline skill's `pr-review skipped` row has the rule); `heavy` " +
+    'never skips it')
+})
+
+test('the README and the skill name the PR review skip, its threshold and the always-review file', async () => {
+  const readme = prose(await Bun.file(join(ROOT, 'README.md')).text())
+  for (const needle of [
+    'A small, well-planned change skips its PR review.', 'fewer than 150 lines outside `docs/`',
+    '`PR_REVIEW_SKIP_BELOW_ADDED_LINES`', '`.claude/pipeline-always-review`', 'Heavy never skips',
+  ]) {
+    expect(readme, needle).toContain(needle)
+  }
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('`pr-review skipped`')
+  expect(skill).toContain('`.claude/pipeline-always-review`')
 })

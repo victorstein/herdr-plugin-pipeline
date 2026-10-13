@@ -1,11 +1,14 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test } from 'bun:test'
-import { nextPhase, RUN_ROWS, TASK_ROWS, taskRow, TIERS, type PhaseRow, type Tier } from '../src/lib/phases'
+import {
+  nextPhase, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, taskRow, TIERS, type PhaseRow, type Tier,
+} from '../src/lib/phases'
 import type { TaskPhase } from '../src/lib/types'
-import { newRun } from '../src/lib/ledger'
+import { newRun, withBatch } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 import { advanceTasks, renderTaskPhasePrompt, type TaskDeps } from '../src/supervisor/tasks'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const ALL: readonly PhaseRow<string>[] = [...RUN_ROWS, ...TASK_ROWS]
@@ -65,20 +68,20 @@ const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review', 'pr-re
 const promptText = (name: string) =>
   Bun.file(join(import.meta.dir, '..', 'prompts', `${name}.md`)).text()
 
-test('every worker review prompt demands an awaited subagent and a pushed verdict', async () => {
+test('every worker review prompt has the verdict committed last and pushed', async () => {
   for (const name of WORKER_REVIEW_PROMPTS) {
-    const text = await promptText(name)
-    expect(text, `${name}.md must require the subagent be awaited`)
-      .toContain('wait for it within this turn')
+    const text = (await promptText(name)).replace(/\s+/g, ' ')
+    expect(text, `${name}.md must say the phase clears on a committed verdict`)
+      .toContain('This phase clears once you are idle, with the verdict file committed')
     expect(text, `${name}.md must require the verdict be pushed`)
-      .toContain('Commit and push the verdict')
+      .toContain('commit and push the verdict file before you end that turn')
   }
 })
 
-test('branch-review carries neither worker instruction — it is orchestrator-owned', async () => {
-  const text = await promptText('branch-review')
-  expect(text).not.toContain('wait for it within this turn')
-  expect(text).not.toContain('Commit and push the verdict')
+test('branch-review carries no worker verdict instruction — it is orchestrator-owned and left uncommitted', async () => {
+  const text = (await promptText('branch-review')).replace(/\s+/g, ' ')
+  expect(text).not.toContain('with the verdict file committed')
+  expect(text).not.toContain('commit and push the verdict')
 })
 
 test('no task row carries a stallWhen — taskStallCandidates never reads one', () => {
@@ -92,7 +95,7 @@ function walkFromQueued(tier: Tier): TaskPhase[] {
   const walked: TaskPhase[] = ['queued']
   while (walked.at(-1) !== 'ci') {
     if (walked.length > TASK_ROWS.length) throw new Error(`${tier} walks in a circle`)
-    walked.push(nextPhase(tier, taskRow(walked.at(-1)!)))
+    walked.push(nextPhase({ tier, mode: 'per-task' }, taskRow(walked.at(-1)!)))
   }
   return walked
 }
@@ -102,6 +105,18 @@ test('every tier walks from queued to ci, through implement', () => {
     const walked = walkFromQueued(tier)
     expect(walked.at(-1), tier).toBe('ci')
     expect(walked, tier).toContain('implement')
+  }
+})
+
+test('a row carrying modes is the onBlocker only of rows whose modes are a subset', () => {
+  for (const rows of [RUN_ROWS, TASK_ROWS] as readonly (readonly PhaseRow<string>[])[]) {
+    for (const row of rows) {
+      if (row.onBlocker === undefined) continue
+      const target = rows.find((r) => r.phase === row.onBlocker)!
+      if (target.modes === undefined) continue
+      const sendsBackFrom = row.modes ?? ['per-task', 'single-pr']
+      for (const mode of sendsBackFrom) expect(target.modes, `${row.phase} → ${target.phase}`).toContain(mode)
+    }
   }
 })
 
@@ -115,6 +130,33 @@ test('every row a tier reaches that has an actor has a prompt', () => {
     for (const phase of walkFromQueued(tier)) {
       const row = taskRow(phase)
       if (row.actor !== undefined) expect(row.prompt, `${tier}: ${phase}`).toBeDefined()
+    }
+  }
+})
+
+function walkToMerge(tier: Tier, mode: RunMode): TaskPhase[] {
+  const walked: TaskPhase[] = ['queued']
+  while (walked.at(-1) !== 'merge') {
+    if (walked.length > TASK_ROWS.length) throw new Error(`${tier} ${mode} walks in a circle`)
+    walked.push(nextPhase({ tier, mode }, taskRow(walked.at(-1)!)))
+  }
+  return walked
+}
+
+test('in each mode and tier the walk from queued reaches merge through implement, by its own rows', () => {
+  for (const tier of TIERS) {
+    const perTask = walkToMerge(tier, 'per-task')
+    expect(perTask, tier).toContain('implement')
+    expect(perTask, tier).toContain('ci')
+    expect(perTask, tier).not.toContain('land-queue')
+    expect(perTask, tier).not.toContain('sync')
+    const singlePr = walkToMerge(tier, 'single-pr')
+    expect(singlePr, tier).toContain('implement')
+    expect(singlePr, tier).not.toContain('ci')
+    expect(singlePr.slice(-3), tier).toEqual(['land-queue', 'sync', 'merge'])
+    for (const phase of singlePr) {
+      const row = taskRow(phase)
+      if (row.actor !== undefined) expect(row.prompt, `${tier} single-pr: ${phase}`).toBeDefined()
     }
   }
 })
@@ -141,7 +183,7 @@ function runWith(task: Task): Run {
   run.phase = 'execute'
   run.orchestrator_pane = 'w1:p1'
   run.tasks = [task]
-  return run
+  return rowRunsIn(taskRow(task.phase), 'per-task') ? run : withBatch(run, batchFixture())
 }
 
 const clearingTick = (): TaskDeps => ({
@@ -168,7 +210,7 @@ test('a tick advances every verdict row, in every tier, to where nextPhase says'
     for (const row of TASK_ROWS.filter((r) => r.signal === 'verdict')) {
       const task = taskIn(row.phase, tier)
       await advanceTasks(runWith(task), clearingTick())
-      expect(task.phase, `${tier}: ${row.phase}`).toBe(nextPhase(tier, row))
+      expect(task.phase, `${tier}: ${row.phase}`).toBe(nextPhase({ tier, mode: 'per-task' }, row))
     }
   }
 })

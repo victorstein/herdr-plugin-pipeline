@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cmdAbort, cmdAnswer, cmdBeadShow, cmdBrief, cmdClose, cmdDecide, cmdDiscoveries, cmdDiscover, cmdDispatchDone, fileUnlessFiled, cmdEscalate, cmdForget,
-  cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
-  cmdTier, recordWorkerPane,
+  cmdNudge, cmdRelease, cmdResume, cmdRewind, cmdShow, cmdStatus,
+  cmdTier, type NudgeDeps, recordWorkerPane,
 } from '../src/cli'
 import type { BeadCreateInput, BeadDetail } from '../src/lib/bd'
 import { cmdTask, fakeBeads, openBead } from './helpers/cmd-task'
@@ -19,7 +19,8 @@ import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/d
 import { settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
 import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
-import type { Run, Task } from '../src/lib/types'
+import type { AgentStatus, Run, Task, TaskPhase } from '../src/lib/types'
+import type { LimitReading } from '../src/supervisor/usage-limits'
 import { beadTaskFields } from './helpers/bead-fields'
 import { hpipeCommand } from '../src/lib/render'
 import { desiredBead } from '../src/lib/bead-desired'
@@ -593,6 +594,7 @@ test('dispatch --done closes intake', async () => {
 
   const result = await cmdDispatchDone(ctx(), { runId: run.run_id, repoKey: 'k' })
   expect(result.ok).toBe(true)
+  expect(result.text).toContain('the run leaves intake once you end your turn')
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.intake_closed).toBe(true)
@@ -651,6 +653,17 @@ test('rewind to implement or earlier forgets the PR and the bead close, so neith
   }
 })
 
+test('a rewind into the PR review or before it forgets a review skip, and one past it keeps it', async () => {
+  const skip = { at: 1, skipped: ['pr-review'] as TaskPhase[], added_lines: 42, cleared: ['spec-review'] as TaskPhase[] }
+  for (const [phase, kept] of [['pr-review', false], ['implement', false], ['spec', false], ['ci', true], ['merge', true]] as const) {
+    const run = runWithTasks([{ task_id: 't1', bead: `hp-skip-${phase}`, phase: 'merge', pr: 5, review_skip: skip }])
+    await saveRun(dir, run)
+    expect((await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })).ok, phase).toBe(true)
+    const task = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)!.tasks[0]!
+    expect(task.review_skip !== undefined, phase).toBe(kept)
+  }
+})
+
 test('a task resumed into implement with its PR still open waits for a new push', async () => {
   // The #46 resume path: a review sent it back at head H, it escalated from
   // implement, and the human resumed it. The rejected head must not count as work.
@@ -690,7 +703,7 @@ test('a task resumed into implement with its PR still open waits for a new push'
 
   head = 'I'
   await advanceTasks(saved, deps)
-  expect(saved.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(saved.tasks[0]?.phase).toBe('pr-review')
 })
 
 test('rewind after a merge onto a phase that works the current PR keeps the PR but forgets the merge and the close', async () => {
@@ -1228,6 +1241,20 @@ test('task echoes the repo bootstrap on the dispatched return', async () => {
   expect(result.text).toContain('bootstrap: .claude/pipeline-bootstrap')
 })
 
+test('registration says which live task a --files declaration overlaps, and what that costs', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  await saveRun(dir, run)
+  const register = (branch: string, bead: string, files: string[]) => cmdTask(ctx(), {
+    branch, bead, surface: 'core', notes: '', dependsOn: [], files, keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  expect((await register('feat/one', 'hp-1', ['src/lib/text.ts'])).text).toContain('files: src/lib/text.ts\n')
+  const second = await register('feat/two', 'hp-2', ['src/lib/'])
+  expect(second.text).toContain('files: src/lib/ — overlaps t1: whichever reaches implement second waits there ' +
+    'until the other finishes')
+  expect((await register('feat/three', 'hp-3', ['docs/'])).text).toContain('files: docs/\n')
+})
+
 const fetchedBase = async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null })
 
 test('the dispatched return keeps every header line above the one blank line', async () => {
@@ -1242,19 +1269,21 @@ test('the dispatched return keeps every header line above the one blank line', a
 
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 5)).toEqual([
+  expect(lines.slice(0, 6)).toEqual([
     'task_id: t1',
     'tier: standard (default)',
+    'effort: worker high, reviews high (plan-review medium)',
     'files: none',
     'bootstrap: .claude/pipeline-bootstrap',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
-  expect(lines.slice(5)).toEqual([
+  expect(lines.slice(6)).toEqual([
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
+    expect.stringMatching(/^ {4}# its JSON gives the new checkout as \.result\.worktree\.path and its pane as /),
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start <name> --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions',
+    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
     expect.stringMatching(/ dispatch --task t1 --pane <\.result\.root_pane\.pane_id>$/),
   ])
   // prompts/dispatch.md calls the lines above the blank line the orchestrator's,
@@ -1288,8 +1317,9 @@ test('a repo declaring no bootstrap says so rather than staying silent', async (
   // path is the one every repo hits today, so it gets the shape contract too.
   const [head, ...rest] = result.text.split('\n\n')
   const lines = head!.split('\n')
-  expect(lines.slice(0, 5)).toEqual([
-    'task_id: t1', 'tier: standard (default)', 'files: none', 'bootstrap: none',
+  expect(lines.slice(0, 6)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high (plan-review medium)',
+    'files: none', 'bootstrap: none',
     'base: 1fb8a43 (origin/main as just fetched)',
   ])
   expect(lines.join('\n')).not.toContain('pipeline-bootstrap')
@@ -1350,6 +1380,12 @@ test('show prints the recorded task without touching the ledger', async () => {
   expect(JSON.stringify((await listRuns(dir, 'personal'))[0])).toBe(before)
 })
 
+test('show marks a finished task\'s checkout that teardown has removed', async () => {
+  await saveRun(dir, runWithTasks([{ task_id: 't1', phase: 'done', checkout_path: join(dir, 'gone-wt') }]))
+  const result = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
+  expect(result.text).toContain(`checkout:   ${join(dir, 'gone-wt')} (removed)`)
+})
+
 test('show says none rather than printing null for what a task has not reached', async () => {
   await saveRun(dir, runWithTasks([{ task_id: 't1' }]))
 
@@ -1375,12 +1411,23 @@ test('show prints a freshly fetched base for an unfinished task, containing its 
   }
 
   const unfinished = await cmdShow(ctx(), { taskId: 't2', repoKey: 'k', runId: null }, fetchBase)
-  expect(unfinished.text).toContain('base: 1fb8a43 (origin/main as just fetched)')
+  expect(unfinished.text).toEndWith('base: 1fb8a43 (origin/main as just fetched) — the base for a new worktree')
   expect(requested).toEqual([[repoDir, ['c0ffee1']]])
 
   const finished = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
   expect(finished.text).not.toContain('base:')
   expect(requested).toHaveLength(1)
+})
+
+test('show\'s base for a task with a worktree says it is not the commit that worktree was cut from', async () => {
+  // Smoke run 14 read the batch tip on this line as the commit the worktree started at.
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement', checkout_path: '/wt/t1' }])
+  run.repo_root = repoDir
+  await saveRun(dir, run)
+  const fetchBase = async () => ({ commit: '9e06c26', ref: 'origin/batch/x', fetchError: null })
+  const shown = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
+  expect(shown.text).toEndWith('base: 9e06c26 (origin/batch/x as just fetched) — the base for a new worktree, ' +
+    'not the commit /wt/t1 was cut from')
 })
 
 test('show names a missing task', async () => {
@@ -1432,6 +1479,23 @@ test('dispatch --task hands the bare brief to the pane, not the header lines', a
   expect(beforeRest.tasks[0]!.awaiting_brief).toBe(true)
   delete beforeRest.tasks[0]!.awaiting_brief
   expect(afterRest).toEqual(beforeRest)
+})
+
+test('dispatch --task refuses a pane Claude\'s usage limit has stopped, sending and claiming nothing', async () => {
+  await registerReadyTask()
+  const { sent, send } = recordingSend()
+  let claimed = 0
+  const result = await cmdDispatchTask(ctx(), {
+    taskId: 't1', paneId: 'w1-2', repoKey: 'k', runId: null,
+  }, send, undefined, async () => { claimed += 1; return { ok: true } }, async () => ({
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  }))
+  expect(result).toMatchObject({ ok: false })
+  expect(result.text).toBe("the agent in w1-2 is stopped by Claude's usage limit (resets 10:20am (America/Managua)); " +
+    'nothing was sent — run this again after the reset')
+  expect(sent).toEqual([])
+  expect(claimed).toBe(0)
 })
 
 test('dispatch --task records the pane over a supervisor write made during the handoff — #12', async () => {
@@ -1865,6 +1929,7 @@ test('--tier with no tier label is recorded as the flag', async () => {
   await seedInRepo()
   const result = await cmdTask(ctx(), { ...existingBead, tier: 'heavy' }, labelled('bug'), fetchedBase)
   expect(headLines(result.text)).toContain('tier: heavy (--tier)')
+  expect(headLines(result.text)).toContain('effort: worker xhigh, reviews xhigh')
   expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
 })
 
@@ -1915,7 +1980,10 @@ test('a filed bead has no labels to read, so --title reads nothing', async () =>
   const result = await cmdTask(ctx(), { ...unfiledTask, title: 't', bodyFile }, beads, fetchedBase)
   expect(result.ok).toBe(true)
   expect(shown()).toBe(0)
-  expect(headLines(result.text).slice(0, 3)).toEqual(['task_id: t1', 'tier: standard (default)', 'bead: hp-318 (filed)'])
+  expect(headLines(result.text).slice(0, 4)).toEqual([
+    'task_id: t1', 'tier: standard (default)', 'effort: worker high, reviews high (plan-review medium)',
+    'bead: hp-318 (filed)',
+  ])
 })
 
 test('a registration that loses its save reads the bead once', async () => {
@@ -1954,6 +2022,7 @@ test('tier raises from any pane, logs the change, and writes nothing to run.hist
   const result = await cmdTier(ctx(), tierInput())
   expect(result.ok).toBe(true)
   expect(result.text).toContain('t1: light → heavy')
+  expect(result.text).toContain('Its reviews now run at effort xhigh; the worker keeps the effort it was started with.')
 
   const saved = await savedRun(run.run_id)
   expect(saved.tasks[0]?.tier).toBe('heavy')
@@ -1963,6 +2032,12 @@ test('tier raises from any pane, logs the change, and writes nothing to run.hist
   }])
   expect(saved.history).toHaveLength(historyBefore)
   expect(saved.tasks[0]?.phase).toBe('implement')
+})
+
+test('a raise to standard says its plan review runs at a lower effort than its other reviews', async () => {
+  await seedTiered()
+  const result = await cmdTier(ctx(), tierInput({ tier: 'standard' }))
+  expect(result.text).toContain('Its reviews now run at effort high (plan-review medium);')
 })
 
 test('tier refuses to lower from the orchestrator pane or any worker pane, live or last', async () => {
@@ -2467,4 +2542,157 @@ test('--bead still assigned to hpipe by a run that released it names that run an
   expect(result.text).toContain(`bead hp-12 is still assigned to hpipe by t4 of run ${released.run_id} (session work)`)
   expect(result.text).toContain('the supervisor of session work')
   expect(await registered()).toEqual([])
+})
+
+const limitedReading = (status: AgentStatus = 'done'): LimitReading => ({
+  status, boxSeen: true, autoContinue: false,
+  line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+})
+const nudgeDeps = (over: Partial<NudgeDeps> = {}) => {
+  const released: string[] = []
+  const deps: NudgeDeps = {
+    readPane: async () => limitedReading(),
+    holds: async () => ({ 'w7:p1': { since: 0, failures: 0, code: 'usage_limit', until: 1, reset: '10:20am' } }),
+    release: async (pane) => { released.push(pane) },
+    ...over,
+  }
+  return { deps, released }
+}
+const worker = (over: Partial<Task> = {}): Partial<Task> => ({
+  task_id: 't1', phase: 'pr-review', pane_id: 'w7:p1', workspace_id: 'w7', phase_entered_at: 5,
+  stall: { at: 5, run_at: 0, last_probe_at: 100, probes: 3, undelivered: 1, holds: 1 },
+  passes: { 'pr-review': 1 }, verdict_seq: 2, ...over,
+} as Partial<Task>)
+
+test('nudge queues a resume, restarts the ladder, releases the hold, and changes nothing else', async () => {
+  const run = runWithTasks([worker()])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const before = structuredClone(run.tasks[0] as Task)
+  const { deps, released } = nudgeDeps()
+
+  const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(result).toEqual({
+    ok: true, text: "t1: resume queued for w7:p1 (pr-review); the supervisor's usage-limit hold on it is released",
+    json: undefined,
+  })
+  expect(released).toEqual(['w7:p1'])
+  const saved = (await listRuns(dir, 'personal'))[0] as Run
+  const task = saved.tasks[0] as Task
+  expect(saved.outbox?.map((e) => [e.to, e.task_id, e.kind])).toEqual([['worker', 't1', 'resume']])
+  expect(saved.outbox?.[0]?.text).toContain('Carry on with `pr-review`')
+  expect(task.stall).toMatchObject({ probes: 0, undelivered: 0, holds: 0 })
+  for (const field of ['phase', 'phase_entered_at', 'passes', 'verdict_seq', 'artifacts'] as const) {
+    expect(task[field], field).toEqual(before[field])
+  }
+  expect(saved.history).toEqual(run.history)
+})
+
+test('nudge refuses a task it cannot help, saying why, and sends nothing', async () => {
+  const cases: Array<[string, Partial<Task>, Partial<NudgeDeps>, string]> = [
+    ['orchestrator row', { phase: 'merge' }, {}, 'which does not wait on its worker'],
+    ['no pane', { pane_id: null }, {}, 'has no agent pane'],
+    ['working', {}, { readPane: async () => limitedReading('working') }, "t1's agent is working; nothing to nudge"],
+    ['no sign of a limit', {}, {
+      readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}),
+    }, 'shows no usage-limit message, the supervisor holds nothing for it, and it has no uncommitted work on record'],
+    ['an unread pane', { uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } }, {
+      readPane: async () => null, holds: async () => ({}),
+    }, "t1's pane w7:p1 could not be read, so whether it is still working in the background is unknown; " +
+      'nothing was queued — run it again'],
+    ['background work', { uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } }, {
+      readPane: async () => ({ ...limitedReading(), line: null, background: ['1 shell', 'ui-dev subagent'] }),
+      holds: async () => ({}),
+    }, "t1's pane shows background work running (1 shell, ui-dev subagent); its phase waits for it"],
+  ]
+  for (const [why, over, depsOver, message] of cases) {
+    rmSync(join(dir, 'runs'), { recursive: true, force: true })
+    const run = runWithTasks([worker(over)])
+    run.phase = 'execute'
+    await saveRun(dir, run)
+    const { deps, released } = nudgeDeps(depsOver)
+    const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+    expect(result.ok, why).toBe(false)
+    expect(result.text, why).toContain(message)
+    expect(released, why).toEqual([])
+    expect((await listRuns(dir, 'personal'))[0]?.outbox ?? [], why).toEqual([])
+  }
+})
+
+test('nudge tells a worker that stopped with uncommitted work to commit, push and finish its phase', async () => {
+  const run = runWithTasks([worker({
+    phase: 'implement', uncommitted_work: { at: 5, count: 4, sample: ['src/a.ts', 'src/b.ts', 'src/c.ts'] },
+  })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps, released } = nudgeDeps({
+    readPane: async () => ({ ...limitedReading('done'), line: null, background: [] }), holds: async () => ({}),
+  })
+
+  const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(result.text).toBe('t1: told to carry on in w7:p1 (implement), with 4 uncommitted paths')
+  expect(released).toEqual([])
+  const saved = (await listRuns(dir, 'personal'))[0] as Run
+  expect(saved.outbox?.map((e) => [e.to, e.task_id, e.kind])).toEqual([['worker', 't1', 'carry-on']])
+  const text = saved.outbox?.[0]?.text ?? ''
+  expect(text).toContain('# Carry on — implement (t1, b)')
+  expect(text).toContain('4 uncommitted paths (src/a.ts, src/b.ts, src/c.ts, …)')
+  expect(text).not.toContain('usage limit')
+  expect(saved.tasks[0]?.stall).toMatchObject({ probes: 0, holds: 0 })
+
+  const again = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(again.text).toBe('t1: a resume is already queued for w7:p1')
+})
+
+test('uncommitted work recorded for an earlier phase entry is no reason to nudge', async () => {
+  const run = runWithTasks([worker({ uncommitted_work: { at: 1, count: 1, sample: ['src/a.ts'] } })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps({ readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}) })
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(false)
+})
+
+test('nudge does not queue a second resume, or one behind a queued phase prompt', async () => {
+  const run = runWithTasks([worker(), worker({ task_id: 't2', pane_id: 'w8:p1' })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps()
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(true)
+  const again = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(again.text).toBe('t1: a resume is already queued for w7:p1')
+})
+
+test('nudge --all resumes every idle worker and lists the ones it skipped', async () => {
+  const run = runWithTasks([
+    worker(),
+    worker({ task_id: 't2', pane_id: 'w8:p1' }),
+    worker({ task_id: 't3', phase: 'merge', pane_id: 'w9:p1' }),
+    worker({ task_id: 't4', phase: 'done', pane_id: null }),
+  ])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps, released } = nudgeDeps({ readPane: async (pane) => limitedReading(pane === 'w8:p1' ? 'working' : 'idle') })
+  const result = await cmdNudge(ctx(), { taskId: null, all: true, repoKey: 'k', runId: null }, deps)
+  expect(result.text.split('\n')).toEqual([
+    "t1: resume queued for w7:p1 (pr-review); the supervisor's usage-limit hold on it is released",
+    'skipped: t2 (working), t3 (merge)',
+  ])
+  expect(released).toEqual(['w7:p1'])
+})
+
+test('nudge needs exactly one of --task and --all', async () => {
+  const { deps } = nudgeDeps()
+  for (const input of [{ taskId: null, all: false }, { taskId: 't1', all: true }]) {
+    const result = await cmdNudge(ctx(), { ...input, repoKey: 'k', runId: null }, deps)
+    expect(result.ok).toBe(false)
+    expect(result.text).toContain('usage: hpipe nudge')
+  }
+})
+
+test('nudge resumes a worker the supervisor holds for a limit even when its screen no longer shows it', async () => {
+  const run = runWithTasks([worker()])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps({ readPane: async () => ({ ...limitedReading(), line: null }) })
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(true)
 })

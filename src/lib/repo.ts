@@ -1,7 +1,8 @@
-import { dirname } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
-async function gitOut(args: string[]): Promise<string> {
-  const proc = Bun.spawn(['git', ...args], { stdout: 'pipe', stderr: 'ignore' })
+async function gitOut(args: string[], cwd?: string): Promise<string> {
+  const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'ignore' })
   const out = (await new Response(proc.stdout).text()).trim()
   await proc.exited
   return out
@@ -14,12 +15,64 @@ async function gitOut(args: string[]): Promise<string> {
  * inside a submodule they are equal and `dirname(--git-common-dir)` would be
  * `<super>/.git/modules`, which is not a repository.
  */
-export async function repoContext(): Promise<{ repoKey: string; repoRoot: string } | null> {
-  const toplevel = await gitOut(['rev-parse', '--show-toplevel'])
+export async function repoContext(cwd?: string): Promise<{ repoKey: string; repoRoot: string } | null> {
+  const toplevel = await gitOut(['rev-parse', '--show-toplevel'], cwd)
   if (toplevel.length === 0) return null
 
-  const gitDir = await gitOut(['rev-parse', '--path-format=absolute', '--git-dir'])
-  const commonDir = await gitOut(['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const gitDir = await gitOut(['rev-parse', '--path-format=absolute', '--git-dir'], cwd)
+  const commonDir = await gitOut(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd)
   const root = commonDir.length > 0 && gitDir !== commonDir ? dirname(commonDir) : toplevel
   return { repoKey: root, repoRoot: root }
+}
+
+/**
+ * herdr runs a plugin action from the plugin's own root, which a GitHub install
+ * makes a git checkout of its own, so the action's cwd names the plugin's repo.
+ * The pane the human is in arrives in the context herdr hands every action. Its
+ * `worktree.repo_key` is the `.git` path, so the root is read rather than the key.
+ */
+export function focusedCwd(env: Record<string, string | undefined> = process.env): string | null {
+  const raw = env.HERDR_PLUGIN_CONTEXT_JSON
+  if (raw === undefined) return null
+  try {
+    const context = JSON.parse(raw) as { focused_pane_cwd?: unknown; worktree?: { repo_root?: unknown } }
+    const root = context.worktree?.repo_root ?? context.focused_pane_cwd
+    return typeof root === 'string' && root.length > 0 ? root : null
+  } catch {
+    return null
+  }
+}
+
+/** The repo of the pane an action was invoked from; never the plugin's own checkout. */
+export async function actionRepoContext(
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ repoKey: string; repoRoot: string } | null> {
+  const cwd = focusedCwd(env)
+  return cwd === null ? null : repoContext(cwd)
+}
+
+/**
+ * Lists one repo-relative path in the repo's shared `info/exclude`, so `git status`
+ * never shows it and `git add -A` never stages it, in every worktree of the repo.
+ * Idempotent. Returns why it could not, or null.
+ */
+export async function excludeFromGit(repoRoot: string, rel: string): Promise<string | null> {
+  let commonDir: string
+  try {
+    commonDir = await gitOut(['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  } catch {
+    commonDir = ''
+  }
+  if (commonDir.length === 0) return `${repoRoot} is not a git repository`
+  const exclude = join(commonDir, 'info', 'exclude')
+  const entry = `/${rel}`
+  try {
+    const current = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
+    if (current.split('\n').includes(entry)) return null
+    mkdirSync(dirname(exclude), { recursive: true })
+    appendFileSync(exclude, `${current.length === 0 || current.endsWith('\n') ? '' : '\n'}${entry}\n`)
+    return null
+  } catch (error) {
+    return `${exclude} could not be written: ${error instanceof Error ? error.message : String(error)}`
+  }
 }

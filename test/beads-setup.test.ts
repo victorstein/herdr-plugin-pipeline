@@ -52,9 +52,9 @@ test('an existing store is left alone, and a --prefix that disagrees with it is 
   await writeBeadsProject(dir, slug, { repo_root: repo, prefix: 'hp', created_at: 1 })
   const { deps, inits } = fakeDeps()
   expect(await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'web' }, deps)).toEqual({
-    ok: true, slug, prefix: 'hp', created: false,
-    notes: ['this repo\'s Beads store already uses prefix hp; --prefix web was ignored'],
+    ok: true, slug, prefix: 'hp', created: false, notes: [], ignoredPrefix: 'web',
   })
+  expect(await setupBeads({ stateDir: dir, repoKey: KEY, repoRoot: repo, prefix: 'HP-' }, deps)).not.toHaveProperty('ignoredPrefix')
   expect(inits).toEqual([])
 })
 
@@ -119,6 +119,15 @@ test('a failed bd init records nothing and passes bd\'s error through', async ()
   expect(result.ok).toBe(false)
   expect(!result.ok && result.error).toContain('Error: database is locked')
   expect(existsSync(join(beadsHome(dir, beadsSlug(KEY)), 'project.json'))).toBe(false)
+})
+
+test('an ignored --prefix leads the lines, naming the prefix in use', () => {
+  // smoke run 13 passed --prefix sm13 to a store on sm12 and missed the note among the rest. Measured on a live run.
+  expect(setupLines({ ok: true, slug: 's-123456', prefix: 'sm12', created: false, notes: [], ignoredPrefix: 'sm13' }, '/st'))
+    .toEqual([
+      "⚠ --prefix sm13 was ignored: this repo's Beads store already uses sm12, so this run's beads are sm12-<n>",
+      'beads: prefix sm12, store /st/beads/s-123456',
+    ])
 })
 
 test('setupLines says whether the store was created, then each note', () => {

@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
-  applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
+  applyStalls, bumpStall, ladderFor, probedRowPane, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
+import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { actionFor } from '../src/lib/status'
 import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
@@ -124,6 +125,26 @@ test('a task stranded in blocked-on-files is probed via the orchestrator', () =>
   const out = taskStallCandidates([run], NOW, 15, 3)
   expect(out).toHaveLength(1)
   expect(out[0]?.paneId).toBe(ORCHESTRATOR_PANE)
+})
+
+test('a task waiting on a holder that is still moving is not probed — #22', () => {
+  // berean-os: t2, t3 and t7 drew 17 probes in four hours while t4 and t6 were
+  // implementing, every one answered "nothing to act on". Measured on a live run.
+  for (const phase of ['implement', 'pr-review', 'ci', 'merge', 'escalated'] as const) {
+    const run = runWithTasks([
+      mkTask({ task_id: 't1', phase, files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+      mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+    ])
+    expect(taskStallCandidates([run], NOW, 15, 3).map((c) => c.task?.task_id), phase).not.toContain('t2')
+  }
+})
+
+test('a task waiting on a failed holder is probed, since only a human frees those files', () => {
+  const run = runWithTasks([
+    mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: LONG_AGO }),
+  ])
+  expect(taskStallCandidates([run], NOW, 15, 3).map((c) => c.task?.task_id)).toEqual(['t2'])
 })
 
 test('a task waiting in blocked-on-decision is probed via the orchestrator', () => {
@@ -265,6 +286,22 @@ test('a verdict row shares the path branch but not the short form', () => {
   expect(a.clause).toContain('/wt/docs/superpowers/reviews/')
 })
 
+test('a worker verdict written since its phase began is not called missing: the phase waits on its commit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stall-awaiting-'))
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'spec-review', checkout_path: dir })
+  run.tasks = [task]
+  const verdict = absoluteArtifactPath(run, task) as string
+  mkdirSync(dirname(verdict), { recursive: true })
+  writeFileSync(verdict, 'VERDICT: CLEAR\n')
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.short).toBe('its review verdict, committed')
+  expect(a.clause).not.toContain('Nothing')
+  expect(a.clause).toContain(`Your verdict is written at:\n\n    ${verdict}\n\nThis phase clears once you are idle ` +
+    'with it committed and pushed, and no subagent of yours is running.')
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('a run verdict row resolves against the repo root, not a worktree', () => {
   const run = runAt('branch-review', LONG_AGO)
   const a = stallAwaiting(run, null, 'hp')
@@ -354,15 +391,57 @@ test('an unrecognised signal falls back to naming the phase', () => {
   })
 })
 
-test('an escalating row is told its position and the bound', () => {
-  expect(ladderFor({ probes: 1, undelivered: 0, escalatable: true }, 3)).toBe(
-    'This is probe 2 of 3. After 3 unanswered probes this phase is escalated to the human ' +
-    'and stops moving on its own.')
+const FIFTEEN = 15 * 60_000
+
+test('an escalating row is told its position, its cadence, what answers it, and what holds the escalation', () => {
+  // The trial's orchestrator read "ignore this" and "after 3 unanswered probes" with nothing saying what
+  // an answer was, and busy-waited in a shell to stay `working`. Measured on a live run.
+  expect(ladderFor({ probes: 1, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3)).toBe(
+    'This is probe 2 of 3, sent every 15 minutes while this phase is open. A reply does not answer it; ' +
+    'only what this phase is waiting for does. After probe 3 the next check escalates this phase to the ' +
+    'human, and it stops moving on its own, unless your pane is busy then — mid-turn, or running a ' +
+    'subagent, shell or monitor that Claude Code lists under its prompt — which puts the escalation off ' +
+    '15 minutes at a time, up to 3 times.')
+})
+
+test('the cadence quoted is the one in force, not the default', () => {
+  expect(ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: 5 * 60_000 }, 3))
+    .toContain('sent every 5 minutes')
+})
+
+test('a probe says what its pane runs, and waits only for a subagent, and only so long', () => {
+  const ladder = (running: string[], subagents: string[]) =>
+    ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3, { running, subagents })
+  expect(ladder(['general-purpose subagent'], ['general-purpose subagent'])).toEndWith(' Your pane shows ' +
+    'background work running now (general-purpose subagent). Once what this phase waits for is there, it waits up ' +
+    'to 10 minutes for general-purpose subagent to finish, and no longer.')
+  // An orchestrator's background shell polling `hpipe status` was told the phase waited for it. Measured on
+  // live runs.
+  expect(ladder(['1 shell'], [])).toEndWith(' Your pane shows background work running now (1 shell). This phase ' +
+    'does not wait for it.')
+  expect(ladder(['1 shell'], [])).not.toContain('stop it')
+})
+
+test('a probe describes background work only of the pane whose work holds its row', () => {
+  // A worker owed its brief is probed in the orchestrator's pane, but its row waits on the worker's pane.
+  const owed = runAt('execute', LONG_AGO)
+  owed.tasks = [mkTask({ phase: 'research', phase_entered_at: LONG_AGO, awaiting_brief: true })]
+  const [toOrchestrator] = taskStallCandidates([owed], NOW, 45, 3, 15)
+  expect(toOrchestrator?.paneId).toBe(ORCHESTRATOR_PANE)
+  expect(probedRowPane(toOrchestrator!)).toBeNull()
+
+  const working = runAt('execute', LONG_AGO)
+  working.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+  expect(probedRowPane(taskStallCandidates([working], NOW, 45, 3)[0]!)).toBe('w7:p1')
+  expect(probedRowPane(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, 3)[0]!)).toBe(ORCHESTRATOR_PANE)
 })
 
 test('an excluded row is never promised a bound it does not have', () => {
-  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).not.toContain('of 3')
-  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).toContain('standing nudge')
+  const ladder = ladderFor({ probes: 8, undelivered: 0, escalatable: false, thresholdMs: FIFTEEN }, 3,
+    { running: ['1 shell'], subagents: [] })
+  expect(ladder).not.toContain('of 3')
+  expect(ladder).toContain('standing nudge, sent every 15 minutes')
+  expect(ladder).not.toContain('background')
 })
 
 test('a run with no orchestrator pane produces no candidate at all', () => {
@@ -500,9 +579,51 @@ const mkDeps = (over: Partial<StallDeps> = {}): TestDeps => {
     queueEscalation: (c) => { sent.push(`escalate:${c.task?.task_id ?? 'run'}`) },
     agentStatus: async () => 'idle',
     persist: async () => {},
+    limited: async () => false,
   }
   return { ...base, ...over, sent }
 }
+
+test('a candidate whose pane Claude\'s usage limit stopped is neither probed nor escalated, and nothing is written', async () => {
+  const atTheTop = () => {
+    const run = runAt('execute', LONG_AGO)
+    const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO, pane_id: 'w7:p1' })
+    run.tasks = [task]
+    task.stall = { at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+    return { run, task }
+  }
+  const { run, task } = atTheTop()
+  const before = structuredClone(task.stall)
+  let persisted = 0
+  const asked: string[] = []
+  const deps = mkDeps({
+    persist: async () => { persisted += 1 },
+    limited: async (pane) => { asked.push(pane); return pane === 'w7:p1' },
+  })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(task.phase).toBe('implement')
+  expect(task.stall).toEqual(before)
+  expect(persisted).toBe(0)
+  expect(asked).toEqual(['w7:p1'])
+
+  const probing = runWithTask({ phase: 'implement', phase_entered_at: 0 })
+  const probeDeps = mkDeps({ now: () => 45 * 60_000, limited: async () => true })
+  await applyStalls(taskStallCandidates([probing], 45 * 60_000, 45, 3), probeDeps)
+  expect(probeDeps.sent).toEqual([])
+  expect(probing.tasks[0]?.stall).toBeUndefined()
+})
+
+test('a task waiting on a limited orchestrator is skipped, and the pane is asked about once', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'merge', phase_entered_at: LONG_AGO, pane_id: 'w7:p1', pr: 7 })
+  run.tasks = [task]
+  const asked: string[] = []
+  const deps = mkDeps({ limited: async (pane) => { asked.push(pane); return pane === ORCHESTRATOR_PANE } })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(asked).toEqual([ORCHESTRATOR_PANE])
+})
 
 test('a probe deferred by the supervisor\'s own send budget records nothing — it is no sign of the pane', async () => {
   const run = runWithTask({ phase: 'implement', phase_entered_at: 0 })
@@ -602,9 +723,9 @@ test('a stall state written before #32 reads as zero undelivered', async () => {
 })
 
 test('the ladder sentence owns up to rungs that never reached the pane — #32', () => {
-  expect(ladderFor({ probes: 2, undelivered: 2, escalatable: true }, 3))
+  expect(ladderFor({ probes: 2, undelivered: 2, escalatable: true, thresholdMs: FIFTEEN }, 3))
     .toContain('2 earlier probes could not be delivered')
-  expect(ladderFor({ probes: 2, undelivered: 0, escalatable: true }, 3))
+  expect(ladderFor({ probes: 2, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3))
     .not.toContain('could not be delivered')
 })
 
@@ -674,6 +795,38 @@ test('only `working` defers — blocked and unknown escalate', async () => {
     await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
     expect(deps.sent, `${status} must escalate`).toEqual(['escalate:t1'])
   }
+})
+
+test('an actor idle at its prompt with background work running is held like a working one', async () => {
+  // The trial's orchestrator survived its branch review's ladder only by busy-waiting in a shell for the
+  // reviewer subagent it was told to dispatch. Measured on a live run.
+  const asked: string[] = []
+  const run = runAt('branch-review', LONG_AGO)
+  run.stall = { at: run.phase_entered_at, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+  const deps = mkDeps({
+    agentStatus: async () => 'done',
+    backgroundWork: async (pane) => { asked.push(pane); return ['general-purpose subagent'] },
+  })
+  await applyStalls(stallCandidates([run], NOW, 15, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(asked).toEqual([ORCHESTRATOR_PANE])
+  expect(stallStateFor(run, run)).toMatchObject({ probes: 3, holds: 1, last_probe_at: NOW })
+
+  const quiet = runAt('branch-review', LONG_AGO)
+  quiet.stall = { at: quiet.phase_entered_at, run_at: quiet.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+  const quietDeps = mkDeps({ agentStatus: async () => 'done', backgroundWork: async () => [] })
+  await applyStalls(stallCandidates([quiet], NOW, 15, 3), quietDeps)
+  expect(quietDeps.sent).toEqual(['escalate:run'])
+})
+
+test('background work defers within the same cap as working', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = { at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 3 }
+  const deps = mkDeps({ agentStatus: async () => 'done', backgroundWork: async () => ['1 shell'] })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual(['escalate:t1'])
 })
 
 test('a paneless worker escalates without consulting anyone (A7, through applyStalls)', async () => {

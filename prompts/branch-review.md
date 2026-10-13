@@ -2,18 +2,16 @@
 
 {{task_outcomes}}
 
-Dispatch a fresh subagent to review the **whole** body of work, not task by task.
+Dispatch a fresh subagent with `effort: {{review_effort}}` to review the **whole** body of work, not
+task by task. If the dispatch is rejected for its effort, dispatch without `effort:`.
 
-There is no run-level spec to review against: each task carried its own, on its own branch. Start
-from this run's merged PRs — `{{hpipe}} show --task <id>` prints each task's `pr:` — and read each
-one's spec and plan under `docs/superpowers/specs/` and `docs/superpowers/plans/`. Those are the
-contracts the work claimed to fulfil.
+{{scope}}
 
 Before you write the verdict, read what the workers found out of scope:
 
     {{hpipe}} discoveries
 
-Each line is a bug or a follow-up a worker recorded instead of fixing it in its PR. File them as
+Each line is a bug or a follow-up a worker recorded instead of fixing it in its {{change_noun}}. File them as
 beads with `{{hpipe}} discoveries --file`, which files every unfiled one, each linked to the bead it
 came from. Filing goes in order and stops at the first failure, keeping what it already filed; once
 the cause is fixed, run it again and it carries on without filing any twice. Name in the review any
@@ -21,7 +19,7 @@ the human may want to close after filing.
 
 Check specifically what per-task review cannot see: seams between tasks, duplicated abstractions
 introduced independently by two workers, contradictions between what the first task assumed and what
-the last one built, and requirements that every individual PR passed but no PR actually implemented.
+the last one built, and requirements that every individual {{change_noun}} passed but no {{change_noun}} actually implemented.
 
 Open the review with the line `Tiers: {{task_tiers}}`.
 
@@ -50,5 +48,15 @@ judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed
 trailer at the **start of the line** — not indented, and not inside a code fence. An indented or
 fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 
-A BLOCKER sends this phase round again and you patch the branch directly — there is no task left to
-send it back to.
+On a `CLEAR`, fix the MAJORs and MINORs it lists yourself once the reviewer has finished, before you
+end that turn, the way the end of this prompt has you patch a BLOCKER: nothing later asks for them.
+
+If the reviewer runs in the background, end your turn and carry on when its completion notice arrives;
+never poll for the review file or sleep while it runs. The supervisor reads the review from disk once
+you are idle and no subagent you started is still running, waiting for one at most 10 minutes after the
+review appears. Never wait for this phase to end with a background shell or monitor polling
+`{{hpipe}} status`: end your turn, and the next prompt arrives on its own. Leave the review uncommitted: it
+is the run's record, not part of the work. The plugin lists it in the repo's git `info/exclude`, so
+`git status` does not show it and `git add -A` does not pick it up; never add it by name.
+
+{{blocker_note}}

@@ -11,14 +11,14 @@ import {
 } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
-  allOrchestratorPanes, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
-  saveOrReapply, saveRun,
+  allOrchestratorPanes, CURRENT_SCHEMAS, isCurrentSchemaRun, isUnlandedSave, listRuns, loadRun, type RunEffect,
+  saveIfChanged, saveOrReapply, saveRun,
 } from '../lib/ledger'
 import { rebindOrchestrator } from '../lib/orchestrator'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { sessionKey } from '../lib/session'
-import { crashLogPath, readWorkspaceId, reapSupervisorSiblings } from '../startup'
+import { crashLogPath, readWorkspaceId, reapSupervisorSiblings, SUPERVISOR_LABEL } from '../startup'
 import { type LockContention, SYNC_BD_TIMEOUT_MS, SYNC_BUDGET_MS, syncBeads } from './beads-sync'
 import { syncBoards } from './boards'
 import {
@@ -29,20 +29,24 @@ import {
   boundedProbeSend, CatchUps, DeliveryGate, flushDeliveries, makeCourier, makeSubmissionCheck,
   outboxPending, queuePending, readyPanes,
 } from './courier'
-import { HEALTH_REFRESH_MS, writeDeliveryHealth } from '../lib/delivery-health'
+import { HEALTH_REFRESH_MS, readDeliveryHealth, writeDeliveryHealth } from '../lib/delivery-health'
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
-  applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
+  applyStalls, ladderFor, probedRowPane, stallAwaiting, type StallCandidate, type StallDeps, stallCandidates,
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
-  applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
-  saveEventedRuns, tickEvents, WorkspaceAbsence,
+  applyEvents, BriefHolds, catchUpDigest, describeWake, FilesPassHolds, noteBackgroundWork, PaneAbsence, parkedFooter,
+  pickOneAdvance, saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
+import { fetchBatches } from './batch-fetch'
 import { ciTransitions } from './ci'
 import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
+import { liftLimits } from './usage-lift'
+import { checkLimits, limitedNow, UsageLimits } from './usage-limits'
+import { observedScreens, PaneBackground, SubagentHolds } from './pane-background'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
@@ -145,6 +149,15 @@ export async function claimSupervisor(
   return true
 }
 
+export function supervisorSelf(input: {
+  pid: number; panePid: number; startedAtMs: number; session: string; socketPath: string; paneId: string
+}): SupervisorPid {
+  return {
+    pid: input.pid, pane_pid: input.panePid, started_at_ms: input.startedAtMs, session: input.session,
+    socket_path: input.socketPath, pane_id: input.paneId, schemas: [...CURRENT_SCHEMAS],
+  }
+}
+
 async function main(): Promise<void> {
   const stateDir = process.env.HERDR_PLUGIN_STATE_DIR
   const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR
@@ -158,15 +171,16 @@ async function main(): Promise<void> {
   const beadLockContention = new Map<string, LockContention>()
   const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
-  const claimed = await claimSupervisor(stateDir, herdr, {
+  const claimed = await claimSupervisor(stateDir, herdr, supervisorSelf({
     pid: process.pid,
-    pane_pid: process.ppid,
-    started_at_ms: (await processStartedAtMs(process.pid)) ?? Date.now(),
+    panePid: process.ppid,
+    startedAtMs: (await processStartedAtMs(process.pid)) ?? Date.now(),
     session,
-    socket_path: process.env.HERDR_SOCKET_PATH ?? '',
-    pane_id: process.env.HERDR_PANE_ID ?? '',
-  })
+    socketPath: process.env.HERDR_SOCKET_PATH ?? '',
+    paneId: process.env.HERDR_PANE_ID ?? '',
+  }))
   if (!claimed) process.exit(EXIT_DUPLICATE)
+  if (process.env.HERDR_PANE_ID) await herdr.renameTabOf(process.env.HERDR_PANE_ID, SUPERVISOR_LABEL)
 
   const config = await loadConfig(configDir)
 
@@ -197,7 +211,9 @@ async function main(): Promise<void> {
     sendsPerTick: config.DELIVERY_SENDS_PER_TICK,
     backoffMaxMs: config.DELIVERY_BACKOFF_MAX_SECONDS * 1000,
     tickBudgetMs: config.DELIVERY_TICK_BUDGET_MS,
-  })
+  }, undefined, undefined, new UsageLimits(
+    undefined, undefined, (await readDeliveryHealth(stateDir, session))?.limits,
+  ))
   // Read at the moment of a clear, not snapshotted: a rebind mid-tick moves a run
   // onto a new orchestrator pane, and that pane is one a human types in at once.
   let claimedPanes = new Set<string>()
@@ -210,9 +226,14 @@ async function main(): Promise<void> {
   const sendProbe = boundedProbeSend(send)
   const catchUps = new CatchUps()
   const briefHolds = new BriefHolds()
+  const filesPass = new FilesPassHolds()
   let healthRevision = -1
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
+  const background = new PaneBackground()
+  const screens = observedScreens(herdr, background)
+  const backgroundWork = async (pane: string) => (await background.work(pane, herdr)).running
+  const holdForSubagents = new SubagentHolds(async (pane) => (await background.work(pane, herdr)).subagents).check
   const paneAbsence = new PaneAbsence()
   const workspaceAbsence = new WorkspaceAbsence()
   let lastCiPollMs = 0
@@ -231,7 +252,14 @@ async function main(): Promise<void> {
       const listed = await herdr.paneList()
       const livePanes = new Set(listed.map((p) => p.pane_id))
       gate.beginTick(livePanes)
+      background.forgetGone(livePanes)
+      background.noteTurns(drained)
       for (const pane of readyPanes(drained)) gate.wake(pane)
+      // Before the wake lines and delivery, so both already see a pane the limit stopped.
+      await checkLimits(gate.limits, screens, drained, new Set([
+        ...panes,
+        ...allRuns.flatMap((run) => [run.orchestrator_pane, ...run.tasks.map((task) => task.pane_id)]),
+      ].filter((pane): pane is string => pane !== null)))
       const events = tickEvents(tickRuns, drained, {
         panes: { absence: paneAbsence, listed },
         workspaces: { absence: workspaceAbsence, listed: await herdr.workspaceList() },
@@ -254,6 +282,7 @@ async function main(): Promise<void> {
         : { runs: tickRuns, wake: applied.wake }
       knownRuns = [...allRuns, ...runs]
       const wake = briefHolds.sift(appliedWake, runs, Date.now())
+      noteBackgroundWork(wake, (pane) => background.lastSeen(pane).running)
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -269,7 +298,8 @@ async function main(): Promise<void> {
 
       if (Date.now() - lastCiPollMs >= config.CI_POLL_SECONDS * 1000) {
         lastCiPollMs = Date.now()
-        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).prChecks(pr))
+        await ciTransitions(runs, (pr, repoRoot) => ghFor(repoRoot).headCi(pr))
+        await fetchBatches(runs)
       }
 
       const advancing = pickOneAdvance(runs)
@@ -319,12 +349,16 @@ async function main(): Promise<void> {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
           const runGh = ghFor(run.repo_root)
-          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle)
+          const { nextPrompt, phaseNote } = await evaluateRun(
+            run, runGh, config, liveIdle, { stateDir }, holdForSubagents,
+          )
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
             liveIdle,
+            backgroundWork,
+            holdForSubagents,
             hasLiveAgent: liveAgentIn(listed),
             maxPasses: config.MAX_PASSES,
             fileSettleMs: config.FILE_SETTLE_MS,
@@ -337,8 +371,9 @@ async function main(): Promise<void> {
             ambiguityLog,
             effects,
             uncommittedPaths,
-            freshDispatchBase: async (repoRoot, dependencyMerges) => {
-              const base = await freshDispatchBase(repoRoot, dependencyMerges)
+            syncYieldMs: config.STALL_MINUTES * 60_000,
+            freshDispatchBase: async (repoRoot, dependencyMerges, branch) => {
+              const base = await freshDispatchBase(repoRoot, dependencyMerges, branch)
               if (base.fetchError !== null) {
                 console.error(`[pipeline] run ${run.run_id}: ${baseLine(base)}`)
               }
@@ -361,12 +396,11 @@ async function main(): Promise<void> {
 
           const enteredRunPhase = run.phase === runPhaseBefore
             ? ''
-            : await promptForRunPhase(run, config)
+            : await promptForRunPhase(run, config, { stateDir })
 
           await refreshBadges(run, herdr, pluginId)
           const covered = briefHolds.heldTasks(run)
-          const lines = wake
-            .filter((w) => w.run.run_id === run.run_id)
+          const lines = filesPass.sift(run, wake, tickNow)
             .map((w) => {
               if (w.task) covered.add(w.task.task_id)
               return `- ${describeWake(w, tickNow, hpipe, gate.holds())}`
@@ -376,6 +410,11 @@ async function main(): Promise<void> {
           // on the same pane still produces a digest — which is the tick a task
           // advances off the CI poll rather than a pane event. `deliveriesFor`
           // renders it once.
+          // A task whose own prompt rides in this digest is covered by it: the merge
+          // prompt was followed by "also waiting on you" naming the same merge.
+          for (const prompt of taskPrompts) {
+            if (prompt.paneId === run.orchestrator_pane) covered.add(prompt.taskId)
+          }
           const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds())
           footers.set(run, footer)
 
@@ -395,7 +434,8 @@ async function main(): Promise<void> {
           // so a prompt about a transition the ledger then refused is refused with
           // it, and one that is saved is sent until it lands.
           const eventsOnly = queuePending(run, runPending, tickNow)
-          if (await saveOrReapply(stateDir, run, effects) === 'saved') {
+          const saved = await saveIfChanged(stateDir, run, effects)
+          if (saved === 'saved' || saved === 'unchanged') {
             pending.push(...eventsOnly)
             deliverFrom.add(run)
           } else {
@@ -407,8 +447,8 @@ async function main(): Promise<void> {
         } catch (error) {
           if (isUnlandedSave(error)) {
             unsaved.add(run)
-            console.error(`[pipeline] run ${run.run_id}: this tick not saved (${error.message}); ` +
-              'its prompts are dropped and it is re-read next tick')
+            console.error(`[pipeline] run ${run.run_id}: a CLI command wrote this run mid-tick ` +
+              `(${error.message}); the tick is redone from the fresh copy next tick, prompts included`)
             continue
           }
           console.error(`[pipeline] run ${run.run_id} failed this tick:`, error)
@@ -476,10 +516,15 @@ async function main(): Promise<void> {
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
       const probeMax = config.STALL_PROBE_MAX
+      const probedWork = async (c: StallCandidate) => {
+        const pane = c.escalatable ? probedRowPane(c) : null
+        return pane === null ? undefined : background.work(pane, herdr)
+      }
       const stallDeps: StallDeps = {
         probeMax,
         now: () => Date.now(),
         agentStatus: (paneId) => herdr.agentStatus(paneId),
+        backgroundWork,
         persist: (run, effect) => saveOrReapply(stateDir, run, effect ? [effect] : []),
         probe: async (c) => {
           const awaiting = stallAwaiting(c.run, c.task, hpipe)
@@ -490,10 +535,11 @@ async function main(): Promise<void> {
               : c.run.phase,
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
-            ladder: ladderFor(c, probeMax),
+            hpipe,
+            ladder: ladderFor(c, probeMax, await probedWork(c)),
           })
           const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
-          return { ...sent, deferred: sent.held === 'budget' }
+          return { ...sent, deferred: sent.held === 'budget' || sent.held === 'usage_limit' }
         },
         escalationText: (c, from) => renderPrompt(pluginRoot, 'stall-escalate', {
           run_id: c.run.run_id,
@@ -509,7 +555,26 @@ async function main(): Promise<void> {
         queueEscalation: (c, text) => {
           enqueue(c.run, { to: 'orchestrator', taskId: c.task?.task_id ?? null, text }, Date.now())
         },
+        limited: limitedNow(gate.limits, screens),
       }
+
+      // Before the stall step, and in the same tick: a pane the step lifts is re-armed
+      // and saved before any ladder is evaluated, so none sees it neither limited nor
+      // re-armed.
+      const lifted = await liftLimits(gate.limits, {
+        io: herdr,
+        listRuns: async () => (await listRuns(stateDir, session))
+          .filter(isCurrentSchemaRun)
+          .filter((r) => config.REPOS_ALLOW.length === 0 || config.REPOS_ALLOW.includes(r.repo_key)),
+        save: (run, effect) => saveOrReapply(stateDir, run, [effect]),
+        renderResume: (task) => renderPrompt(pluginRoot, 'usage-resume', {
+          phase: task.phase, task_id: task.task_id, branch: task.branch,
+        }),
+        note: () => Bun.file(join(pluginRoot, 'prompts', 'usage-lifted.md')).text(),
+        hpipe,
+        now: Date.now,
+      })
+      for (const run of runs) if (lifted.has(run.run_id)) unsaved.add(run)
 
       const savedRuns = runs.filter((run) => !unsaved.has(run))
       await applyStalls(
@@ -525,7 +590,7 @@ async function main(): Promise<void> {
       if (gate.revision !== healthRevision || Date.now() - healthWrittenAt >= HEALTH_REFRESH_MS) {
         healthWrittenAt = Date.now()
         await writeDeliveryHealth(stateDir, session, {
-          pid: process.pid, written_at: healthWrittenAt, panes: gate.holds(),
+          pid: process.pid, written_at: healthWrittenAt, panes: gate.holds(), limits: gate.limits.snapshot(),
         })
         healthRevision = gate.revision
       }

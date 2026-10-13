@@ -10,39 +10,61 @@ import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
 import { type SetupInput, type SetupResult, setupBeads, setupLines } from './lib/beads-setup'
+import { checkoutSteps, checksDir, defaultBatchBranch, mergeBatchCommand, rulesetPattern, sha8 } from './lib/batch'
 import { bootstrapLine, repoBootstrap } from './lib/bootstrap'
+import { runChangeVars } from './lib/change-prompt'
+import { CHECK_REL, checkFailure, type CheckRun, checkLine, repoCheck, runCheck } from './lib/check'
 import { bvTriage } from './lib/bv'
-import { observePanes } from './lib/delivery-health'
+import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
-import { baseLine, dependencyMerges, type DispatchBase, freshDispatchBase } from './lib/dispatch-base'
-import { detectCycle, gateStatus } from './lib/gating'
+import {
+  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, fetchFromOrigin,
+  freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
+} from './lib/dispatch-base'
+import { Gh } from './lib/gh'
+import { detectCycle, filesOverlap, gateStatus } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
+  BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
   runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  wasAborted, writeOrchestrator,
+  wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
-import { enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
+import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
-import { enqueue } from './lib/outbox'
-import { isTier, RUN_ROWS, TASK_ROWS, TIERS, runRow, taskRow, tierOf } from './lib/phases'
-import { supervisorState } from './lib/pidfile'
-import { drain } from './lib/queue'
+import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
+import {
+  isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
+  taskRow, tierOf,
+} from './lib/phases'
+import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
+import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
-import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { currentUncommittedWork, formatStatus, formatTaskDetail, resumeCommand, uncommittedSummary } from './lib/status'
+import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
-import { bindWorkerPane, dispatchSequence, dispatchWorkerCommand, startWorkerCommand } from './lib/unstarted'
+import {
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, shellQuoted, startWorkerCommand,
+  unbriefedWorker,
+} from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import { renderRunPhasePrompt } from './supervisor/deliver'
+import { cleanupLines, renderRunPhasePrompt, reserveRunReview, uncommittedPaths } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
-import type { BeadBrief, Run, RunPhase, Task, TaskPhase } from './lib/types'
+import { checkReleaseTitle, releaseSections } from './lib/release-title'
+import { headOf, isAncestor, nothingToLand, resolveCommit, syncWalk, type SyncWalk } from './lib/sync-walk'
+import type {
+  Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase, UncommittedWork,
+} from './lib/types'
+import { isAgentReady } from './lib/machine'
+import { type LimitReading, readingFrom, readLimit, resetText } from './supervisor/usage-limits'
+import { backgroundWorkOn } from './lib/background-work'
+import { SCREEN_LINES } from './lib/screen'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -192,16 +214,108 @@ export interface StartBeads {
 
 const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
 
+/**
+ * What `start --single-pr` asks outside git: whether the supervisor can drive a
+ * batch, whether GitHub can squash, and whether a ruleset already guards the branch.
+ */
+export interface StartBatch {
+  supervisor: () => Promise<SupervisorState>
+  squashMergeAllowed: (repoRoot: string) => Promise<{ allowed: boolean } | { error: string }>
+  rulesetProtects: (repoRoot: string, branch: string) => Promise<boolean>
+}
+
+const realStartBatch = (ctx: Ctx): StartBatch => ({
+  supervisor: () => supervisorState(ctx.stateDir, ctx.session),
+  squashMergeAllowed: (repoRoot) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).squashMergeAllowed(),
+  rulesetProtects: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).rulesetProtects(branch),
+})
+
+interface BatchPlan { branch: string; into: string; commit: string; adopted: boolean }
+
+/**
+ * Every check `start --single-pr` makes before anything is written: each only
+ * reads, so a refusal leaves no Beads store, no branch and no run behind.
+ */
+async function planBatch(
+  ctx: Ctx, run: Run, requested: string | null, deps: StartBatch,
+): Promise<{ ok: true; plan: BatchPlan } | { ok: false; error: string }> {
+  const refuse = (error: string) => ({ ok: false as const, error: `${error}; nothing was started` })
+
+  const supervisor = await deps.supervisor()
+  if (supervisor.state === 'live' && !drivenSchemas(supervisor.info).includes(BATCH_SCHEMA_VERSION)) {
+    return refuse(`the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates single-PR runs ` +
+      'and would never advance this one: close its `Pipeline supervisor` pane and run the plugin\'s `supervisor` ' +
+      'action, then start again')
+  }
+
+  const fetched = await fetchDefaultBranch(run.repo_root)
+  if (fetched.fetchError !== null || fetched.commit === null) {
+    return refuse(`could not fetch the default branch from origin (${fetched.fetchError ?? 'no commit resolved'}), ` +
+      'and a stale base would put work already on it into the batch PR')
+  }
+
+  const branch = requested ?? defaultBatchBranch(run.run_id, run.repo_root)
+  if (branch === fetched.branch) {
+    return refuse(`${branch} is the default branch, which the batch ships into; name a branch of its own`)
+  }
+  const badName = await branchNameRefusal(run.repo_root, branch)
+  if (badName !== null) return refuse(badName)
+
+  const squash = await deps.squashMergeAllowed(run.repo_root)
+  if ('error' in squash) return refuse(`could not ask GitHub whether this repo allows squash merges: ${squash.error}`)
+  if (!squash.allowed) {
+    return refuse('this repo does not allow squash merges, and the batch PR must be squash-merged for its ' +
+      "release notes to apply: allow them in the repo's settings, or start without --single-pr")
+  }
+
+  const onOrigin = await remoteBranchHead(run.repo_root, branch)
+  if (!onOrigin.ok) return refuse(`could not ask origin about ${branch}: ${onOrigin.reason}`)
+  if (onOrigin.sha !== null && onOrigin.sha !== fetched.commit) {
+    return refuse(`${branch} already exists on origin at ${sha8(onOrigin.sha)}, not at ${fetched.branch}'s ` +
+      `${sha8(fetched.commit)}: name another with --batch-branch, or delete it if it is a leftover`)
+  }
+  return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
+}
+
+function batchLines(plan: BatchPlan, repoRoot: string, protectedAlready: boolean): string[] {
+  const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
+  return [
+    `batch: ${plan.branch} at ${sha8(plan.commit)} (origin/${plan.into} as just fetched${adopted}) — ` +
+      `this run ships as one PR into ${plan.into}`,
+    checkLine(repoCheck(repoRoot)),
+    protectedAlready
+      ? `ruleset: ${plan.branch} is already protected from force-pushes and deletion`
+      : `ruleset: protect ${rulesetPattern(plan.branch)} from force-pushes and deletion (GitHub → Settings → Rules → ` +
+        'Rulesets): git refuses only a landing that is not a fast-forward, and a --force push gets through without one',
+  ]
+}
+
 export async function cmdStart(ctx: Ctx, input: {
   title: string; repoKey: string; repoRoot: string
   socketPath: string; paneId: string; workspaceId: string
-  prefix: string | null
-}, beads: StartBeads = REAL_START_BEADS): Promise<CmdResult> {
+  prefix: string | null; singlePr: boolean; batchBranch: string | null
+}, beads: StartBeads = REAL_START_BEADS, batch: StartBatch = realStartBatch(ctx)): Promise<CmdResult> {
+  if (input.batchBranch !== null && !input.singlePr) {
+    return fail('--batch-branch only goes with --single-pr: a per-task run has no batch branch')
+  }
   const existing = await runForRepo(ctx.stateDir, ctx.session, input.repoKey)
   if (existing.kind !== 'free') {
     const blocker = existing.kind === 'ambiguous' ? existing.runs[0] as Run : existing.run
     return fail(`a run is already active for this repo: ${blocker.run_id} (phase ${blocker.phase}). ` +
       `Finish it, or run: ${hpipeCommand(ctx.pluginRoot)} abort ${blocker.run_id}`)
+  }
+
+  const run = newRun({
+    session: ctx.session, socketPath: input.socketPath,
+    repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
+  })
+  let plan: BatchPlan | null = null
+  let protectedAlready = false
+  if (input.singlePr) {
+    const planned = await planBatch(ctx, run, input.batchBranch, batch)
+    if (!planned.ok) return fail(planned.error)
+    plan = planned.plan
+    protectedAlready = await batch.rulesetProtects(input.repoRoot, plan.branch)
   }
 
   const tools = await beads.tools()
@@ -213,10 +327,19 @@ export async function cmdStart(ctx: Ctx, input: {
   if (!setup.ok) return fail(setup.error)
   const bvBroken = bvProblem(tools.bv)
 
-  const run = newRun({
-    session: ctx.session, socketPath: input.socketPath,
-    repoKey: input.repoKey, repoRoot: input.repoRoot, title: input.title,
-  })
+  // After the Beads setup, so a Beads failure leaves no branch behind.
+  if (plan !== null && !plan.adopted) {
+    const refused = await pushToOrigin(input.repoRoot, plan.commit, plan.branch)
+    if (refused !== null) return fail(`could not push ${plan.branch} to origin: ${refused}; nothing was started`)
+  }
+  if (plan !== null) {
+    withBatch(run, {
+      branch: plan.branch, into: plan.into, base_commit: plan.commit,
+      checkout: join(resolve(ctx.stateDir), 'checkouts', run.run_id),
+      pr: null, head_sha_at_entry: null, ci: null, merged_at_ms: null, merge_commit: null,
+      ...(protectedAlready ? { ruleset_protected: true } : {}),
+    })
+  }
   run.orchestrator_pane = input.paneId
   await saveRun(ctx.stateDir, run)
   await writeOrchestrator(ctx.stateDir, ctx.session, input.repoKey, {
@@ -225,22 +348,68 @@ export async function cmdStart(ctx: Ctx, input: {
   })
 
   const intake = await renderPrompt(ctx.pluginRoot, 'intake', {
+    ...runChangeVars(run, hpipeCommand(ctx.pluginRoot)),
     run_id: run.run_id, title: run.title,
   })
   const preface = [
     ...setupLines(setup, ctx.stateDir),
     ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
+    ...(plan === null ? [] : batchLines(plan, input.repoRoot, protectedAlready)),
   ]
   return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }
 
 const REGISTRABLE: readonly RunPhase[] = ['intake', 'dispatch', 'execute']
+/**
+ * A single-PR run is also registrable here: a red final CI too big to patch, or a
+ * branch-review BLOCKER, becomes a fix task, and registering it moves the run back
+ * to `execute`. A run rewind there would not do: intake stays closed, and the run
+ * is back in `branch-review` on the next tick.
+ */
+const SHIPPING: readonly RunPhase[] = ['branch-review', 'ship', 'ship-ci', 'ship-merge']
 const PHASES_BEFORE_A_PR: ReadonlySet<string> = new Set<TaskPhase>([
   'queued', 'research', 'spec', 'spec-review', 'plan', 'plan-review', 'blocked-on-files', 'implement',
 ])
 const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
-  ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'merge',
+  ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'land-queue', 'sync', 'merge',
 ])
+
+/** Whether the batch PR has merged: null when GitHub could not say. */
+export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | null>
+
+const ghBatchShipped: BatchShipped = async (repoRoot, pr) => {
+  const view = await new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prView(pr)
+  return view === null ? null : view.merged
+}
+
+/**
+ * One GitHub question per command. A stale save re-runs the whole attempt, and a
+ * gh call inside it outlasts a supervisor tick, so every attempt would lose to the
+ * supervisor's next save; asked once, before the retried save, it costs none of them.
+ */
+function askedOnce(shipped: BatchShipped): BatchShipped {
+  const answers = new Map<string, Promise<boolean | null>>()
+  return (repoRoot, pr) => {
+    const key = `${repoRoot}\0${pr}`
+    let answer = answers.get(key)
+    if (answer === undefined) {
+      answer = shipped(repoRoot, pr)
+      answers.set(key, answer)
+    }
+    return answer
+  }
+}
+
+/** Why nothing more can join this single-PR run, or null. Once its PR merged, a fix lands on a branch already shipped. */
+async function shippedRefusal(run: Run, shipped: BatchShipped): Promise<string | null> {
+  const batch = run.batch
+  if (batch === undefined) return null
+  if (batch.merged_at_ms !== null) return `the batch already shipped as PR #${batch.pr ?? 'unknown'}`
+  if (batch.pr === null) return null
+  const merged = await shipped(run.repo_root, batch.pr)
+  if (merged === null) return `could not ask GitHub whether PR #${batch.pr} has merged; run it again`
+  return merged ? `the batch already shipped as PR #${batch.pr}` : null
+}
 
 /** The store for this repo, or why the CLI cannot use one. */
 async function cliBd(stateDir: string, repoKey: string): Promise<Bd | BdFailure> {
@@ -279,9 +448,12 @@ interface RegistrationAttempt {
   showBeadOnce: (repoKey: string, id: string) => Promise<BeadDetail | BdFailure>
   landed: (taskId: string) => void
   dispatchBase: DispatchBaseFor
+  shipped: BatchShipped
 }
 
-type DispatchBaseFor = (repoRoot: string, dependencyMerges: string[] | null) => Promise<DispatchBase>
+type DispatchBaseFor = (
+  repoRoot: string, dependencyMerges: string[] | null, branch: string | null,
+) => Promise<DispatchBase>
 
 interface TaskInput {
   branch: string; bead?: string; surface: string; notes: string
@@ -370,6 +542,14 @@ function filingInput(input: TaskInput): BeadCreateInput {
   }
 }
 
+/** The single-PR run a fix task would reopen, if this repo's live run is shipping. */
+async function shippingRun(ctx: Ctx, input: TaskInput): Promise<Run | null> {
+  const shipping = await resolveCurrentSchemaRun(ctx.stateDir, ctx.session, {
+    runId: input.runId, repoKey: input.repoKey, phases: SHIPPING, taskId: null, reach: 'unfinished',
+  })
+  return shipping.ok && modeOf(shipping.run) === 'single-pr' ? shipping.run : null
+}
+
 async function registerTask(
   ctx: Ctx, input: TaskInput, attempt: RegistrationAttempt,
 ): Promise<CmdResult> {
@@ -380,8 +560,18 @@ async function registerTask(
   // A v2 run's tasks carry no bead, so it must neither take this task nor make
   // the resolution ambiguous.
   const found = await resolveFor(ctx, query, null)
-  if (!found.ok) return found.result
-  const run = found.value
+  let run: Run
+  let reopensShipping = false
+  if (found.ok) {
+    run = found.value
+  } else {
+    const shipping = await shippingRun(ctx, input)
+    if (shipping === null) return found.result
+    run = shipping
+    reopensShipping = true
+    const refusal = await shippedRefusal(run, attempt.shipped)
+    if (refusal !== null) return fail(`${refusal}; register the fix in a new run`)
+  }
 
   // Work with no bead behind it used to fall outside the pipeline and be
   // hand-rolled, which is where the mistakes were. Filing one here keeps the
@@ -418,6 +608,12 @@ async function registerTask(
   }
   if (input.branch.trim().length === 0) return fail('--branch is required')
   if (input.branch.startsWith('-')) return fail(`--branch cannot start with "-", got: ${input.branch}`)
+  if (run.batch !== undefined && [run.batch.branch, run.batch.into].includes(input.branch)) {
+    const which = input.branch === run.batch.branch
+      ? 'batch branch, which tasks land on'
+      : 'default branch, which the batch ships into'
+    return fail(`--branch ${input.branch} is this run's ${which}; give the task a branch of its own`)
+  }
 
   const agentFile = join(run.repo_root, '.claude', 'agents', `${input.surface}-dev.md`)
   if (!existsSync(agentFile)) {
@@ -529,6 +725,7 @@ async function registerTask(
   // execute completes only once intake is closed and every task is terminal, so a
   // task registered mid-run must reopen the gate or the run could complete underneath it.
   run.intake_closed = false
+  if (reopensShipping) enterRunPhase(run, 'execute', 'a fix task was registered')
 
   // The CLI is handing the prompt over now, so the task is dispatched. Leaving it
   // `queued` would make the next tick deliver the same prompt a second time. One
@@ -545,7 +742,7 @@ async function registerTask(
   // the only other place task.files reaches a human is the blocked-on-files
   // warning in status.ts, which speaks only once overlap has already fired — so a
   // declaration that matches nothing is silent by construction.
-  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}`
+  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(task, run.tasks)}`
 
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
@@ -554,7 +751,10 @@ async function registerTask(
   const bootLine = bootstrapLine(bootstrap)
 
   const header = [
-    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`,
+    ...(reopensShipping
+      ? [`run moved to execute: register any other fix, then \`${hpipeCommand(ctx.pluginRoot)} dispatch --done\``]
+      : []),
+    `task_id: ${task.task_id}`, `tier: ${chosen.tier} (${chosen.why})`, `effort: ${effortSummary(task)}`,
     ...(filed ? [`bead: ${bead} (filed)`] : []), filesLine, bootLine,
   ].join('\n')
 
@@ -562,15 +762,27 @@ async function registerTask(
 
   // After the save, not before: nothing here is recorded, and a fetch between
   // the read and the save only widens the window a concurrent write can take.
-  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
+  const base = await attempt.dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
   const prompt = await renderWorkerPrompt(ctx.pluginRoot, run, task)
   const sequence = dispatchSequence(run, task, base, bootstrap, hpipeCommand(ctx.pluginRoot))
   return ok(`${header}\n${baseLine(base)}\n${sequence}\n\n${prompt}`)
 }
 
+/**
+ * Said at registration, where the overlap is chosen: the lock only bites at
+ * `implement`, so nothing else mentions it until the task is already waiting.
+ */
+function overlapNote(task: Task, all: readonly Task[]): string {
+  const sharers = all.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
+    taskRow(t.phase).terminal !== true && filesOverlap(task.files, t.files))
+  if (sharers.length === 0) return ''
+  return ` — overlaps ${sharers.map((t) => t.task_id).join(', ')}: whichever reaches implement second ` +
+    'waits there until the other finishes'
+}
+
 export async function cmdTask(
   ctx: Ctx, input: TaskInput, beads: RegistrationBeads = cliRegistrationBeads(ctx.stateDir),
-  dispatchBase: DispatchBaseFor = freshDispatchBase,
+  dispatchBase: DispatchBaseFor = freshDispatchBase, shipped: BatchShipped = ghBatchShipped,
 ): Promise<CmdResult> {
   // The retry re-runs registerTask from a fresh read, so the bd calls are memoised
   // out here: a second attempt reuses the bead the first one filed and the bead it
@@ -585,7 +797,10 @@ export async function cmdTask(
     showBeadOnce: (repoKey, id) => (outcome.shown ??= beads.show(repoKey, id)),
     landed: (taskId) => { outcome.registeredAs = taskId },
     dispatchBase,
+    shipped: askedOnce(shipped),
   }
+  const shipping = await shippingRun(ctx, input)
+  if (shipping !== null) await shippedRefusal(shipping, attempt.shipped)
   const filedBead = async (): Promise<CreatedBead | null> => {
     const filed = outcome.filing === null ? null : await outcome.filing
     return filed === null || isBdFailure(filed) ? null : filed
@@ -642,7 +857,8 @@ export async function cmdBrief(ctx: Ctx, input: {
  * Read-only, and reaches a finished run under --run, like `brief`. An unfinished
  * task also gets a freshly fetched `base:` line: it is what the recovery advice
  * cuts a lost worktree from, and the one its dispatch printed may be long gone
- * from the orchestrator's context and stale besides.
+ * from the orchestrator's context and stale besides. Unlabelled, it read as the
+ * commit the task's worktree was cut from. Measured on a live run.
  */
 export async function cmdShow(ctx: Ctx, input: {
   taskId: string; repoKey: string | null; runId: string | null
@@ -655,8 +871,9 @@ export async function cmdShow(ctx: Ctx, input: {
   const { run, task } = found.value
   const detail = formatTaskDetail(run, task)
   if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
-  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks))
-  return ok(`${detail}\n${baseLine(base)}`)
+  const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
+  const notThisOne = task.checkout_path === null ? '' : `, not the commit ${task.checkout_path} was cut from`
+  return ok(`${detail}\n${baseLine(base)} — the base for a new worktree${notThisOne}`)
 }
 
 export type ClaimBead = (repoKey: string, bead: string) => Promise<Done | BdFailure>
@@ -672,10 +889,15 @@ export type SendBrief = (paneId: string, text: string) => Promise<CallResult<unk
  * brief goes over `agent prompt` instead, the same channel the supervisor uses
  * for every later phase. Measured on a live run.
  */
+export type ReadPaneLimit = (paneId: string) => Promise<LimitReading | null>
+
+const cliReadPaneLimit: ReadPaneLimit = (paneId) => readLimit(new Herdr(), paneId)
+
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
-  claim: ClaimBead = cliClaimBead(ctx.stateDir)): Promise<CmdResult> {
+  claim: ClaimBead = cliClaimBead(ctx.stateDir), readPaneLimit: ReadPaneLimit = cliReadPaneLimit,
+): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
   // would strand the opposite way, since registration already moved the task past
@@ -720,6 +942,16 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
   if (holder) {
     return fail(`${input.paneId} is already ${holder.task_id}'s worker pane — pass ${task.task_id}'s ` +
       'root pane, from `herdr pane list --workspace <its workspace>`')
+  }
+
+  // A brief typed into a pane Claude's usage limit has stopped is rejected on
+  // arrival, yet herdr confirms it, and the task would wait on a worker that never
+  // read it.
+  const limit = await readPaneLimit(input.paneId)
+  if (limit?.line != null && isAgentReady(limit.status)) {
+    const reset = resetText(limit.line)
+    return fail(`the agent in ${input.paneId} is stopped by Claude's usage limit` +
+      `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`)
   }
 
   // Before the send: a brief cannot be recalled, and a bead someone else holds
@@ -805,7 +1037,13 @@ async function closeIntake(ctx: Ctx, input: {
   const run = found.value
   run.intake_closed = true
   await saveRun(ctx.stateDir, run)
-  return ok(`intake closed for ${run.run_id}`)
+  // An orchestrator that went on working after this saw `[intake]` in status and
+  // digests for as long as its turn lasted, and had to read the source to learn
+  // why. Measured on a live run.
+  const whenItMoves = run.phase === 'intake'
+    ? '; the run leaves intake once you end your turn — the supervisor reads intake only while you are idle'
+    : ''
+  return ok(`intake closed for ${run.run_id}${whenItMoves}`)
 }
 export const cmdDispatchDone = retryingOnStale(closeIntake)
 
@@ -835,7 +1073,7 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
   // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
   const phasePrompt = task
     ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, task.phase)
-    : await renderRunPhasePrompt(run, ctx.pluginRoot)
+    : await renderRunPhasePrompt(run, ctx.pluginRoot, { stateDir: ctx.stateDir })
   if (phasePrompt.length === 0) return ''
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
   // brief — task id, agent file, `decide`, never main — already arrived. One entry,
@@ -850,9 +1088,22 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
     : `; its prompt is queued for ${task.pane_id}`
 }
 
-async function rewind(ctx: Ctx, input: {
-  runId: string; phase: string; taskId: string | null
-}): Promise<CmdResult> {
+function modePhases(rows: readonly PhaseRow<string>[], mode: RunMode): string {
+  return `its phases are ${rows.filter((r) => rowRunsIn(r, mode)).map((r) => r.phase).join(', ')}`
+}
+
+interface RewindInput { runId: string; phase: string; taskId: string | null }
+
+/**
+ * The run would otherwise review, ship, or reach `done` and stop being driven, with
+ * the rewound task stranded behind it. The run phases registration reopens.
+ */
+function rewindReopensShipping(run: Run, input: RewindInput): boolean {
+  return Boolean(input.taskId) && modeOf(run) === 'single-pr' && SHIPPING.includes(run.phase) &&
+    TASK_ROWS.some((r) => r.phase === input.phase) && !taskPhaseIsTerminal(input.phase)
+}
+
+async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
 
@@ -867,6 +1118,14 @@ async function rewind(ctx: Ctx, input: {
     return fail(`no such phase: ${input.phase || '(missing)'} — valid ` +
       `${isTask ? 'task' : 'run'} phases are ${rows.map((r) => r.phase).join(', ')}`)
   }
+  // Tiers only warn about this, because a task routed past a row still leaves it.
+  // A mode cannot: a single-PR task left in `ci` waits forever on a PR that does
+  // not exist, and a per-task one in `land-queue` on a batch branch it never had.
+  const mode = modeOf(run)
+  const target = (rows as readonly PhaseRow<string>[]).find((r) => r.phase === input.phase)!
+  if (!rowRunsIn(target, mode)) {
+    return fail(`${input.phase} is not a phase of a ${modeName(mode)} run — ${modePhases(rows, mode)}`)
+  }
 
   // A rewind ONTO a review row commissions a new review but renders no prompt —
   // `advanceTask` returns null for a row whose verdict is not fresh, so the task
@@ -875,11 +1134,28 @@ async function rewind(ctx: Ctx, input: {
   let reserved: string | null = null
   let rewoundTask: Task | null = null
   let tierWarning = ''
+  let reopensShipping = ''
 
   if (isTask) {
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
     rewoundTask = task
+
+    // A landing reads the reviewed head, never the branch, so a task cannot land
+    // again without one: the last landing's is the head that is already on the batch.
+    if (modeOf(run) === 'single-pr' && LANDING_PHASES.has(input.phase) && !task.land_sha) {
+      const last = task.landed?.at(-1)
+      if (last === undefined) {
+        return fail(`no reviewed head is recorded for ${task.task_id}: rewind it to a review row`)
+      }
+      task.land_sha = last.land_sha
+    }
+    if (rewindReopensShipping(run, input)) {
+      const refusal = await shippedRefusal(run, shipped)
+      if (refusal !== null) return fail(`${input.taskId} was not rewound: ${refusal}`)
+      enterRunPhase(run, 'execute', `${input.taskId} was rewound to ${input.phase}`)
+      reopensShipping = '; the run moves back to execute'
+    }
 
     if (!phaseHoldsBead(run.phase, task.phase) && phaseHoldsBead(run.phase, input.phase)) {
       const taken = await beadsTakenMeanwhile(ctx, run, [task])
@@ -941,7 +1217,10 @@ async function rewind(ctx: Ctx, input: {
     if (PHASES_BEFORE_A_PR.has(task.phase)) {
       task.pr = null
       task.ci = null
+      delete task.land_sha
     }
+    // As `enterTaskPhase` forgets it: the work is judged afresh from here.
+    if (PHASES_BEFORE_A_PR.has(task.phase) || taskRow(task.phase).signal === 'verdict') delete task.review_skip
     // A standing merge keeps the bead closed through the rework, and a standing
     // close would clear `close` the instant `merge` records the merge again.
     if (PHASES_BEFORE_A_MERGE.has(task.phase)) {
@@ -961,9 +1240,15 @@ async function rewind(ctx: Ctx, input: {
     run.passes = {}
     run.phase_entered_at = Date.now()
     run.escalated_from = null
+    // `ship` finds the PR again if it is still open; `prForBranch` lists open ones only.
+    if (run.batch !== undefined && run.phase === 'ship') run.batch.pr = null
+    if (run.batch !== undefined && run.phase === 'ship-ci') {
+      run.batch.ci = null
+      delete run.batch.ci_head
+    }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (runRow(run.phase).signal === 'verdict') {
-      reserved = reserveVerdict(run, null, run.phase)
+      reserved = await reserveRunReview(run, () => {})
     }
   }
 
@@ -971,10 +1256,306 @@ async function rewind(ctx: Ctx, input: {
   await saveRun(ctx.stateDir, run)
   return ok(
     `rewound ${input.taskId ?? input.runId} to ${input.phase}; counters cleared` +
-    (reserved === null ? '' : `; next verdict → ${reserved}`) + owed + tierWarning,
+    (reserved === null ? '' : `; next verdict → ${reserved}`) + reopensShipping + owed + tierWarning,
   )
 }
-export const cmdRewind = retryingOnStale(rewind)
+export async function cmdRewind(
+  ctx: Ctx, input: RewindInput, shipped: BatchShipped = ghBatchShipped,
+): Promise<CmdResult> {
+  const askShipped = askedOnce(shipped)
+  const before = await runById(ctx.stateDir, ctx.session, input.runId)
+  if (before && rewindReopensShipping(before, input)) await shippedRefusal(before, askShipped)
+  return retryingOnStale(rewind)(ctx, input, askShipped)
+}
+
+export interface SubmitDeps {
+  /** An open PR from `branch`, by number, or why gh could not say. */
+  openPr: (repoRoot: string, branch: string) => Promise<{ pr: number | null } | { error: string }>
+  runCheck?: (checkout: string, logPath: string) => Promise<CheckRun>
+}
+
+const REAL_SUBMIT_DEPS: SubmitDeps = {
+  openPr: (repoRoot, branch) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).openPrForBranch(branch),
+}
+
+interface SubmitInput { taskId: string; title: string | null; repoKey: string | null; runId: string | null }
+
+/** The title a sync keeps when it names none: the change's own, from its last submission or landing. */
+function standingTitle(task: Task): string | null {
+  return task.submission?.title ?? task.landed?.at(-1)?.title ?? null
+}
+
+function submittedLine(task: Task, sub: Submission, batch: Batch): string {
+  const checked = sub.check === 'passed' ? 'check passed' : `no ${CHECK_REL} declared`
+  const head = `submitted ${task.task_id} at ${sha8(sub.head_sha)} as "${sub.title}" (${sub.kind}; ${checked})`
+  if (sub.kind !== 'sync') return head
+  if (sub.merge === 'clean' && sub.merges === 0) return `${head} — nothing on ${batch.branch} to merge: it lands next`
+  return sub.merge === 'clean'
+    ? `${head} — a clean merge of ${batch.branch}: it lands next`
+    : `${head} — not a clean merge of ${batch.branch} (at ${sha8(sub.dirty_at ?? sub.head_sha)}): it goes back ` +
+      'through review before it lands'
+}
+
+/** Everything `submit` verified, kept for the one quick save that records it. */
+interface PreparedSubmission {
+  runId: string
+  taskId: string
+  kind: Submission['kind']
+  enteredAt: number
+  landSha: string | null
+  submission: Submission
+  note: string | null
+  /** The batch head as just fetched, when an `implement` head does not contain it. */
+  batchMovedTo: string | null
+}
+
+/**
+ * The supervisor sends such a task to `sync` only once it reaches `land-queue`, and
+ * a worker told nothing read the sync as unexplained. Measured on a live run.
+ */
+const batchMovedLine = (batch: Batch, taskId: string, batchHead: string): string =>
+  `${batch.branch} moved to ${sha8(batchHead)} since this head last merged it, so ${taskId} goes through sync ` +
+  'before it lands: you are sent the sync prompt when its turn comes'
+
+type Prepared<T> = { ok: true; value: T } | { ok: false; result: CmdResult }
+
+/**
+ * Everything slow happens here, once, before the ledger is touched: one fetch, one
+ * ls-remote, one PR lookup and the check. Inside a save's stale-retry they could
+ * never land, because a live supervisor saves the run every tick and the network
+ * calls alone outlast one: berean-os's smoke worker failed nine submits in a row.
+ * Measured on a live run.
+ */
+async function prepareSubmission(
+  ctx: Ctx, input: SubmitInput, deps: SubmitDeps,
+): Promise<Prepared<{ prepared: PreparedSubmission; batch: Batch }>> {
+  const refused = (text: string): Prepared<never> => ({ ok: false, result: fail(text) })
+  const found = await resolveTask(ctx, {
+    taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'driven', escape: null,
+  })
+  if (!found.ok) return { ok: false, result: found.result }
+  const { run, task } = found.value
+  const batch = run.batch
+  if (batch === undefined) {
+    return refused(`${run.run_id} is a per-task run: its tasks open PRs, and there is nothing to submit`)
+  }
+  if (task.phase === 'land-queue') {
+    return refused(`${task.task_id} waits in land-queue for the landing slot; if it must sync when its turn comes, ` +
+      'you are sent the sync prompt then — end your turn')
+  }
+  if (task.phase !== 'implement' && task.phase !== 'sync') {
+    return refused(`${task.task_id} is in ${task.phase}; submit answers only implement and sync`)
+  }
+  const kind = task.phase
+  const checkout = task.checkout_path
+  if (checkout === null) return refused(`${task.task_id} has no worktree on record, so there is nothing to submit from`)
+
+  const title = input.title ?? (kind === 'sync' ? standingTitle(task) : null)
+  if (title === null) {
+    return refused(kind === 'implement'
+      ? '--title is required: it is this change\'s line in the batch PR\'s release notes'
+      : `--title is needed: no earlier submission of ${task.task_id} names this change`)
+  }
+  const titleCheck = checkReleaseTitle(title, releaseSections(checkout))
+  if (!titleCheck.ok) return refused(titleCheck.error)
+
+  const uncommitted = await uncommittedPaths(checkout)
+  if (uncommitted === null) return refused(`git could not read the status of ${checkout}`)
+  if (uncommitted.length > 0) {
+    const more = uncommitted.length > 5 ? ', …' : ''
+    return refused(`${checkout} has uncommitted or untracked work (${uncommitted.slice(0, 5).join(', ')}${more}): ` +
+      'commit it or ignore it, and push — the check must test the pushed tree')
+  }
+  const head = await headOf(checkout)
+  if (head === null) return refused(`git could not read HEAD in ${checkout}`)
+
+  const fetchFailed = await fetchFromOrigin(checkout, trackingRefspec(batch.branch))
+  if (fetchFailed !== null) return refused(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  const pushed = await remoteBranchHead(checkout, task.branch)
+  if (!pushed.ok) return refused(`could not ask origin about ${task.branch}: ${pushed.reason}`)
+  if (pushed.sha !== head) {
+    return refused(`push first: origin has ${task.branch} at ${pushed.sha === null ? 'nothing' : sha8(pushed.sha)}, ` +
+      `and HEAD is ${sha8(head)}`)
+  }
+  const batchRef = `refs/remotes/origin/${batch.branch}`
+  const empty = await nothingToLand(checkout, batchRef)
+  if (empty === null) return refused(`git could not compare ${task.branch} with ${batch.branch}`)
+  if (empty) {
+    return refused(`nothing to land: ${task.branch} has no change that ${batch.branch} lacks outside ${ARTIFACT_ROOT}/`)
+  }
+
+  let merge: SyncWalk | null = null
+  if (kind === 'implement' && task.head_sha_at_entry !== null) {
+    const sinceReview = await syncWalk(checkout, task.head_sha_at_entry, batchRef)
+    if (sinceReview.clean) {
+      return refused(`nothing but merges of ${batch.branch} since the review sent it back: commit the fixes, push, ` +
+        'and submit again')
+    }
+  }
+  if (kind === 'sync') {
+    const current = await isAncestor(checkout, batchRef, head)
+    if (current === null) return refused(`git could not compare ${task.branch} with ${batch.branch}`)
+    if (!current) return refused(`still behind ${batch.branch}: merge it and push — ${mergeBatchCommand(batch)}`)
+    merge = await syncWalk(checkout, task.land_sha ?? null, batchRef)
+  }
+  const batchMovedTo = kind === 'implement' && await isAncestor(checkout, batchRef, head) === false
+    ? await resolveCommit(checkout, batchRef)
+    : null
+
+  const open = await deps.openPr(run.repo_root, task.branch)
+  if ('error' in open) {
+    return refused(`could not ask GitHub whether ${task.branch} has an open PR (${open.error}); run it again`)
+  }
+  const pr = open.pr
+  if (pr !== null) {
+    return refused(`${task.branch} has an open PR, #${pr}, which would carry every sibling's commits into ` +
+      `${batch.into}. Close PR #${pr}, then submit again`)
+  }
+
+  const check = repoCheck(checkout)
+  if (check.kind === 'not-executable') {
+    return refused(`${CHECK_REL} is not executable in ${checkout}: chmod +x ${CHECK_REL}, commit and push that, ` +
+      'then submit again')
+  }
+  let outcome: CheckOutcome = 'none'
+  if (check.kind === 'ready') {
+    const log = join(checksDir(ctx.stateDir, run), `${task.task_id}-${sha8(head)}.log`)
+    const ran = await (deps.runCheck ?? runCheck)(checkout, log)
+    if (ran.code !== 0) {
+      return refused(`${CHECK_REL} ${checkFailure(ran)}; its last lines:\n\n${ran.tail}\n\nthe whole log: ${log}`)
+    }
+    outcome = 'passed'
+  }
+
+  const submission: Submission = {
+    kind, title, head_sha: head, at: Date.now(), check: outcome,
+    ...(merge === null ? {} : merge.clean
+      ? { merge: 'clean', merges: merge.merges }
+      : { merge: 'dirty', dirty_at: merge.at }),
+  }
+  return {
+    ok: true,
+    value: {
+      batch,
+      prepared: {
+        runId: run.run_id, taskId: task.task_id, kind, enteredAt: task.phase_entered_at,
+        landSha: task.land_sha ?? null, submission, note: titleCheck.note, batchMovedTo,
+      },
+    },
+  }
+}
+
+/** The quick part, retried on a stale save: nothing in it waits on the network or the check. */
+async function recordSubmission(
+  ctx: Ctx, prepared: PreparedSubmission, batch: Batch, repoKey: string | null,
+): Promise<CmdResult> {
+  const found = await resolveTask(ctx, {
+    taskId: prepared.taskId, repoKey, runId: prepared.runId, reach: 'driven', escape: null,
+  })
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+  if (task.phase !== prepared.kind || task.phase_entered_at !== prepared.enteredAt ||
+    (task.land_sha ?? null) !== prepared.landSha) {
+    return fail(`${task.task_id} moved on (now in ${task.phase}) while submit ran its checks; nothing was recorded — ` +
+      'submit again if it still applies')
+  }
+  task.submission = prepared.submission
+  await saveRun(ctx.stateDir, run)
+  return ok([
+    submittedLine(task, prepared.submission, batch),
+    ...(prepared.batchMovedTo === null ? [] : [batchMovedLine(batch, task.task_id, prepared.batchMovedTo)]),
+    ...(prepared.note === null ? [] : [`note: ${prepared.note}`]),
+  ].join('\n'))
+}
+
+/** The single-PR worker's equivalent of opening a PR. Nothing is recorded unless every check passes. */
+export async function cmdSubmit(
+  ctx: Ctx, input: SubmitInput, deps: SubmitDeps = REAL_SUBMIT_DEPS,
+): Promise<CmdResult> {
+  const prepared = await prepareSubmission(ctx, input, deps)
+  if (!prepared.ok) return prepared.result
+  return retryingOnStale(recordSubmission)(ctx, prepared.value.prepared, prepared.value.batch, input.repoKey)
+}
+
+async function batchCheck(
+  ctx: Ctx, input: { repoKey: string | null; runId: string | null },
+  check: (checkout: string, logPath: string) => Promise<CheckRun>,
+): Promise<Prepared<{ runId: string; checked: NonNullable<Batch['checked']>; batch: Batch }>> {
+  const refused = (text: string): Prepared<never> => ({ ok: false, result: fail(text) })
+  const found = await resolveFor(ctx, {
+    runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'driven',
+  }, null)
+  if (!found.ok) return { ok: false, result: found.result }
+  const run = found.value
+  const batch = run.batch
+  if (batch === undefined) return refused(`${run.run_id} is a per-task run: there is no batch to check`)
+  if (!existsSync(batch.checkout)) {
+    return refused(`the batch checkout is not there yet; create it first:\n  ${checkoutSteps(run, false).join('\n  ')}`)
+  }
+
+  const fetchFailed = await fetchFromOrigin(run.repo_root, trackingRefspec(batch.branch))
+  if (fetchFailed !== null) return refused(`could not fetch ${batch.branch}: ${fetchFailed}`)
+  const head = await resolveCommit(run.repo_root, `refs/remotes/origin/${batch.branch}`)
+  if (head === null) return refused(`origin/${batch.branch} does not resolve after the fetch`)
+  const checkoutHead = await headOf(batch.checkout)
+  if (checkoutHead !== head) {
+    return refused(`the batch checkout is at ${checkoutHead === null ? 'nothing' : sha8(checkoutHead)}, not at ` +
+      `origin/${batch.branch}'s ${sha8(head)}: push anything of its own, then bring it up to date with ` +
+      `\`git -C ${shellQuoted(batch.checkout)} pull --ff-only\``)
+  }
+  const uncommitted = await uncommittedPaths(batch.checkout)
+  if (uncommitted === null || uncommitted.length > 0) {
+    return refused(`the batch checkout has uncommitted or untracked work (${(uncommitted ?? ['unreadable']).join(', ')}): ` +
+      'commit and push it, or remove it, so the check tests what the PR carries')
+  }
+
+  const declared = repoCheck(batch.checkout)
+  if (declared.kind === 'not-executable') {
+    return refused(`${CHECK_REL} is not executable on ${batch.branch}: chmod +x ${CHECK_REL}, commit and push it`)
+  }
+  let outcome: CheckOutcome = 'none'
+  if (declared.kind === 'ready') {
+    const log = join(checksDir(ctx.stateDir, run), `batch-${sha8(head)}.log`)
+    const ran = await check(batch.checkout, log)
+    if (ran.code !== 0) {
+      return refused(`${CHECK_REL} ${checkFailure(ran)} on ${batch.branch} at ${sha8(head)}; its last lines:` +
+        `\n\n${ran.tail}\n\nthe whole log: ${log}`)
+    }
+    outcome = 'passed'
+  }
+  return { ok: true, value: { runId: run.run_id, batch, checked: { head_sha: head, at: Date.now(), check: outcome } } }
+}
+
+async function recordBatchCheck(
+  ctx: Ctx, runId: string, checked: NonNullable<Batch['checked']>, repoKey: string | null,
+): Promise<CmdResult> {
+  const found = await resolveFor(ctx, { runId, repoKey, phases: null, taskId: null, reach: 'driven' }, null)
+  if (!found.ok) return found.result
+  const batch = found.value.batch
+  if (batch === undefined) return fail(`${runId} is a per-task run: there is no batch to check`)
+  batch.checked = checked
+  await saveRun(ctx.stateDir, found.value)
+  const head = `${batch.branch} at ${sha8(checked.head_sha)}`
+  return ok(checked.check === 'passed'
+    ? `checked ${head}: ${CHECK_REL} passed`
+    : `recorded ${head}: nothing checked it, since no ${CHECK_REL} is declared — run the tests and the typecheck ` +
+      `in ${batch.checkout} yourself`)
+}
+
+/**
+ * The one local run of every landing together, in the batch checkout at the head
+ * just fetched. `ship` clears only once the PR's head is the head recorded here,
+ * so a fix-task landing forces a fresh check before CI. The fetch and the check run
+ * once, outside the retried save, for the reason `prepareSubmission` gives.
+ */
+export async function cmdBatchCheck(
+  ctx: Ctx, input: { repoKey: string | null; runId: string | null },
+  check: (checkout: string, logPath: string) => Promise<CheckRun> = runCheck,
+): Promise<CmdResult> {
+  const prepared = await batchCheck(ctx, input, check)
+  if (!prepared.ok) return prepared.result
+  return retryingOnStale(recordBatchCheck)(ctx, prepared.value.runId, prepared.value.checked, input.repoKey)
+}
 
 export type CloseBead = (repoKey: string, bead: string, reason: string, force: boolean) => Promise<Done | BdFailure>
 
@@ -1004,7 +1585,7 @@ export async function cmdClose(ctx: Ctx, input: {
     return fail(`no merge is recorded for ${task.task_id}, so its bead must not close yet — ` +
       `\`${hpipeCommand(ctx.pluginRoot)} rewind ${run.run_id} merge --task ${task.task_id}\` records it`)
   }
-  const closed = await close(run.repo_key, task.bead, closeReason(task), input.force)
+  const closed = await close(run.repo_key, task.bead, closeReason(task, run), input.force)
   if (isBdFailure(closed)) {
     return fail(`bd would not close ${task.bead}:\n  ${closed.error}` + (input.force
       ? ''
@@ -1035,6 +1616,176 @@ async function release(ctx: Ctx, input: {
   return ok(`released ${input.taskId}; files reservation cleared`)
 }
 export const cmdRelease = retryingOnStale(release)
+
+/** A pane's limit reading, and what Claude Code shows running in its background. */
+export interface PaneReading extends LimitReading {
+  background?: readonly string[]
+}
+
+export interface NudgeDeps {
+  readPane: (paneId: string) => Promise<PaneReading | null>
+  /** The live supervisor's holds, to say when a usage-limit hold is being released. */
+  holds: () => Promise<Record<string, PaneHold>>
+  /** Tells the supervisor to drop its usage-limit hold on the pane. */
+  release: (paneId: string) => Promise<void>
+}
+
+const cliReadPane = async (paneId: string): Promise<PaneReading | null> => {
+  const herdr = new Herdr()
+  const screen = await herdr.paneReadStyled(paneId, SCREEN_LINES)
+  if (screen === '') return null
+  return { ...readingFrom(screen, await herdr.agentStatus(paneId)), background: backgroundWorkOn(screen).running }
+}
+
+const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
+  readPane: cliReadPane,
+  holds: async () => {
+    const state = await supervisorState(ctx.stateDir, ctx.session)
+    return readPaneHolds(ctx.stateDir, ctx.session, state.state === 'live' ? state.info.pid : undefined)
+  },
+  release: async (paneId) => {
+    await enqueueEvent(join(ctx.stateDir, 'queue', ctx.session), {
+      kind: 'pipeline.nudge', session: ctx.session, at: Date.now(), pane_id: paneId,
+    })
+  },
+})
+
+/** Why a task is not nudged; `quiet` ones are left out of `--all`'s output, which lists them by id. */
+interface NudgeRefusal { why: string; short: string }
+
+/** Stopped by Claude's usage limit, or stopped in its phase with work it never committed. */
+type Stopped = { by: 'limit' } | { by: 'uncommitted'; work: UncommittedWork }
+
+/**
+ * Only a worker Claude's usage limit stopped — its pane still shows the line, or
+ * the supervisor holds it — or one whose last idle spell in this phase found
+ * uncommitted work and whose pane runs nothing in the background. An idle review
+ * worker waiting on its background reviewer reads `done` too, and told the limit
+ * cut its subagent off it would dispatch a second reviewer.
+ */
+async function nudgeTarget(
+  run: Run, task: Task, hpipe: string, deps: NudgeDeps, holds: Record<string, PaneHold>,
+): Promise<NudgeRefusal | Stopped> {
+  const row = taskRow(task.phase)
+  if (row.actor !== 'worker') {
+    return { why: `${task.task_id} is in ${task.phase}, which does not wait on its worker; nothing to nudge`, short: task.phase }
+  }
+  if (task.pane_id === null) {
+    return { why: `${task.task_id} has no agent pane — \`${hpipe} status\` says how to start one`, short: 'no pane' }
+  }
+  const unbriefed = unbriefedWorker(run, task)
+  if (unbriefed !== null) {
+    return { why: `${task.task_id}'s agent has not been handed its brief: ${briefCommand(task, unbriefed.paneId, hpipe)}`, short: 'unbriefed' }
+  }
+  if (queuedResume(run, task) !== null) {
+    return { why: `${task.task_id}: a resume is already queued for ${task.pane_id}`, short: 'queued' }
+  }
+  if (queuedWorkerPrompt(run, task) !== null) {
+    return { why: `${task.task_id}'s ${task.phase} prompt is queued and restarts it; nothing to nudge`, short: 'prompt queued' }
+  }
+  const reading = await deps.readPane(task.pane_id)
+  if (reading?.status === 'working') {
+    return { why: `${task.task_id}'s agent is working; nothing to nudge`, short: 'working' }
+  }
+  if (reading?.line != null || holds[task.pane_id]?.code === 'usage_limit') return { by: 'limit' }
+  if (reading === null) {
+    return {
+      why: `${task.task_id}'s pane ${task.pane_id} could not be read, so whether it is still working in the ` +
+        'background is unknown; nothing was queued — run it again',
+      short: 'unread pane',
+    }
+  }
+  const background = reading.background ?? []
+  if (background.length > 0) {
+    return {
+      why: `${task.task_id}'s pane shows background work running (${background.join(', ')}); its phase waits for it, ` +
+        'and nothing needs nudging',
+      short: 'background work',
+    }
+  }
+  const work = currentUncommittedWork(run, task)
+  if (work !== null) return { by: 'uncommitted', work }
+  return {
+    why: `${task.task_id}'s pane ${task.pane_id} shows no usage-limit message, the supervisor holds nothing for it, and ` +
+      'it has no uncommitted work on record; nudge only resumes a worker Claude\'s usage limit stopped or one that ' +
+      `stopped with uncommitted work — \`${hpipe} status\` says what it waits for`,
+    short: 'nothing stopped it',
+  }
+}
+
+/**
+ * Tells idle workers to carry on where they stopped — after Claude's usage limit,
+ * or with uncommitted work in their phase. Unlike a same-phase rewind it touches no
+ * phase, passes, verdict reservation or history, so a review in flight is not
+ * dispatched twice. It restarts each one's stall ladder and releases the
+ * supervisor's usage-limit hold on its pane.
+ */
+async function nudge(ctx: Ctx, input: {
+  taskId: string | null; all: boolean; repoKey: string | null; runId: string | null
+}, deps: NudgeDeps): Promise<CmdResult> {
+  if ((input.taskId === null) === !input.all) return fail(commandUsage(USAGE.nudge as string[]))
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  let run: Run
+  let candidates: Task[]
+  if (input.taskId !== null) {
+    const found = await resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'driven', escape: null,
+    })
+    if (!found.ok) return found.result
+    run = found.value.run
+    candidates = [found.value.task]
+  } else {
+    const found = await resolveFor(ctx, {
+      runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'driven',
+    }, null)
+    if (!found.ok) return found.result
+    run = found.value
+    candidates = run.tasks.filter((t) => !taskPhaseIsTerminal(t.phase))
+  }
+
+  const holds = await deps.holds()
+  const nudged: Array<[Task, Stopped]> = []
+  const skipped: Array<[Task, NudgeRefusal]> = []
+  for (const task of candidates) {
+    const target = await nudgeTarget(run, task, hpipe, deps, holds)
+    if ('by' in target) nudged.push([task, target])
+    else skipped.push([task, target])
+  }
+  if (input.taskId !== null && skipped[0] !== undefined) return fail(skipped[0][1].why)
+  const skippedLine = skipped.length === 0 ? [] :
+    [`skipped: ${skipped.map(([t, r]) => `${t.task_id} (${r.short})`).join(', ')}`]
+  if (nudged.length === 0) return ok(['nothing to nudge', ...skippedLine].join('\n'))
+
+  const now = Date.now()
+  for (const [task, stopped] of nudged) {
+    const vars = { phase: task.phase, task_id: task.task_id, branch: task.branch }
+    const text = stopped.by === 'limit'
+      ? await renderPrompt(ctx.pluginRoot, 'usage-resume', vars)
+      : await renderPrompt(ctx.pluginRoot, 'carry-on', { ...vars, uncommitted: uncommittedSummary(stopped.work) })
+    const kind = stopped.by === 'limit' ? 'resume' : 'carry-on'
+    enqueue(run, { to: 'worker', taskId: task.task_id, text, kind }, now)
+    task.stall = freshLadder(run, task, now)
+  }
+  await saveRun(ctx.stateDir, run)
+
+  const lines: string[] = []
+  for (const [task, stopped] of nudged) {
+    const pane = task.pane_id as string
+    if (stopped.by === 'uncommitted') {
+      lines.push(`${task.task_id}: told to carry on in ${pane} (${task.phase}), with ${stopped.work.count} uncommitted ` +
+        (stopped.work.count === 1 ? 'path' : 'paths'))
+      continue
+    }
+    await deps.release(pane)
+    const held = holds[pane]?.code === 'usage_limit'
+    lines.push(`${task.task_id}: resume queued for ${pane} (${task.phase})` +
+      (held ? "; the supervisor's usage-limit hold on it is released" : ''))
+  }
+  return ok([...lines, ...skippedLine].join('\n'))
+}
+
+export const cmdNudge = (ctx: Ctx, input: Parameters<typeof nudge>[1], deps: NudgeDeps = cliNudgeDeps(ctx)) =>
+  retryingOnStale(nudge)(ctx, input, deps)
 
 async function decide(ctx: Ctx, input: {
   task: string; question: string; recommendation: string
@@ -1303,7 +2054,8 @@ async function tier(ctx: Ctx, input: {
     at: Date.now(), from, to, source: 'hpipe-tier', pane: input.callerPane, why: input.why,
   }]
   await saveRun(ctx.stateDir, run)
-  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}.`)
+  return ok(`${task.task_id}: ${from} → ${to}. ${task.phase} completes as it is; the next step follows ${to}. ` +
+    `Its reviews now run at effort ${reviewEfforts(to)}; the worker keeps the effort it was started with.`)
 }
 export const cmdTier = retryingOnStale(tier)
 
@@ -1352,7 +2104,10 @@ export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkToo
   )
   return ok(formatStatus(
     runs,
-    { state: state.state, pid: 'info' in state ? state.info.pid : undefined },
+    {
+      state: state.state, pid: 'info' in state ? state.info.pid : undefined,
+      schemas: 'info' in state ? drivenSchemas(state.info) : undefined,
+    },
     ctx.session,
     hpipeCommand(ctx.pluginRoot),
     livePanes,
@@ -1376,8 +2131,24 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   run.escalated_from = run.phase
   run.phase = 'done'
   await saveRun(ctx.stateDir, run)
-  return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
-    `supervisor's next tick. Undo: hpipe resume ${run.run_id}`)
+  const undo = `Undo: hpipe resume ${run.run_id}`
+  if (run.batch === undefined) {
+    return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
+      `supervisor's next tick. ${undo}`)
+  }
+  return ok([`aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`, ...(await cleanupLines(run, run.batch))]
+    .join('\n'))
+}
+
+/** A landed task's bead stays closed through an abort: its commits are on the batch branch, which nothing deletes. */
+function abortedBatch(run: Run, batch: Batch): string {
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).map((t) => t.task_id)
+  const kept = landed.length === 0
+    ? `nothing landed on ${batch.branch}`
+    : `${batch.branch} keeps the landed tasks (${landed.join(', ')}), whose beads stay closed`
+  const pr = batch.pr === null ? '' : ` PR #${batch.pr} is left open.`
+  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone, and the unlanded ` +
+    `tasks' beads are released on the supervisor's next tick.${pr}`
 }
 export const cmdAbort = retryingOnStale(abort)
 
@@ -1453,7 +2224,7 @@ function positionals(argv: string[]): string[] {
 }
 
 const USAGE: Record<string, string[]> = {
-  start: ['hpipe start <title> [--prefix <bead-prefix>]'],
+  start: ['hpipe start <title> [--prefix <bead-prefix>] [--single-pr [--batch-branch <name>]]'],
   task: ['hpipe task --branch <branch> (--bead <id> | --title <title> --body-file <path> ' +
     '[--acceptance-file <path>]) --surface <surface> [--tier light|standard|heavy] ' +
     '[--depends-on <id,id>] [--files <prefix,prefix>] [--notes <text>] [--keep-worktree] [--run <run-id>]'],
@@ -1469,6 +2240,7 @@ const USAGE: Record<string, string[]> = {
   drain: ['hpipe drain'],
   rewind: ['hpipe rewind <run-id> <phase> [--task <id>]'],
   release: ['hpipe release --task <id> [--run <run-id>]'],
+  nudge: ['hpipe nudge (--task <id> | --all) [--run <run-id>]'],
   decide: ['hpipe decide --task <id> --question <text> --recommend <text> [--run <run-id>]'],
   escalate: ['hpipe escalate --task <id> --decision <id> --recommend <text> [--run <run-id>]'],
   discover: ['hpipe discover --task <id> --title <title> --body-file <path> [--run <run-id>]'],
@@ -1479,6 +2251,8 @@ const USAGE: Record<string, string[]> = {
   abort: ['hpipe abort <run-id>'],
   forget: ['hpipe forget <workspace-id>'],
   close: ['hpipe close --task <id> [--force] [--run <run-id>]'],
+  submit: ['hpipe submit --task <id> [--title "<conventional title>"] [--run <run-id>]'],
+  'batch-check': ['hpipe batch-check [--run <run-id>]'],
 }
 
 const commandUsage = (forms: string[]): string => `usage: ${forms.join('\n       ')}`
@@ -1488,7 +2262,7 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
@@ -1575,9 +2349,17 @@ async function dispatch(argv: string[]): Promise<number> {
         out = fail('--prefix needs a value: hpipe start <title> --prefix <bead-prefix>')
         break
       }
+      const batchBranch = flag(rest, 'batch-branch')
+      if (rest.includes('--batch-branch') && (batchBranch === null || batchBranch.startsWith('--'))) {
+        out = fail('--batch-branch needs a value: hpipe start <title> --single-pr --batch-branch <name>')
+        break
+      }
+      const words = withoutFlag(withoutFlag(rest.filter((arg) => arg !== '--single-pr'), 'prefix'), 'batch-branch')
       out = await cmdStart(ctx, {
-        title: withoutFlag(rest, 'prefix').join(' ').trim(),
+        title: words.join(' ').trim(),
         prefix,
+        singlePr: rest.includes('--single-pr'),
+        batchBranch,
         repoKey: repo!.repoKey, repoRoot: repo!.repoRoot,
         socketPath: process.env.HERDR_SOCKET_PATH ?? '',
         paneId: process.env.HERDR_PANE_ID ?? '',
@@ -1642,6 +2424,15 @@ async function dispatch(argv: string[]): Promise<number> {
       })
       break
 
+    case 'nudge':
+      out = await cmdNudge(ctx, {
+        taskId: flag(rest, 'task') ?? null,
+        all: rest.includes('--all'),
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
     case 'release':
       out = await cmdRelease(ctx, {
         taskId: flag(rest, 'task') ?? '',
@@ -1703,6 +2494,19 @@ async function dispatch(argv: string[]): Promise<number> {
         tier: positionals(rest)[0] ?? '',
         why: flag(rest, 'why') ?? '',
         callerPane: process.env.HERDR_PANE_ID || null,
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+      })
+      break
+
+    case 'batch-check':
+      out = await cmdBatchCheck(ctx, { repoKey: repo?.repoKey ?? null, runId: flag(rest, 'run') })
+      break
+
+    case 'submit':
+      out = await cmdSubmit(ctx, {
+        taskId: flag(rest, 'task') ?? '',
+        title: flag(rest, 'title'),
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
       })

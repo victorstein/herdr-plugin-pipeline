@@ -3,14 +3,14 @@ import { chmodSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, deliverPendingAnswers, freshVerdict, promptForTaskPhase } from '../src/supervisor/tasks'
 import { answerDecision, openDecision } from '../src/lib/decisions'
-import { absoluteArtifactPath } from '../src/supervisor/deliver'
+import { absoluteArtifactPath, artifactPathFor } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
 import { enqueue, settleOutbox } from '../src/lib/outbox'
 import { hpipeCommand } from '../src/lib/render'
 import type { QueuedEvent, Run, Task } from '../src/lib/types'
 import { dispatchSequence } from '../src/lib/unstarted'
-import { ciTransitions } from '../src/supervisor/ci'
+import { CI_SETTLE_MS, ciTransitions } from '../src/supervisor/ci'
 import { applyEvents } from '../src/supervisor/tick'
 import { cleanupFixtures, commitIn, repoWithWorktree, tempDir } from './helpers/git-worktree'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -75,6 +75,24 @@ test('advanceTasks releases a blocked-on-files task once its sibling settles', a
   ])
   await advanceTasks(run, deps())
   expect(run.tasks[1]?.phase).toBe('implement')
+})
+
+test('a task the file gate held back for a tick is marked as having waited; one it never held is not', async () => {
+  const holder = mkTask({ task_id: 't1', phase: 'implement', files: ['a/'] })
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'], phase_entered_at: 5 })
+  const free = mkTask({ task_id: 't3', phase: 'blocked-on-files', files: ['b/'], phase_entered_at: 6 })
+  const run = mkRun([holder, waiter, free])
+  await advanceTasks(run, deps())
+  expect(waiter.files_waited_at).toBe(5)
+  expect(free.phase).toBe('implement')
+  expect(free.files_waited_at).toBeUndefined()
+
+  holder.phase = 'done'
+  await advanceTasks(run, deps())
+  expect(waiter.phase).toBe('implement')
+  expect(run.history.filter((h) => h.from === 'blocked-on-files').map((h) => [h.task_id, h.why])).toEqual([
+    ['t3', 'no task held its files'], ['t2', 'no overlapping files in flight'],
+  ])
 })
 
 function checkoutWithPlan(planText: string): { checkout_path: string; artifacts: Task['artifacts'] } {
@@ -215,13 +233,13 @@ test('a queued task whose dependency is escalated stays queued until it finishes
   expect(run.tasks[1]?.phase).toBe('research')
 })
 
-test('an idle worker with a fresh PR advances to pr-review-intent', async () => {
+test('an idle worker with a fresh PR advances to pr-review', async () => {
   const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(run.tasks[0]?.phase).toBe('pr-review')
   expect(run.tasks[0]?.pr).toBe(42)
 })
 
@@ -234,12 +252,12 @@ test('LIVELOCK: a task re-entering implement does not advance on the same sha', 
   expect(run.tasks[0]?.phase).toBe('implement')
 })
 
-test('a cleared task review advances to the second stage', async () => {
+test('a task already in pr-review-intent clears straight to ci, past the retired second stage', async () => {
   const run = mkRun([mkTask({ phase: 'pr-review-intent' })])
   await advanceTasks(run, deps({
     verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-quality')
+  expect(run.tasks[0]?.phase).toBe('ci')
 })
 
 test('orchestrator-owned task phases are not evaluated while the orchestrator is busy', async () => {
@@ -298,13 +316,13 @@ test('teardown removes the worktree and completes the task', async () => {
   expect(run.tasks[0]?.phase).toBe('done')
 })
 
-test('entering pr-review-intent yields that row\'s review prompt', async () => {
+test('entering pr-review yields that row\'s review prompt', async () => {
   const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
   const prompts = await advanceTasks(run, deps({
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(prompts.map((p) => p.text).join('\n')).toContain('pr-review-intent')
+  expect(prompts.map((p) => p.text).join('\n')).toContain('# `pr-review` — PR #42')
 })
 
 test('entering merge yields the merge prompt', async () => {
@@ -341,7 +359,7 @@ test('a worker-owned phase addresses its prompt to the worker pane, not the orch
     prForBranch: async () => 42,
     prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
   }))
-  expect(run.tasks[0]?.phase).toBe('pr-review-intent')
+  expect(run.tasks[0]?.phase).toBe('pr-review')
   expect(prompts[0]?.paneId).toBe('w7:p1')
 })
 
@@ -632,6 +650,27 @@ test('an idle worker still owed its phase prompt is not inspected for uncommitte
   expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
 })
 
+test('a queued usage-limit resume is not a phase prompt: an idle worker without its artifact is still reported', async () => {
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  const run = mkRun([mkTask({
+    phase: 'spec', phase_entered_at: 5, checkout_path: worktree, artifacts: designArtifacts(),
+  })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 5)
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.artifact_missing).toBeDefined()
+})
+
+test('a queued usage-limit resume does not hide a PR the worker opened before the limit', async () => {
+  const run = mkRun([mkTask({ phase: 'implement', agent_status: 'idle', head_sha_at_entry: 'old' })])
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 0)
+  await advanceTasks(run, deps({
+    prForBranch: async () => 42,
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new' }),
+  }))
+  expect(run.tasks[0]?.pr).toBe(42)
+  expect(run.tasks[0]?.phase).not.toBe('implement')
+})
+
 test('a working worker clears a missing-artifact record instead of reporting it', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
 
@@ -815,6 +854,119 @@ test('a busy worker drops the record, so its next idle spell is inspected afresh
   await advanceTasks(run, deps({ liveIdle: async () => false, uncommittedPaths: git.uncommittedPaths }))
   expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
   expect(git.calls).toHaveLength(0)
+})
+
+const backgroundIn = (busy: Record<string, string[]>) => async (pane: string) => busy[pane] ?? []
+
+test('a worker idle at its prompt with background work running is not stopped: no uncommitted work is recorded', async () => {
+  // t3 on the berean-os trial run: herdr said `done`, its implementer subagent was still building, and the
+  // two paths were that subagent's unfinished step. Measured on a live run.
+  const git = dirtyTree(['src/components/themes/BaseTheme.cpp', 'src/components/themes/BaseTheme.h'])
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({
+    uncommittedPaths: git.uncommittedPaths,
+    backgroundWork: backgroundIn({ 'w7:p1': ['1 shell', '4 monitors', 'ui-dev subagent'] }),
+  }))
+  expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
+  expect(git.calls).toEqual([])
+
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths, backgroundWork: backgroundIn({}) }))
+  expect(run.tasks[0]?.uncommitted_work?.count).toBe(2)
+})
+
+const researchWithItsArtifact = () => {
+  const artifacts = designArtifacts()
+  return mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktreeWith(artifacts.research as string), artifacts,
+  })])
+}
+
+test('a worker\'s fresh artifact waits for a subagent still running, which may still be writing it', async () => {
+  const run = researchWithItsArtifact()
+  const asked: string[] = []
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w7:p1': ['general-purpose subagent'] }),
+    holdForSubagents: async (key, pane) => { asked.push(`${key} ${pane}`); return { hold: true } },
+  }))
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(asked).toEqual([`${run.run_id}:t1:0 w7:p1`])
+
+  await advanceTasks(run, deps({ holdForSubagents: async () => ({ hold: false }) }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('a shell or a monitor never holds a row: a poller waiting for the phase change would hold it for good', async () => {
+  // Orchestrators have polled `hpipe status` from a background shell for the phase to change. Measured on
+  // live runs.
+  const run = researchWithItsArtifact()
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w7:p1': ['1 shell', '2 monitors'] }),
+    holdForSubagents: async () => ({ hold: false }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('past the cap the row advances anyway, and its history says what it went past', async () => {
+  const run = researchWithItsArtifact()
+  await advanceTasks(run, deps({ holdForSubagents: async () => ({ hold: false, past: ['ui-dev subagent'] }) }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.history.at(-1)?.why).toBe('actor idle + artifact fresh; advanced past background work still running ' +
+    '(ui-dev subagent) after 10m')
+})
+
+test('the hold is asked only once the row\'s signal is ready, and of a verdict too', async () => {
+  let asked = 0
+  const holdForSubagents = async () => { asked += 1; return { hold: true } as const }
+  const waiting = mkRun([mkTask({ phase: 'research', phase_entered_at: Date.now() + 60_000, checkout_path: null })])
+  await advanceTasks(waiting, deps({ holdForSubagents }))
+  expect(asked).toBe(0)
+
+  const reviewed = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  await advanceTasks(reviewed, deps({
+    holdForSubagents, verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(asked).toBe(1)
+  expect(reviewed.tasks[0]?.phase).toBe('spec-review')
+})
+
+test('a verdict waits for the worker to commit it: until then its reviewer\'s completion notice is unhandled', async () => {
+  const clear = async () => ({ verdict: 'CLEAR' as const, blockers: 0, majors: 0 })
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  const verdict = artifactPathFor(run, run.tasks[0] as Task) as string
+  expect(verdict).toBe('docs/superpowers/reviews/hp-1-spec-review-0.md')
+
+  for (const uncommitted of [[verdict], ['docs/'], ['docs/superpowers/reviews/']]) {
+    await advanceTasks(run, deps({ verdictFor: clear, uncommittedPaths: async () => ['src/a.ts', ...uncommitted] }))
+    expect(run.tasks[0]?.phase, uncommitted.join()).toBe('spec-review')
+  }
+
+  await advanceTasks(run, deps({ verdictFor: clear, uncommittedPaths: async () => ['docs/superpowers/reviews-old/'] }))
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('an unreadable checkout does not hold a verdict', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }), uncommittedPaths: async () => null,
+  }))
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('the orchestrator\'s background work does not hold the task rows it owns', async () => {
+  // Its monitors are usually about other tasks, and a single-PR `merge` holds the landing slot.
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w1:p1': ['2 monitors'] }),
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('close')
+})
+
+test('a design review records it too: its verdict waits on a commit, and a stopped worker must say so', async () => {
+  const git = dirtyTree(['docs/superpowers/reviews/hp-1-plan-review-0.md'])
+  const run = mkRun([mkTask({ phase: 'plan-review', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+  expect(run.tasks[0]?.uncommitted_work).toEqual({ at: 5, count: 1, sample: ['docs/superpowers/reviews/hp-1-plan-review-0.md'] })
 })
 
 test('design rows record nothing', async () => {
@@ -1140,7 +1292,7 @@ for (const { phase, tier } of [
 
     head = 'bbb'
     await advanceTasks(run, deps({ prView, prForBranch: async () => 42 }))
-    expect(task.phase).toBe(phase)
+    expect(task.phase).toBe('pr-review')
   })
 }
 
@@ -1177,9 +1329,9 @@ test('a send-back whose PR head cannot be read waits a tick instead of disarming
 
 test('a cleared review or a green CI reads no PR head', async () => {
   const { reads, prView } = headReads(() => 'aaa')
-  const review = mkRun([mkTask({ phase: 'pr-review-intent', tier: 'heavy', pr: 42 })])
+  const review = mkRun([mkTask({ phase: 'pr-review', tier: 'heavy', pr: 42 })])
   await advanceTasks(review, deps({ verdictFor: async () => clear, prView }))
-  expect(review.tasks[0]?.phase).toBe('pr-review-quality')
+  expect(review.tasks[0]?.phase).toBe('ci')
 
   const green = mkRun([mkTask({ phase: 'ci', pr: 42, ci: 'pass', tier: 'heavy' })])
   await advanceTasks(green, deps({ prView }))
@@ -1199,7 +1351,9 @@ test('a second CI round waits for a fresh poll instead of failing on the last ro
   expect(task.ci).toBeNull()
   expect(counterFor(task, 'ci')).toBe(1)
 
-  await ciTransitions([run], async () => 'pass')
+  const green = async () => ({ bucket: 'pass' as const, headSha: 'aaa' })
+  await ciTransitions([run], green, 0)
+  await ciTransitions([run], green, CI_SETTLE_MS)
   await advanceTasks(run, deps())
   expect(task.phase).toBe('merge')
 })
@@ -1222,7 +1376,7 @@ test('implement holds while its prompt is undelivered, so a lagging head read ca
   settleOutbox(run, [{ id: prompt.id, ok: true }], Date.now())
   head = 'F'
   await advanceTasks(run, deps({ prView }))
-  expect(task.phase).toBe('pr-review-intent')
+  expect(task.phase).toBe('pr-review')
 })
 
 test('a send-back on the last allowed pass escalates without waiting on the PR head', async () => {
@@ -1260,4 +1414,105 @@ test('a send-back with no PR found, or no head on it, waits a tick rather than r
   }))
   expect(noHead.phase).toBe('pr-review-intent')
   expect(counterFor(noHead, 'pr-review-intent')).toBe(0)
+})
+
+// ——— skipping the PR review on a small, well-planned change ———
+
+const DESIGN_CLEARED = (taskId = 't1'): Run['history'] => [
+  { at: 1, task_id: taskId, from: 'spec-review', to: 'plan', why: 'cleared' },
+  { at: 2, task_id: taskId, from: 'plan-review', to: 'blocked-on-files', why: 'cleared' },
+]
+
+interface SkipReads {
+  fetched: string[]
+  sized: string[]
+  numstat: string | null
+  listed: { ok: true; text: string | null } | { ok: false }
+  fetchFails: boolean
+}
+
+function skipReads(over: Partial<SkipReads> = {}) {
+  const reads: SkipReads = { fetched: [], sized: [], numstat: '40\t3\tsrc/a.ts\0', listed: { ok: true, text: null },
+    fetchFails: false, ...over }
+  const landingGit = {
+    isAncestor: async () => true,
+    remoteBranchHead: async () => ({ ok: true as const, sha: 'new' }),
+    resolve: async (_root: string, ref: string) => ref,
+    changedPaths: async () => [],
+    fetch: async (_root: string, refspec: string) => {
+      reads.fetched.push(refspec)
+      return reads.fetchFails ? 'unreachable' : null
+    },
+  }
+  const changeGit = {
+    numstat: async (_root: string, base: string, head: string) => {
+      reads.sized.push(`${base}...${head}`)
+      return reads.numstat
+    },
+    fileAt: async () => reads.listed,
+  }
+  return { reads, landingGit, changeGit }
+}
+
+async function leaveImplement(over: Partial<Task>, reads = skipReads(), baseRef: string | null = 'main') {
+  const run = mkRun([mkTask({ phase: 'implement', head_sha_at_entry: 'old', pr: 42, tier: 'standard', ...over })])
+  run.history = DESIGN_CLEARED()
+  const prompts = await advanceTasks(run, deps({
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new', baseRef }),
+    landingGit: reads.landingGit, changeGit: reads.changeGit,
+  }))
+  return { run, task: run.tasks[0]!, prompts, reads: reads.reads }
+}
+
+test('a small standard change whose spec and plan cleared first time skips its PR review for ci', async () => {
+  const { run, task, prompts, reads } = await leaveImplement({})
+  expect(task.phase).toBe('ci')
+  expect(task.review_skip).toMatchObject({ skipped: ['pr-review'], added_lines: 40 })
+  expect(run.history.at(-1)?.why)
+    .toBe('PR #42 at new; pr-review skipped: 40 lines added outside docs/, spec-review and plan-review cleared first pass')
+  expect(reads.fetched).toEqual(['+refs/heads/main:refs/remotes/origin/main', '+refs/heads/feat/x:refs/remotes/origin/feat/x'])
+  expect(reads.sized).toEqual(['refs/remotes/origin/main...new'])
+  expect(prompts).toHaveLength(0)
+})
+
+test('the PR review runs on a change at the threshold, or one the always-review list names', async () => {
+  for (const [label, reads] of [
+    ['150 lines', skipReads({ numstat: '150\t0\tsrc/a.ts\0' })],
+    ['listed', skipReads({ listed: { ok: true, text: 'src/\n' } })],
+  ] as const) {
+    const { task } = await leaveImplement({}, reads)
+    expect(task.phase, label).toBe('pr-review')
+    expect(task.review_skip, label).toBeUndefined()
+  }
+})
+
+test('a measurement that fails anywhere means the PR review runs', async () => {
+  for (const [label, reads, baseRef] of [
+    ['fetch', skipReads({ fetchFails: true }), 'main'],
+    ['numstat', skipReads({ numstat: null }), 'main'],
+    ['always-review list', skipReads({ listed: { ok: false } }), 'main'],
+    ['PR base', skipReads(), null],
+  ] as const) {
+    const { task } = await leaveImplement({}, reads, baseRef)
+    expect(task.phase, label).toBe('pr-review')
+  }
+})
+
+test('heavy, a sent-back spec, or an exit that is not ready never fetches to measure', async () => {
+  const heavy = await leaveImplement({ tier: 'heavy' })
+  expect(heavy.task.phase).toBe('pr-review')
+  expect(heavy.reads.fetched).toEqual([])
+
+  const reads = skipReads()
+  const run = mkRun([mkTask({ phase: 'implement', head_sha_at_entry: 'old', pr: 42, tier: 'light' })])
+  run.history = [{ at: 1, task_id: 't1', from: 'spec-review', to: 'spec', why: 'returned (pass 1)' }, ...DESIGN_CLEARED()]
+  await advanceTasks(run, deps({
+    prView: async () => ({ merged: false, mergedAtMs: null, headSha: 'new', baseRef: 'main' }),
+    landingGit: reads.landingGit, changeGit: reads.changeGit,
+  }))
+  expect(run.tasks[0]?.phase).toBe('pr-review')
+
+  const unchanged = await leaveImplement({ head_sha_at_entry: 'new' })
+  expect(unchanged.task.phase).toBe('implement')
+  expect([...reads.reads.fetched, ...unchanged.reads.fetched]).toEqual([])
 })

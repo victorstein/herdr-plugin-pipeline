@@ -1,9 +1,9 @@
 import { BD_ACTOR } from './bd'
 import { escalatedUnanswered } from './decisions'
-import { TERMINAL_BAD } from './gating'
+import { fileHolders, TERMINAL_BAD } from './gating'
 import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
-import { TASK_ROWS } from './phases'
+import { rowRunsIn, type RunMode, TASK_ROWS } from './phases'
 import type { Run, Task } from './types'
 
 /**
@@ -18,7 +18,17 @@ export const ABORTED_LABEL = 'aborted'
  * keeping it managed lets the reconciler strip it from their beads.
  */
 const LEGACY_PHASE_LABEL_PREFIX = 'phase:'
-const PHASE_LABELS: ReadonlySet<string> = new Set([...TASK_ROWS.map((row) => row.phase), ABORTED_LABEL])
+/**
+ * Per mode, because a bare phase name can be an ordinary word: a per-task run never
+ * enters `sync`, and stripping a human's `sync` label from every bead it claims
+ * would take something it never wrote.
+ */
+const phaseLabelsIn = (mode: RunMode): ReadonlySet<string> =>
+  new Set([...TASK_ROWS.filter((row) => rowRunsIn(row, mode)).map((row) => row.phase), ABORTED_LABEL])
+const PHASE_LABELS: Readonly<Record<RunMode, ReadonlySet<string>>> = {
+  'per-task': phaseLabelsIn('per-task'),
+  'single-pr': phaseLabelsIn('single-pr'),
+}
 export const AWAITING_HUMAN_LABEL = 'hpipe:awaiting-human'
 /**
  * Provenance labels sit outside the managed namespaces on purpose: a discovered bead can later be
@@ -47,12 +57,18 @@ export interface DesiredBead {
   labels: string[]
   metadata: Record<string, string>
   blockedBy: string[]
+  /**
+   * The run's other beads this one must not be blocked by. Only a file wait adds
+   * an edge that later has to go, so only these are ever removed: an edge a human
+   * drew to a bead outside the run is theirs.
+   */
+  unblockedBy: string[]
   comments: DesiredComment[]
 }
 
 /** Every other label is a human's, and the reconciler never removes it. */
-export const isManagedLabel = (label: string): boolean =>
-  PHASE_LABELS.has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+export const isManagedLabel = (label: string, mode: RunMode): boolean =>
+  PHASE_LABELS[mode].has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
 
 export function commentMarker(taskId: string, decisionId: string, kind: 'asked' | 'ruling'): string {
   return `[hpipe ${taskId}/${decisionId}/${kind}]`
@@ -66,6 +82,16 @@ function dependencyBeads(task: Task, run: Run): string[] {
   return task.depends_on
     .map((id) => run.tasks.find((t) => t.task_id === id)?.bead)
     .filter((bead): bead is string => bead !== undefined)
+}
+
+/**
+ * A wait on a sibling's files is a block by that sibling's bead, so bv shows the
+ * card under BLOCKED and names the task it waits on. berean-os kept three such
+ * waits under IN PROGRESS, saying nothing about whom. Measured on a live run.
+ */
+function blockerBeads(task: Task, run: Run): string[] {
+  const holders = task.phase === 'blocked-on-files' ? fileHolders(task, run.tasks).map((t) => t.bead) : []
+  return [...new Set([...dependencyBeads(task, run), ...holders])]
 }
 
 /** One per escalated question and one per ruling, each ending in the marker that makes posting it idempotent. */
@@ -103,9 +129,13 @@ function decisionComments(task: Task): DesiredComment[] {
  */
 export function desiredBead(task: Task, run: Run): DesiredBead {
   const phaseLabel: string = task.phase
+  const blockedBy = blockerBeads(task, run)
+  const unblockedBy = run.tasks
+    .filter((t) => t.task_id !== task.task_id && !blockedBy.includes(t.bead))
+    .map((t) => t.bead)
   const shared = {
     bead: task.bead, metadata: { [RUN_METADATA_KEY]: run.run_id },
-    blockedBy: dependencyBeads(task, run), comments: decisionComments(task),
+    blockedBy, unblockedBy, comments: decisionComments(task),
   }
 
   if (task.merged_at_ms !== null) {
@@ -115,8 +145,11 @@ export function desiredBead(task: Task, run: Run): DesiredBead {
     const why = wasAborted(run) && !TERMINAL_BAD.has(task.phase) ? ABORTED_LABEL : phaseLabel
     return { ...shared, status: 'open', assignee: null, labels: [why] }
   }
-  if (escalatedUnanswered(task) !== null) {
+  if (escalatedUnanswered(task) !== null || task.phase === 'escalated') {
     return { ...shared, status: 'blocked', assignee: BD_ACTOR, labels: [phaseLabel, AWAITING_HUMAN_LABEL] }
+  }
+  if (task.phase === 'blocked-on-files') {
+    return { ...shared, status: 'blocked', assignee: BD_ACTOR, labels: [phaseLabel] }
   }
   if (task.phase !== 'queued' && task.awaiting_brief !== true) {
     return { ...shared, status: 'in_progress', assignee: BD_ACTOR, labels: [phaseLabel] }

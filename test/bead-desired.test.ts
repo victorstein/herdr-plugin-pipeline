@@ -4,7 +4,7 @@ import {
 } from '../src/lib/bead-desired'
 import { escalatedUnanswered, openDecision } from '../src/lib/decisions'
 import { newRun } from '../src/lib/ledger'
-import { TASK_ROWS } from '../src/lib/phases'
+import { rowRunsIn, TASK_ROWS } from '../src/lib/phases'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -33,7 +33,8 @@ test('a merged task wants its bead closed by hpipe, carrying no managed label an
   for (const phase of ['close', 'teardown', 'done', 'orphaned'] as const) {
     const task = mkTask({ phase, merged_at_ms: 5 })
     expect(desiredBead(task, runWith(task)), phase).toEqual({
-      bead: 'hp-1', status: 'closed', assignee: 'hpipe', labels: [], metadata: RUN_METADATA, blockedBy: [], comments: [],
+      bead: 'hp-1', status: 'closed', assignee: 'hpipe', labels: [], metadata: RUN_METADATA, blockedBy: [], unblockedBy: [],
+      comments: [],
     })
   }
 })
@@ -72,9 +73,34 @@ test('a run that ended on its own releases an unfinished task under that task\'s
   expect(desiredBead(task, run)).toMatchObject({ status: 'open', labels: ['failed'] })
 })
 
-test('an escalated task keeps its claim: the human may resume it', () => {
+test('an escalated task keeps its claim, and sits in BLOCKED marked for the human', () => {
   const task = mkTask({ phase: 'escalated', escalated_from: 'plan' })
-  expect(desiredBead(task, runWith(task))).toMatchObject({ status: 'in_progress', assignee: 'hpipe' })
+  expect(desiredBead(task, runWith(task))).toMatchObject({
+    status: 'blocked', assignee: 'hpipe', labels: ['escalated', AWAITING_HUMAN_LABEL],
+  })
+})
+
+test('a task waiting on another task\'s files is blocked by that task\'s bead — #20', () => {
+  // berean-os: t2, t3 and t7 waited on t4 and t6 in IN PROGRESS while BLOCKED stood
+  // empty, and nothing said which task they waited on. Measured on a live run.
+  const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'implement', files: ['src/reader/'] })
+  const other = mkTask({ task_id: 't6', bead: 'hp-6', phase: 'implement', files: ['src/search/'] })
+  const waiting = mkTask({
+    task_id: 't2', bead: 'hp-2', phase: 'blocked-on-files', files: ['src/reader/Menu.cpp'], pr: null,
+  })
+  const run = runWith(holder, other, waiting)
+  expect(desiredBead(waiting, run)).toMatchObject({
+    status: 'blocked', assignee: 'hpipe', labels: ['blocked-on-files'], blockedBy: ['hp-4'], unblockedBy: ['hp-6'],
+  })
+})
+
+test('a wait that ended wants its file edge gone, while a depends_on edge stays for good', () => {
+  const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
+  const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'done', merged_at_ms: 2, files: ['src/a.ts'] })
+  const task = mkTask({ task_id: 't2', bead: 'hp-2', phase: 'implement', depends_on: ['t1'], files: ['src/a.ts'] })
+  expect(desiredBead(task, runWith(first, holder, task))).toMatchObject({
+    status: 'in_progress', blockedBy: ['hp-1'], unblockedBy: ['hp-4'],
+  })
 })
 
 test('a registered task its worker has not been briefed on stays open and unassigned', () => {
@@ -157,18 +183,30 @@ test('every row records the run id in metadata rather than a label, which would 
   }
 })
 
-test('hpipe manages its hpipe: labels, every bare task phase name and aborted; a human\'s labels stay theirs', () => {
-  const taskPhases = TASK_ROWS.map((row) => row.phase)
-  for (const label of [...taskPhases, 'aborted', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
-    expect(isManagedLabel(label), label).toBe(true)
-  }
-  for (const label of ['frontend', 'pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) {
-    expect(isManagedLabel(label), label).toBe(false)
+test('hpipe manages its hpipe: labels, every bare phase name of the run\'s mode and aborted; a human\'s labels stay theirs', () => {
+  for (const mode of ['per-task', 'single-pr'] as const) {
+    const taskPhases = TASK_ROWS.filter((row) => rowRunsIn(row, mode)).map((row) => row.phase)
+    for (const label of [...taskPhases, 'aborted', 'hpipe:run=r9', AWAITING_HUMAN_LABEL]) {
+      expect(isManagedLabel(label, mode), `${mode} ${label}`).toBe(true)
+    }
+    for (const label of ['frontend', 'pipeline:tier-light', 'ui', 'phased', DISCOVERED_LABEL, discoveryLabel('r9', 't1', 'x1')]) {
+      expect(isManagedLabel(label, mode), `${mode} ${label}`).toBe(false)
+    }
   }
 })
 
+test('a per-task run does not manage the single-PR rows\' labels, which are ordinary words a human may use', () => {
+  for (const label of ['sync', 'land-queue']) {
+    expect(isManagedLabel(label, 'per-task'), label).toBe(false)
+    expect(isManagedLabel(label, 'single-pr'), label).toBe(true)
+  }
+  expect(isManagedLabel('ci', 'single-pr')).toBe(false)
+})
+
 test('a phase: label from an earlier build stays managed, so the reconciler migrates it away', () => {
-  for (const label of ['phase:research', 'phase:aborted', 'phase:retired-phase']) expect(isManagedLabel(label), label).toBe(true)
+  for (const label of ['phase:research', 'phase:aborted', 'phase:retired-phase']) {
+    expect(isManagedLabel(label, 'per-task'), label).toBe(true)
+  }
 })
 
 test('the phase label is the bare phase name, short enough to survive a bv card', () => {

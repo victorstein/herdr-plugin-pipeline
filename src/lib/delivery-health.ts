@@ -3,14 +3,22 @@ import { type PaneInfo, paneHasNoAgent } from './herdr'
 import type { PaneObservations } from './outbox'
 import { readJson, writeJson } from './store'
 import type { SessionKey } from './types'
+import type { LimitLine } from './usage-limit'
 
 /** Why the supervisor is holding what it owes one pane. */
 export interface PaneHold {
   /** Start of the current streak of failed or held sends. */
   since: number
   failures: number
-  /** The last herdr code, or `stuck_input` while the box holds text the supervisor did not write. */
+  /**
+   * The last herdr code, `stuck_input` while the box holds text the supervisor did
+   * not write, or `usage_limit` while Claude's usage limit stops the pane.
+   */
   code: string
+  /** `usage_limit` only: when it resets, or null when the pane's message could not be dated. */
+  until?: number | null
+  /** `usage_limit` only: the reset as Claude printed it, e.g. `10:20am (America/Managua)`. */
+  reset?: string | null
 }
 
 /**
@@ -22,6 +30,14 @@ export interface DeliveryHealth {
   pid: number
   written_at: number
   panes: Record<string, PaneHold>
+  /** The usage limits the supervisor is tracking, for the next one to carry on from. */
+  limits?: PersistedLimits
+}
+
+export interface PersistedLimits {
+  marks: Record<string, { line: LimitLine; since: number; resets_at: number | null }>
+  /** Pane → the line last lifted while still on screen, which must not be marked again. */
+  stale: Record<string, string>
 }
 
 const healthPath = (stateDir: string, session: SessionKey) =>
@@ -41,6 +57,14 @@ export const HEALTH_REFRESH_MS = 15_000
  * wedged in a slow call — and its holds describe a moment long gone.
  */
 export const HEALTH_MAX_AGE_MS = 4 * HEALTH_REFRESH_MS
+
+/**
+ * Whatever supervisor wrote it, live or not: a restarted supervisor carries on from
+ * its predecessor's usage limits, so a limit keeps the time it was first seen.
+ */
+export async function readDeliveryHealth(stateDir: string, session: SessionKey): Promise<DeliveryHealth | null> {
+  return readJson<DeliveryHealth>(healthPath(stateDir, session))
+}
 
 /** Only the live, ticking supervisor's file counts. */
 export async function readPaneHolds(

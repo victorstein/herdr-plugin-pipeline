@@ -156,19 +156,29 @@ export async function mainlineBranch(
   return null
 }
 
-async function fetchBase(repoRoot: string): Promise<DispatchBase> {
-  let branch = 'main'
+/**
+ * `branch` is a single-PR run's batch branch; null fetches origin's default.
+ *
+ * The refspec is explicit: `git fetch origin <name>` updates the tracking ref only
+ * when the remote's fetch refspec covers it, and in a narrow clone wrote nothing
+ * but FETCH_HEAD — so "as just fetched" named a stale local commit, or none.
+ */
+async function fetchBase(repoRoot: string, batchBranch: string | null): Promise<DispatchBase & { branch: string }> {
+  let branch = batchBranch ?? 'main'
   let fetchError: string | null
   const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
   if (origin.code !== 0) {
     fetchError = failureReason(origin)
   } else {
     const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
-    const found = await defaultBranch(repoRoot, async () => network)
-    branch = found.branch
-    fetchError = found.error
+    fetchError = null
+    if (batchBranch === null) {
+      const found = await defaultBranch(repoRoot, async () => network)
+      branch = found.branch
+      fetchError = found.error
+    }
     if (fetchError === null) {
-      const fetched = await git(repoRoot, ['fetch', '--quiet', 'origin', branch], network)
+      const fetched = await git(repoRoot, ['fetch', '--quiet', 'origin', trackingRefspec(branch)], network)
       if (fetched.code !== 0) fetchError = failureReason(fetched)
     }
   }
@@ -179,9 +189,17 @@ async function fetchBase(repoRoot: string): Promise<DispatchBase> {
   ]
   for (const [fullRef, ref] of candidates) {
     const resolved = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${fullRef}^{commit}`])
-    if (resolved.code === 0) return { commit: resolved.out.trim(), ref, fetchError }
+    if (resolved.code === 0) return { commit: resolved.out.trim(), ref, fetchError, branch }
   }
-  return { commit: null, ref: branch, fetchError }
+  return { commit: null, ref: branch, fetchError, branch }
+}
+
+/** Origin's default branch and its commit as just fetched, bypassing the dispatch cache. */
+export async function fetchDefaultBranch(
+  repoRoot: string,
+): Promise<{ branch: string; commit: string | null; fetchError: string | null }> {
+  const { branch, commit, fetchError } = await fetchBase(repoRoot, null)
+  return { branch, commit, fetchError }
 }
 
 const recentBases = new Map<string, { fetchedAt: number; base: DispatchBase }>()
@@ -203,10 +221,12 @@ async function containsAll(repoRoot: string, commit: string | null, merges: stri
  * that started before the merge could otherwise pass as after it.
  */
 export async function freshDispatchBase(
-  repoRoot: string, dependencyMerges: string[] | null = [], now: () => number = Date.now,
+  repoRoot: string, dependencyMerges: string[] | null = [], branch: string | null = null,
+  now: () => number = Date.now,
 ): Promise<DispatchBase> {
   const startedAt = now()
-  const recent = recentBases.get(repoRoot)
+  const cacheKey = `${repoRoot}\0${branch ?? ''}`
+  const recent = recentBases.get(cacheKey)
   if (
     recent !== undefined && dependencyMerges !== null &&
     startedAt - recent.fetchedAt < CACHE_TTL_MS &&
@@ -214,26 +234,80 @@ export async function freshDispatchBase(
   ) {
     return recent.base
   }
-  const base = await fetchBase(repoRoot)
-  recentBases.set(repoRoot, { fetchedAt: startedAt, base })
+  const { commit, ref, fetchError } = await fetchBase(repoRoot, branch)
+  const base = { commit, ref, fetchError }
+  recentBases.set(cacheKey, { fetchedAt: startedAt, base })
   return base
 }
 
+export const trackingRefspec = (branch: string): string => `+refs/heads/${branch}:refs/remotes/origin/${branch}`
+
 /**
- * Best effort, under the same budget as a dispatch fetch: on failure the
- * destination ref is only as new as the last fetch, or absent.
+ * Under the same budget as a dispatch fetch: on failure the destination ref is
+ * only as new as the last fetch, or absent. Returns why it failed, or null.
  */
-export async function fetchFromOrigin(repoRoot: string, refspec: string): Promise<void> {
+export async function fetchFromOrigin(repoRoot: string, refspec: string): Promise<string | null> {
   const origin = await git(repoRoot, ['remote', 'get-url', 'origin'])
-  if (origin.code !== 0) return
+  if (origin.code !== 0) return failureReason(origin)
   const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
-  await git(repoRoot, ['fetch', '--quiet', 'origin', refspec], network)
+  const fetched = await git(repoRoot, ['fetch', '--quiet', 'origin', refspec], network)
+  return fetched.code === 0 ? null : failureReason(fetched)
+}
+
+export type RemoteHead = { ok: true; sha: string | null } | { ok: false; reason: string }
+
+/** What origin says a branch points at now; `sha: null` when it has no such branch. */
+export async function remoteBranchHead(repoRoot: string, branch: string): Promise<RemoteHead> {
+  const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  const listed = await git(repoRoot, ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], network)
+  if (listed.code !== 0) return { ok: false, reason: failureReason(listed) }
+  const line = listed.out.split('\n').find((l) => l.endsWith(`\trefs/heads/${branch}`))
+  return { ok: true, sha: line === undefined ? null : line.split('\t')[0]! }
+}
+
+const unreachableOrigins = new Map<string, { at: number; reason: string }>()
+
+/**
+ * For the supervisor's tick, which is serial: with origin unreachable, every
+ * ls-remote costs the whole budget, for every task that asks, on every tick of
+ * every run. A failure answers for the repo's origin until it cools down, as a
+ * failed default-branch lookup does; a missing branch is an answer, not a failure.
+ */
+export async function remoteBranchHeadCooled(
+  repoRoot: string, branch: string, now: () => number = Date.now,
+): Promise<RemoteHead> {
+  const failed = unreachableOrigins.get(repoRoot)
+  if (failed !== undefined && now() - failed.at < CACHE_TTL_MS) {
+    return { ok: false, reason: `${failed.reason}; not retried for ${CACHE_TTL_MS / 1000}s` }
+  }
+  const head = await remoteBranchHead(repoRoot, branch)
+  if (head.ok) unreachableOrigins.delete(repoRoot)
+  else unreachableOrigins.set(repoRoot, { at: now(), reason: head.reason })
+  return head
+}
+
+/**
+ * Never forced. Git refuses the update unless `sha` contains what origin has, and
+ * origin compares-and-swaps the old value, so a refusal is the answer. Returns why
+ * it was refused, or null.
+ */
+export async function pushToOrigin(repoRoot: string, sha: string, branch: string): Promise<string | null> {
+  const network = { env: await networkEnv(repoRoot), deadline: Date.now() + FETCH_TIMEOUT_MS }
+  const pushed = await git(repoRoot, ['push', '--quiet', 'origin', `${sha}:refs/heads/${branch}`], network)
+  return pushed.code === 0 ? null : failureReason(pushed)
+}
+
+/** Why git would not take `name` as a branch name, or null. */
+export async function branchNameRefusal(repoRoot: string, name: string): Promise<string | null> {
+  const checked = await git(repoRoot, ['check-ref-format', '--branch', name])
+  return checked.code === 0 ? null : `${name} is not a valid branch name`
 }
 
 export function forgetDispatchBases(): void {
   recentBases.clear()
   advertisedDefaults.clear()
   unansweredLookups.clear()
+  unreachableOrigins.clear()
 }
 
 export function dependencyMerges(task: Task, tasks: Task[]): string[] | null {

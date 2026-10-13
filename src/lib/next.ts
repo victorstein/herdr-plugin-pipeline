@@ -132,7 +132,7 @@ export function formatNext(output: TriageOutput, held: ReadonlySet<string>, opti
   }
 
   if (picks.length === 0 && notClaimable.length === 0 && later.length === 0) {
-    lines.push('nothing to pick up: every open bead is held, blocked or filtered out')
+    lines.push('nothing to pick up: no open bead is claimable — the backlog is empty, or every open bead is held, blocked or filtered out')
   } else {
     if (picks.length === 0) lines.push('now: nothing claimable')
     else lines.push('now (parallel when their --files are disjoint):', ...picks.map(pickLine))

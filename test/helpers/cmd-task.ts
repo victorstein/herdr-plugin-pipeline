@@ -25,7 +25,7 @@ export function fakeBeads(over: Partial<RegistrationBeads> = {}): RegistrationBe
  */
 export function cmdTask(
   ctx: CmdTaskArgs[0], input: CmdTaskArgs[1], beads: RegistrationBeads = fakeBeads(),
-  dispatchBase?: CmdTaskArgs[3],
+  dispatchBase?: CmdTaskArgs[3], shipped: CmdTaskArgs[4] = async () => false,
 ): ReturnType<typeof cmdTaskWithRealBeads> {
-  return cmdTaskWithRealBeads(ctx, input, beads, dispatchBase)
+  return cmdTaskWithRealBeads(ctx, input, beads, dispatchBase, shipped)
 }

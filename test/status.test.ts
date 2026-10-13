@@ -2,8 +2,10 @@ import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
-import type { Run, Task } from '../src/lib/types'
+import { FILES_FREE_ON_ARRIVAL } from '../src/lib/machine'
+import type { ReviewSkip, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
+import { parkedFooter } from '../src/supervisor/tick'
 
 // Deliberately not `hpipe`: a GitHub install has no such binary on PATH, so
 // every command status prints must be the rendered invocation it was handed.
@@ -176,6 +178,21 @@ test('a healthy run produces none of the four new warning lines', () => {
   expect(text).not.toContain('dispatch --done')
 })
 
+test('finished runs from an earlier plugin version collapse to one line below the live ones — #7', () => {
+  const live = mkRun()
+  live.tasks = [mkTask({ task_id: 't1', phase: 'implement' })]
+  const legacy = Array.from({ length: 3 }, () => {
+    const run = mkRun()
+    run.schema_version = 2
+    run.phase = 'done'
+    return run
+  })
+  const text = formatStatus([...legacy, live], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('was started by an earlier plugin version')
+  expect(text).toContain('3 finished runs from an earlier plugin version not shown')
+  expect(text.indexOf(live.run_id)).toBeLessThan(text.indexOf('3 finished runs'))
+})
+
 test('a run from an earlier plugin version is listed as ignored, with no task lines', () => {
   const run = mkRun()
   run.schema_version = 2
@@ -266,8 +283,8 @@ test('every task line carries how long it has sat in its phase', () => {
     mkTask({ task_id: 't2', phase: 'implement', phase_entered_at: now - 2 * 60_000 }),
   ]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
-  expect(text).toContain('  t1 feat/x hp-1 [research 780m] heavy working')
-  expect(text).toContain('  t2 feat/x hp-1 [implement 2m] heavy working')
+  expect(text).toContain('  t1 feat/x hp-1 [research 780m] heavy agent:working')
+  expect(text).toContain('  t2 feat/x hp-1 [implement 2m] heavy agent:working')
 })
 
 test('a PR parked in merge is named under waiting on you, not left among the rest', () => {
@@ -334,6 +351,16 @@ test('nothing waiting on you prints no section at all', () => {
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('waiting on you')
 })
 
+test('a run in branch-review lists the review itself under waiting on you', () => {
+  const now = 100_000_000
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.phase_entered_at = now - 3 * 60_000
+  run.tasks = [mkTask({ task_id: 't1', phase: 'done' })]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
+  expect(text).toContain('  waiting on you:\n    run [branch-review 3m] — YOUR move: the whole-branch review')
+})
+
 test('an idle worker sitting on uncommitted work is waiting on you, not thinking', () => {
   const now = 100_000_000
   const run = mkRun()
@@ -345,7 +372,7 @@ test('an idle worker sitting on uncommitted work is waiting on you, not thinking
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain(
     '    t1 feat/x (hp-1) [implement 30m] — YOUR move: worker idle with 4 uncommitted paths ' +
-    '(src/a.ts, src/b.ts, src/c.ts, …) — have it commit and push',
+    `(src/a.ts, src/b.ts, src/c.ts, …) — \`${HP} nudge --task t1\` tells it to commit, push and finish implement`,
   )
 })
 
@@ -379,15 +406,32 @@ test('a stuck files block prints its release command once', () => {
   expect(text).toContain('t2 blocked on files held by t1 (failed) — it has stopped moving')
 })
 
-test('every stuck holder gets its own release command', () => {
+test('every failed holder gets its own release command', () => {
   const run = mkRun()
   run.tasks = [
     mkTask({ task_id: 't1', phase: 'failed', files: ['src/a.ts'] }),
     mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts', 'src/b.ts'] }),
-    mkTask({ task_id: 't3', phase: 'escalated', files: ['src/b.ts'] }),
+    mkTask({ task_id: 't3', phase: 'failed', files: ['src/b.ts'] }),
   ]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
     `— YOUR move: \`${HP} release --task t1\`, \`${HP} release --task t3\``,
+  )
+})
+
+test('an escalated holder is never offered for release: it is resumed or abandoned — #21', () => {
+  // berean-os: t4 escalated during a usage-limit pause while holding t2's files,
+  // and every digest said \`release --task t4\`. Following it would have dropped
+  // t4's lock mid-PR and let t2 implement over its files. Measured on a live run.
+  const run = mkRun()
+  run.tasks = [
+    mkTask({ task_id: 't4', phase: 'escalated', escalated_from: 'pr-review', files: ['src/a.ts'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('release --task')
+  expect(text).toContain('t2 blocked on files held by t4 (escalated) — it keeps them until it is resumed or abandoned')
+  expect(actionFor(run, run.tasks[1]!, HP)).toBe(
+    'nothing for you here — t4 holds these files and is escalated; its own line says how to resume or abandon it',
   )
 })
 
@@ -609,7 +653,7 @@ test('a dispatch inside its grace reads as under way on its task line — #135',
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
-  expect(taskLine).toEndWith(`[research 0m] heavy unknown — dispatch under way — see \`${HP} show --task t1\``)
+  expect(taskLine).toEndWith(`[research 0m] heavy agent:unknown — dispatch under way — see \`${HP} show --task t1\``)
   expect(text).not.toContain('waiting on you:')
 })
 
@@ -661,6 +705,57 @@ test('a worker whose phase prompt is held by stuck input is not called idle with
   expect(text).toContain('⚠ stuck input in w3:p1')
 })
 
+const RESET_AT = 100_000_000 + 3_600_000
+const limitHold = (until: number | null) => ({
+  'w3:p1': {
+    since: 100_000_000 - 60_000, failures: 0, code: 'usage_limit', until,
+    reset: until === null ? null : '10:20am (America/Managua)',
+  },
+})
+
+test('a worker the usage limit paused is nobody\'s move, ahead of its held prompt and its missing artifact', () => {
+  const { run, now } = heldSpecPrompt()
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(['w3:p1']), now, {
+    holds: limitHold(RESET_AT),
+  })
+  expect(text).toContain("t1 feat/x hp-1 [spec 1m] heavy agent:idle — nothing for you — paused by Claude's usage limit, " +
+    'resets 10:20am (America/Managua); the supervisor resumes it then')
+  expect(text).not.toContain('waiting on you:')
+  expect(text).toContain("⚠ usage limit in w3:p1: 1 prompt for t1's worker held 1m")
+  expect(waitsOnYou(run, run.tasks[0] as Task, now, limitHold(RESET_AT))).toBe(false)
+})
+
+test('a worker paused by a limit whose reset could not be read waits on you, and says how to resume it', () => {
+  const { run, now } = heldSpecPrompt()
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, limitHold(null))).toBe(
+    "YOUR move: paused by Claude's usage limit, whose reset could not be read — once it has reset, " +
+      `\`${HP} nudge --task t1\``,
+  )
+})
+
+test('a worker owed a usage-limit resume is not called idle with nothing, in status or the digest footer', () => {
+  const { run, now } = heldSpecPrompt()
+  run.outbox = []
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, now)
+  const task = run.tasks[0] as Task
+  expect(actionFor(run, task, HP, now)).toBe(
+    "nothing for you — its resume after Claude's usage limit is queued for w3:p1")
+  expect(waitsOnYou(run, task, now)).toBe(false)
+  expect(parkedFooter(run, new Set(), now, HP)).not.toContain('with nothing at')
+
+  const failing = { 'w3:p1': { since: now - 60_000, failures: 2, code: 'agent_not_found' } }
+  expect(actionFor(run, task, HP, now, failing))
+    .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — see the ⚠ delivery line below")
+})
+
+test('a worker told to carry on is nobody\'s move until that prompt lands', () => {
+  const { run, now } = heldSpecPrompt()
+  run.outbox = []
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'carry-on' }, now)
+  const task = run.tasks[0] as Task
+  expect(actionFor(run, task, HP, now)).toBe('nothing for you — its nudge to carry on is queued for w3:p1')
+})
+
 test('a send refused before it went out is named stuck from the gate\'s holds, as the digest passes them — #136', () => {
   const { run, now } = heldSpecPrompt()
   const holds = { 'w3:p1': { since: now - 60_000, failures: 0, code: 'stuck_input' } }
@@ -694,7 +789,7 @@ test('the status task line carries the tier right after the phase bracket', () =
   const run = mkRun()
   run.tasks = [mkTask({ task_id: 't2', phase: 'implement', tier: 'light', phase_entered_at: now - 5 * 60_000 })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now))
-    .toContain('  t2 feat/x hp-1 [implement 5m] light working')
+    .toContain('  t2 feat/x hp-1 [implement 5m] light agent:working')
 })
 
 test('visitedPhases lists every phase entered, drops repeats and marks rewinds', () => {
@@ -715,10 +810,24 @@ test('visitedPhases lists every phase entered, drops repeats and marks rewinds',
     .toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research', '↺research'])
 })
 
+// Smoke run 14: every task's visited line named blocked-on-files though no task held its files.
+test('visitedPhases marks a file gate the task passed straight through', () => {
+  const run = mkRun()
+  const task = mkTask({ task_id: 't1' })
+  run.history = [
+    { at: 1, task_id: 't1', from: 'plan', to: 'blocked-on-files', why: 'actor idle + artifact fresh' },
+    { at: 2, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: FILES_FREE_ON_ARRIVAL },
+    { at: 3, task_id: 't1', from: 'rewind', to: 'blocked-on-files', why: 'manual rewind' },
+    { at: 4, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: 'no overlapping files in flight' },
+  ]
+  expect(visitedPhases(run, task))
+    .toEqual(['blocked-on-files (passed through)', 'implement', '↺blocked-on-files', 'implement'])
+})
+
 test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {
   const run = mkRun()
   const task = mkTask({
-    task_id: 't1', phase: 'spec', tier: 'standard',
+    task_id: 't1', phase: 'spec', tier: 'standard', adopted_at: Date.UTC(2026, 8, 25, 10, 30),
     tier_history: [
       { at: Date.UTC(2026, 8, 25, 10, 4), from: null, to: 'light', source: 'label', pane: 'w1:p1',
         why: 'label pipeline:tier-light' },
@@ -733,8 +842,9 @@ test('hpipe show prints the tier, its log and the phases visited, after the phas
   ]
   const lines = formatTaskDetail(run, task).split('\n')
   const phaseAt = lines.findIndex((line) => line.startsWith('phase:'))
-  expect(lines.slice(phaseAt + 1, phaseAt + 4)).toEqual([
+  expect(lines.slice(phaseAt + 1, phaseAt + 5)).toEqual([
     'tier:       standard',
+    'effort:     worker medium (started light; a tier change does not restart it), reviews high (plan-review medium)',
     'tier log:   2026-09-25 10:04Z — → light (label pipeline:tier-light) · ' +
       '2026-09-25 11:30Z light → standard (hpipe-tier, pane w3:p1): research found a contract change',
     'visited:    research → spec',
@@ -747,6 +857,7 @@ test('hpipe show on a task from before tiers reads heavy, with no log, and nothi
   run.tasks = [task]
   const text = formatTaskDetail(run, task)
   expect(text).toContain('tier:       heavy')
+  expect(text).toContain('effort:     worker xhigh, reviews xhigh')
   expect(text).toContain('tier log:   none')
   expect(text).toContain('visited:    none')
 })
@@ -777,4 +888,45 @@ test('a decision put to the human is listed under waiting on you with the comman
   expect(text).toContain('waiting on you:')
   expect(text).toContain(`decision d1 was put to the human 5m ago — record their ruling with ` +
     `\`${HP} answer --task t1 --decision d1 --answer "<their ruling>" --by human\``)
+})
+
+test('hpipe show names the head CI was read on, since a green is only about that head — #16', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'merge', ci: 'pass', ci_head: { sha: '924e0aecb66cbcd7', seen_at: 0 } })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('ci:         pass (on 924e0aec)')
+})
+
+const SKIPPED: ReviewSkip = { at: 1, skipped: ['pr-review'], added_lines: 42, cleared: ['spec-review'] }
+
+test('a task whose PR review was skipped says so on its status line', () => {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({
+    phase: 'ci', phase_entered_at: Date.now(), tier: 'light', pr: 7, ci: 'pending',
+    review_skip: SKIPPED,
+  })]
+  const line = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n').find((l) => l.startsWith('  t1 '))
+  expect(line).toContain('[ci 0m] light pr-review skipped agent:working PR #7 ci:pending')
+})
+
+// Smoke run 14 read "pr-review skipped done", where `done` is the agent's state, not a phase.
+test('the agent\'s state on a status line is labelled, so a skip note cannot run into it', () => {
+  const run = mkRun()
+  run.phase = 'execute'
+  run.tasks = [mkTask({ phase: 'land-queue', phase_entered_at: Date.now(), tier: 'light', agent_status: 'done',
+    review_skip: SKIPPED })]
+  const line = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n').find((l) => l.startsWith('  t1 '))
+  expect(line).toContain('[land-queue 0m] light pr-review skipped agent:done')
+})
+
+test('hpipe show says which review was skipped and why, right after the phases visited', () => {
+  const run = mkRun()
+  const task = mkTask({ phase: 'ci', tier: 'light', review_skip: SKIPPED })
+  run.tasks = [task]
+  const lines = formatTaskDetail(run, task).split('\n')
+  const visitedAt = lines.findIndex((line) => line.startsWith('visited:'))
+  expect(lines[visitedAt + 1]).toBe('skipped:    pr-review (42 lines added outside docs/, spec-review cleared first pass)')
+  run.tasks = [mkTask({ phase: 'ci' })]
+  expect(formatTaskDetail(run, run.tasks[0]!)).not.toContain('skipped:')
 })

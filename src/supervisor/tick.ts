@@ -1,7 +1,9 @@
 import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
-import { nextPhase, taskRow, tierOf } from '../lib/phases'
+import { fileHolders } from '../lib/gating'
+import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
+import { reviewsSkipped } from '../lib/review-skip'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
@@ -35,10 +37,16 @@ export interface WakeLine {
   detail?: string
 }
 
-function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number): string {
+function phaseBox(phaseAtEvent: string, phase: string, enteredAt: number, now: number, skipped = ''): string {
   return phaseAtEvent === phase
     ? `${phase} ${ageMinutes(enteredAt, now)}m`
-    : `${phaseAtEvent} → ${phase}`
+    : `${phaseAtEvent} → ${phase}${skipped}`
+}
+
+/** Only on the transition out of `implement`: that is the moment the skip happened. */
+function skippedOnTheWay(task: Task, phaseAtEvent: string): string {
+  const skip = task.review_skip
+  return skip === undefined || phaseAtEvent !== 'implement' ? '' : `, ${reviewsSkipped(skip)}`
 }
 
 /**
@@ -56,13 +64,29 @@ export function describeWake(
     return `${run.run_id} [${box}] ${line.event}`
   }
 
-  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now)
+  const skipped = skippedOnTheWay(task, line.phaseAtEvent)
+  const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now, skipped)
   const head = `${task.task_id} ${task.branch} (${task.bead}) [${box}] ` +
     `${line.event} — ${actionFor(run, task, hpipe, now, holds)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
   return `${head}\n${indented}`
+}
+
+/**
+ * herdr reports a pane `done` the moment its turn ends, whatever it left running.
+ * The trial's orchestrator read `agent:done` on a worker whose implementer
+ * subagent was still building firmware as a worker that had stopped. Measured on a
+ * live run. `blocked` keeps its pane tail instead.
+ */
+export function noteBackgroundWork(wake: WakeLine[], runningIn: (pane: string) => readonly string[]): void {
+  for (const line of wake) {
+    const pane = line.task?.pane_id
+    if (pane == null || (line.event !== 'agent:done' && line.event !== 'agent:idle')) continue
+    const running = runningIn(pane)
+    if (running.length > 0) line.event = `${line.event}, background work running (${running.join(', ')})`
+  }
 }
 
 /** Long enough to cover the orchestrator's next shell call after `agent start`. */
@@ -114,6 +138,50 @@ export class BriefHolds {
     return new Set([...this.held.values()]
       .filter(({ line }) => line.run.run_id === run.run_id && line.task !== null)
       .map(({ line }) => (line.task as Task).task_id))
+  }
+}
+
+/** How long a line about a task passing through `blocked-on-files` waits for the phase after it. */
+export const FILES_PASS_HOLD_MS = 30_000
+
+function passesThroughFiles(run: Run, task: Task): boolean {
+  return task.phase === 'blocked-on-files' && fileHolders(task, run.tasks).length === 0
+}
+
+/** Only the idle that ended the phase before: a block or a lost pane is news, and goes at once. */
+const endsAPhase = (line: WakeLine): boolean => /^agent:(done|idle)\b/.test(line.event)
+
+/**
+ * Every task enters `blocked-on-files`, and one nothing holds leaves it for
+ * `implement` on the next tick. Its line, rendered in between, reported a pass as an
+ * event the orchestrator could do nothing about: the trial's digest read `[plan-review
+ * → blocked-on-files] … no task holds its files now`, and the task was implementing a
+ * tick later. Measured on a live run. Such a line is held until the task leaves, and
+ * rendered then against the fresh record, as `plan-review → implement`; a holder
+ * appearing is a real wait, and its line goes at once. In memory, like `BriefHolds`.
+ */
+export class FilesPassHolds {
+  private held: Array<{ line: WakeLine; since: number }> = []
+
+  /** This run's lines to render now, held ones included, against `run`'s current records. */
+  sift(run: Run, wake: readonly WakeLine[], now: number): WakeLine[] {
+    const mine = this.held.filter(({ line }) => line.run.run_id === run.run_id)
+    this.held = this.held.filter(({ line }) => line.run.run_id !== run.run_id)
+    const fresh = wake.filter((line) => line.run.run_id === run.run_id).map((line) => ({ line, since: now }))
+    const send: WakeLine[] = []
+    for (const { line, since } of [...mine, ...fresh]) {
+      const task = line.task === null ? undefined : run.tasks.find((t) => t.task_id === line.task?.task_id)
+      if (task === undefined) {
+        send.push(line)
+        continue
+      }
+      if (endsAPhase(line) && passesThroughFiles(run, task) && now - since < FILES_PASS_HOLD_MS) {
+        this.held.push({ line, since })
+        continue
+      }
+      send.push({ ...line, run, task })
+    }
+    return send
   }
 }
 
@@ -175,16 +243,20 @@ export interface ApplyResult {
  * A row whose exit is recorded on the task is judged by where it returns: a
  * decision opened in `merge` resumes `merge`, which the worker takes no part in.
  * Only a return target the task never recorded falls back to `resumeActor`.
+ *
+ * An `anyWorker` row is walked past: a fresh agent in the worktree can take it,
+ * so a reviewed task waiting to land is released rather than failed.
  */
-export function workerStillNeeded(task: Task): boolean {
+export function workerStillNeeded(run: Run, task: Task): boolean {
+  const route = routeOf(run, task)
   const seen = new Set<TaskPhase>()
   const reachable: TaskPhase[] = [task.phase]
   for (let phase = reachable.pop(); phase !== undefined; phase = reachable.pop()) {
     if (seen.has(phase)) continue
     seen.add(phase)
     const row = taskRow(phase)
-    if (row.actor === 'worker') return true
-    if (row.onClear) reachable.push(nextPhase(tierOf(task), row))
+    if (row.actor === 'worker' && row.anyWorker !== true) return true
+    if (row.onClear) reachable.push(nextPhase(route, row))
     if (row.onBlocker) reachable.push(row.onBlocker)
     if (row.returnsTo !== undefined) {
       const returnsTo = task[row.returnsTo]
@@ -196,7 +268,7 @@ export function workerStillNeeded(task: Task): boolean {
 }
 
 function losePane(run: Run, task: Task, wake: WakeLine[]): void {
-  if (!workerStillNeeded(task)) {
+  if (!workerStillNeeded(run, task)) {
     // The answer to an open decision is delivered to the worker's pane, so with
     // that pane gone the question is moot and the task goes back to the row the
     // orchestrator was driving rather than waiting on a delivery that cannot happen.
@@ -210,11 +282,16 @@ function losePane(run: Run, task: Task, wake: WakeLine[]): void {
   }
   const phaseAtEvent = task.phase
   if (task.phase === 'blocked-on-decision') abandonDecisions(task)
-  enterTaskPhase(run, task, 'failed', task.pr ? 'pane exited after PR' : 'pane exited with no PR')
+  const singlePr = modeOf(run) === 'single-pr'
+  const handedOver = singlePr ? task.submission !== undefined : task.pr !== null
+  const why = singlePr
+    ? `pane exited ${handedOver ? 'after' : 'before'} it submitted`
+    : handedOver ? 'pane exited after PR' : 'pane exited with no PR'
+  enterTaskPhase(run, task, 'failed', why)
   releaseWorkerPane(task)
   wake.push({
     run, task, phaseAtEvent,
-    event: `pane exited${task.pr ? '' : ', no PR'}`,
+    event: `pane exited${handedOver ? '' : singlePr ? ', nothing submitted' : ', no PR'}`,
   })
 }
 

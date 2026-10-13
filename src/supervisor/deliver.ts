@@ -1,22 +1,34 @@
-import { join } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import {
+  batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
+  suggestedPrTitle,
+} from '../lib/batch'
+import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
-import { mainlineBranch } from '../lib/dispatch-base'
+import { ciCheckFirst, runChangeVars } from '../lib/change-prompt'
+import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/dispatch-base'
 import { hasLanded } from '../lib/ledger'
-import { advanceRun, counterFor } from '../lib/machine'
-import { runRow, taskRow } from '../lib/phases'
+import { excludeFromGit } from '../lib/repo'
+import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
+import { IMPLEMENT_MODEL } from '../lib/models'
+import { modeOf, runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
-import { taskTiers } from '../lib/tier-prompt'
+import { branchReviewEffort, taskTiers } from '../lib/tier-prompt'
 import {
   artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
   verdictPrefix,
 } from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
-import type { Run, Task, TaskPhase } from '../lib/types'
+import type { Batch, Run, Task, TaskPhase } from '../lib/types'
+import { shellQuoted, shellWord } from '../lib/unstarted'
+import { holdKey, notePastSubagents, type SubagentHold } from './pane-background'
 import { FINISHED } from './teardown'
+import { isAncestor, resolveCommit } from '../lib/sync-walk'
 
 export interface DigestInput {
   run: Run
@@ -41,11 +53,11 @@ export function buildDigest(input: DigestInput): string {
   // Each non-empty tail part brings exactly one blank line with it, so the output
   // is byte-identical to the old fixed-slot join whenever there is no footer.
   const tail = [input.nextPrompt, input.footer ?? ''].filter((part) => part.length > 0)
+  // A prompt with no events under it read as "0 events:" and nothing more.
+  const events = input.eventLines.length === 0 ? [] : ['', `${input.eventLines.length} events:`, ...input.eventLines]
   return [
     `[pipeline] run ${input.run.run_id}${input.phaseNote}`,
-    '',
-    `${input.eventLines.length} events:`,
-    ...input.eventLines,
+    ...events,
     ...tail.flatMap((part) => ['', part]),
   ].join('\n').trimEnd()
 }
@@ -206,7 +218,7 @@ async function git(checkoutPath: string, args: string[]): Promise<{ code: number
  * (`git add -A` with its artifact uncommitted) is subtracted as foreign.
  */
 export async function adoptableArtifacts(
-  checkoutPath: string | null, claimed: Set<string>,
+  checkoutPath: string | null, claimed: Set<string>, batchBranch: string | null = null,
 ): Promise<string[]> {
   // Adoption is a worktree-scoped repair. With no checkout the scan would run
   // against the main checkout, shared with the orchestrator, the run-level
@@ -214,7 +226,7 @@ export async function adoptableArtifacts(
   if (checkoutPath === null) return []
 
   const mainlines: string[] = []
-  for (const ref of await mainlineRefs(checkoutPath)) {
+  for (const ref of await mainlineRefs(checkoutPath, batchBranch)) {
     const resolved = await git(checkoutPath, ['rev-parse', '--verify', '--quiet', ref])
     if (resolved.code === 0) mainlines.push(ref)
   }
@@ -251,13 +263,16 @@ export async function adoptableArtifacts(
  *
  * A base pinned at dispatch would not help. Whatever the base, the diff runs to
  * HEAD's tree, and merging the default branch puts the siblings' docs in that tree.
+ *
+ * A single-PR run's batch branch is a mainline too: its worktrees are cut from it.
  */
-async function mainlineRefs(checkoutPath: string): Promise<string[]> {
+async function mainlineRefs(checkoutPath: string, batchBranch: string | null): Promise<string[]> {
   const branch = await mainlineBranch(checkoutPath, (reason) => warnToTick(
     `adoption offers no candidates in ${checkoutPath}: origin's default branch is unknown (${reason})`,
   ))
   if (branch === null) return []
-  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
+  const batch = batchBranch === null ? [] : [`refs/heads/${batchBranch}`, `refs/remotes/origin/${batchBranch}`]
+  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`, ...batch]
 }
 
 // `-m --first-parent`, not `--diff-merges=first-parent`: the latter needs git 2.31,
@@ -303,10 +318,19 @@ function awaitsWorktree(task: Task): boolean {
  * dispatches at registration, so the orchestrator usually registers, dispatches
  * and closes intake in the turn that gate waits out. The prompt then arrived
  * asking it to keep registering and to run `dispatch --done`, both already done,
- * and it spent a turn on it. Measured on a live run.
+ * and it spent a turn on it. Measured on a live run. A queued task is owed nothing
+ * yet: it arrives as its own `Dispatch tN` prompt, block and all, once it can start.
  */
 function owedDispatch(task: Task): boolean {
-  return task.phase === 'queued' || awaitsWorktree(task) || task.awaiting_brief === true
+  return awaitsWorktree(task) || task.awaiting_brief === true
+}
+
+function nothingToDispatch(run: Run): string {
+  const queued = run.tasks.filter((task) => task.phase === 'queued').map((task) => task.task_id)
+  if (queued.length === 0) return 'Every task registered so far has its worktree and its brief: nothing to dispatch now.'
+  return 'Every task that can start has its worktree and its brief: nothing to dispatch now. ' +
+    `${queued.join(', ')} ${queued.length === 1 ? 'is' : 'are'} queued; each arrives as its own \`Dispatch tN\` ` +
+    'prompt, carrying its dispatch block, once it can start.'
 }
 
 export function taskSignalsFor(run: Run) {
@@ -321,6 +345,22 @@ export function taskSignalsFor(run: Run) {
   }
 }
 
+export type RunGh = Pick<Gh, 'prForBranch' | 'prView' | 'prChecksDetail'>
+
+/** The batch PR as gh reads it now; null when none is open, or a read failed, which skips the row this tick. */
+async function readBatchPr(batch: Batch, gh: RunGh): Promise<BatchPr | null> {
+  const number = batch.pr ?? (await gh.prForBranch(batch.branch))
+  if (number === null) return null
+  const view = await gh.prView(number)
+  if (view === null) return null
+  return {
+    number, headSha: view.headSha, merged: view.merged, mergedAtMs: view.mergedAtMs,
+    mergeCommit: view.mergeCommit ?? null,
+  }
+}
+
+const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
+
 /**
  * Evaluates one run. `liveIdle` is the tick's shared reader: the orchestrator
  * pane must read idle both now and again after ACTOR_SETTLE_MS, because a
@@ -333,7 +373,8 @@ export function taskSignalsFor(run: Run) {
  * sets them to different values.
  */
 export async function evaluateRun(
-  run: Run, gh: Gh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
+  run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
+  extras: RunRenderExtras = {}, holdForSubagents?: SubagentHold,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
@@ -341,6 +382,7 @@ export async function evaluateRun(
 
   const signal = runRow(run.phase).signal
   const actorIdle = await liveIdle(pane)
+  let pastSubagents: readonly string[] | null = null
 
   let artifactFresh = false
   let verdict: VerdictResult | null = null
@@ -353,19 +395,33 @@ export async function evaluateRun(
 
     if (!(await isFresh(absolute, run.phase_entered_at))) return stay
     if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return stay
+    // A branch review the orchestrator handed to a subagent is written while it sits
+    // idle at its prompt, and on a CLEAR it fixes the findings once the subagent
+    // reports back: read before then, the ship prompt overtook both.
+    if (holdForSubagents !== undefined) {
+      const call = await holdForSubagents(holdKey(run, null), pane)
+      if (call.hold) return stay
+      pastSubagents = call.past ?? null
+    }
 
     artifactFresh = true
     verdict = await parseVerdict(absolute)
   }
 
+  const batch = run.batch
+  const readsPr = batch !== undefined &&
+    (READS_THE_BATCH_PR.has(run.phase) || (run.phase === 'ship-ci' && batch.ci === 'fail'))
+  const batchPr = readsPr ? await readBatchPr(batch, gh) : undefined
+
   const before = run.phase
   const advanced = advanceRun(run, {
     actorIdle, artifactFresh, verdict, maxPasses: config.MAX_PASSES,
-    ...taskSignalsFor(run),
+    ...taskSignalsFor(run), batchPr,
   })
   if (!advanced) return stay
+  notePastSubagents(run, before, pastSubagents)
 
-  const nextPrompt = await promptForRunPhase(run, config)
+  const nextPrompt = await promptForRunPhase(run, config, { ciDetail: (pr) => gh.prChecksDetail(pr), ...extras })
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }
 }
 
@@ -373,6 +429,17 @@ const UNLANDED_MEANING: Partial<Record<TaskPhase, string>> = {
   'failed': 'its work never merged',
   'orphaned': 'it merged, but its worktree was not removed; its code is on the base branch',
   'escalated': 'it is waiting on a human and its work has not merged',
+}
+
+/**
+ * Read off `landed`, not `merged_at_ms`: a task that landed and was then rewound
+ * and abandoned has no merge recorded, yet its commits are on the batch branch.
+ */
+function unlandedMeaning(run: Run, task: Task, batch: Batch): string {
+  if ((task.landed ?? []).length > 0) return `it landed on \`${batch.branch}\` before it stopped`
+  if (task.phase === 'blocked-on-failure') return neverStarted(run, task)
+  if (task.phase === 'escalated') return `it is waiting on a human and has not landed on \`${batch.branch}\``
+  return `its work never landed on \`${batch.branch}\``
 }
 
 /**
@@ -396,6 +463,8 @@ function neverStarted(run: Run, task: Task): string {
  * all. Measured on a live run.
  */
 export function taskOutcomesFor(run: Run): string {
+  const batch = run.batch
+  if (batch !== undefined) return batchOutcomes(run, batch)
   const unlanded = run.tasks.filter((t) => t.phase !== 'done')
   if (unlanded.length === 0) return `Every task in **${run.title}** is merged and torn down.`
   const lines = unlanded.map((t) =>
@@ -411,16 +480,134 @@ export function taskOutcomesFor(run: Run): string {
   ].join('\n')
 }
 
-export async function promptForRunPhase(run: Run, _config: Config): Promise<string> {
-  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
-  return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd())
+function batchOutcomes(run: Run, batch: Batch): string {
+  const unlanded = run.tasks.filter((t) => t.phase !== 'done')
+  if (unlanded.length === 0) return `Every task in **${run.title}** has landed on \`${batch.branch}\` and is torn down.`
+  return [
+    `Not every task in **${run.title}** landed on \`${batch.branch}\`. Every task has landed and is torn down except:`,
+    '',
+    ...unlanded.map((t) =>
+      `- \`${t.task_id}\` (${t.bead}, \`${t.branch}\`) stopped at \`${t.phase}\` — ${unlandedMeaning(run, t, batch)}`),
+    '',
+    'Review what is on the batch branch. Do not report the absence of work that never landed as a finding ' +
+    'against the tasks that did — the human already knows these stopped.',
+  ].join('\n')
+}
+
+/** What a run render needs beyond the ledger; the supervisor's are its environment and gh. */
+export interface RunRenderExtras {
+  stateDir?: string
+  ciDetail?: (pr: number) => Promise<string>
+  maxPasses?: number
+}
+
+export async function promptForRunPhase(run: Run, config: Config, extras: RunRenderExtras = {}): Promise<string> {
+  if (runRow(run.phase).signal === 'verdict') await reserveRunReview(run, warnToTick)
+  return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd(), {
+    maxPasses: config.MAX_PASSES, ...extras,
+  })
+}
+
+/** Rewritten on every render, so the body always lists every landing so far. */
+function writeShipFiles(stateDir: string, run: Run): { body: string; squash: string } {
+  const body = batchPrBodyPath(stateDir, run)
+  const squash = squashBodyPath(stateDir, run)
+  mkdirSync(dirname(body), { recursive: true })
+  writeFileSync(body, batchPrBody(run))
+  writeFileSync(squash, squashBody(run))
+  return { body, squash }
+}
+
+function checkSentence(batch: Batch): string {
+  const check = repoCheck(existsSync(batch.checkout) ? batch.checkout : '')
+  return check.kind === 'none'
+    ? `It fetches \`${batch.branch}\` and records the head of the checkout at it, but this repo declares no ` +
+      `\`${CHECK_REL}\`: run the tests and the typecheck there yourself first.`
+    : `It fetches \`${batch.branch}\`, runs \`${CHECK_REL}\` in \`${batch.checkout}\` at that head, and records ` +
+      'the head it passed on.'
+}
+
+/** The ship steps fetch only the batch, so `origin/<into>` is as old as the last fetch of it, which may be the start. */
+function intoConflictCheck(batch: Batch): string {
+  const checkout = shellQuoted(batch.checkout)
+  return `git -C ${checkout} fetch origin ${shellWord(trackingRefspec(batch.into))} && git -C ${checkout} ` +
+    `merge-tree --write-tree ${shellWord(`origin/${batch.into}`)} ${shellWord(`origin/${batch.branch}`)}`
+}
+
+/**
+ * Start's answer, not a fresh one: a ship prompt is also rendered by a rewind, inside
+ * a save's stale-retry, where a gh call could outlast every retry.
+ */
+function rulesetAdvice(batch: Batch): string {
+  if (batch.ruleset_protected === true) return ''
+  return ` If \`${rulesetPattern(batch.branch)}\` has no ruleset blocking force-pushes and deletion, recommend ` +
+    'one to the user (GitHub → Settings → Rules → Rulesets): without it, a `--force` push gets past the ' +
+    'landing gate.'
+}
+
+/**
+ * As the per-task merge prompt's: pinned to the head the pass was read on, so a push
+ * between the prompt and the merge makes GitHub refuse it. The batch merge carried
+ * no guard, and a push reaches `ship-ci` only at the supervisor's next fetch.
+ * Measured on a live run.
+ */
+function greenHeadVars(batch: Batch): { green_head: string; pinned: string; match_head: string } {
+  const passedOn = batch.ci === 'pass' ? batch.ci_head?.sha : undefined
+  if (passedOn === undefined) return { green_head: 'the head CI ran on', pinned: '', match_head: '' }
+  return {
+    green_head: `\`${sha8(passedOn)}\`, the head CI ran on`,
+    pinned: " The merge command merges only while the PR's head is still that commit.",
+    match_head: ` --match-head-commit ${shellWord(passedOn)}`,
+  }
+}
+
+function shipCiStatus(batch: Batch, pr: string): string {
+  const what = `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`.`
+  return batch.ci === 'pass' ? `CI is green on ${what} ` : `No green CI is recorded on ${what} ${ciCheckFirst(pr)}\n`
+}
+
+async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: RunRenderExtras): Promise<string> {
+  const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR ?? ''
+  const { body, squash } = writeShipFiles(stateDir, run)
+  const vars = {
+    run_id: run.run_id, batch: batch.branch, into: batch.into, pr: String(batch.pr ?? 'unknown'),
+    checkout: batch.checkout, checkout_quoted: shellQuoted(batch.checkout), implement_model: IMPLEMENT_MODEL,
+    body_path: body, body_file: shellQuoted(body), squash_body_file: shellQuoted(squash),
+    subject: shellQuoted(squashSubject(run)),
+  }
+  if (run.phase === 'ship-merge') {
+    return renderPrompt(pluginRoot, 'ship-merge', {
+      ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch),
+    })
+  }
+  const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
+  // `ship-ci` also sends a head pushed past the check back here, and that is no red to repair.
+  const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci' && batch.ci === 'fail'
+  if (cameFromRedCi && batch.pr !== null) {
+    return renderPrompt(pluginRoot, 'ship-ci-red', {
+      ...vars, checkout_steps: steps, ci_failure: (await extras.ciDetail?.(batch.pr)) ?? '',
+      pass: String(counterFor(run, 'ship-ci')), max_passes: String(extras.maxPasses ?? 2),
+    })
+  }
+  return renderPrompt(pluginRoot, 'ship', {
+    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
+    ruleset_advice: rulesetAdvice(batch),
+    pr_command: batch.pr === null
+      ? `gh pr create --base ${shellWord(batch.into)} --head ${shellWord(batch.branch)} ` +
+        `--title ${shellQuoted(suggestedPrTitle(run))} ` +
+        `--body-file ${shellQuoted(body)}`
+      : `gh pr edit ${batch.pr} --body-file ${shellQuoted(body)}`,
+  })
 }
 
 /** The run's phase prompt against the verdict path already reserved; see `renderTaskPhasePrompt`. */
-export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promise<string> {
+export async function renderRunPhasePrompt(
+  run: Run, pluginRoot: string, extras: RunRenderExtras = {},
+): Promise<string> {
   const verdictPath = absoluteArtifactPath(run, null) ?? join(run.repo_root, 'review.md')
 
   const common = {
+    ...runChangeVars(run, hpipeCommand(pluginRoot)),
     run_id: run.run_id, title: run.title,
     pass: String(counterFor(run, run.phase)),
     verdict_path: verdictPath,
@@ -431,13 +618,18 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
   switch (run.phase) {
     case 'intake': return renderPrompt(pluginRoot, 'intake', common)
     case 'dispatch': {
-      if (run.intake_closed && !run.tasks.some(owedDispatch)) return ''
+      const queued = run.tasks.some((task) => task.phase === 'queued')
+      if (run.intake_closed && !queued && !run.tasks.some(owedDispatch)) return ''
       const registering = run.intake_closed ? '' : await renderPrompt(pluginRoot, 'dispatch-registering', common)
+      if (!run.tasks.some(owedDispatch)) {
+        return [`# Dispatch — run ${run.run_id}`, nothingToDispatch(run), registering.trimEnd()]
+          .filter((part) => part.length > 0).join('\n\n')
+      }
       const text = await renderPrompt(pluginRoot, 'dispatch', { ...common, registering })
       return text.replace(/\n{3,}/g, '\n\n')
     }
     case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', {
-      ...common, task_outcomes: taskOutcomesFor(run),
+      ...common, task_outcomes: taskOutcomesFor(run), review_effort: branchReviewEffort(run),
     })
     case 'escalated': {
       const from = run.escalated_from ?? run.phase
@@ -448,7 +640,10 @@ export async function renderRunPhasePrompt(run: Run, pluginRoot: string): Promis
         abandon: '',
       })
     }
-    case 'done': return runDoneNotice(run)
+    case 'ship':
+    case 'ship-merge':
+      return run.batch === undefined ? '' : shipPrompt(run, run.batch, pluginRoot, extras)
+    case 'done': return run.batch === undefined ? perTaskDoneNotice(run) : batchDoneNotice(run, run.batch)
     default: return ''
   }
 }
@@ -462,7 +657,262 @@ function runDoneNotice(run: Run): string {
   const why = run.history.findLast((h) => h.task_id === undefined && h.to === 'done')?.why
   return [
     `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
-    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}`),
+    ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}${mergedPrNote(t)}`),
+  ].join('\n')
+}
+
+const mergedPrNote = (task: Task): string => (hasLanded(task) && task.pr !== null ? `, PR #${task.pr} merged` : '')
+
+async function perTaskDoneNotice(run: Run): Promise<string> {
+  const merged = run.tasks.filter((t) => hasLanded(t) && t.pr !== null)
+  const repo = shellQuoted(run.repo_root)
+  const leftovers = [
+    ...(await mergedBranchLines(run, merged, repo)), ...(await mergedMainlineLines(run, merged, repo)),
+    ...(await staleRemoteRefLines(run, repo, merged.map((t) => t.branch))),
+  ]
+  return [
+    runDoneNotice(run), ...(leftovers.length === 0 ? [] : ['Clean up when you are done with it:', ...leftovers]),
+  ].join('\n')
+}
+
+/**
+ * GitHub deletes a merged PR's head branch only when the repo is set to, and
+ * herdr's worktree removal keeps the local one. A squash merge leaves none of a
+ * branch's commits on the default branch, so only a branch still at the head its
+ * PR merged is safe to delete: `merge` holds that head to the one CI passed on.
+ */
+async function mergedBranchLines(run: Run, merged: Task[], repo: string): Promise<string[]> {
+  const remoteDeletable: string[] = []
+  const localDeletable: string[] = []
+  const remoteKept: string[] = []
+  const localKept: string[] = []
+  for (const task of merged) {
+    const mergedHead = task.ci_head?.sha ?? null
+    const unmerged = (where: string, sha: string) => mergedHead === null
+      ? `  ${where} is at ${sha8(sha)}, and the head PR #${task.pr} merged is not on record; check before deleting`
+      : `  ${where} has commits PR #${task.pr} did not merge: ${sha8(sha)}; review before deleting`
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
+    if (!remote.ok) {
+      remoteKept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
+    } else if (remote.sha !== null) {
+      if (remote.sha === mergedHead) remoteDeletable.push(task.branch)
+      else remoteKept.push(unmerged(task.branch, remote.sha))
+    }
+    // A kept worktree still has its branch checked out, and `branch -D` refuses that.
+    if (task.checkout_path !== null && existsSync(task.checkout_path)) continue
+    const local = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
+    if (local === null) continue
+    if (local === mergedHead) localDeletable.push(task.branch)
+    else localKept.push(unmerged(`local ${task.branch}`, local))
+  }
+  const deleteLine = (command: string, branches: string[]) =>
+    (branches.length === 0 ? [] : [`  git -C ${repo} ${command} ${branches.map(shellWord).join(' ')}`])
+  return [
+    ...deleteLine('push origin --delete', remoteDeletable), ...remoteKept,
+    ...deleteLine('branch -D', localDeletable), ...localKept,
+  ]
+}
+
+/** The latest merge stands for every earlier one: the default branch's history is linear. */
+async function mergedMainlineLines(run: Run, merged: Task[], repo: string): Promise<string[]> {
+  const latest = merged
+    .filter((t): t is Task & { merge_commit: string } => typeof t.merge_commit === 'string')
+    .sort((a, b) => (b.merged_at_ms ?? 0) - (a.merged_at_ms ?? 0))[0]
+  if (latest === undefined) return []
+  const mainline = await mainlineBranch(run.repo_root)
+  if (mainline === null) return []
+  return staleBranchLines(run, repo, mainline, latest.merge_commit, `PR #${latest.pr}'s merge`)
+}
+
+/**
+ * GitHub deletes only a PR's own head branch on merge, so the task branches are
+ * left to the orchestrator — but only a branch whose head is on the batch is
+ * safe to delete: anything pushed to it after its reviewed head never landed.
+ */
+export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
+  const deletable: string[] = []
+  const kept: string[] = []
+  for (const task of run.tasks) {
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
+    if (!remote.ok) {
+      kept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
+      continue
+    }
+    if (remote.sha === null) continue
+    const landed = await isAncestor(run.repo_root, remote.sha, `refs/remotes/origin/${batch.branch}`)
+    if (landed === true) {
+      deletable.push(task.branch)
+    } else if (landed === false) {
+      kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+    } else {
+      kept.push(`  ${task.branch} is at ${sha8(remote.sha)}, which could not be compared with ${batch.branch} here; ` +
+        'fetch it and check before deleting')
+    }
+  }
+  const repo = shellQuoted(run.repo_root)
+  return [
+    'Clean up when you are done with it:',
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
+    ...kept,
+    ...await checkoutRemovalLines(batch.checkout, repo),
+    `  git -C ${repo} branch -D ${shellWord(batch.branch)}`,
+  ]
+}
+
+const nonEmptyLines = (text: string): string[] => text.split('\n').filter((line) => line.length > 0)
+
+const sample = (paths: readonly string[]): string => `${paths.slice(0, 3).join(', ')}${paths.length > 3 ? ', …' : ''}`
+
+/**
+ * git refuses to remove a worktree with initialised submodules unless forced, and
+ * the ship prompts have the orchestrator bootstrap the batch checkout, which is how
+ * a repo that vendors an SDK as a submodule gets them. Measured on a live run.
+ * `--force` deletes a linked worktree's submodule git data and any uncommitted work
+ * with it, so it is offered only when nothing there is unrecorded: no uncommitted
+ * work, every initialised submodule at the commit the checkout records, and that
+ * commit on one of the submodule's remote branches.
+ */
+async function checkoutRemovalLines(checkout: string, repo: string): Promise<string[]> {
+  const remove = `  git -C ${repo} worktree remove`
+  const quoted = shellQuoted(checkout)
+  if (!existsSync(checkout)) return [`${remove} ${quoted}`]
+  const submodules = await git(checkout, ['submodule', 'status', '--recursive'])
+  const initialised = nonEmptyLines(submodules.text).filter((line) => !line.startsWith('-'))
+  if (submodules.code === 0 && initialised.length === 0) return [`${remove} ${quoted}`]
+  const pathOf = (line: string): string => line.slice(1).trim().split(' ')[1] ?? line
+  const moved = initialised.filter((line) => line.startsWith('+') || line.startsWith('U')).map(pathOf)
+  const status = await git(checkout, ['status', '--porcelain', '--ignore-submodules=none'])
+  const unpushed = await git(checkout, ['submodule', 'foreach', '--quiet', '--recursive',
+    'git branch -r --contains HEAD | grep -q . || echo "$displaypath"'])
+  const reasons = [
+    ...(submodules.code !== 0 || status.code !== 0 || unpushed.code !== 0 ? ['work git could not read'] : []),
+    ...(nonEmptyLines(status.text).length > 0
+      ? [`uncommitted work (${sample(nonEmptyLines(status.text).map((line) => line.slice(3)))})`]
+      : []),
+    ...(moved.length > 0 ? [`submodules not at the commit it records (${sample(moved)})`] : []),
+    ...(nonEmptyLines(unpushed.text).length > 0
+      ? [`submodule commits on no remote branch (${sample(nonEmptyLines(unpushed.text))})`]
+      : []),
+  ]
+  if (reasons.length === 0) {
+    return [`${remove} --force ${quoted}  # git refuses its submodules without --force; nothing in them is unpushed`]
+  }
+  return [`${remove} ${quoted}`, `  ${checkout} has ${reasons.join('; ')}: review it before adding --force, which ` +
+    'its submodules need and which deletes their git data in this checkout']
+}
+
+/**
+ * What a shipped run still leaves once the clean-up above is run: herdr's worktree
+ * removal keeps each task's local branch, a ruleset keeps the batch on origin, the
+ * user's default branch predates the squash merge, and the branch review stays in
+ * the working copy, kept out of git. Measured on a live run.
+ */
+async function shippedLeftovers(run: Run, batch: Batch): Promise<string[]> {
+  const repo = shellQuoted(run.repo_root)
+  const squashMerge = `PR #${batch.pr ?? 'unknown'}'s squash merge`
+  return [
+    ...(await localTaskBranchLines(run, batch, repo)),
+    ...(await staleBranchLines(run, repo, batch.into, batch.merge_commit, squashMerge)),
+    ...(await originBatchLines(run, batch, repo)),
+    ...(await staleRemoteRefLines(run, repo, [batch.branch, ...run.tasks.map((t) => t.branch)])),
+    ...branchReviewLines(run),
+  ]
+}
+
+/**
+ * GitHub can delete a merged branch itself, and the clone keeps its `origin/` ref
+ * until a fetch prunes it: the trial's batch was deleted on merge and
+ * `origin/batch/…` stayed. Measured on a live run. A branch still on origin is
+ * the other lines' to delete, which takes its ref with it.
+ */
+async function staleRemoteRefLines(run: Run, repo: string, branches: string[]): Promise<string[]> {
+  const stale: string[] = []
+  for (const branch of new Set(branches)) {
+    if (await resolveCommit(run.repo_root, `refs/remotes/origin/${branch}`) === null) continue
+    const onOrigin = await remoteBranchHeadCooled(run.repo_root, branch)
+    if (onOrigin.ok && onOrigin.sha === null) stale.push(branch)
+  }
+  if (stale.length === 0) return []
+  const refs = stale.map((branch) => shellWord(`origin/${branch}`)).join(' ')
+  return [`  git -C ${repo} branch -dr ${refs}  # origin no longer has ${stale.length === 1 ? 'it' : 'them'}`]
+}
+
+/** Only a branch whose head is on the batch is safe to force-delete: a squash merge leaves none of them merged. */
+async function localTaskBranchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const batchRef = `refs/remotes/origin/${batch.branch}`
+  const deletable: string[] = []
+  const kept: string[] = []
+  for (const task of run.tasks) {
+    // A kept worktree still has its branch checked out, and `branch -D` refuses that.
+    if (task.checkout_path !== null && existsSync(task.checkout_path)) continue
+    const head = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
+    if (head === null) continue
+    const landed = await isAncestor(run.repo_root, head, batchRef)
+    const local = `  local ${task.branch}`
+    if (landed === true) deletable.push(task.branch)
+    else if (landed === false) kept.push(`${local} has commits that did not land: ${sha8(head)}; review before deleting`)
+    else kept.push(`${local} is at ${sha8(head)}, which could not be compared with ${batch.branch}; check before deleting`)
+  }
+  return [
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} branch -D ${deletable.map(shellWord).join(' ')}`]),
+    ...kept,
+  ]
+}
+
+/** `pull` only on the branch checked out; any other is moved by fetch, which refuses anything but a fast-forward. */
+async function staleBranchLines(
+  run: Run, repo: string, branch: string, mergeCommit: string | null, merge: string,
+): Promise<string[]> {
+  if (mergeCommit !== null && await isAncestor(run.repo_root, mergeCommit, `refs/heads/${branch}`) === true) return []
+  const current = await git(run.repo_root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  const why = `  # ${branch} predates ${merge}`
+  return [current.code === 0 && current.text.trim() === branch
+    ? `  git -C ${repo} pull --ff-only${why}`
+    : `  git -C ${repo} fetch origin ${shellWord(`${branch}:${branch}`)}${why}`]
+}
+
+async function originBatchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const onOrigin = await remoteBranchHeadCooled(run.repo_root, batch.branch)
+  if (!onOrigin.ok || onOrigin.sha === null) return []
+  if (batch.ruleset_protected === true) {
+    return [`  origin keeps ${batch.branch}, which the ruleset on ${rulesetPattern(batch.branch)} protects from deletion: leave it`]
+  }
+  return [`  origin keeps ${batch.branch}, which is harmless; deleting it, ` +
+    `\`git -C ${repo} push origin --delete ${shellWord(batch.branch)}\`, needs a bypass if a ruleset protects ` +
+    rulesetPattern(batch.branch)]
+}
+
+/**
+ * A run's review is its record, never committed, and sits in the user's working
+ * copy, so it is excluded from git the moment it is reserved: left untracked there
+ * it was one `git add -A` from shipping. Measured on a live run. The plugin writes
+ * the exclusion itself rather than asking the orchestrator to touch git's files.
+ */
+export async function reserveRunReview(run: Run, warn: ReserveWarn): Promise<string> {
+  const reserved = reserveVerdict(run, null, run.phase, warn)
+  const refused = await excludeFromGit(run.repo_root, reserved)
+  if (refused !== null) warn(`run ${run.run_id}: ${reserved} is not excluded from git: ${refused}`)
+  return reserved
+}
+
+function branchReviewLines(run: Run): string[] {
+  return Object.entries(run.artifacts.verdicts)
+    .filter(([key]) => key.startsWith('branch-review-'))
+    .map(([, rel]) => join(run.repo_root, rel))
+    .filter((path) => existsSync(path))
+    .map((path) => `  rm ${shellQuoted(path)}  # this run's branch review, kept out of git: delete it once you no ` +
+      'longer need the record')
+}
+
+async function batchDoneNotice(run: Run, batch: Batch): Promise<string> {
+  const shipped = batch.merged_at_ms !== null
+  const outcome = shipped
+    ? `shipped: PR #${batch.pr ?? 'unknown'} squash-merged as ${sha8(batch.merge_commit ?? 'unknown')}; ` +
+      `${batch.into} now carries every landing`
+    : `not shipped: nothing on ${batch.branch} reached ${batch.into}`
+  return [
+    runDoneNotice(run), outcome, ...(await cleanupLines(run, batch)),
+    ...(shipped ? await shippedLeftovers(run, batch) : []),
   ].join('\n')
 }
 

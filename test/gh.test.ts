@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
@@ -25,34 +25,99 @@ test('an empty check list is pending, never pass', () => {
   expect(rollUpBucket([])).toBe('pending')
 })
 
-test('exit code 8 is read as pending rather than an error', async () => {
-  const bin = await makeFakeBin(dir, { 'pr checks': [{ bucket: 'pending', name: 'ci' }] }, { 'pr checks': 8 })
-  expect(await new Gh(bin, dir).prChecks(5)).toBe('pending')
+const run = (name: string, status: string, conclusion: string) => ({
+  __typename: 'CheckRun', name, status, conclusion, workflowName: 'CI (build)',
 })
 
-test('a gh failure maps to unknown, which is not terminal', async () => {
-  const bin = await makeFakeBin(dir, { 'pr checks': { message: 'gh auth required' } }, { 'pr checks': 1 })
-  expect(await new Gh(bin, dir).prChecks(5)).toBe('unknown')
+test('headCi reads the head commit\'s own checks and names the head — #16', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc123', statusCheckRollup: [run('lint-title', 'COMPLETED', 'SUCCESS')] },
+    'run list': [{ status: 'completed', conclusion: 'success' }],
+  })
+  expect(await new Gh(bin, dir).headCi(5)).toEqual({ bucket: 'pass', headSha: 'abc123' })
+})
+
+test('a workflow run still queued for the head holds CI pending, with no check of its own yet — #16', async () => {
+  const bin = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc123', statusCheckRollup: [run('lint-title', 'COMPLETED', 'SUCCESS')] },
+    'run list': [{ status: 'queued', conclusion: '' }],
+  })
+  expect((await new Gh(bin, dir).headCi(5))?.bucket).toBe('pending')
+  expect(readFileSync(join(dir, 'calls.log'), 'utf8')).toContain('run list --commit abc123 ')
+})
+
+test('the head\'s checks bucket the way gh pr checks does', async () => {
+  const bucketOf = async (rows: unknown[]) => {
+    const bin = await makeFakeBin(dir, { 'pr view': { headRefOid: 'abc', statusCheckRollup: rows }, 'run list': [] })
+    return (await new Gh(bin, dir).headCi(5))?.bucket
+  }
+  expect(await bucketOf([run('build', 'IN_PROGRESS', '')])).toBe('pending')
+  expect(await bucketOf([run('build', 'COMPLETED', 'FAILURE')])).toBe('fail')
+  expect(await bucketOf([run('build', 'COMPLETED', 'CANCELLED')])).toBe('fail')
+  expect(await bucketOf([run('build', 'COMPLETED', 'SKIPPED'), run('test', 'COMPLETED', 'NEUTRAL')])).toBe('pass')
+  expect(await bucketOf([{ __typename: 'StatusContext', context: 'ci/legacy', state: 'PENDING' }])).toBe('pending')
+  expect(await bucketOf([{ __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR' }])).toBe('fail')
+  expect(await bucketOf([])).toBe('pending')
+})
+
+test('a gh failure on either call is no reading at all, never a verdict', async () => {
+  const noView = await makeFakeBin(dir, { 'pr view': { message: 'gh auth required' } }, { 'pr view': 1 })
+  expect(await new Gh(noView, dir).headCi(5)).toBeNull()
+  const noRuns = await makeFakeBin(dir, {
+    'pr view': { headRefOid: 'abc', statusCheckRollup: [] }, 'run list': { message: 'rate limited' },
+  }, { 'run list': 1 })
+  expect(await new Gh(noRuns, dir).headCi(5)).toBeNull()
 })
 
 test('prView reads merged from state and mergedAt, not a merged field', async () => {
   const bin = await makeFakeBin(dir, {
     'pr view': {
       state: 'MERGED', mergedAt: '2026-09-13T10:00:00Z', mergeCommit: { oid: 'm3rg3' }, headRefOid: 'abc123',
+      baseRefName: 'main',
     },
   })
   const view = await new Gh(bin, dir).prView(5)
   expect(view).toEqual({
     merged: true, mergedAtMs: Date.parse('2026-09-13T10:00:00Z'), mergeCommit: 'm3rg3', headSha: 'abc123',
+    baseRef: 'main',
   })
 })
 
 test('an open PR is not merged and has no mergedAt', async () => {
   const bin = await makeFakeBin(dir, { 'pr view': { state: 'OPEN', mergedAt: null, headRefOid: 'abc' } })
-  expect(await new Gh(bin, dir).prView(5)).toMatchObject({ merged: false, mergedAtMs: null, mergeCommit: null })
+  expect(await new Gh(bin, dir).prView(5)).toMatchObject({ merged: false, mergedAtMs: null, mergeCommit: null, baseRef: null })
 })
 
 test('prForBranch returns the first PR number or null', async () => {
   const bin = await makeFakeBin(dir, { 'pr list': [{ number: 412 }] })
   expect(await new Gh(bin, dir).prForBranch('feat/x')).toBe(412)
+})
+
+test('openPrForBranch tells no PR apart from a gh that could not say, and says why', async () => {
+  const one = await makeFakeBin(dir, { 'pr list': [{ number: 412 }] })
+  expect(await new Gh(one, dir).openPrForBranch('feat/x')).toEqual({ pr: 412 })
+  const none = await makeFakeBin(dir, { 'pr list': [] })
+  expect(await new Gh(none, dir).openPrForBranch('feat/x')).toEqual({ pr: null })
+  const broken = await makeFakeBin(dir, { 'pr list': { error: { code: 'auth', message: 'gh auth login' } } })
+  expect(await new Gh(broken, dir).openPrForBranch('feat/x')).toMatchObject({ error: expect.stringContaining('gh auth login') })
+})
+
+test('whether the repo allows squash merges is read from gh, and a gh failure says why', async () => {
+  const allowed = await makeFakeBin(dir, { 'repo view': { squashMergeAllowed: true } })
+  expect(await new Gh(allowed, dir).squashMergeAllowed()).toEqual({ allowed: true })
+  const off = await makeFakeBin(dir, { 'repo view': { squashMergeAllowed: false } })
+  expect(await new Gh(off, dir).squashMergeAllowed()).toEqual({ allowed: false })
+  const broken = await makeFakeBin(dir, { 'repo view': { error: { code: 'auth', message: 'gh auth login' } } })
+  expect(await new Gh(broken, dir).squashMergeAllowed()).toMatchObject({ error: expect.stringContaining('gh auth login') })
+})
+
+test('a branch counts as protected only when an active ruleset refuses both its force-push and its deletion', async () => {
+  const rules = (types: string[]) => makeFakeBin(dir, {
+    'api repos/{owner}/{repo}/rules/branches/batch%2Fmenu': types.map((type) => ({ type, ruleset_id: 7 })),
+  })
+  expect(await new Gh(await rules(['non_fast_forward', 'deletion']), dir).rulesetProtects('batch/menu')).toBe(true)
+  expect(await new Gh(await rules(['deletion']), dir).rulesetProtects('batch/menu')).toBe(false)
+  expect(await new Gh(await rules([]), dir).rulesetProtects('batch/menu')).toBe(false)
+  const broken = await makeFakeBin(dir, { api: { error: { code: 'auth', message: 'gh auth login' } } })
+  expect(await new Gh(broken, dir).rulesetProtects('batch/menu')).toBe(false)
 })

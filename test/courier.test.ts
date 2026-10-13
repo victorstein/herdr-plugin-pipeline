@@ -7,10 +7,11 @@ import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
 import {
   BACKOFF_BASE_MS, boundedProbeSend, boxHoldsOnly, CatchUps, CLEAR_MIN_INTERVAL_MS, ClearGuard, DeliveryGate,
   flushDeliveries,
-  inputBoxText, makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
+  makeCourier, outboxPending, type PromptIO, queuePending, readyPanes, type Send,
   makeSubmissionCheck, PROBE_DEFERRALS_MAX, sendConfirmed, STALLED_SEND_TTL_MS, STUCK_INPUT,
-  submissionOf, withoutFaintText,
+  submissionOf,
 } from '../src/supervisor/courier'
+import { inputBoxText, withoutFaintText } from '../src/lib/screen'
 import { deliveriesFor, type PendingPrompt } from '../src/supervisor/deliver'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -939,4 +940,79 @@ test('submissionOf reads the box the answer was sent into', () => {
   expect(submissionOf('[Pasted text #3 +11 lines] also this', ANSWER)).toBe('stuck')
   expect(submissionOf('also this\n**Q:** which way? **A:** A', ANSWER)).toBe('stuck')
   expect(submissionOf('a draft typed after the answer went in', ANSWER)).toBe('submitted')
+})
+
+// ——— usage limits ———
+
+const LIMITED = [
+  '⏺ Opened the PR.',
+  "  ⎿  You've hit your session limit · resets 10:20am (America/Managua)",
+  '     /upgrade to increase your usage limit.',
+  '',
+  RULE, '❯ ', RULE, '  ⏵⏵ auto mode on',
+].join('\n')
+const LIMIT_SEEN = Date.parse('2026-10-11T12:34:14Z')
+
+test('an idle pane showing the usage-limit line is marked and held before its box is touched', async () => {
+  const gate = gateAt({ now: LIMIT_SEEN })
+  gate.beginTick(new Set(['w4:p1']))
+  const io = fakeIO({ screen: LIMITED, status: 'done' })
+  const send = makeCourier(gate, io, 15000)
+  expect(await send('w4:p1', 'Still working?')).toEqual({ ok: false, code: 'usage_limit', held: 'usage_limit' })
+  expect(io.calls).toEqual(['read w4:p1', 'status w4:p1'])
+  expect(gate.limits.isLimited('w4:p1')).toBe(true)
+  expect(gate.holds()['w4:p1']).toMatchObject({ code: 'usage_limit', until: Date.parse('2026-10-11T16:20:00Z') })
+})
+
+test('a marked pane is held without a read and without spending the tick\'s budget', async () => {
+  const gate = gateAt({ now: LIMIT_SEEN }, 1)
+  gate.beginTick(new Set(['w4:p1', 'w5:p1']))
+  const io = fakeIO({ screen: LIMITED, status: 'done' })
+  const send = makeCourier(gate, io, 15000)
+  await send('w4:p1', 'first')
+  gate.beginTick(new Set(['w4:p1', 'w5:p1']))
+  io.calls.length = 0
+  expect((await send('w4:p1', 'second')).held).toBe('usage_limit')
+  expect(io.calls).toEqual([])
+  expect(gate.admit('w5:p1')).toBeNull()
+})
+
+test('the limit line on a working pane marks nothing, and the send goes ahead', async () => {
+  const gate = gateAt({ now: LIMIT_SEEN })
+  gate.beginTick(new Set(['w4:p1']))
+  const io = fakeIO({ screen: LIMITED, status: 'working' })
+  expect((await makeCourier(gate, io, 15000)('w4:p1', 'carry on')).ok).toBe(true)
+  expect(gate.limits.isLimited('w4:p1')).toBe(false)
+})
+
+test('a limited pane reports usage_limit in holds() even while stuck or failing, and bumps the revision', () => {
+  const gate = gateAt({ now: LIMIT_SEEN })
+  gate.markStuck('w4:p1')
+  gate.record('w4:p1', { ok: false, code: 'agent_not_found' })
+  const before = gate.revision
+  gate.limits.observe('w4:p1', {
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  })
+  expect(gate.revision).toBeGreaterThan(before)
+  expect(gate.holds()['w4:p1']?.code).toBe('usage_limit')
+  gate.limits.lifted('w4:p1')
+  expect(gate.holds()['w4:p1']?.code).toBe(STUCK_INPUT)
+})
+
+test('a prompt herdr confirmed counts as activity: the pane\'s next limit line is not an old one', async () => {
+  const gate = gateAt({ now: LIMIT_SEEN })
+  gate.beginTick(new Set(['w4:p1']))
+  gate.limits.observe('w4:p1', {
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  })
+  gate.limits.nudge('w4:p1')
+  gate.limits.lifted('w4:p1')
+  await makeCourier(gate, fakeIO(), 15000)('w4:p1', 'carry on')
+  gate.limits.observe('w4:p1', {
+    status: 'done', boxSeen: true, autoContinue: false,
+    line: { label: 'session limit', when: '10:20am', zone: 'America/Managua', text: 'x' },
+  })
+  expect(gate.limits.isLimited('w4:p1')).toBe(true)
 })

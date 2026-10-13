@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
-import { claimSupervisor, eachIsolated, sharedRead } from '../src/supervisor/main'
+import { CURRENT_SCHEMAS } from '../src/lib/ledger'
+import { claimSupervisor, eachIsolated, sharedRead, supervisorSelf } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
 
 let dir: string
@@ -32,7 +33,7 @@ const twoSupervisorPanes = {
   ] } },
   'pane process-info --pane w1:p2': { result: { process_info: { shell_pid: 111 } } },
   'pane process-info --pane w1:p3': { result: { process_info: { shell_pid: 222 } } },
-  'pane read w1:p2': 'TypeError: boom\n    at tick (main.ts:1)\n[pipeline] supervisor exited — run hpipe status\n',
+  'pane read w1:p2': 'TypeError: boom\n    at tick (main.ts:1)\n[pipeline] supervisor exited (code 1) — run hpipe status\n',
   'pane close': { result: {} },
 }
 
@@ -50,7 +51,7 @@ test('a supervisor that claims the session closes the dead one beside it and kee
   expect(calls).not.toContain('pane close w1:p3')
   const crashLog = await Bun.file(join(dir, 'supervisor.personal.crash.log')).text()
   expect(crashLog).toContain('TypeError: boom\n    at tick (main.ts:1)\n')
-  expect(crashLog).toContain('[pipeline] supervisor exited — run hpipe status')
+  expect(crashLog).toContain('[pipeline] supervisor exited (code 1) — run hpipe status')
   expect(logged.join('\n')).toContain('closed dead supervisor panes: w1:p2')
   expect(logged.join('\n')).toContain('supervisor.personal.crash.log')
 })
@@ -132,4 +133,12 @@ test('a run read that fails skips only the steps reading it, and is attempted on
   expect(logged).toEqual([
     '[pipeline] beads sync failed this tick:', '[pipeline] board upkeep failed this tick:',
   ])
+})
+
+test('a claiming supervisor records every schema it drives, so start can refuse beside an old one', async () => {
+  const me = supervisorSelf({ pid: 4243, panePid: 223, startedAtMs: 1, session: 'personal', socketPath: '/s', paneId: '' })
+  expect(me.schemas).toEqual([3, 4])
+  expect(me.schemas).toEqual([...CURRENT_SCHEMAS])
+  expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
+  expect((await readPid(dir, 'personal'))?.schemas).toEqual([3, 4])
 })

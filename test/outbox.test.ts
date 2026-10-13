@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import {
-  deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, recipientPane, settleOutbox,
-  UNATTEMPTED_WARN_MS,
+  deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume, queuedWorkerPrompt,
+  recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
 import type { Decision, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -124,6 +124,21 @@ test('a pane stuck on someone else\'s input is named even when only digests are 
       'input box holds text the supervisor did not send — submit or clear that text and delivery resumes',
     "  ⚠ stuck input in w7:p1: nothing has been sent to t1's worker for 2m because its " +
       'input box holds text the supervisor did not send — submit or clear that text and delivery resumes',
+  ])
+})
+
+test('a pane the usage limit stopped is named with its reset, owed something or not, and never as unattempted', () => {
+  const run = mkRun()
+  enqueue(run, { to: 'orchestrator', taskId: null, text: 'x' }, 0)
+  const holds = {
+    'w1:p1': { since: MINUTE, failures: 0, code: 'usage_limit', until: 90 * MINUTE, reset: '10:20am (America/Managua)' },
+    'w7:p1': { since: 2 * MINUTE, failures: 0, code: 'usage_limit', until: null, reset: null },
+  }
+  expect(deliveryWarnings(run, new Set(['w1:p1', 'w7:p1']), 5 * MINUTE, { holds })).toEqual([
+    "  ⚠ usage limit in w1:p1: 1 prompt for the orchestrator held 5m — Claude's usage limit resets " +
+      '10:20am (America/Managua); what is owed waits for it, nothing to do',
+    "  ⚠ usage limit in w7:p1 (t1's worker) for 3m — Claude's usage limit, whose reset could not be read; " +
+      'held until its screen moves on or `hpipe nudge` releases it',
   ])
 })
 
@@ -269,4 +284,17 @@ test('a stuck box the supervisor recorded is named for what is held behind it �
 
 test('a live orchestrator pane with an agent in it gets no warning', () => {
   expect(deliveryWarnings(mkRun(), LIVE, MINUTE, { agentless: new Set(['w7:p9']) })).toEqual([])
+})
+
+test('a queued resume is not the task\'s phase prompt, and a phase prompt is not a resume', () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  const task = mkTask({ phase_entered_at: run.phase_entered_at })
+  run.tasks = [task]
+  const resume = enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'resume' }, 1)
+  expect(resume.kind).toBe('resume')
+  expect(queuedWorkerPrompt(run, task)).toBeNull()
+  expect(queuedResume(run, task)?.id).toBe(resume.id)
+  const phase = enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 2)
+  expect(phase.kind).toBeUndefined()
+  expect(queuedWorkerPrompt(run, task)?.id).toBe(phase.id)
 })

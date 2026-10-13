@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  listRuns, loadRun, newRun, readOrchestrator,
-  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveRun, StaleRunError, writeOrchestrator,
+  BATCH_SCHEMA_VERSION, isCurrentSchemaRun, listRuns, loadRun, newRun, readOrchestrator,
+  resolveRun, retryOnStaleRun, runById, runForRepo, runIsDriven, saveIfChanged, saveRun, StaleRunError, withBatch,
+  writeOrchestrator,
 } from '../src/lib/ledger'
 import { tierOf } from '../src/lib/phases'
+import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
 let dir: string
@@ -59,6 +61,25 @@ test('a new run carries schema_version 3 and an open intake', () => {
   expect(run.schema_version).toBe(3)
   expect(run.intake_closed).toBe(false)
   expect(run.passes).toEqual({})
+})
+
+test('a single-PR run is written as schema 4, and both schemas are current', () => {
+  const perTask = newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' })
+  const singlePr = withBatch(newRun({ session: 's', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 't' }),
+    batchFixture())
+  expect(singlePr.schema_version).toBe(BATCH_SCHEMA_VERSION)
+  expect(BATCH_SCHEMA_VERSION).toBe(4)
+  expect(singlePr.batch?.branch).toBe('batch/x')
+  expect(isCurrentSchemaRun(perTask)).toBe(true)
+  expect(isCurrentSchemaRun(singlePr)).toBe(true)
+  for (const other of [1, 2, 5]) expect(isCurrentSchemaRun({ ...perTask, schema_version: other })).toBe(false)
+})
+
+test('a single-PR run holds its repo like any other', async () => {
+  const batched = withBatch(newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'b' }),
+    batchFixture())
+  await saveRun(dir, batched)
+  expect(await runForRepo(dir, 'personal', 'k')).toMatchObject({ kind: 'one', run: { run_id: batched.run_id } })
 })
 
 test('runForRepo ignores a run of another schema, so it never blocks hpipe start', async () => {
@@ -329,4 +350,38 @@ test('a task saved without a tier loads without one, and reading its tier writes
   await saveRun(dir, loaded)
   const raw = await Bun.file(join(dir, 'runs', 'personal', `${runId}.json`)).text()
   expect(raw).not.toContain('"tier"')
+})
+
+test('a tick that changed nothing writes nothing, and says so only while its copy is current', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  const revision = run.revision
+  expect(await saveIfChanged(dir, run, [])).toBe('unchanged')
+  expect((await loadRun(dir, 'p', run.run_id))?.revision).toBe(revision)
+
+  const elsewhere = (await loadRun(dir, 'p', run.run_id))!
+  elsewhere.title = 'renamed by a CLI command'
+  await saveRun(dir, elsewhere)
+  expect(await saveIfChanged(dir, run, [])).toBe('stale')
+})
+
+test('a tick that changed something, or carries an effect, saves as before', async () => {
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  run.title = 'changed this tick'
+  expect(await saveIfChanged(dir, run, [])).toBe('saved')
+  expect((await loadRun(dir, 'p', run.run_id))?.title).toBe('changed this tick')
+  expect(await saveIfChanged(dir, run, [() => {}])).toBe('saved')
+})
+
+test('a change the CI poll made before the tick looked at the run is saved', async () => {
+  // The tick polls CI into its copies before it advances them. Judged against a
+  // snapshot taken after the poll, the CI head never reached the file, so its
+  // settle window restarted on every read and a PR never left CI.
+  const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
+  await saveRun(dir, run)
+  const polled = (await loadRun(dir, 'p', run.run_id))!
+  polled.passes['branch-review'] = 1
+  expect(await saveIfChanged(dir, polled, [])).toBe('saved')
+  expect((await loadRun(dir, 'p', run.run_id))?.passes['branch-review']).toBe(1)
 })

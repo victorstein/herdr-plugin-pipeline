@@ -163,6 +163,12 @@ hpipe dispatch --done
 hpipe status      # assert: run phase is no longer [intake]
 ```
 
+Once you go idle the run moves to `dispatch`. When you have already run every printed block, its
+prompt is one line — `Every task that can start has its worktree and its brief: nothing to dispatch
+now.`, naming any task still `queued` as arriving later as its own `Dispatch tN` prompt — or nothing
+at all when no task is queued and intake is closed. The full dispatch walkthrough arriving after
+every block has run is a **finding**.
+
 **Failure looks like:** `found no run in intake, dispatch or execute for <repo> in session <session>`
 from `hpipe task` (you are in the wrong repo or session — the message names both), or `no agent
 definition at …-dev.md` (wrong `--surface`).
@@ -172,7 +178,7 @@ The orchestrator now creates a worktree per task and adopts its root pane:
 ```bash
 herdr worktree create --cwd <repo> --branch smoke/one --base <commit>   # the commit on the base: line
 # capture .result.root_pane.pane_id
-herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions
+herdr agent start smoke-one --kind claude --pane <root_pane_id> -- --dangerously-skip-permissions --effort high
 hpipe dispatch --task t1 --pane <root_pane_id>
 ```
 
@@ -185,9 +191,15 @@ working on it — not text sitting in the input box. `hpipe show --task t1` prin
 that merge even though nobody pulled local `main` (`git -C <worktree> merge-base --is-ancestor
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
 --abbrev-ref @{u}` fails with `no upstream configured`). Under that line both print the same
-`dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
-declares one, `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
-dispatched at registration is started with the flag too (#118). Until its agent is detected, for up
+`dispatch, in order:` block — `worktree create … --base <that commit>`, a `#` line saying the create
+JSON gives the checkout as `.result.worktree.path` and its pane as `.result.root_pane.pane_id`, the
+bootstrap when the repo declares one (an `# optional:` step running `./bin/bootstrap` or the like when
+the repo has one it never wired in), `agent start <bead> … -- --dangerously-skip-permissions`,
+`dispatch --task` — so a worker
+dispatched at registration is started with the flag too (#118). The `agent start` line names the agent
+by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr agent list` shows the
+agent under that name. A refusal of the name, or of a second start under it after a rewind, is a
+finding. Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
 in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
 is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
@@ -338,10 +350,14 @@ watch -n 2 'hpipe status'
   ends, which the footer leaves out) — both use one predicate and render `actionFor`, so a
   different recovery command between the two is a finding. Every `hpipe status` task line should
   read `[<phase> Nm]`, and the minutes should match the digest's box for the same task.
-- **Leave one worker idle with an uncommitted edit** in `implement` (or either PR review): within a
-  tick of it going idle, `hpipe status` should list it under `waiting on you:` as `YOUR move:
-  worker idle with N uncommitted path(s) (…) — have it commit and push`, and the entry should
-  vanish the moment the worker goes busy. The supervisor runs one `git status` per idle spell, not
+- **Leave one worker idle with an uncommitted edit** in `implement` (or any review): within a
+  tick of it going idle, `hpipe status` should list it under `waiting on you:` as ``YOUR move:
+  worker idle with N uncommitted path(s) (…) — `hpipe nudge --task tN` tells it to commit, push
+  and finish implement``, and the entry should vanish the moment the worker goes busy. Run that
+  nudge: the worker should get `# Carry on — implement (tN, …)` naming the paths, `status` should
+  read `its nudge to carry on is queued` until it lands, and a second nudge should answer `a resume
+  is already queued`. With a background shell running in the worker's pane the nudge must be
+  refused, naming the shell. The supervisor runs one `git status` per idle spell, not
   per tick; a git process per second in `ps` while it sits idle is a finding. So is a checkout
   whose bootstrap leaves untracked, un-ignored files, which would flag every idle worker.
 - **Independently of any digest, a task parked in `ci`, `merge`, `close`, `teardown` or `escalated`
@@ -387,9 +403,13 @@ tier passes through it on the way to `implement`: a heavy or standard task enter
    moving, so only a release clears it` instead, and then `t2` also appears under `waiting on
    you:` carrying the rendered `<hpipe> release --task t1` — once, not on both lines.
 
-   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (light and
-   standard), `pr-review-intent` and `pr-review-quality` (heavy), `ci`, `merge`, `close`, `teardown`
-   all hold files. Pinned heavy, `t1` passes through the heavy pair.
+   The holder phase in that line should track `t1` as it moves: `implement`, `pr-review` (every
+   tier), `ci`, `merge`, `close`, `teardown` all hold files. `t2`'s own task line, and any digest line
+   about it, names the same holder: `— nothing for you — waiting for t1 (implement) to free the files
+   it holds`. A digest that says no task holds its files while status still prints the ⚠ line above
+   is a finding. A task nothing holds passes through `blocked-on-files` in a tick, and its digest line
+   is held for that tick and reads `[plan-review → implement]` (or `[plan → implement]` for light);
+   a `[… → blocked-on-files] … no task holds its files now` line in a digest is a finding.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.
@@ -539,8 +559,18 @@ them would cascade their dependents to `blocked-on-failure`. Their probe says so
 is waiting for: the PR to merge, the bead to be closed by the supervisor, `gh pr checks <pr>`, or the `rewind` that
 resumes an escalated task.
 
-If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
-`STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.
+If the actor's pane reports `working` when escalation comes due, or shows background work under its
+prompt (see §5's second finding), it is deferred one interval, up to `STALL_PROBE_MAX` times, then
+escalated anyway. Nothing waits forever.
+
+Each probe states the cadence in force — `sent every 15 minutes` at the defaults, whatever
+`config.env` sets otherwise — that a reply does not answer it, and what holds the escalation off; a
+probe whose minutes differ from the `This phase has been open N minutes` steps it arrives at is a
+finding. A probe to the pane whose work holds its row, when that pane shows background work, names
+it: `… This phase does not wait for it.` for a shell or a monitor, and `… it waits up to 10 minutes for
+<subagent> to finish, and no longer.` for a subagent. A probe that tells the orchestrator a phase waits
+for a shell is a **finding**, and so is one listing the orchestrator's work in a probe about a worker
+owed its brief.
 
 ### 4d. Delivery to a pane that cannot answer
 
@@ -596,16 +626,28 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
    rule must still show at least two `─` before its name in the narrowest pane you use. When the
    held send is a worker's phase prompt, also check that the task names the held prompt rather
    than `worker idle with nothing at …` (#136; see §2).
-5. **Usage limit.** If a session hits its limit during the run, record the code the supervisor logs
-   for sends to it. `agent_prompt_stalled` or `agent_not_ready` means the gate backs it off and holds
-   its prompts; a success means a limited Claude still takes prompts up, and the outbox cannot see
-   the limit — a finding.
+5. **Usage limit.** Limits are frequent (50 rejected requests in two weeks of worker transcripts), so
+   one is likely in any long run. When a pane shows `You've hit your … · resets …`:
+   - **Capture it raw**, before anything else touches the pane: `herdr pane read <pane> --source
+     visible --lines 40 --format ansi > limited.ansi`, the same with `--format text > limited.txt`,
+     and `herdr agent get <pane>`. Never through `grep` or `cut`: the parser needs the box rules and
+     the dim `⎿`. Compare them with the fixtures in `test/usage-limit.test.ts` and add them there.
+   - **Pass:** the supervisor logs `usage limit in <pane> until <reset>` once; `hpipe status` shows
+     the worker `paused by Claude's usage limit, resets …` and `⚠ usage limit in <pane>`; no stall
+     probe or escalation reaches it however long the outage; 90 s after the reset the log says
+     `usage limit in <pane> lifted`, the worker gets one `Usage limit lifted` prompt and carries on
+     without restarting its phase, and the orchestrator gets one note naming it.
+   - **Record** what herdr reports for the limited pane (`done` on 2026-10-11), and whether Claude's
+     own auto-continue appears (`continuing automatically`); if it does, capture that screen too and
+     check that no resume prompt was sent on top of it.
+   - `hpipe nudge --task <id>` on a limited worker queues the resume and the log says the hold is
+     released; on a worker with no limit line it refuses.
 
 ## 5. The subagent / `agent_status` question — OPEN, record the answer here
 
-**The question.** During `spec-review`, `plan-review`, `pr-review`, `pr-review-intent` and
-`pr-review-quality`, the worker dispatches a *review subagent*, and during `implement` the Sonnet
-subagent that writes the code; either way it is told to wait for it within its own turn. The
+**The question.** During `spec-review`, `plan-review` and `pr-review`, the worker dispatches a
+*review subagent*, and during `implement` the Sonnet
+subagent that writes the code; either way it was then told to wait for it within its own turn. The
 supervisor gates every artifact-and-verdict row, and `implement`, on the worker pane reading `idle`
 or `done` (via `herdr agent get`, double-checked after `ACTOR_SETTLE_MS`). Three adversarial rounds could not
 settle statically whether a Claude Code subagent running inside a pane perturbs that pane's
@@ -718,6 +760,50 @@ the rule stops matching and the question reopens. The await-and-do-not-end-your-
 four review prompts is therefore worth keeping as defence in depth, but it is not load-bearing today —
 and the verdict-file predicate remains an independent guard regardless.
 
+Superseded by smoke run 16: Claude Code now runs every subagent in the background, and a worker told
+to wait within its turn polled the verdict file in a foreground sleep loop. Every prompt that
+dispatches a subagent now says to end the turn and carry on when its completion notice arrives; the
+supervisor reads the agents panel (below), and holds a worker's review row until the verdict is
+committed.
+
+#### §5 again: shells, monitors and a parent that took another turn — the pane DOES read `done`
+
+Measured on the berean-os trial run of 2026-10-12. The answer above holds only while the parent's
+last line is `✻ Waiting for N background agents to finish`: herdr's claude manifest (2026.09.11.1,
+`herdr agent explain <pane> --json`) rules that line, and `· N MCP tasks still running`, as
+`working`, and nothing else. Once the parent takes another turn — a Monitor event, its subagent's
+report — its last line reads `✻ Cogitated for 2m 27s · done 5:25 PM · 1 shell, 4 monitors still
+running` and the pane reads `done`. t3 sat there with its implementer subagent waiting on a firmware
+build, and the digest told the orchestrator to have it commit and push. The supervisor now reads the
+footer for that work: `⏵⏵ bypass permissions on · 1 shell, 4 monitors · ← 1 agent`, and the agents
+panel's `◯ ui-dev  Waiting on x4pro firmware build … · ↓ 112.8k tokens` row. `← 1 agent` is the
+agents-view hint, which a fresh session shows too, and is not work.
+
+To check it: have a worker in `implement` start a background shell (`sleep 600`, run in the
+background) and end its turn with an uncommitted edit. Its digest line should read `agent:done,
+background work running (1 shell)`, and `hpipe status` must **not** list it under `waiting on you:`.
+Kill the shell: the uncommitted-work line should appear within a minute, which is how often the
+supervisor re-reads a pane that showed work. A design row whose artifact appears while the pane
+shows a subagent (a panel row or `N local agents`) must wait for it, and advance at the latest 10
+minutes after the artifact appeared, with `advanced past background work still running (…) after
+10m` in its history; with only a shell or a monitor running it must advance at once. Have the
+orchestrator wait for a phase change from a background shell polling `hpipe status` once: the phase
+must still advance when its signal arrives, and every probe and phase prompt says never to wait that
+way. In `branch-review`, let the orchestrator
+dispatch its reviewer subagent in the background and end its turn: once the escalation falls due,
+`hpipe show` or the ledger's `stall.holds` should climb instead of the run escalating, for as long as
+the panel lists the subagent. A pill or a panel row worded differently from these is a **finding**:
+record the footer verbatim.
+
+In a worker's review row the reviewer runs in the background: the worker dispatches it and ends its
+turn. A `sleep`, `perl -e 'sleep …'` or `until [ -f … ]` loop in its pane is a **finding**, in any
+row. The verdict appears while the worker sits idle with the subagent's panel row listed; the task
+must stay in its review row, `git -C <worktree> status --short` showing the verdict untracked, until
+the completion notice wakes the worker and it commits the verdict, with a `CLEAR`'s fixes. The row
+advances within a tick or two of that commit and its push. A transition out of the review row while
+the verdict is still untracked in the worktree is a **finding**; so is a review row that stays put,
+the worker idle with nothing running, after the verdict is committed and pushed.
+
 #### Environment note
 
 `herdr agent start` returns `agent_not_ready` when Claude Code shows its folder-trust dialog on a
@@ -727,10 +813,8 @@ worker would block once. Not a plugin bug, but it will stall a first run.
 
 ## 6. Finish the run
 
-Let `t1` go all the way. The route after `implement` follows the tier: pinned heavy, it is
-`implement` → PR → `pr-review-intent` → `pr-review-quality` → `ci` → `merge` → `close` → `teardown` →
-`done`; a task on the `standard` default goes `implement` → PR → `pr-review` → `ci` → … instead. Then
-`t2` releases and follows. When both are `done` and
+Let `t1` go all the way. After `implement` every tier takes the same route: `implement` → PR →
+`pr-review` → `ci` → `merge` → `close` → `teardown` → `done`. Then `t2` releases and follows. When both are `done` and
 intake is closed, the run advances to `branch-review`, whose prompt goes to the orchestrator; it
 clears to `done`.
 
@@ -745,6 +829,9 @@ clears to `done`.
   before the worker's fix push appears on the PR.
 - If CI goes red and the task returns to `ci`, `hpipe show` reads `ci: none` until the new head is
   polled; a failure, `ci` pass count bump or escalation within 30s of re-entry is the stale result.
+- The merge prompt's command is `gh pr merge <n> --squash --match-head-commit <sha>`, `<sha>` being the
+  head `hpipe show` prints as `ci: pass (on <sha8>)`, and it reads `Green is for <sha8>, the head CI
+  ran on`. The merge it renders goes through.
 - `teardown` removes the worktree unless the task was registered `--keep-worktree`.
 - No plugin commands were dropped:
 
@@ -782,18 +869,21 @@ review rows it visits:
 | --- | --- | --- |
 | `light` | `blocked-on-files` — no `plan-review` | `pr-review` → `ci` |
 | `standard` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
-| `heavy` | `plan-review` → `blocked-on-files` | `pr-review-intent` → `pr-review-quality` → `ci` |
+| `heavy` | `plan-review` → `blocked-on-files` | `pr-review` → `ci` |
 
 §1–§6 pin both tasks heavy, so none of that routing is exercised there. These two batches are its only
-live check. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
+live check. The smoke repo's changes are small, so a light or standard task whose design reviews
+cleared first time goes `implement → ci` and skips its `pr-review` (§10). To walk the rows this table
+names, commit `.claude/pipeline-always-review` on `main` listing the batch's `--files` before
+registering, and remove it afterwards. Run them against `victorstein/hpipe-smoke`, each in a fresh session: repeat Setup with
 `export SMOKE=pipesmoke<N>` and the next unused `N`, so neither batch's ledger mixes with another's.
 
 **Upgrade first.** The supervisor is long-lived and keeps the code it started with. If any session
 that will drive these batches was up before this build was installed or linked, close its `Pipeline
 supervisor` pane and run the plugin's `supervisor` action (or restart the session), then check that
-`hpipe status` reads `supervisor: live (pid N)` with a new pid. A supervisor still on the old phase
-table routes every task as heavy while the CLI briefs it for its tier: a `light` or `standard` task
-reaching `pr-review-intent` is that, not a routing bug.
+`hpipe status` reads `supervisor: live (pid N)` with a new pid. A supervisor still on an old phase
+table routes by it while the CLI briefs the task by the new one: a task of any tier reaching
+`pr-review-intent` is that, not a routing bug.
 
 ### 7a. Batch A — one task per tier
 
@@ -825,10 +915,11 @@ otherwise removes before you can read them.
    ```
    light     research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
    standard  research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review-intent → pr-review-quality → ci → merge → close → teardown → done
+   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
    ```
 
-   A returned review shows as a repeat (`… → spec-review → spec → spec-review → …`) and a decision as
+   A gate no task held reads `blocked-on-files (passed through)`. A returned review shows as a repeat
+   (`… → spec-review → spec → spec-review → …`) and a decision as
    `blocked-on-decision` between two entries of the same phase; both are fine. A row the tier skips
    appearing, or one it runs missing, is a finding.
 2. **The implement subagent ran on Sonnet.** While a task is in `implement`, read its pane
@@ -846,7 +937,14 @@ otherwise removes before you can read them.
    code itself with no subagent at all.
 3. **`Tier:` atop each verdict.** For every path under `verdicts:` in `hpipe show --task <id>`,
    `head -1 <checkout>/<path>` reads `Tier: <the task's tier>`.
-4. **`branch-review` runs.** Three tasks landed, so once the last is `done` the run goes `execute →
+4. **Each review runs at its own effort, and the plan review reads rather than runs.** `hpipe show`
+   prints `effort: worker high, reviews high (plan-review medium)` for the standard task and
+   `effort: worker xhigh, reviews xhigh` for the heavy one. In the worker panes, the standard task's
+   `plan-review` subagent is dispatched with `effort: medium` and its other reviews with `effort:
+   high`. In the `plan-review` subagent's transcript, record whether it ran the build or the tests,
+   or copied the worktree to apply the plan: the prompt now tells it not to, so any of those is a
+   finding. The plan itself has no step that pushes, opens a PR or runs `hpipe submit`.
+5. **`branch-review` runs.** Three tasks landed, so once the last is `done` the run goes `execute →
    branch-review`, the orchestrator's pane gets the final-review prompt, and its verdict opens
    `Tiers: t1 light, t2 standard, t3 heavy`. It clears to `done`.
 
@@ -882,7 +980,7 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    `research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done`.
 3. **`branch-review` is skipped.** One task landed, so the run goes straight from `execute` to `done`:
    the orchestrator never receives a final-review prompt, and the ledger's last run entry reads
-   `execute → done` with why `one task landed; branch-review skipped`:
+   `execute → done` with why `one task merged (PR #<n>); branch-review skipped`:
 
    ```bash
    jq '.history | map(select(.task_id == null)) | last' "$STATE/runs/$SMOKE/<run_id>.json"
@@ -893,7 +991,9 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    (`pane read … --lines 40`) a tick or two after the run reads `done` and write down the last thing
    the pipeline sent it — a digest naming the run's end, the task's `teardown → done` line alone, or
    nothing — and whether `hpipe status` then shows the run as ended. A silent end is data for that
-   question, not a failure of this step.
+   question, not a failure of this step. A done notice that arrives lists `t1 … : done, PR #<n> merged`
+   and ends with a `Clean up when you are done with it:` block: the task branch on origin (unless
+   GitHub deleted it on merge), the local task branch, and a `pull --ff-only` of `main`.
 
 `hpipe tier` never lowers from a pipeline pane: `lowering a tier needs a human; run this from your own
 pane`. If you want the live check of that guard, have the orchestrator run `hpipe tier --task t1 light
@@ -929,9 +1029,11 @@ hpipe start "beads smoke" --prefix bsm
 exists from §1 the line reads `beads: prefix <p>, store …` and `--prefix` is ignored; use that prefix
 wherever `bsm` appears below.
 
-**Check:** `ls -A "$STORE"` holds `.beads` and `project.json`; `$STORE/.beads/issues.jsonl` exists;
-`git -C "$STATE" status` shows nothing new if the state dir sits in a repo. **(human)** a `Board: <repo>
-<hash>` tab appears in the pipeline workspace within a tick or two and runs `bv`.
+**Check:** `ls -A "$STORE"` holds `.beads`, `.git` and `project.json`; `$STORE/.beads/issues.jsonl`
+exists; `git -C "$STORE" ls-files` prints only `.beads/issues.jsonl` and `git -C "$STORE" log
+--format='%an %s'` prints `hpipe init`; if the state dir sits in a repo, that repo gains no commit and
+nothing staged. **(human)** a `Board: <repo> <hash>` tab appears in the pipeline workspace within a
+tick or two and runs `bv`.
 
 ### 8b. One task, open to closed
 
@@ -964,7 +1066,7 @@ hpipe next
 
 **Expect** (`bv` is run by `hpipe` on your machine, so this is **(human)**): any `warning:` lines, then
 `now (parallel when their --files are disjoint):` — which does **not** list `bsm-2`, because task `t2` holds
-it — or, with nothing else open, `nothing to pick up: every open bead is held, blocked or filtered out`.
+it — or, with nothing else open, `nothing to pick up: no open bead is claimable — the backlog is empty, or every open bead is held, blocked or filtered out`.
 `hpipe next --limit 1` prints at most one pick.
 
 ### 8d. Abort releases, resume re-claims
@@ -1043,7 +1145,7 @@ back, not something to patch mid-run.
    *Look for:* every entry under `dependencies` and `dependents` carries `dependency_type` (`blocks` or
    `parent-child`) and `status`. The adoption refusal in 8e reads exactly those two names; if either is
    called something else, adoption silently lets an epic through.
-3. **bd's stderr warning outside git.** Provoke a failing bd write, for example
+3. **bd's stderr warning.** Provoke a failing bd write, for example
    `hpipe task --branch smoke/x --bead no-such-bead --surface <surface> --files NOTES.md` (or a `--title`
    run with an unreadable body). *Look for:* hpipe's error shows only bd's real error. Then capture the
    raw text with `BEADS_DIR="$STORE/.beads" GIT_CEILING_DIRECTORIES="$STATE/beads" bd create "x" --json --actor smoke 2>&1 >/dev/null | cat -A`
@@ -1075,6 +1177,13 @@ back, not something to patch mid-run.
    second (8d). *Look for:* the bead goes `open → in_progress → closed`; **(human)** the phase label on
    the board updates at each phase; an abort releases the bead (`open`, no assignee) and a resume
    re-claims it.
+8. **bv's history view (human).** After 8b, open bv's history view on the board. *Look for:* no
+   `History load failed` line, and the bead's changes listed against hpipe's commits (`git -C "$STORE"
+   log --format='%h %s'` shows one per CLI write and one per supervisor pass that wrote — `update bsm-1`,
+   `sync`, …). Then the upgrade path, on a store made by a release before this one (or a copy of one with
+   its `.git` removed, no run live): open the board with **Open board**. *Look for:* `$STORE/.git`
+   appears with one `catch up` commit before bv starts, and the history view loads. If bv still cannot
+   read the history, record its exact message: it is a finding, not something to work around mid-run.
 
 | Deferred check | Result | Notes |
 |---|---|---|
@@ -1085,6 +1194,246 @@ back, not something to patch mid-run.
 | 5 board after herdr restart | | |
 | 6 `hpipe next` compact | | |
 | 7 full task lifecycle | | |
+| 8 bv history view, new store and upgraded store | | |
+
+---
+
+## 9. One PR per batch (`--single-pr`)
+
+This mode touches startup (the push in `start`), gating (the batch as every base, the landing slot) and
+delivery (new prompts, the queued sync hand-over). The wiring test drives it end to end against a
+bare local origin, but GitHub, release-please and live agents are only proven here. Run it in a fresh
+`pipesmokeN` session against `victorstein/hpipe-smoke`.
+
+### 9a. Setup, before the session boots
+
+- `.claude/pipeline-always-review` on `main` listing every path these tasks touch: the steps below
+  need each task's review to run, and a small change would otherwise skip it (§10). Remove it after.
+- release-please configured on `hpipe-smoke` (`release-please-config.json` with `changelog-sections`,
+  and the release workflow): step 9i is pass/fail on the release it cuts.
+- A ruleset on `batch/*` blocking force-pushes and deletion (Settings → Rules → Rulesets). The landing
+  gate is git refusing a non-fast-forward push; a `--force` landing gets through without the ruleset.
+- Squash merges allowed on the repo.
+- `.claude/pipeline-check` committed on `main`, executable, running the repo's tests, and a
+  `.claude/agents/<surface>-dev.md`.
+
+### 9b. A supervisor that predates the mode
+
+With the previous release's supervisor still running in the session, run
+`hpipe start "smoke batch" --single-pr` from the new CLI. **Assert:** refused, naming that
+supervisor's pid and the `Pipeline supervisor` pane; no `batch/*` branch on origin; no run in
+`hpipe status`. Restart the supervisor pane, then:
+
+```bash
+hpipe start "smoke batch" --single-pr
+git ls-remote --heads origin 'batch/*'     # assert: exactly the printed branch, at origin/main's head
+hpipe status                               # assert: "ships as one PR: batch/<…> → main · 0 of 0 landed"
+```
+
+**Assert** the output carries `batch: batch/<…> at <sha8> (origin/main as just fetched)`, `check:
+.claude/pipeline-check` and the `ruleset:` line, and the intake prompt opens with "This run ships as
+one PR". With the `batch/*` ruleset active, the `ruleset:` line reads `batch/<…> is already protected
+from force-pushes and deletion`; without it, it recommends one.
+
+### 9c. Registration, the base, submit's refusals
+
+Register t1 and t3 with disjoint `--files`, and t2 with `--depends-on t1` and files overlapping t1's.
+**Assert:**
+
+- every `base:` line is `origin/batch/<…> as just fetched`, at the batch head;
+- `hpipe task --branch batch/<…>` and `--branch main` are refused;
+- in t1's worktree, before pushing, `hpipe submit --task t1 --title "feat: x"` says `push first`;
+  `--title "feet: x"` is refused naming the repo's types; a PR opened by hand from t1's branch makes
+  submit say `Close PR #n, then submit again` (close it after);
+- a real submit prints `submitted t1 at <sha8> as "…" (implement; check passed)` and the check's log
+  is under `$STATE/runs/$SMOKE/<run>.checks/`;
+- push a commit to the batch after a worker's implement-start merge and before its submit: the submit
+  prints a second line, `batch/<…> moved to <sha8> since this head last merged it, so tN goes through
+  sync before it lands`, `<sha8>` being that push, and the task later goes `land-queue → sync`;
+- the review prompt's diff command is `git fetch origin … && git diff origin/batch/<…>...origin/<branch>`.
+
+### 9d. The gate, and one landing at a time
+
+Time t1 and t3 so both clear review within a minute of each other, holding one worker's last review
+back if needed. **Assert:**
+
+- one takes the slot (`landing: tN (merge)` in status); the other waits in `land-queue` with `nothing
+  for you — waiting to land; tN holds the landing slot`, no prompt, and no stall probe;
+- before the waiting task syncs, pushing its old reviewed sha by hand
+  (`git push origin <sha>:refs/heads/batch/<…>`) is refused;
+- the slot holder's landing prompt reads `<land sha8> is the head that was reviewed. The check ran on
+  <sha8>, and <land sha8> adds nothing to it but review verdicts under docs/superpowers/reviews/`, where
+  `<sha8>` is the head `submit` printed and `git diff --name-only <sha8> <land sha8>` lists only that
+  task's review file;
+- the first lands with the rendered push: `origin/batch/<…>` equals its land sha, the landing shows in
+  status within one CI poll (30 s), its bead closes with `landed on batch/<…> (<sha8>); ships with
+  the batch PR into main`, and its worktree is torn down;
+- the second goes `land-queue → sync`, its worker merges and submits, `submit` reports `a clean merge
+  of batch/<…>` and runs the check, and it lands with no second review;
+- t2, once t1 is done, is cut from a batch head containing t1's land sha.
+
+### 9e. A reviewer's inline fix, checked before it lands
+
+Have a task's last reviewer fix a MAJOR inline (a code change, committed and pushed with its verdict).
+**Assert:** with the slot, the task goes to `sync`, not `merge` (`… was not checked since it was reviewed`
+in `hpipe show`'s visited list or the history), the worker's submit runs the check on that head, and
+only then does it land. When the batch has not moved, the worker's merge says `Already up to date`:
+`submit` must report `nothing on batch/<…> to merge: it lands next`, the history `nothing on batch/<…>
+to merge into <sha8>`, `hpipe show` `land sha: <sha8> (reviewed; its sync merged nothing)`, and the
+land prompt `<sha8> is the head that was reviewed and checked; its sync found nothing on batch/<…> to
+merge` (without `and checked` when the repo declares no check). `clean sync` anywhere in that
+task's text is a **finding**: nothing was merged.
+
+### 9f. A push in `merge` lands reviewed
+
+While a task waits in `merge`, push a small hand-off commit to its branch as the orchestrator would.
+**Assert:** on the next tick it goes to `sync` (`<branch> moved to <sha8> after its reviewed head`),
+the sync is reported not clean, the task goes back through its review, and the commit lands on the
+batch reviewed — it does not vanish with the worktree.
+
+### 9g. A dirty sync, and a deleted branch
+
+Register t4 and t5 editing one file under wrongly disjoint `--files`. **Assert:** the second to land
+syncs with a conflict, `submit` reports `not a clean merge`, the task goes through its tier's first
+review with the remerge-diff note in its prompt, then lands. While a task is in `merge`, delete an
+already-landed sibling's branch on origin: the landing is still seen.
+
+### 9h. A lost pane
+
+Close the worker pane of a task waiting in `land-queue` that will have to sync. **Assert:** the task is
+not failed (`hpipe status` shows it waiting, with the `agent start` line); when the batch moves past
+it, another task with an agent takes the slot first; once you start an agent in its worktree, the
+brief and the sync prompt arrive on their own, and nothing has to be sent by hand.
+
+### 9i. The run's end, and the release
+
+**Assert**, in order:
+
+- `branch-review`'s prompt reads `git diff origin/main...origin/batch/<…>` in the batch checkout;
+- `ship` writes `$STATE/runs/$SMOKE/<run>.batch-pr.md` with one override line per landing, the
+  orchestrator creates `$STATE/checkouts/<run>` and runs `hpipe batch-check` there, and opens the PR;
+  the run stays in `ship` until the PR's head is the head `batch-check` recorded (`checked batch/<…> at
+  <sha8>: .claude/pipeline-check passed`, or in a repo with no check `recorded batch/<…> at <sha8>:
+  nothing checked it, …` — `checked` there is a finding). The ship prompt says
+  `The merge step replaces the PR's whole description`, and the orchestrator adds nothing to the PR's
+  description on GitHub. With the `batch/*` ruleset active since `start` (whose `ruleset:` line said
+  `already protected`), the ship prompt has no ruleset advice and the ledger's `.batch.ruleset_protected`
+  is `true`; on a run started without one, the advice is there;
+- `ship-ci` stays pending until every workflow run on the PR head has finished;
+- **a push after the check:** push a failing test to the batch while the run is in `ship-ci` or
+  `ship-merge`. The run goes back to `ship` (`head moved to <sha8> past <sha8>, the head batch-check
+  recorded`) with the plain ship prompt, not `CI is red`, and spends no `ship-ci` pass; `batch-check`
+  refuses the test there. Revert it, `batch-check`, `ship → ship-ci`. A run that reaches `ship-merge`,
+  or merges, at a head other than `.batch.checked.head_sha` is a **finding**;
+- **red CI, the fix-task route:** push a test that fails only in CI, such as
+  `expect(process.env.CI).toBeUndefined()` (GitHub Actions sets `CI`), and `batch-check` it, so the
+  red falls on a checked head: `ship-ci → ship` with `CI is red`. `hpipe task …`
+  moves the run to `execute`, `dispatch --done`, the fix lands, the run goes
+  `execute → branch-review → ship`, needs a fresh `batch-check`, then `ship-ci`, green;
+- **red CI, the patch route:** push another CI-only failure and `batch-check` it; the second red
+  escalates the run. `hpipe rewind <run> ship`, patch through a subagent in the batch checkout,
+  `batch-check`: `ship → ship-ci`, green;
+- squash-merge with the two rendered commands. The merge command carries `--match-head-commit <sha>`,
+  `<sha>` being the head `ship-ci` saw pass (`.batch.ci_head.sha` in the ledger), and the prompt names
+  its short sha as the green head; push an empty commit to the batch before running it once, and
+  GitHub must refuse the merge. The run then goes `ship-merge → ship`, and merges only after a fresh
+  `batch-check` and green CI on the new head. **Pass/fail:** exactly one release PR follows, whose notes list every
+  landed title, the fix task's included, and nothing else;
+- on a throwaway PR with no override block, check that the squash body's extra lines alone give one
+  entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);
+- `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n
+  squash-merged as <sha8>` and deletes only the task branches whose head is on the batch. In a repo
+  whose bootstrap initialises submodules, the batch checkout's line reads `worktree remove --force …  #
+  git refuses its submodules without --force; nothing in them is unpushed` while the checkout is
+  clean, and drops `--force` with a review note naming what is unrecorded once anything in it is
+  uncommitted, a submodule is off the commit the checkout records, or a submodule's commit is on no
+  remote branch: `--force` deletes the submodules' git data in a linked worktree. Run every clean-up line it
+  prints, then check nothing is left: no local task branch (`git branch`), the
+  default branch at the squash commit, `git status` clean (the plugin listed the branch review in
+  `$(git rev-parse --git-common-dir)/info/exclude` when it reserved it, and the notice offers `rm` for
+  it), and the batch branch on origin only when a ruleset kept it. With `.batch.ruleset_protected`
+  `true`, the notice says `origin keeps batch/<…>, which the ruleset on batch/* protects from deletion:
+  leave it` and offers no `push origin --delete`; without it, the delete is offered with its bypass
+  caveat. When GitHub deleted the batch
+  on merge, the notice carries `git -C <repo> branch -dr origin/batch/<…>  # origin no longer has it`,
+  and after it `git branch -r` lists no `origin/batch/<…>`; a per-task run's notice does the same for
+  merged PR branches GitHub deleted.
+
+### 9j. Abort
+
+On a second, throwaway single-PR run with one landed task, `hpipe abort <run>`. **Assert:** it names
+the landed task, says its bead stays closed and nothing reached main, and prints the clean-up
+commands; `hpipe status` shows `not shipped: batch/<…> holds 1 landed task (t1) that is not on main`.
+
+Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
+one does not fit, and that is a finding.
+
+---
+
+## 10. Skipping the PR review on a small, well-planned change
+
+A light or standard task leaving `implement` goes past its PR review when its change adds fewer than
+150 lines outside `docs/`, its `spec-review` (and `plan-review`, where its tier runs one) cleared on
+the first pass, no PR review sent it back, and it touches nothing listed in
+`.claude/pipeline-always-review` on its base. The unit suite drives this against a bare local origin;
+GitHub's PR base and a live supervisor's fetches are only proven here. Fresh `pipesmokeN` session,
+`victorstein/hpipe-smoke`, no always-review file on `main` to start with.
+
+### 10a. A per-task skip, and a heavy task beside it
+
+Register t1 (`--tier standard`) and t2 (`--tier heavy`), each a change of a few lines, with disjoint
+`--files`. **Assert**, once both are past `implement`:
+
+- t1 went `implement → ci` and its pane received no `pr-review` prompt; t2 entered `pr-review`.
+- `hpipe status`'s t1 line reads `standard pr-review skipped`; `hpipe show --task t1` prints
+  `skipped:    pr-review (<N> lines added outside docs/, spec-review and plan-review cleared first pass)`,
+  its `visited:` line has no `pr-review`, and `verdicts:` holds no `pr-review-0`.
+- `<N>` is the added column of `git diff --numstat origin/main...origin/<t1 branch>`, summed over paths
+  outside `docs/`.
+- The orchestrator's digest line for t1's transition reads `[implement → ci, pr-review skipped]`, and
+  t1's merge prompt opens `The PR review was skipped (…) and CI is green on PR #<n>.`
+- The ledger records why:
+
+  ```bash
+  jq '.history | map(select(.task_id == "t1" and .from == "implement")) | last | .why' "$STATE/runs/$SMOKE/<run_id>.json"
+  ```
+
+  reads `PR #<n> at <sha>; pr-review skipped: <N> lines added outside docs/, …`.
+
+### 10b. What keeps the review
+
+In the same run, register three more small standard tasks:
+
+- t3, after committing `.claude/pipeline-always-review` on `main` with a line naming t3's file. It
+  enters `pr-review`.
+- t4, whose change also edits `.claude/pipeline-always-review` on its branch. It enters `pr-review`:
+  a change to the list is always reviewed, whatever the base's copy names.
+- t5 with a change of 200 added lines outside `docs/`. It enters `pr-review`.
+- If any task in the run had a `spec-review` or `plan-review` send-back, it entered `pr-review` however
+  small its change was. Record whether one did.
+- Each of them says why in the ledger: the `implement →` entry's `why` (the `jq` above) ends `; reviewed:
+  <file> is on .claude/pipeline-always-review` for t3, `; reviewed: it edits
+  .claude/pipeline-always-review` for t4, `; reviewed: 200 lines added outside docs/ (a skip needs
+  fewer than 150)` for t5, and `; reviewed: <review> sent it back` for a send-back. A light or
+  standard task that entered `pr-review` with no `reviewed:` reason is a **finding**; a heavy one has
+  none.
+
+### 10c. A single-PR skip
+
+In a `--single-pr` run with one small standard task. **Assert:** it goes `implement → land-queue`;
+`hpipe show` prints `land sha:   <sha8> (submitted; pr-review skipped)`, at the head `submit`
+recorded; it lands as a fast-forward when up to date and checked, and the landing prompt reads `The PR
+review was skipped (…), and <sha8> is the head that was submitted and checked`. A head pushed past
+the submission before the skip lands only through `sync`; the unit suite covers that, since a live
+run cannot time a push into the one tick between `submit` and the skip.
+
+If such a task must sync and the merge conflicts, `submit` reports `not a clean merge` and the task goes
+to `pr-review`, its first. **Assert** that review's prompt says `No reviewed head is recorded, so this
+is the change's first review: read the whole diff` and names `git show --remerge-diff <sha>` at the
+sha `submit` printed after `not a clean merge … (at`.
+
+**Record:** each task's change size, whether it skipped, and the wall-clock time from `implement` to
+`ci` (or `land-queue`) for a skipping task against a reviewed one.
 
 ---
 

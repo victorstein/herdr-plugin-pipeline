@@ -222,4 +222,17 @@ export class Herdr {
   async paneRename(paneId: string, label: string): Promise<CallResult<unknown>> {
     return this.call(['pane', 'rename', paneId, label])
   }
+
+  /**
+   * herdr labels a tab by its number unless it is renamed, so a plugin pane
+   * opened as a tab showed up as `2`, and neither the human nor the orchestrator
+   * found the board. Measured on a live run.
+   */
+  async renameTabOf(paneId: string, label: string): Promise<CallResult<unknown>> {
+    const pane = await this.call<{ pane?: { tab_id?: string } }>(['pane', 'get', paneId])
+    if (!pane.ok) return pane
+    const tabId = pane.result?.pane?.tab_id
+    if (tabId === undefined) return { ok: false, code: 'no_tab', message: `pane ${paneId} reported no tab` }
+    return this.call(['tab', 'rename', tabId, label])
+  }
 }

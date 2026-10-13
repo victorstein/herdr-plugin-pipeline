@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
-  detectCycle, filesClearFor, filesOverlap, gateStatus, planDeclaredFiles,
+  detectCycle, filesClearFor, filesOverlap, gateStatus, landingQueue, landingSlotHolder, planDeclaredFiles,
   releasableFromFiles, separatePipelineArtifacts, widenFiles,
 } from '../src/lib/gating'
 import type { Task } from '../src/lib/types'
@@ -244,4 +244,30 @@ test('detectCycle returns null for an acyclic graph', () => {
   const a = task({ task_id: 't1' })
   const b = task({ task_id: 't2', depends_on: ['t1'] })
   expect(detectCycle([a, b])).toBeNull()
+})
+
+// ——— single-PR: one landing at a time ———
+
+test('the landing slot is held from sync through merge, and through a decision asked from either', () => {
+  for (const phase of ['sync', 'merge'] as const) {
+    expect(landingSlotHolder([task({ task_id: 't1', phase })])?.task_id, phase).toBe('t1')
+  }
+  for (const from of ['sync', 'merge'] as const) {
+    const asking = task({ task_id: 't1', phase: 'blocked-on-decision', decision_from: from })
+    expect(landingSlotHolder([asking])?.task_id, from).toBe('t1')
+  }
+  for (const phase of ['close', 'escalated', 'failed', 'pr-review', 'land-queue'] as const) {
+    expect(landingSlotHolder([task({ task_id: 't1', phase })]), phase).toBeNull()
+  }
+  expect(landingSlotHolder([task({ phase: 'blocked-on-decision', decision_from: 'implement' })])).toBeNull()
+})
+
+test('the landing queue is ordered by entry time, then task id', () => {
+  const queue = landingQueue([
+    task({ task_id: 't3', phase: 'land-queue', phase_entered_at: 5 }),
+    task({ task_id: 't2', phase: 'land-queue', phase_entered_at: 5 }),
+    task({ task_id: 't1', phase: 'land-queue', phase_entered_at: 9 }),
+    task({ task_id: 't4', phase: 'sync', phase_entered_at: 1 }),
+  ])
+  expect(queue.map((t) => t.task_id)).toEqual(['t2', 't3', 't1'])
 })

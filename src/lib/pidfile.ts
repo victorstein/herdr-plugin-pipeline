@@ -56,6 +56,11 @@ export function clearPid(stateDir: string, session: SessionKey): void {
   }
 }
 
+/** A supervisor that predates the field drove only the per-task schema. */
+export function drivenSchemas(info: SupervisorPid): number[] {
+  return info.schemas ?? [3]
+}
+
 export async function supervisorState(
   stateDir: string, session: SessionKey,
 ): Promise<SupervisorState> {

@@ -1,4 +1,4 @@
-import { cmdStart as cmdStartWithRealBeads, type StartBeads } from '../../src/cli'
+import { cmdStart as cmdStartWithRealBeads, type StartBatch, type StartBeads } from '../../src/cli'
 import type { Tools } from '../../src/lib/tools'
 
 type CmdStartArgs = Parameters<typeof cmdStartWithRealBeads>
@@ -17,13 +17,25 @@ export function startBeads(over: Partial<StartBeads> = {}): StartBeads {
   }
 }
 
+/** No supervisor running, a repo that allows squash merges, and no ruleset on the batch, unless a test says otherwise. */
+export function startBatch(over: Partial<StartBatch> = {}): StartBatch {
+  return {
+    supervisor: async () => ({ state: 'none' }),
+    squashMergeAllowed: async () => ({ allowed: true }),
+    rulesetProtects: async () => false,
+    ...over,
+  }
+}
+
 /**
  * `hpipe start` checks bd and bv and sets up a Beads store; a call here gets the
  * fake above instead of spawning the machine's own binaries into a temp state dir.
  */
 export function cmdStart(
-  ctx: CmdStartArgs[0], input: Omit<CmdStartArgs[1], 'prefix'> & { prefix?: string | null },
-  beads: StartBeads = startBeads(),
+  ctx: CmdStartArgs[0],
+  input: Omit<CmdStartArgs[1], 'prefix' | 'singlePr' | 'batchBranch'> &
+    { prefix?: string | null; singlePr?: boolean; batchBranch?: string | null },
+  beads: StartBeads = startBeads(), batch: StartBatch = startBatch(),
 ): ReturnType<typeof cmdStartWithRealBeads> {
-  return cmdStartWithRealBeads(ctx, { prefix: null, ...input }, beads)
+  return cmdStartWithRealBeads(ctx, { prefix: null, singlePr: false, batchBranch: null, ...input }, beads, batch)
 }

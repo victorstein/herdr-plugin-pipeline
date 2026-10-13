@@ -1,7 +1,7 @@
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { TERMINAL_BAD, TERMINAL_OK } from './gating'
-import { SCHEMA_VERSION } from './ledger'
+import { isCurrentSchemaRun } from './ledger'
 import { readJson } from './store'
 import type { TaskPhase } from './types'
 
@@ -91,7 +91,8 @@ export async function beadClaimants(stateDir: string): Promise<BeadClaimant[]> {
   for (const session of entries(runsRoot).sort()) {
     for (const name of entries(join(runsRoot, session)).filter((n) => n.endsWith('.json')).sort()) {
       const run = await readJson<RunFile>(join(runsRoot, session, name))
-      if (run === null || run.schema_version !== SCHEMA_VERSION || run.repo_key === undefined) continue
+      if (run === null || !isCurrentSchemaRun({ schema_version: run.schema_version ?? 0 }) ||
+        run.repo_key === undefined) continue
       for (const task of run.tasks ?? []) {
         if (task.bead === undefined) continue
         claimants.push({

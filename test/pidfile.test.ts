@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  claimPid, clearStalePid, processStartedAtMs, readPid, supervisorState, writePid,
+  claimPid, clearStalePid, drivenSchemas, processStartedAtMs, readPid, supervisorState, writePid,
 } from '../src/lib/pidfile'
 
 let dir: string
@@ -65,4 +65,10 @@ test('clearing a stale pid file spares one a rival has since claimed — #97', a
   await writePid(dir, stalePid)
   clearStalePid(dir, 'personal', stalePid)
   expect(await readPid(dir, 'personal')).toBeNull()
+})
+
+test('a pid file written before schemas existed reads as a supervisor that drives only schema 3', () => {
+  const info = { pid: 1, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2' }
+  expect(drivenSchemas(info)).toEqual([3])
+  expect(drivenSchemas({ ...info, schemas: [3, 4] })).toEqual([3, 4])
 })

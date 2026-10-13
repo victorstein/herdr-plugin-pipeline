@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { repoContext } from '../lib/repo'
+import { actionRepoContext } from '../lib/repo'
 import { writeOrchestrator } from '../lib/ledger'
 import { claimRunForRepo } from '../lib/orchestrator'
 import { hpipeCommand } from '../lib/render'
@@ -13,8 +13,8 @@ if (!stateDir || !paneId || !workspaceId) {
   process.exit(1)
 }
 
-// Identify the repo the same way `hpipe start` does, so the two agree.
-const repo = await repoContext()
+// Identify the repo the same way `hpipe start` does, so the two agree, from the pane it was invoked in.
+const repo = await actionRepoContext()
 if (!repo) {
   console.error('[pipeline] claim must be invoked from inside a git repository')
   process.exit(1)
