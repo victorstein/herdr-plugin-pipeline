@@ -79,7 +79,7 @@ behaviour; this skill does.
    overrides `--tier`; two tier labels are refused. The `tier:` line under `task_id:` says what was
    recorded and why. light skips `plan-review`; every tier gets one combined `pr-review`, except a
    light or standard task with a small change, which skips it (the `pr-review skipped` row under
-   **While it runs**); heavy never skips it, and runs its reviews at the highest effort. A heavy task already in `pr-review-intent` or
+   **While it runs**); heavy never skips it, and runs its spec review at the highest effort. A heavy task already in `pr-review-intent` or
    `pr-review-quality` from before an upgrade finishes it and goes on to `ci` (or `land-queue`).
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
    `Dispatch tN` prompt carrying the same block — run it then) or a brief with a

@@ -1929,7 +1929,7 @@ test('--tier with no tier label is recorded as the flag', async () => {
   await seedInRepo()
   const result = await cmdTask(ctx(), { ...existingBead, tier: 'heavy' }, labelled('bug'), fetchedBase)
   expect(headLines(result.text)).toContain('tier: heavy (--tier)')
-  expect(headLines(result.text)).toContain('effort: worker xhigh, reviews xhigh')
+  expect(headLines(result.text)).toContain('effort: worker high, reviews high (spec-review xhigh)')
   expect((await registered())[0]!.tier_history?.[0]).toMatchObject({ source: 'flag', pane: null })
 })
 
@@ -2022,7 +2022,7 @@ test('tier raises from any pane, logs the change, and writes nothing to run.hist
   const result = await cmdTier(ctx(), tierInput())
   expect(result.ok).toBe(true)
   expect(result.text).toContain('t1: light → heavy')
-  expect(result.text).toContain('Its reviews now run at effort xhigh; the worker keeps the effort it was started with.')
+  expect(result.text).toContain('Its reviews now run at effort high (spec-review xhigh); the worker keeps the effort it was started with.')
 
   const saved = await savedRun(run.run_id)
   expect(saved.tasks[0]?.tier).toBe('heavy')

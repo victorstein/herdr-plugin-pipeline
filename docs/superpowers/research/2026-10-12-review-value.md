@@ -101,6 +101,9 @@ Effort after these changes:
 | standard | high | high | medium |
 | heavy | xhigh | xhigh | xhigh |
 
+Changed 2026-10-13, after the first real run on these changes: heavy runs its worker, PR and plan
+reviews at `high` and keeps `xhigh` for the spec review only (`src/lib/models.ts`).
+
 ### Where the build departs from the brief, and why
 
 - **"First pass" is read from the run's history, not the pass counters.** `hpipe rewind` clears every
