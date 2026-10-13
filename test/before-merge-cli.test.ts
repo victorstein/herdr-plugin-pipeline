@@ -7,6 +7,7 @@ import {
 } from '../src/cli'
 import { openDecision } from '../src/lib/decisions'
 import { loadRun, saveRun } from '../src/lib/ledger'
+import { BEFORE_MERGE_CAPABILITY } from '../src/lib/pidfile'
 import type { PrView } from '../src/lib/gh'
 import type { Run, Task } from '../src/lib/types'
 import { CHECKED_HEAD, checkOf, heldTask, NEWER_HEAD, perTaskRun, ruling, singlePrRun } from './helpers/before-merge'
@@ -188,7 +189,7 @@ test('a supervisor that honours before-merge checks lets hold through', async ()
   const out = await hold(run, ['no ghost'], 't1', reads({
     supervisor: async () => ({ state: 'live', info: {
       pid: 4242, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w0:p1',
-      capabilities: ['before-merge'],
+      capabilities: [BEFORE_MERGE_CAPABILITY],
     } }),
   }))
   expect(out.ok, out.text).toBe(true)

@@ -68,16 +68,12 @@ export const BEFORE_MERGE_CAPABILITY = 'before-merge'
  */
 export const SUPERVISOR_CAPABILITIES: readonly string[] = [SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY]
 
-/** A supervisor that predates the field has none. */
-export function supervisorCapabilities(info: SupervisorPid): string[] {
-  return info.capabilities ?? []
-}
-
 /** A supervisor that predates the field drove only the per-task schema. */
 export function drivenSchemas(info: SupervisorPid): number[] {
   return info.schemas ?? [3]
 }
 
+/** A supervisor that predates the field honours none. */
 export function honours(info: SupervisorPid, capability: string): boolean {
   return (info.capabilities ?? []).includes(capability)
 }

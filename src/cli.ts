@@ -53,7 +53,7 @@ import {
   taskRow, tierOf,
 } from './lib/phases'
 import {
-  drivenSchemas, honours, SHARED_PATHS_CAPABILITY, supervisorCapabilities, type SupervisorState, supervisorState,
+  BEFORE_MERGE_CAPABILITY, drivenSchemas, honours, SHARED_PATHS_CAPABILITY, type SupervisorState, supervisorState,
 } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
@@ -312,7 +312,7 @@ async function sharedPathsSource(repoRoot: string, plan: BatchPlan | null): Prom
 /** Only stricter: an old supervisor locks the shared paths too. */
 async function oldSupervisorLocksShared(ctx: Ctx, batch: StartBatch): Promise<string[]> {
   const supervisor = await batch.supervisor()
-  if (supervisor.state !== 'live' || supervisorCapabilities(supervisor.info).includes(SHARED_PATHS_CAPABILITY)) return []
+  if (supervisor.state !== 'live' || honours(supervisor.info, SHARED_PATHS_CAPABILITY)) return []
   return [`⚠ shared: the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates shared paths and ` +
     "locks them anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` action to share them"]
 }
@@ -2403,7 +2403,7 @@ async function holdRefusal(
     return `${task.task_id} is finished (phase: ${task.phase}) — there is no merge left to hold`
   }
   const supervisor = await reads.supervisor()
-  if (supervisor.state === 'live' && !honours(supervisor.info, 'before-merge')) {
+  if (supervisor.state === 'live' && !honours(supervisor.info, BEFORE_MERGE_CAPABILITY)) {
     return `the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates before-merge checks and ` +
       "would send the merge command anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` " +
       'action, then run this again'
