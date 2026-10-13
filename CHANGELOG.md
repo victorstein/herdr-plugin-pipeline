@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.1.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.0.0...v2.1.0) (2026-10-13)
+
+
+### Features
+
+* a pane running a subagent, shell or monitor counts as busy, not idle ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* a small, well-planned light or standard change skips its PR review; .claude/pipeline-always-review keeps paths reviewed ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* heavy tasks run one combined PR review, and plan review reads the plan instead of building it ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* hold and resume a worker stopped by Claude's usage limit; hpipe nudge ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* single-PR mode: a run's tasks land on one batch branch and ship as one PR (hpipe start --single-pr, hpipe submit, hpipe batch-check) ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* workers and review subagents run at an effort set by the task's tier ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+
+
+### Bug Fixes
+
+* a review BLOCKER is a shipping defect or an owner's call, with at most five MINORs, and a CLEAR's findings are fixed with the verdict ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* board actions resolve the focused pane's repo, and the board shows what a blocked card waits on ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* done notices clean up merged branches, stale refs and worktrees with submodules ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* merge commands pin the head CI passed on ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* status no longer advises release for an escalated holder, and blocked-on-files tasks stop nagging ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* the board's history view reads the Beads store, now a git repo ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* the branch review stays out of git ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* the CI gate waits for the head's runs to finish, and a new head invalidates the result ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* the orchestrator asks on a permission denial, lists its allow rules, and lands prerequisites before registering ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+* the supervisor saves a tick only when the run changed ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+
+
+### Documentation
+
+* what the adversarial reviews are worth, and the 2026-10-11 live-run notes ([53bbf6b](https://github.com/victorstein/herdr-plugin-pipeline/commit/53bbf6bd78d179704ec0c101f9a5a9af6fd49a7b))
+
 ## [2.0.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v1.7.1...v2.0.0) (2026-10-03)
 
 
