@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  claimPid, clearStalePid, drivenSchemas, processStartedAtMs, readPid, supervisorState, writePid,
+  claimPid, clearStalePid, drivenSchemas, processStartedAtMs, readPid, SUPERVISOR_CAPABILITIES, supervisorCapabilities,
+  supervisorState, writePid,
 } from '../src/lib/pidfile'
 
 let dir: string
@@ -71,4 +72,11 @@ test('a pid file written before schemas existed reads as a supervisor that drive
   const info = { pid: 1, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2' }
   expect(drivenSchemas(info)).toEqual([3])
   expect(drivenSchemas({ ...info, schemas: [3, 4] })).toEqual([3, 4])
+})
+
+test('a pid file written before capabilities existed reads as a supervisor with none', () => {
+  const info = { pid: 1, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2' }
+  expect(supervisorCapabilities(info)).toEqual([])
+  expect(supervisorCapabilities({ ...info, capabilities: ['shared-paths'] })).toEqual(['shared-paths'])
+  expect(SUPERVISOR_CAPABILITIES).toContain('shared-paths')
 })

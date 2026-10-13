@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
-import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
+import { processStartedAtMs, readPid, SUPERVISOR_CAPABILITIES, writePid } from '../src/lib/pidfile'
 import { CURRENT_SCHEMAS } from '../src/lib/ledger'
 import { claimSupervisor, eachIsolated, sharedRead, supervisorSelf } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
@@ -141,4 +141,12 @@ test('a claiming supervisor records every schema it drives, so start can refuse 
   expect(me.schemas).toEqual([...CURRENT_SCHEMAS])
   expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
   expect((await readPid(dir, 'personal'))?.schemas).toEqual([3, 4])
+})
+
+test('a claiming supervisor records what it can do, so start can warn beside an old one', async () => {
+  const me = supervisorSelf({ pid: 4243, panePid: 223, startedAtMs: 1, session: 'personal', socketPath: '/s', paneId: '' })
+  expect(me.capabilities).toEqual([...SUPERVISOR_CAPABILITIES])
+  expect(me.capabilities).toContain('shared-paths')
+  expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
+  expect((await readPid(dir, 'personal'))?.capabilities).toEqual([...SUPERVISOR_CAPABILITIES])
 })

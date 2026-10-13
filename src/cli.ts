@@ -18,8 +18,8 @@ import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import {
-  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, fetchFromOrigin,
-  freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
+  baseArgument, baseLine, branchNameRefusal, dependencyMerges, describeBase, type DispatchBase, fetchDefaultBranch,
+  fetchFromOrigin, freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
 } from './lib/dispatch-base'
 import { Gh } from './lib/gh'
 import { detectCycle, filesOverlap, gateStatus, lockingFiles } from './lib/gating'
@@ -38,11 +38,12 @@ import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
 } from './lib/phases'
-import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
+import { drivenSchemas, supervisorCapabilities, type SupervisorState, supervisorState } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
+import { readSharedPaths, type SharedPathsSource, startSharedLines } from './lib/shared-paths'
 import { currentUncommittedWork, formatStatus, formatTaskDetail, resumeCommand, uncommittedSummary } from './lib/status'
 import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
@@ -215,8 +216,9 @@ export interface StartBeads {
 const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
 
 /**
- * What `start --single-pr` asks outside git: whether the supervisor can drive a
- * batch, whether GitHub can squash, and whether a ruleset already guards the branch.
+ * What `start` asks outside git: whether the supervisor can drive a batch and
+ * honour shared paths, whether GitHub can squash, and whether a ruleset already
+ * guards the batch branch.
  */
 export interface StartBatch {
   supervisor: () => Promise<SupervisorState>
@@ -277,6 +279,27 @@ async function planBatch(
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
 
+/**
+ * The commit the run is cut from: the batch's base, or for a per-task run the
+ * default branch as a dispatch would fetch it. The working tree may be on any branch.
+ */
+async function sharedPathsSource(repoRoot: string, plan: BatchPlan | null): Promise<SharedPathsSource> {
+  if (plan !== null) {
+    const ref = `origin/${plan.into}`
+    return { at: plan.commit, commit: plan.commit, ref, described: `${ref} as just fetched` }
+  }
+  const base = await freshDispatchBase(repoRoot, [], null)
+  return { at: baseArgument(base), commit: base.commit, ref: base.ref, described: describeBase(base) }
+}
+
+/** Only stricter: an old supervisor locks the shared paths too. */
+async function oldSupervisorLocksShared(ctx: Ctx, batch: StartBatch): Promise<string[]> {
+  const supervisor = await batch.supervisor()
+  if (supervisor.state !== 'live' || supervisorCapabilities(supervisor.info).includes('shared-paths')) return []
+  return [`⚠ shared: the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates shared paths and ` +
+    "locks them anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` action to share them"]
+}
+
 function batchLines(plan: BatchPlan, repoRoot: string, protectedAlready: boolean): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
   return [
@@ -327,6 +350,13 @@ export async function cmdStart(ctx: Ctx, input: {
   if (!setup.ok) return fail(setup.error)
   const bvBroken = bvProblem(tools.bv)
 
+  const sharedFrom = await sharedPathsSource(input.repoRoot, plan)
+  run.shared_paths = await readSharedPaths(input.repoRoot, sharedFrom)
+  const sharedLines = [
+    ...startSharedLines(run.shared_paths, sharedFrom.described),
+    ...(run.shared_paths.prefixes.length === 0 ? [] : await oldSupervisorLocksShared(ctx, batch)),
+  ]
+
   // After the Beads setup, so a Beads failure leaves no branch behind.
   if (plan !== null && !plan.adopted) {
     const refused = await pushToOrigin(input.repoRoot, plan.commit, plan.branch)
@@ -355,6 +385,7 @@ export async function cmdStart(ctx: Ctx, input: {
     ...setupLines(setup, ctx.stateDir),
     ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
     ...(plan === null ? [] : batchLines(plan, input.repoRoot, protectedAlready)),
+    ...sharedLines,
   ]
   return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }

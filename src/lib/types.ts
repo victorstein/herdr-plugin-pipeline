@@ -446,4 +446,6 @@ export interface SupervisorPid {
   pane_id: string
   /** The run schemas this supervisor drives. Absent on a supervisor that predates it, which drives only 3. */
   schemas?: number[]
+  /** What it does that an older supervisor beside a newer CLI would not; see `SUPERVISOR_CAPABILITIES`. */
+  capabilities?: string[]
 }
