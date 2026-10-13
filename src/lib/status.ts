@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
-import { landCommand, landsCleanSync, sha8 } from './batch'
+import { landCommand, landsCleanSync, landsUnmergedSync, sha8 } from './batch'
 import { CHECK_REL, repoCheck } from './check'
 import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
@@ -707,9 +707,9 @@ function submittedLine(sub: Submission, batch: Batch, now: number): string {
   const checked = sub.check === 'passed' ? 'check passed' : 'no check declared'
   const at = `at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago`
   if (sub.kind !== 'sync') return `${sub.title} (${sub.kind}, ${at}; ${checked})`
-  const merge = sub.merge === 'clean'
-    ? `a clean merge of ${batch.branch}`
-    : `not a clean merge of ${batch.branch}, at ${sha8(sub.dirty_at ?? sub.head_sha)}`
+  const merge = sub.merge !== 'clean'
+    ? `not a clean merge of ${batch.branch}, at ${sha8(sub.dirty_at ?? sub.head_sha)}`
+    : sub.merges === 0 ? `nothing on ${batch.branch} to merge` : `a clean merge of ${batch.branch}`
   return `sync ${at} (${merge}; ${checked})`
 }
 
@@ -717,9 +717,9 @@ function landingDetail(task: Task, batch: Batch, now: number): string[] {
   const sub = task.submission
   const submitted = sub === undefined ? 'none' : submittedLine(sub, batch, now)
   const judged = task.review_skip === undefined ? 'reviewed' : `submitted; ${reviewsSkipped(task.review_skip)}`
-  const landSha = task.land_sha
-    ? `${sha8(task.land_sha)} (${landsCleanSync(task) ? `clean sync of ${batch.branch}` : judged})`
-    : 'none'
+  const landed = landsUnmergedSync(task) ? `${judged}; its sync merged nothing`
+    : landsCleanSync(task) ? `clean sync of ${batch.branch}` : judged
+  const landSha = task.land_sha ? `${sha8(task.land_sha)} (${landed})` : 'none'
   const landings = (task.landed ?? []).map((l) => {
     const skipped = l.review_skipped === undefined ? '' : ` (${l.review_skipped.join(' and ')} skipped)`
     return `${batch.branch} at ${sha8(l.land_sha)}, ${ageMinutes(l.at, now)}m ago${skipped}`

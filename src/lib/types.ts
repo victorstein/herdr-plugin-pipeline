@@ -183,6 +183,11 @@ export interface Submission {
   merge?: 'clean' | 'dirty'
   /** `sync` only, when dirty: the first commit the walk could not account for. */
   dirty_at?: string
+  /**
+   * `sync` only, when clean: the merges of the batch since `land_sha`. None means the
+   * branch already contained the batch, and the head is the one that was judged.
+   */
+  merges?: number
 }
 
 /**

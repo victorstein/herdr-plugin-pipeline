@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { checkoutSteps, landCommand, landsCleanSync, mergeBatchCommand, sha8 } from './batch'
+import { checkoutSteps, landCommand, landsCleanSync, landsUnmergedSync, mergeBatchCommand, sha8 } from './batch'
 import { trackingRefspec } from './dispatch-base'
 import { CHECK_REL, repoCheck } from './check'
 import { modeOf } from './phases'
@@ -200,6 +200,10 @@ function landHead(batch: Batch, task: Task): string {
   const sub = task.submission
   const checked = sub?.check === 'passed'
   const judged = task.review_skip === undefined ? 'reviewed' : 'submitted'
+  if (landsUnmergedSync(task)) {
+    return `the head that was ${judged}${checked ? ' and checked' : ''}; its sync found nothing on ` +
+      `\`${batch.branch}\` to merge`
+  }
   if (landsCleanSync(task)) {
     return `a clean sync of \`${batch.branch}\` on top of the ${judged} head${checked ? ', checked' : ''}`
   }

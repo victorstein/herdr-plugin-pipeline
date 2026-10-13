@@ -693,6 +693,20 @@ test('the batch landing names a clean sync as one, on top of the head that was r
     'single-pr'))).toContain('`aaaa1111` is the head that was reviewed and checked.')
 })
 
+test('the batch landing calls a sync that merged nothing the head that was reviewed, not a clean sync', async () => {
+  // The trial's t4: "`46b096bc` is a clean sync of `batch/…` on top of the reviewed head", of a head
+  // nothing had been merged into. Measured on a live run.
+  const synced = (check: 'passed' | 'none') => ({ tier: 'light' as const, verdict_seq: { 'pr-review': 1 },
+    land_sha: '46b096bc0000', submission: { kind: 'sync' as const, title: 't', head_sha: '46b096bc0000', at: 1, check,
+      merge: 'clean' as const, merges: 0 } })
+  const unchecked = prose(await renderPhase('merge', synced('none'), 'merge', 'single-pr'))
+  expect(unchecked).toContain('Review cleared, and `46b096bc` is the head that was reviewed; its sync found ' +
+    'nothing on `batch/x` to merge. It contains every landing')
+  expect(unchecked).not.toContain('clean sync')
+  expect(prose(await renderPhase('merge', synced('passed'), 'merge', 'single-pr')))
+    .toContain('`46b096bc` is the head that was reviewed and checked; its sync found nothing on `batch/x` to merge.')
+})
+
 // Smoke run 15: the check ran on the sync submission, the CLEAR recorded the head that
 // adds the review file, and the land prompt called that head "reviewed and checked".
 test('the batch landing says where the check ran when the reviewed head only adds review verdicts to it', async () => {

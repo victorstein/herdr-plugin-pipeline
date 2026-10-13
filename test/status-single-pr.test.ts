@@ -197,6 +197,18 @@ test('show tells a sync submission by its own kind and sha, without the change\'
     .toContain('submitted:  sync at 3ad9911f, 33m ago (a clean merge of batch/x; check passed)')
 })
 
+test('show tells a sync that merged nothing from a clean merge, in its submission and its land sha', () => {
+  const synced = mkTask({
+    phase: 'merge', land_sha: '46b096bc00',
+    submission: { kind: 'sync', title: 'feat(tags): chips', head_sha: '46b096bc00', at: NOW - 3 * 60_000,
+      check: 'none', merge: 'clean', merges: 0 },
+  })
+  const detail = formatTaskDetail(singlePr([synced]), synced, NOW)
+  expect(detail).toContain('submitted:  sync at 46b096bc, 3m ago (nothing on batch/x to merge; no check declared)')
+  expect(detail).toContain('land sha:   46b096bc (reviewed; its sync merged nothing)')
+  expect(detail).not.toContain('clean sync')
+})
+
 test('show marks a landing that went in with its PR review skipped, after the skip itself is cleared', () => {
   const task = mkTask({
     phase: 'done', land_sha: 'eeee5555aa',

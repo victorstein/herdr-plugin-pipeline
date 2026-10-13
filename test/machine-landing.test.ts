@@ -166,6 +166,15 @@ test('sync: a clean submission advances the reviewed head and goes to merge', ()
   })
   expect(advanceTask(run, task, signals())?.phase).toBe('merge')
   expect(task.land_sha).toBe('eeee5555')
+  expect(run.history.at(-1)?.why).toBe('clean sync of batch/x at eeee5555')
+})
+
+test('sync: a submission that merged nothing goes to merge saying so, not as a clean sync', () => {
+  const { run, task } = fixture('sync', {
+    land_sha: 'aaaa1111', submission: submitted({ kind: 'sync', merge: 'clean', merges: 0, head_sha: 'aaaa1111' }),
+  })
+  expect(advanceTask(run, task, signals())?.phase).toBe('merge')
+  expect(run.history.at(-1)?.why).toBe('nothing on batch/x to merge into aaaa1111')
 })
 
 test('sync: a dirty submission goes back to pr-review in every tier and keeps the reviewed head', () => {

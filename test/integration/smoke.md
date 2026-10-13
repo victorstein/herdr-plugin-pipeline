@@ -1243,7 +1243,12 @@ back if needed. **Assert:**
 Have a task's last reviewer fix a MAJOR inline (a code change, committed and pushed with its verdict).
 **Assert:** with the slot, the task goes to `sync`, not `merge` (`… was not checked since it was reviewed`
 in `hpipe show`'s visited list or the history), the worker's submit runs the check on that head, and
-only then does it land.
+only then does it land. When the batch has not moved, the worker's merge says `Already up to date`:
+`submit` must report `nothing on batch/<…> to merge: it lands next`, the history `nothing on batch/<…>
+to merge into <sha8>`, `hpipe show` `land sha: <sha8> (reviewed; its sync merged nothing)`, and the
+land prompt `<sha8> is the head that was reviewed and checked; its sync found nothing on batch/<…> to
+merge` (without `and checked` when the repo declares no check). `clean sync` anywhere in that
+task's text is a **finding**: nothing was merged.
 
 ### 9f. A push in `merge` lands reviewed
 

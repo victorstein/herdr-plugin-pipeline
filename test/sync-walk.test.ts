@@ -62,7 +62,7 @@ function mergeExpectingConflict(repo: string, ...args: string[]): void {
 test('one honest merge of the batch is clean', async () => {
   const { repo, landSha } = forked()
   merge(repo, 'batch')
-  expect(await walk(repo, landSha)).toEqual({ clean: true })
+  expect(await walk(repo, landSha)).toEqual({ clean: true, merges: 1 })
 })
 
 test('two honest merges are clean', async () => {
@@ -70,12 +70,12 @@ test('two honest merges are clean', async () => {
   merge(repo, 'batch')
   onBatch(repo, 'later.txt', 'later\n')
   merge(repo, 'batch')
-  expect(await walk(repo, landSha)).toEqual({ clean: true })
+  expect(await walk(repo, landSha)).toEqual({ clean: true, merges: 2 })
 })
 
 test('nothing to merge is trivially clean: HEAD is the reviewed head', async () => {
   const { repo, landSha } = forked()
-  expect(await walk(repo, landSha)).toEqual({ clean: true })
+  expect(await walk(repo, landSha)).toEqual({ clean: true, merges: 0 })
 })
 
 test('both sides making the identical change merge clean', async () => {
@@ -86,13 +86,13 @@ test('both sides making the identical change merge clean', async () => {
   commit(repo, 'feat: same change')
   const reviewed = revParse(repo, 'HEAD')
   merge(repo, 'batch')
-  expect(await walk(repo, reviewed)).toEqual({ clean: true })
+  expect(await walk(repo, reviewed)).toEqual({ clean: true, merges: 1 })
 })
 
 test('-X theirs with no conflict to apply it to is clean', async () => {
   const { repo, landSha } = forked()
   merge(repo, '-X', 'theirs', 'batch')
-  expect(await walk(repo, landSha)).toEqual({ clean: true })
+  expect(await walk(repo, landSha)).toEqual({ clean: true, merges: 1 })
 })
 
 test('an extra commit after the merge is dirty, and named', async () => {
@@ -224,7 +224,7 @@ test('a criss-cross whose inner resolutions agree is clean, and git merges it un
   const { repo, reviewed } = crissCross(true)
   expect(revParse(repo, 'HEAD')).not.toBe(reviewed)
   expect(revParse(repo, 'HEAD^2')).toBe(revParse(repo, 'batch'))
-  expect(await walk(repo, reviewed)).toEqual({ clean: true })
+  expect(await walk(repo, reviewed)).toEqual({ clean: true, merges: 1 })
 })
 
 test('a criss-cross whose inner resolutions disagree is dirty', async () => {
@@ -245,7 +245,7 @@ test('a merge driver the repo declares is honoured, as git merge honours it', as
   const reviewed = revParse(repo, 'HEAD')
   onBatch(repo, 'log.txt', 'a\nbatch\n')
   merge(repo, 'batch')
-  expect(await walk(repo, reviewed)).toEqual({ clean: true })
+  expect(await walk(repo, reviewed)).toEqual({ clean: true, merges: 1 })
 })
 
 test('with no reviewed head recorded, nothing is clean', async () => {

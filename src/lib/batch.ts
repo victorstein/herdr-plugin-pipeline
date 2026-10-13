@@ -28,6 +28,11 @@ export function landsCleanSync(task: Task): boolean {
   return sub?.kind === 'sync' && sub.merge === 'clean' && sub.head_sha === task.land_sha
 }
 
+/** A clean sync whose branch already contained the batch: what lands is the head that was judged. */
+export function landsUnmergedSync(task: Task): boolean {
+  return landsCleanSync(task) && task.submission?.merges === 0
+}
+
 /** A non-force push: git refuses it unless `landSha` already contains the batch head, which is the landing gate. */
 export function landCommand(run: Run, landSha: string): string {
   const refspec = `${landSha}:refs/heads/${(run.batch as Batch).branch}`

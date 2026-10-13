@@ -1286,6 +1286,7 @@ function submittedLine(task: Task, sub: Submission, batch: Batch): string {
   const checked = sub.check === 'passed' ? 'check passed' : `no ${CHECK_REL} declared`
   const head = `submitted ${task.task_id} at ${sha8(sub.head_sha)} as "${sub.title}" (${sub.kind}; ${checked})`
   if (sub.kind !== 'sync') return head
+  if (sub.merge === 'clean' && sub.merges === 0) return `${head} — nothing on ${batch.branch} to merge: it lands next`
   return sub.merge === 'clean'
     ? `${head} — a clean merge of ${batch.branch}: it lands next`
     : `${head} — not a clean merge of ${batch.branch} (at ${sha8(sub.dirty_at ?? sub.head_sha)}): it goes back ` +
@@ -1425,7 +1426,9 @@ async function prepareSubmission(
 
   const submission: Submission = {
     kind, title, head_sha: head, at: Date.now(), check: outcome,
-    ...(merge === null ? {} : merge.clean ? { merge: 'clean' } : { merge: 'dirty', dirty_at: merge.at }),
+    ...(merge === null ? {} : merge.clean
+      ? { merge: 'clean', merges: merge.merges }
+      : { merge: 'dirty', dirty_at: merge.at }),
   }
   return {
     ok: true,

@@ -423,7 +423,9 @@ function advanceLanding(run: Run, task: Task, s: TaskSignals): Task | null {
       if (!s.actorIdle) return null
       if (sync.merge === 'clean') {
         task.land_sha = sync.head_sha
-        return enterTaskPhase(run, task, 'merge', `clean sync of ${batch} at ${sha8(sync.head_sha)}`)
+        return enterTaskPhase(run, task, 'merge', sync.merges === 0
+          ? `nothing on ${batch} to merge into ${sha8(sync.head_sha)}`
+          : `clean sync of ${batch} at ${sha8(sync.head_sha)}`)
       }
       // A skipped review left no reviewed head, so the review this sends it to is
       // its first and must read the whole change, not a range since a review.

@@ -4,8 +4,9 @@ import { ARTIFACT_ROOT } from './verdict-path'
  * Whether every commit since the reviewed head is an automatic merge of the batch.
  * A clean sync holds no line the batch's own reviews did not judge, so it is only
  * re-tested; anything else is code no reviewer has seen, and goes back to review.
+ * `merges` counts the merges walked: none when the head is the reviewed head itself.
  */
-export type SyncWalk = { clean: true } | { clean: false; at: string; why: string }
+export type SyncWalk = { clean: true; merges: number } | { clean: false; at: string; why: string }
 
 interface GitOut { code: number; out: string }
 
@@ -42,7 +43,8 @@ export async function syncWalk(checkout: string, reviewed: string | null, batchR
   const head = (await git(checkout, ['rev-parse', 'HEAD'])).out
   if (reviewed === null) return { clean: false, at: head, why: 'no reviewed head is recorded to walk back to' }
   const stop = (await git(checkout, ['rev-parse', '--verify', '--quiet', `${reviewed}^{commit}`])).out
-  for (let commit = head; commit !== stop;) {
+  let merges = 0
+  for (let commit = head; commit !== stop; merges += 1) {
     if (await isAncestor(checkout, commit, batchRef) !== false) {
       return { clean: false, at: commit, why: 'the walk reached the batch branch without meeting the reviewed head' }
     }
@@ -60,7 +62,7 @@ export async function syncWalk(checkout: string, reviewed: string | null, batchR
     }
     commit = first
   }
-  return { clean: true }
+  return { clean: true, merges }
 }
 
 /** The pipeline's own documents: a change made of these alone is nothing to land. */

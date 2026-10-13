@@ -369,8 +369,25 @@ test('sync: a clean merge is recorded clean, keeping the implement title', async
   expect(out.ok).toBe(true)
   expect(out.text).toContain('a clean merge of batch/x')
   expect((await saved(f)).submission).toMatchObject({
-    kind: 'sync', merge: 'clean', title: 'feat(menu): close on escape', head_sha: revParse(f.worktree, 'HEAD'),
+    kind: 'sync', merge: 'clean', merges: 1, title: 'feat(menu): close on escape', head_sha: revParse(f.worktree, 'HEAD'),
   })
+})
+
+// The trial's t4 was sent to sync only to be checked: its merge said "Already up to date", and the land
+// prompt called the reviewed head itself a clean sync. Measured on a live run.
+test('sync: a head that already contains the batch is recorded as merging nothing', async () => {
+  const f = await fixture()
+  const reviewed = work(f)
+  const run = (await loadRun(dir, 'personal', f.run.run_id))!
+  Object.assign(run.tasks[0]!, {
+    phase: 'sync', land_sha: reviewed,
+    submission: { kind: 'implement', title: 'feat(menu): close on escape', head_sha: reviewed, at: 500, check: 'none' },
+  })
+  await saveRun(dir, run)
+  const out = await submit(f, null)
+  expect(out.text).toContain(`submitted t1 at ${reviewed.slice(0, 8)}`)
+  expect(out.text).toContain('— nothing on batch/x to merge: it lands next')
+  expect((await saved(f)).submission).toMatchObject({ kind: 'sync', merge: 'clean', merges: 0, head_sha: reviewed })
 })
 
 test('sync: anything beyond a clean merge is recorded dirty, with the commit that made it so', async () => {
