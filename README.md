@@ -323,7 +323,10 @@ goes straight to `ci` (`land-queue` in a single-PR run) when all of these hold:
 - it touches no path on the repo's always-review list.
 
 Heavy never skips, and a git read that fails means the review runs. The history records why, as
-`pr-review skipped: 42 lines added outside docs/, spec-review and plan-review cleared first pass`;
+`pr-review skipped: 42 lines added outside docs/, spec-review and plan-review cleared first pass`,
+and a light or standard task that keeps its review says why too, as `reviewed: 167 lines added
+outside docs/ (a skip needs fewer than 150)`, `reviewed: <path> is on .claude/pipeline-always-review`
+or `reviewed: plan-review sent it back`;
 `hpipe status` marks the task `pr-review skipped`, `hpipe show` prints a `skipped:` line, the digest
 shows `[implement → ci, pr-review skipped]`, and the merge prompt says the review was skipped. In a
 single-PR run the head that lands is recorded exactly as a clearing review records it, so a push

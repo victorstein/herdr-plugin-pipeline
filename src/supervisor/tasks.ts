@@ -24,7 +24,7 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { changePromptVars, landingPromptVars, mergePromptVars, syncPromptVars } from '../lib/change-prompt'
 import {
-  ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, reviewSkip, type SkipCandidate, skipCandidate,
+  ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, type ReviewCall, reviewCall, type SkipCandidate, skipCandidacy,
 } from '../lib/review-skip'
 import { tierPromptVars } from '../lib/tier-prompt'
 import { changedPaths, fileAt, type FileAtRef, isAncestor, landsNothing, numstat, resolveCommit } from '../lib/sync-walk'
@@ -502,7 +502,7 @@ async function gatherSignals(
       const view = await deps.prView(pr)
       const signals = { ...base, prNumber: pr, headSha: view?.headSha ?? null }
       if (!implementReady(run, task, signals)) return signals
-      return { ...signals, reviewSkip: await perTaskSkip(run, task, view?.baseRef ?? null, signals.headSha, deps) }
+      return { ...signals, ...await perTaskSkip(run, task, view?.baseRef ?? null, signals.headSha, deps) }
     }
     case 'research':
     case 'spec':
@@ -673,14 +673,23 @@ async function withReviewedHead<S extends { headSha: string | null }>(
  * rather than on the branch, so a change cannot take itself off the list. Any read
  * that fails means the review runs.
  */
-async function sizedSkip(
+async function sizedCall(
   run: Run, candidate: SkipCandidate, baseRef: string, head: string, deps: TaskDeps,
-): Promise<ReviewSkip | null> {
+): Promise<ReviewCall> {
   const changes = deps.changeGit ?? LOCAL_CHANGE_GIT
   const counted = await changes.numstat(run.repo_root, baseRef, head)
   const listed = await changes.fileAt(run.repo_root, baseRef, ALWAYS_REVIEW_REL)
   const alwaysReview = !listed.ok ? null : listed.text === null ? [] : alwaysReviewPrefixes(listed.text)
-  return reviewSkip(candidate, counted === null ? null : changeSize(counted), alwaysReview, Date.now())
+  return reviewCall(candidate, counted === null ? null : changeSize(counted), alwaysReview, Date.now())
+}
+
+/** What the machine's `implement` exit reads: the skip, or why the review runs. */
+interface SkipSignals { reviewSkip?: ReviewSkip; reviewedBecause?: string }
+
+const UNMEASURED: SkipSignals = { reviewedBecause: 'its change could not be measured' }
+
+function reviewedBecause(why: string | null): SkipSignals {
+  return why === null ? {} : { reviewedBecause: why }
 }
 
 async function fetchedAll(run: Run, branches: string[], git: LandingGit): Promise<boolean> {
@@ -693,11 +702,13 @@ async function fetchedAll(run: Run, branches: string[], git: LandingGit): Promis
 /** The ledger's rules first, so a heavy or sent-back task costs no fetch. */
 async function perTaskSkip(
   run: Run, task: Task, baseRef: string | null, head: string | null, deps: TaskDeps,
-): Promise<ReviewSkip | null> {
-  const candidate = skipCandidate(run, task)
-  if (candidate === null || baseRef === null || head === null) return null
-  if (!(await fetchedAll(run, [baseRef, task.branch], deps.landingGit ?? LOCAL_LANDING_GIT))) return null
-  return sizedSkip(run, candidate, `refs/remotes/origin/${baseRef}`, head, deps)
+): Promise<SkipSignals> {
+  const found = skipCandidacy(run, task)
+  if (!('candidate' in found)) return reviewedBecause(found.reviewedBecause)
+  if (baseRef === null || head === null) return UNMEASURED
+  if (!(await fetchedAll(run, [baseRef, task.branch], deps.landingGit ?? LOCAL_LANDING_GIT))) return UNMEASURED
+  const call = await sizedCall(run, found.candidate, `refs/remotes/origin/${baseRef}`, head, deps)
+  return 'skip' in call ? { reviewSkip: call.skip } : reviewedBecause(call.reviewedBecause)
 }
 
 /**
@@ -706,17 +717,19 @@ async function perTaskSkip(
  */
 async function withSinglePrSkip<S extends { headSha: string | null }>(
   signals: S, run: Run, task: Task, deps: TaskDeps,
-): Promise<S | (S & { reviewSkip: ReviewSkip; headContainsSubmission: true })> {
-  const candidate = skipCandidate(run, task)
+): Promise<(S & SkipSignals) | (S & { reviewSkip: ReviewSkip; headContainsSubmission: true })> {
+  const found = skipCandidacy(run, task)
+  if (!('candidate' in found)) return { ...signals, ...reviewedBecause(found.reviewedBecause) }
   const submitted = task.submission?.head_sha
-  if (candidate === null || submitted === undefined || run.batch === undefined) return signals
+  if (submitted === undefined || run.batch === undefined) return signals
   const git = deps.landingGit ?? LOCAL_LANDING_GIT
   const remote = await git.remoteBranchHead(run.repo_root, task.branch)
-  if (!remote.ok || remote.sha === null) return signals
-  if (!(await fetchedAll(run, [run.batch.branch, task.branch], git))) return signals
-  if (await git.isAncestor(run.repo_root, submitted, remote.sha) !== true) return signals
-  const skip = await sizedSkip(run, candidate, batchRefOf(run.batch), remote.sha, deps)
-  return skip === null ? signals : { ...signals, reviewSkip: skip, headSha: remote.sha, headContainsSubmission: true }
+  if (!remote.ok || remote.sha === null) return { ...signals, ...UNMEASURED }
+  if (!(await fetchedAll(run, [run.batch.branch, task.branch], git))) return { ...signals, ...UNMEASURED }
+  if (await git.isAncestor(run.repo_root, submitted, remote.sha) !== true) return { ...signals, ...UNMEASURED }
+  const call = await sizedCall(run, found.candidate, batchRefOf(run.batch), remote.sha, deps)
+  if (!('skip' in call)) return { ...signals, reviewedBecause: call.reviewedBecause }
+  return { ...signals, reviewSkip: call.skip, headSha: remote.sha, headContainsSubmission: true }
 }
 
 /**

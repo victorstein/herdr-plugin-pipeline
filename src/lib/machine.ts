@@ -284,6 +284,8 @@ export interface TaskSignals {
   yieldAfterMs?: number
   /** Set only on an `implement` exit the supervisor measured small enough to skip its PR review. */
   reviewSkip?: ReviewSkip | null
+  /** Why a light or standard task's `implement` exit keeps its PR review, for the history. */
+  reviewedBecause?: string
 }
 
 /** The sync this phase entry asked for, once the worker has submitted it; an older one answers an earlier entry. */
@@ -501,7 +503,8 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
         ? `PR #${s.prNumber} at ${s.headSha}`
         : `submitted ${sha8(submitted.head_sha)} as "${submitted.title}"`
       if (s.reviewSkip) return skipPrReview(run, task, s, s.reviewSkip, why)
-      return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')), why)
+      const reviewed = s.reviewedBecause === undefined ? why : `${why}; reviewed: ${s.reviewedBecause}`
+      return enterTaskPhase(run, task, nextPhase(routeOf(run, task), taskRow('implement')), reviewed)
     }
 
     case 'spec-review':

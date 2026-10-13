@@ -67,19 +67,39 @@ const REVIEW_ROWS = TASK_ROWS.filter((row) => row.signal === 'verdict')
  * only the route's: a plan review's send-back still counts once a human lowers
  * the tier past it, and a PR review that sent the task back must see the fix.
  */
-const sentBackByAReview = (entry: HistoryEntry): boolean =>
+const sentByAReview = (entry: HistoryEntry): boolean =>
   REVIEW_ROWS.some((row) => row.phase === entry.from && (entry.to === row.onBlocker || entry.to === 'escalated'))
+
+/** A candidate, or why a light or standard task is none; heavy, or a route with no PR review, gives no reason. */
+export type Candidacy = { candidate: SkipCandidate } | { reviewedBecause: string | null }
+
+/** From the ledger alone: the fetch that sizes the change waits on a candidate. */
+export function skipCandidacy(run: Run, task: Task): Candidacy {
+  const route = routeOf(run, task)
+  if (route.tier === 'heavy') return { reviewedBecause: null }
+  const { reviews, next } = prReviewsOn(route)
+  if (reviews.length === 0) return { reviewedBecause: null }
+  const history = run.history.filter((entry) => entry.task_id === task.task_id)
+  const sentBack = history.find(sentByAReview)
+  if (sentBack !== undefined) {
+    return { reviewedBecause: `${sentBack.from} ${sentBack.to === 'escalated' ? 'escalated it' : 'sent it back'}` }
+  }
+  const design = designReviewsOn(route)
+  const unpassed = design.find((review) => !passed(history, review))
+  if (unpassed !== undefined) return { reviewedBecause: `${unpassed} never cleared` }
+  return { candidate: { skipped: reviews, next, cleared: design } }
+}
 
 /** Whether a task leaving `implement` may skip its PR review, from the ledger alone: the fetch waits on a yes. */
 export function skipCandidate(run: Run, task: Task): SkipCandidate | null {
-  const route = routeOf(run, task)
-  if (route.tier === 'heavy') return null
-  const { reviews, next } = prReviewsOn(route)
-  if (reviews.length === 0) return null
-  const history = run.history.filter((entry) => entry.task_id === task.task_id)
-  const design = designReviewsOn(route)
-  if (!design.every((review) => passed(history, review)) || history.some(sentBackByAReview)) return null
-  return { skipped: reviews, next, cleared: design }
+  const found = skipCandidacy(run, task)
+  return 'candidate' in found ? found.candidate : null
+}
+
+/** Why a light or standard task leaving `implement` is no skip candidate; null for a candidate, or heavy. */
+export function notSkippedBecause(run: Run, task: Task): string | null {
+  const found = skipCandidacy(run, task)
+  return 'candidate' in found ? null : found.reviewedBecause
 }
 
 // `git diff --numstat -z --no-renames`: one `added\tdeleted\tpath` record per NUL,
@@ -118,19 +138,37 @@ export function alwaysReviewPrefixes(text: string): string[] {
   return prefixes
 }
 
+export type ReviewCall = { skip: ReviewSkip } | { reviewedBecause: string }
+
 /**
- * Null on any doubt: an unmeasured change, or an unread always-review list, is
- * reviewed. The list is always on itself: in a single-PR run it is read from the
- * batch branch, so one skipped edit to it would decide for every later sibling.
+ * Reviewed on any doubt: an unmeasured change, or an unread always-review list.
+ * The list is always on itself: in a single-PR run it is read from the batch
+ * branch, so one skipped edit to it would decide for every later sibling. The
+ * reason goes in the history, which said only what was submitted when a 167-line
+ * change was reviewed. Measured on a live run.
  */
+export function reviewCall(
+  candidate: SkipCandidate, size: ChangeSize | null, alwaysReview: string[] | null, at: number,
+): ReviewCall {
+  if (size === null) return { reviewedBecause: 'its change could not be measured' }
+  if (alwaysReview === null) return { reviewedBecause: `${ALWAYS_REVIEW_REL} could not be read at its base` }
+  if (size.added >= PR_REVIEW_SKIP_BELOW_ADDED_LINES) {
+    return {
+      reviewedBecause: `${size.added} lines added outside ${DOCS_PREFIX} ` +
+        `(a skip needs fewer than ${PR_REVIEW_SKIP_BELOW_ADDED_LINES})`,
+    }
+  }
+  if (size.paths.includes(ALWAYS_REVIEW_REL)) return { reviewedBecause: `it edits ${ALWAYS_REVIEW_REL}` }
+  const listed = size.paths.find((path) => alwaysReview.some((prefix) => path.startsWith(prefix)))
+  if (listed !== undefined) return { reviewedBecause: `${listed} is on ${ALWAYS_REVIEW_REL}` }
+  return { skip: { at, skipped: candidate.skipped, added_lines: size.added, cleared: candidate.cleared } }
+}
+
 export function reviewSkip(
   candidate: SkipCandidate, size: ChangeSize | null, alwaysReview: string[] | null, at: number,
 ): ReviewSkip | null {
-  if (size === null || alwaysReview === null) return null
-  if (size.added >= PR_REVIEW_SKIP_BELOW_ADDED_LINES) return null
-  const listed = [ALWAYS_REVIEW_REL, ...alwaysReview]
-  if (size.paths.some((path) => listed.some((prefix) => path.startsWith(prefix)))) return null
-  return { at, skipped: candidate.skipped, added_lines: size.added, cleared: candidate.cleared }
+  const call = reviewCall(candidate, size, alwaysReview, at)
+  return 'skip' in call ? call.skip : null
 }
 
 export function skipReason(skip: ReviewSkip): string {

@@ -103,9 +103,38 @@ test('a change touching the always-review list on its base is reviewed however s
   const head = pushedChange(clone, 'main', 't1-branch')
 
   const task = mkTask({ head_sha_at_entry: 'old' })
-  await advanceTasks(runIn(clone, task, false), deps(head))
+  const run = runIn(clone, task, false)
+  await advanceTasks(run, deps(head))
   expect(task.phase).toBe('pr-review')
   expect(task.review_skip).toBeUndefined()
+  expect(run.history.at(-1)?.why).toBe(`PR #42 at ${head}; reviewed: src/menu.ts is on ${ALWAYS_REVIEW_REL}`)
+})
+
+test('a single-PR change too big to skip says so where it enters its review', async () => {
+  const { remote, clone } = cloneOfRemote('main')
+  git(['push', '-q', remote, 'HEAD:refs/heads/batch/x'], clone)
+  git(['fetch', '-q', 'origin', '+refs/heads/batch/x:refs/remotes/origin/batch/x'], clone)
+  git(['checkout', '-q', '-b', 't1-branch', 'origin/batch/x'], clone)
+  commitAs(clone, 'src/menu.ts', lines(167))
+  git(['push', '-q', 'origin', 't1-branch'], clone)
+  const head = revParse(clone, 'HEAD')
+  const task = mkTask({
+    pr: null, submission: { kind: 'implement', title: 'feat(menu): chips', head_sha: head, at: 20, check: 'passed' },
+  })
+  const run = runIn(clone, task, true)
+  await advanceTasks(run, deps())
+  expect(task.phase).toBe('pr-review')
+  expect(run.history.at(-1)?.why).toBe(`submitted ${head.slice(0, 8)} as "feat(menu): chips"; ` +
+    'reviewed: 167 lines added outside docs/ (a skip needs fewer than 150)')
+})
+
+test('a task a design review sent back says so, without any git read', async () => {
+  const task = mkTask({ head_sha_at_entry: 'old' })
+  const run = runIn('/nonexistent-repo', task, false)
+  run.history.push({ at: 2, task_id: 't1', from: 'spec-review', to: 'spec', why: 'returned (pass 1)' })
+  await advanceTasks(run, deps('h2'))
+  expect(task.phase).toBe('pr-review')
+  expect(run.history.at(-1)?.why).toBe('PR #42 at h2; reviewed: spec-review sent it back')
 })
 
 test('a single-PR light change goes past its PR review into land-queue, landing the head it measured', async () => {

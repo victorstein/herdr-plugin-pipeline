@@ -1363,6 +1363,12 @@ In the same run, register three more small standard tasks:
 - t5 with a change of 200 added lines outside `docs/`. It enters `pr-review`.
 - If any task in the run had a `spec-review` or `plan-review` send-back, it entered `pr-review` however
   small its change was. Record whether one did.
+- Each of them says why in the ledger: the `implement →` entry's `why` (the `jq` above) ends `; reviewed:
+  <file> is on .claude/pipeline-always-review` for t3, `; reviewed: it edits
+  .claude/pipeline-always-review` for t4, `; reviewed: 200 lines added outside docs/ (a skip needs
+  fewer than 150)` for t5, and `; reviewed: <review> sent it back` for a send-back. A light or
+  standard task that entered `pr-review` with no `reviewed:` reason is a **finding**; a heavy one has
+  none.
 
 ### 10c. A single-PR skip
 

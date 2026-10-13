@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { newRun, withBatch } from '../src/lib/ledger'
 import {
-  alwaysReviewPrefixes, changeSize, describeReviewSkip, PR_REVIEW_SKIP_BELOW_ADDED_LINES, prReviewsOn, reviewSkip,
-  skipCandidate, skipReason,
+  alwaysReviewPrefixes, changeSize, describeReviewSkip, notSkippedBecause, PR_REVIEW_SKIP_BELOW_ADDED_LINES,
+  prReviewsOn, reviewCall, reviewSkip, skipCandidate, skipReason,
 } from '../src/lib/review-skip'
 import type { HistoryEntry, Run, Task, TaskPhase, Tier } from '../src/lib/types'
 import { batchFixture } from './helpers/batch'
@@ -81,6 +81,21 @@ test('a design review the route runs but the task never passed makes no candidat
   expect(skipCandidate(run, task)).toBeNull()
 })
 
+test('a light or standard task that is no candidate says why its PR review runs; heavy says nothing', () => {
+  const cases: Array<[Tier, HistoryEntry[], string | null]> = [
+    ['standard', [step('plan-review', 'plan'), ...CLEARED_DESIGN], 'plan-review sent it back'],
+    ['standard', [step('spec-review', 'escalated'), ...CLEARED_DESIGN], 'spec-review escalated it'],
+    ['standard', CLEARED_DESIGN.filter((h) => h.from !== 'plan-review' && h.to !== 'plan-review'),
+      'plan-review never cleared'],
+    ['heavy', CLEARED_DESIGN, null],
+    ['standard', CLEARED_DESIGN, null],
+  ]
+  for (const [tier, history, why] of cases) {
+    const { run, task } = runOf(tier, history)
+    expect(notSkippedBecause(run, task), why ?? tier).toBe(why)
+  }
+})
+
 test('a decision asked during a design review is not a send-back', () => {
   const { run, task } = runOf('standard', [
     step('spec-review', 'blocked-on-decision'), step('blocked-on-decision', 'spec-review'), ...CLEARED_DESIGN,
@@ -147,6 +162,22 @@ test('a change at the threshold, an unmeasured one, or one touching the list doe
   expect(reviewSkip(CANDIDATE, null, [], 5)).toBeNull()
   expect(reviewSkip(CANDIDATE, { added: 1, paths: ['src/a.ts'] }, null, 5)).toBeNull()
   expect(reviewSkip(CANDIDATE, { added: 1, paths: ['docs/x.md', 'src/auth/token.ts'] }, ['src/auth/'], 5)).toBeNull()
+})
+
+test('a change that does not skip says why: its size, the list, or what could not be read', () => {
+  // The trial's t2 added 167 lines outside docs/ and its history said only what it submitted. Measured on a live run.
+  expect(reviewCall(CANDIDATE, { added: 167, paths: ['src/a.ts'] }, [], 5))
+    .toEqual({ reviewedBecause: '167 lines added outside docs/ (a skip needs fewer than 150)' })
+  expect(reviewCall(CANDIDATE, { added: 1, paths: ['docs/x.md', 'src/auth/token.ts'] }, ['src/auth/'], 5))
+    .toEqual({ reviewedBecause: `src/auth/token.ts is on ${'.claude/pipeline-always-review'}` })
+  expect(reviewCall(CANDIDATE, { added: 1, paths: ['.claude/pipeline-always-review'] }, [], 5))
+    .toEqual({ reviewedBecause: 'it edits .claude/pipeline-always-review' })
+  expect(reviewCall(CANDIDATE, null, [], 5)).toEqual({ reviewedBecause: 'its change could not be measured' })
+  expect(reviewCall(CANDIDATE, { added: 1, paths: ['src/a.ts'] }, null, 5))
+    .toEqual({ reviewedBecause: '.claude/pipeline-always-review could not be read at its base' })
+  expect(reviewCall(CANDIDATE, { added: 149, paths: ['src/a.ts'] }, [], 5)).toEqual({
+    skip: { at: 5, skipped: ['pr-review'], added_lines: 149, cleared: ['spec-review'] },
+  })
 })
 
 test('the skip reads as the rows skipped and the numbers behind it', () => {
