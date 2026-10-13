@@ -217,6 +217,36 @@ export interface Landing {
   review_skipped?: TaskPhase[]
 }
 
+/** The human's ruling on a before-merge check. */
+export interface Resolution {
+  as: 'confirmed' | 'waived' | 'failed'
+  at: number
+  /** The head the ruling covers. Null for a waiver, which covers any head. */
+  head: string | null
+  /** Waived: why. Failed: what the human saw. */
+  note?: string
+  /** HERDR_PANE_ID of the command: the audit trail. */
+  pane: string
+}
+
+/**
+ * A check only the human can make, such as a device test. The merge it guards gets
+ * no merge command until the human has confirmed or waived it. Nothing deletes one,
+ * not a rewind and not an abort: one whose work never ships is computed as not needed.
+ */
+export interface BeforeMergeCheck {
+  /** c1, c2, …: one sequence across the run's task and run checks. */
+  id: string
+  /** What the human checks, in the orchestrator's words. */
+  check: string
+  recorded_at: number
+  /** The decision whose answer carried it. */
+  decision?: string
+  recorded_pane: string
+  /** Append-only: the last one is the ruling in force. */
+  resolutions: Resolution[]
+}
+
 export interface Task {
   task_id: string
   branch: string
@@ -322,6 +352,8 @@ export interface Task {
   landed?: Landing[]
   /** Absent unless the last `implement` exit skipped the PR review; older ledgers never carry it. */
   review_skip?: ReviewSkip
+  /** Per-task, they hold this task's merge; single-PR, the batch PR's. Absent is none, as on older ledgers. */
+  before_merge?: BeforeMergeCheck[]
   notes: string
 }
 
@@ -384,6 +416,8 @@ export interface Run {
   outbox?: OutboxEntry[]
   /** Present exactly when the run ships as one PR; see `modeOf`. */
   batch?: Batch
+  /** Single-PR only: checks of what ships, holding the batch PR. */
+  before_merge?: BeforeMergeCheck[]
 }
 
 export interface HistoryEntry {
@@ -427,4 +461,6 @@ export interface SupervisorPid {
   pane_id: string
   /** The run schemas this supervisor drives. Absent on a supervisor that predates it, which drives only 3. */
   schemas?: number[]
+  /** What this supervisor honours beyond its schemas. Absent on a supervisor that predates it, which honours none. */
+  capabilities?: string[]
 }
