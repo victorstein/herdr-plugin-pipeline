@@ -384,6 +384,25 @@ export interface Run {
   outbox?: OutboxEntry[]
   /** Present exactly when the run ships as one PR; see `modeOf`. */
   batch?: Batch
+  /** Absent on runs started before shared paths existed, which lock every declared path. */
+  shared_paths?: SharedPaths
+}
+
+/**
+ * `.claude/pipeline-shared-paths` as `hpipe start` read it, never refreshed: a list
+ * that shrank mid-run could leave two tasks past the file gate on a path that
+ * locks again, and one read per registration would make the overlap test asymmetric.
+ */
+export interface SharedPaths {
+  prefixes: string[]
+  /** Lines left out: a glob, or one that would share the whole repo. */
+  ignored: string[]
+  /** What was read; null only when no commit resolved, and `error` then says so. */
+  commit: string | null
+  ref: string
+  read_at: number
+  /** Set when git could not read the file; nothing is shared then. */
+  error?: string
 }
 
 export interface HistoryEntry {
