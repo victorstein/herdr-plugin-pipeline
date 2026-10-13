@@ -123,8 +123,8 @@ export function stallCandidates(
  * Measured on a live run (#22). A task with no holder left is stranded, and a
  * failed holder frees nothing until a human releases it; both are still probed.
  */
-function waitsOnLiveHolders(task: Task, all: Task[]): boolean {
-  const holders = fileHolders(task, all)
+function waitsOnLiveHolders(run: Run, task: Task): boolean {
+  const holders = fileHolders(run, task)
   return holders.length > 0 && holders.every((holder) => taskRow(holder.phase).terminal !== true)
 }
 
@@ -145,7 +145,7 @@ export function taskStallCandidates(
     for (const task of run.tasks) {
       const row = taskRow(task.phase)
       if (!row.stallable) continue
-      if (task.phase === 'blocked-on-files' && waitsOnLiveHolders(task, run.tasks)) continue
+      if (task.phase === 'blocked-on-files' && waitsOnLiveHolders(run, task)) continue
       // #22 again otherwise: the holder has its own ladder, and a probe about each
       // task behind it says nothing new.
       if (task.phase === 'land-queue' && landingSlotHolder(run.tasks) !== null) continue

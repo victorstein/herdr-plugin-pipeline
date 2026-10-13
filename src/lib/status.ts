@@ -254,7 +254,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     // A failed holder keeps its files until a human releases them. An escalated one
     // is not released: it is resumed or abandoned, and the skill says so — a release
     // would let this task implement over files the holder is still changing.
-    const holders = fileHolders(task, run.tasks)
+    const holders = fileHolders(run, task)
     const failed = holders.filter((t) => taskRow(t.phase).terminal === true)
     if (failed.length > 0) {
       return yours(`YOUR move: ${failed.map((t) => `\`${hpipe} release --task ${t.task_id}\``).join(', ')}`)
@@ -414,7 +414,7 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
     }
 
     if (task.phase === 'blocked-on-files') {
-      for (const holder of fileHolders(task, run.tasks)) {
+      for (const holder of fileHolders(run, task)) {
         lines.push(
           `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
           (holder.phase === 'escalated'

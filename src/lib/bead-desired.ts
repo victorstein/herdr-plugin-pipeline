@@ -90,7 +90,7 @@ function dependencyBeads(task: Task, run: Run): string[] {
  * waits under IN PROGRESS, saying nothing about whom. Measured on a live run.
  */
 function blockerBeads(task: Task, run: Run): string[] {
-  const holders = task.phase === 'blocked-on-files' ? fileHolders(task, run.tasks).map((t) => t.bead) : []
+  const holders = task.phase === 'blocked-on-files' ? fileHolders(run, task).map((t) => t.bead) : []
   return [...new Set([...dependencyBeads(task, run), ...holders])]
 }
 

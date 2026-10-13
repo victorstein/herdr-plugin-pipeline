@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
 import {
-  detectCycle, filesClearFor, filesOverlap, gateStatus, landingQueue, landingSlotHolder, planDeclaredFiles,
-  releasableFromFiles, separatePipelineArtifacts, widenFiles,
+  detectCycle, fileHolders, filesClearFor, filesOverlap, gateStatus, landingQueue, landingSlotHolder, lockingFiles,
+  planDeclaredFiles, releasableFromFiles, separatePipelineArtifacts, sharedFiles, widenFiles,
 } from '../src/lib/gating'
-import type { Task } from '../src/lib/types'
+import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
 const task = (over: Partial<Task>): Task => ({
@@ -59,7 +59,7 @@ test('an escalated dependency is waited on, not treated as a failure', () => {
 test('a finished task does not hold its files', () => {
   const done = task({ task_id: 't1', phase: 'done', files: ['packages/core/'] })
   const waiting = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/x.ts'] })
-  expect(filesClearFor(waiting, [done, waiting])).toBe(true)
+  expect(filesClearFor({ tasks: [done, waiting] }, waiting)).toBe(true)
 })
 
 test('an escalated task still holds its files', () => {
@@ -67,13 +67,13 @@ test('an escalated task still holds its files', () => {
   // persist — releasing the lock would let a second task edit the same files.
   const stuck = task({ task_id: 't1', phase: 'escalated', files: ['packages/core/'] })
   const waiting = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/x.ts'] })
-  expect(filesClearFor(waiting, [stuck, waiting])).toBe(false)
+  expect(filesClearFor({ tasks: [stuck, waiting] }, waiting)).toBe(false)
 })
 
 test('an orphaned task releases its files, because its code already merged', () => {
   const merged = task({ task_id: 't1', phase: 'orphaned', files: ['apps/api/'] })
   const waiting = task({ task_id: 't2', phase: 'blocked-on-files', files: ['apps/api/main.ts'] })
-  expect(filesClearFor(waiting, [merged, waiting])).toBe(true)
+  expect(filesClearFor({ tasks: [merged, waiting] }, waiting)).toBe(true)
 })
 
 test('queued ignores file overlap — only depends_on gates it', () => {
@@ -85,19 +85,19 @@ test('queued ignores file overlap — only depends_on gates it', () => {
 test('blocked-on-files is held by an in-flight overlapping sibling', () => {
   const t1 = task({ task_id: 't1', phase: 'implement', files: ['packages/core/'] })
   const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/src/'] })
-  expect(filesClearFor(t2, [t1, t2])).toBe(false)
+  expect(filesClearFor({ tasks: [t1, t2] }, t2)).toBe(false)
 })
 
 test('a design-phase sibling does not hold files', () => {
   const t1 = task({ task_id: 't1', phase: 'plan', files: ['packages/core/'] })
   const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/'] })
-  expect(filesClearFor(t2, [t1, t2])).toBe(true)
+  expect(filesClearFor({ tasks: [t1, t2] }, t2)).toBe(true)
 })
 
 test('a failed sibling holds its files forever', () => {
   const t1 = task({ task_id: 't1', phase: 'failed', files: ['packages/core/'] })
   const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['packages/core/'] })
-  expect(filesClearFor(t2, [t1, t2])).toBe(false)
+  expect(filesClearFor({ tasks: [t1, t2] }, t2)).toBe(false)
 })
 
 test('blocked-on-decision inherits file-holding from decision_from', () => {
@@ -106,14 +106,14 @@ test('blocked-on-decision inherits file-holding from decision_from', () => {
   const free = task({ task_id: 't3', phase: 'blocked-on-decision', files: ['a/'] })
   free.decision_from = 'plan'
   const waiter = task({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] })
-  expect(filesClearFor(waiter, [held, waiter])).toBe(false)
-  expect(filesClearFor(waiter, [free, waiter])).toBe(true)
+  expect(filesClearFor({ tasks: [held, waiter] }, waiter)).toBe(false)
+  expect(filesClearFor({ tasks: [free, waiter] }, waiter)).toBe(true)
 })
 
 test('at most one task leaves an overlapping group per tick', () => {
   const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/'] })
   const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['a/'] })
-  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+  expect(releasableFromFiles({ tasks: [a, b] }).map((t) => t.task_id)).toEqual(['t1'])
 })
 
 test('a plan declares files on column-0 FILES lines, comma-separated and repeatable', () => {
@@ -219,19 +219,85 @@ test('a sibling declaring docs no longer overlaps a plan that only wrote its own
 test('two waiters that each discover the other\'s files are serialised, not deadlocked', () => {
   const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['a/'] })
   const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['b/'] })
-  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1', 't2'])
+  expect(releasableFromFiles({ tasks: [a, b] }).map((t) => t.task_id)).toEqual(['t1', 't2'])
 
   a.files.push(...widenFiles(a.files, planDeclaredFiles('FILES: a/, b/x.ts\n')))
-  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+  expect(releasableFromFiles({ tasks: [a, b] }).map((t) => t.task_id)).toEqual(['t1'])
 
   b.files.push(...widenFiles(b.files, planDeclaredFiles('FILES: b/, a/y.ts\n')))
-  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t1'])
+  expect(releasableFromFiles({ tasks: [a, b] }).map((t) => t.task_id)).toEqual(['t1'])
 
   a.phase = 'implement'
-  expect(releasableFromFiles([a, b])).toEqual([])
+  expect(releasableFromFiles({ tasks: [a, b] })).toEqual([])
 
   a.phase = 'done'
-  expect(releasableFromFiles([a, b]).map((t) => t.task_id)).toEqual(['t2'])
+  expect(releasableFromFiles({ tasks: [a, b] }).map((t) => t.task_id)).toEqual(['t2'])
+})
+
+// ——— shared paths: listed in .claude/pipeline-shared-paths, never locked ———
+
+const sharing = (prefixes: string[], tasks: Task[]): Pick<Run, 'tasks' | 'shared_paths'> => ({
+  tasks, shared_paths: { prefixes, ignored: [], commit: 'c0ffee', ref: 'origin/main', read_at: 0 },
+})
+
+test('a task locks its files minus every entry under a shared prefix', () => {
+  const t1 = task({ task_id: 't1', files: ['src/reader/', 'docs/file-formats.md', 'docs/file-formats/v2.md', 'docs/'] })
+  const run = sharing(['docs/file-formats'], [t1])
+  expect(lockingFiles(run, t1)).toEqual(['src/reader/', 'docs/'])
+  expect(sharedFiles(run, t1)).toEqual(['docs/file-formats.md', 'docs/file-formats/v2.md'])
+})
+
+test('a run with no shared paths locks every declared file, as before', () => {
+  const t1 = task({ task_id: 't1', files: ['src/reader/', 'docs/file-formats.md'] })
+  expect(lockingFiles({ tasks: [t1] }, t1)).toEqual(['src/reader/', 'docs/file-formats.md'])
+  expect(sharedFiles({ tasks: [t1] }, t1)).toEqual([])
+})
+
+test('an overlap on a shared path alone holds nothing', () => {
+  const t1 = task({ task_id: 't1', phase: 'implement', files: ['src/a/', 'docs/registry.md'] })
+  const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['src/b/', 'docs/registry.md'] })
+  const run = sharing(['docs/registry.md'], [t1, t2])
+  expect(fileHolders(run, t2)).toEqual([])
+  expect(filesClearFor(run, t2)).toBe(true)
+  expect(filesClearFor({ tasks: [t1, t2] }, t2)).toBe(false)
+})
+
+test('a task whose every entry is shared locks nothing and is held by nothing', () => {
+  const t1 = task({ task_id: 't1', phase: 'implement', files: ['docs/'] })
+  const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['docs/registry.md'] })
+  const run = sharing(['docs/registry.md'], [t1, t2])
+  expect(lockingFiles(run, t2)).toEqual([])
+  expect(filesClearFor(run, t2)).toBe(true)
+})
+
+test('an entry broader than a shared prefix still locks the rest of it', () => {
+  const t1 = task({ task_id: 't1', phase: 'implement', files: ['docs/'] })
+  const t2 = task({ task_id: 't2', phase: 'blocked-on-files', files: ['docs/other.md', 'docs/registry.md'] })
+  const run = sharing(['docs/registry.md'], [t1, t2])
+  expect(fileHolders(run, t2).map((t) => t.task_id)).toEqual(['t1'])
+})
+
+test('the overlap test on locking files is symmetric', () => {
+  const t1 = task({ task_id: 't1', phase: 'implement', files: ['src/a/', 'docs/registry.md'] })
+  const t2 = task({ task_id: 't2', phase: 'pr-review', files: ['docs/'] })
+  const t3 = task({ task_id: 't3', phase: 'ci', files: ['src/a/x.ts', 'docs/registry.md'] })
+  const run = sharing(['docs/registry.md'], [t1, t2, t3])
+  for (const a of run.tasks) {
+    for (const b of run.tasks.filter((t) => t !== a)) {
+      const aHeldByB = fileHolders(run, a).includes(b)
+      expect(fileHolders(run, b).includes(a), `${a.task_id} ${b.task_id}`).toBe(aHeldByB)
+    }
+  }
+  expect(fileHolders(run, t1).map((t) => t.task_id)).toEqual(['t3'])
+  expect(fileHolders(run, t2)).toEqual([])
+})
+
+test('two waiters that share only a listed path leave the gate on the same pass', () => {
+  const a = task({ task_id: 't1', phase: 'blocked-on-files', files: ['src/a/', 'docs/registry.md'] })
+  const b = task({ task_id: 't2', phase: 'blocked-on-files', files: ['src/b/', 'docs/registry.md'] })
+  const c = task({ task_id: 't3', phase: 'blocked-on-files', files: ['src/a/x.ts'] })
+  expect(releasableFromFiles(sharing(['docs/registry.md'], [a, b, c])).map((t) => t.task_id)).toEqual(['t1', 't2'])
+  expect(releasableFromFiles({ tasks: [a, b, c] }).map((t) => t.task_id)).toEqual(['t1'])
 })
 
 test('detectCycle names a cycle', () => {

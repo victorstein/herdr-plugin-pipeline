@@ -153,6 +153,30 @@ test('a plan listing the artifact directory does not serialise it behind a sibli
   ])
 })
 
+test('a plan widening onto a shared path records it, says it does not lock, and is not held there', async () => {
+  const waiter = mkTask({
+    task_id: 't2', phase: 'blocked-on-files', files: ['src/b/'],
+    ...checkoutWithPlan('FILES: src/b/x.ts, docs/registry.md, test/b.test.ts\n'),
+  })
+  const run = mkRun([mkTask({ task_id: 't1', phase: 'implement', files: ['src/a/', 'docs/registry.md'] }), waiter])
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+
+  const seen: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { seen.push(args.join(' ')) }
+  try {
+    await advanceTasks(run, deps())
+  } finally {
+    console.error = original
+  }
+
+  expect(waiter.files).toEqual(['src/b/', 'docs/registry.md', 'test/b.test.ts'])
+  expect(waiter.phase).toBe('implement')
+  expect(seen.filter((line) => line.includes('plan widened files'))).toEqual([
+    '[pipeline] t2 (feat/x): plan widened files by docs/registry.md (shared, not locking), test/b.test.ts',
+  ])
+})
+
 test('two tasks whose plans each discover the other\'s files run one after the other', async () => {
   const run = mkRun([
     mkTask({

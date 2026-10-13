@@ -219,6 +219,18 @@ test('a healthy holder is reported as finishing, not as needing release', () => 
   expect(text).not.toContain('release --task t1')
 })
 
+test('a sibling sharing only a listed path is no holder, in the warnings or the task line', () => {
+  const run = mkRun()
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement', files: ['src/a/', 'docs/registry.md'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/b/', 'docs/registry.md'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('blocked on files held by')
+  expect(text).toContain('no task holds its files now')
+})
+
 test('a stuck holder is still reported as needing release', () => {
   const run = mkRun()
   run.tasks = [

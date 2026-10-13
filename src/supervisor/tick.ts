@@ -145,7 +145,7 @@ export class BriefHolds {
 export const FILES_PASS_HOLD_MS = 30_000
 
 function passesThroughFiles(run: Run, task: Task): boolean {
-  return task.phase === 'blocked-on-files' && fileHolders(task, run.tasks).length === 0
+  return task.phase === 'blocked-on-files' && fileHolders(run, task).length === 0
 }
 
 /** Only the idle that ended the phase before: a block or a lost pane is news, and goes at once. */

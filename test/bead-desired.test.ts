@@ -94,6 +94,16 @@ test('a task waiting on another task\'s files is blocked by that task\'s bead â€
   })
 })
 
+test('an overlap on a shared path alone draws no blocker edge', () => {
+  const sibling = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'implement', files: ['src/a/', 'docs/registry.md'] })
+  const waiting = mkTask({
+    task_id: 't2', bead: 'hp-2', phase: 'blocked-on-files', files: ['src/b/', 'docs/registry.md'], pr: null,
+  })
+  const run = runWith(sibling, waiting)
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  expect(desiredBead(waiting, run).blockedBy).toEqual([])
+})
+
 test('a wait that ended wants its file edge gone, while a depends_on edge stays for good', () => {
   const first = mkTask({ task_id: 't1', bead: 'hp-1', phase: 'done', merged_at_ms: 1 })
   const holder = mkTask({ task_id: 't4', bead: 'hp-4', phase: 'done', merged_at_ms: 2, files: ['src/a.ts'] })

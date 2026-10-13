@@ -1,3 +1,5 @@
+import type { Run } from './types'
+
 /** Read from the default branch at `hpipe start`, like `ALWAYS_REVIEW_REL` from a change's base. */
 export const SHARED_PATHS_REL = '.claude/pipeline-shared-paths'
 
@@ -20,3 +22,9 @@ export function sharedPathPrefixes(text: string): { prefixes: string[]; ignored:
   }
   return { prefixes, ignored }
 }
+
+export const sharedPrefixesOf = (run: Pick<Run, 'shared_paths'>): string[] => run.shared_paths?.prefixes ?? []
+
+/** A plain prefix test, as `--files` entries overlap. */
+export const isSharedPath = (path: string, prefixes: readonly string[]): boolean =>
+  prefixes.some((prefix) => path.startsWith(prefix))

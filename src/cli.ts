@@ -22,7 +22,7 @@ import {
   freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
 } from './lib/dispatch-base'
 import { Gh } from './lib/gh'
-import { detectCycle, filesOverlap, gateStatus } from './lib/gating'
+import { detectCycle, filesOverlap, gateStatus, lockingFiles } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
@@ -742,7 +742,7 @@ async function registerTask(
   // the only other place task.files reaches a human is the blocked-on-files
   // warning in status.ts, which speaks only once overlap has already fired — so a
   // declaration that matches nothing is silent by construction.
-  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(task, run.tasks)}`
+  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(run, task)}`
 
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
@@ -772,9 +772,10 @@ async function registerTask(
  * Said at registration, where the overlap is chosen: the lock only bites at
  * `implement`, so nothing else mentions it until the task is already waiting.
  */
-function overlapNote(task: Task, all: readonly Task[]): string {
-  const sharers = all.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
-    taskRow(t.phase).terminal !== true && filesOverlap(task.files, t.files))
+function overlapNote(run: Run, task: Task): string {
+  const locking = lockingFiles(run, task)
+  const sharers = run.tasks.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
+    taskRow(t.phase).terminal !== true && filesOverlap(locking, lockingFiles(run, t)))
   if (sharers.length === 0) return ''
   return ` — overlaps ${sharers.map((t) => t.task_id).join(', ')}: whichever reaches implement second ` +
     'waits there until the other finishes'

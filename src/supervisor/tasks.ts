@@ -23,6 +23,7 @@ import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/pre
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
 import { changePromptVars, landingPromptVars, mergePromptVars, syncPromptVars } from '../lib/change-prompt'
+import { isSharedPath, sharedPrefixesOf } from '../lib/shared-paths'
 import {
   ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, type ReviewCall, reviewCall, type SkipCandidate, skipCandidacy,
 } from '../lib/review-skip'
@@ -494,9 +495,12 @@ async function widenFromPlan(run: Run, task: Task): Promise<void> {
   if (added.length === 0) return
   task.files = [...task.files, ...added]
   const ignoredNote = ignored.length === 0 ? '' : ` (ignored pipeline artifacts: ${ignored.join(', ')})`
+  const shared = sharedPrefixesOf(run)
+  const described = (path: string): string =>
+    path === '' ? '(whole repo)' : isSharedPath(path, shared) ? `${path} (shared, not locking)` : path
   console.error(
     `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ` +
-    added.map((path) => (path === '' ? '(whole repo)' : path)).join(', ') + ignoredNote,
+    added.map(described).join(', ') + ignoredNote,
   )
 }
 
@@ -664,7 +668,7 @@ async function gatherSignals(
     // files now in flight.
     case 'blocked-on-files': {
       await widenFromPlan(run, task)
-      const filesClear = releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id)
+      const filesClear = releasableFromFiles(run).some((t) => t.task_id === task.task_id)
       if (!filesClear) task.files_waited_at = task.phase_entered_at
       return { ...base, filesClear }
     }
