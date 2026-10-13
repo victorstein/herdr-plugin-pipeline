@@ -11,6 +11,7 @@ import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
+import { describeFiles, sharedStatusLine } from './shared-paths'
 import { effortSummary } from './tier-prompt'
 import type {
   Batch, MissingArtifact, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
@@ -567,6 +568,8 @@ export function formatStatus(
       continue
     }
     if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now))
+    const shared = sharedStatusLine(run)
+    if (shared !== null) lines.push(`  ${shared}`)
 
     for (const task of run.tasks) {
       const bits = [
@@ -750,7 +753,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `branch:     ${task.branch}`,
     `bead:       ${task.bead}`,
     `surface:    ${task.surface}`,
-    `files:      ${listOrNone(task.files)}`,
+    `files:      ${describeFiles(run, task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,
     `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
     `tier:       ${tierOf(task)}`,

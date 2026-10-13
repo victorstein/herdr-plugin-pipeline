@@ -231,6 +231,33 @@ test('a sibling sharing only a listed path is no holder, in the warnings or the 
   expect(text).toContain('no task holds its files now')
 })
 
+test('a run sharing paths names them and the commit they were read at under its header', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ files: ['src/reader/', 'docs/file-formats.md'] })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('shared:')
+
+  run.shared_paths = { prefixes: [], ignored: ['docs/*.md'], commit: '1fb8a43c99', ref: 'origin/main', read_at: 0 }
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('shared:')
+
+  run.shared_paths.prefixes = ['docs/file-formats.md', 'CHANGELOG.md']
+  const lines = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n')
+  const header = lines.findIndex((line) => line.startsWith(run.run_id))
+  expect(lines).toContain('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)')
+  expect(lines.indexOf('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)')).toBeGreaterThan(header)
+  expect(lines.indexOf('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)'))
+    .toBeLessThan(lines.findIndex((line) => line.startsWith('  t1 ')))
+})
+
+test('show marks each declared entry a shared path covers', () => {
+  const run = mkRun()
+  const task = mkTask({ files: ['src/reader/', 'docs/file-formats.md'] })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('files:      src/reader/, docs/file-formats.md\n')
+  run.shared_paths = { prefixes: ['docs/file-formats'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  expect(formatTaskDetail(run, task)).toContain('files:      src/reader/, docs/file-formats.md (shared)\n')
+  expect(formatTaskDetail(run, mkTask({ files: [] }))).toContain('files:      none\n')
+})
+
 test('a stuck holder is still reported as needing release', () => {
   const run = mkRun()
   run.tasks = [

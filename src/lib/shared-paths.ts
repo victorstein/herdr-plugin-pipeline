@@ -31,6 +31,20 @@ export const sharedPrefixesOf = (run: Pick<Run, 'shared_paths'>): string[] => ru
 export const isSharedPath = (path: string, prefixes: readonly string[]): boolean =>
   prefixes.some((prefix) => path.startsWith(prefix))
 
+/** A shared entry is still recorded and printed, marked, because the merge and sync notes read it. */
+export function describeFiles(run: Pick<Run, 'shared_paths'>, files: readonly string[]): string {
+  if (files.length === 0) return 'none'
+  const shared = sharedPrefixesOf(run)
+  return files.map((path) => (isSharedPath(path, shared) ? `${path} (shared)` : path)).join(', ')
+}
+
+/** Names the snapshot's commit, so a list changed mid-run shows as not yet in force. */
+export function sharedStatusLine(run: Pick<Run, 'shared_paths'>): string | null {
+  const shared = run.shared_paths
+  if (shared === undefined || shared.prefixes.length === 0) return null
+  return `shared: ${shared.prefixes.join(', ')} (from ${shared.commit === null ? shared.ref : sha8(shared.commit)})`
+}
+
 /** The commit `start` cuts the run from, and how its start line describes it. */
 export interface SharedPathsSource {
   /** What git reads the file at: the commit, or the ref when none resolved. */

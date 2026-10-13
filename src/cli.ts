@@ -43,7 +43,7 @@ import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
-import { readSharedPaths, type SharedPathsSource, startSharedLines } from './lib/shared-paths'
+import { describeFiles, readSharedPaths, type SharedPathsSource, startSharedLines } from './lib/shared-paths'
 import { currentUncommittedWork, formatStatus, formatTaskDetail, resumeCommand, uncommittedSummary } from './lib/status'
 import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
@@ -773,7 +773,7 @@ async function registerTask(
   // the only other place task.files reaches a human is the blocked-on-files
   // warning in status.ts, which speaks only once overlap has already fired — so a
   // declaration that matches nothing is silent by construction.
-  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(run, task)}`
+  const filesLine = `files: ${describeFiles(run, task.files)}${overlapNote(run, task)}`
 
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the

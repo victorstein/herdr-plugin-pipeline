@@ -1264,9 +1264,12 @@ test('registration names only an overlap on a path that locks', async () => {
   })
 
   await register('feat/one', 'hp-1', ['src/a/', 'docs/registry.md'])
-  expect((await register('feat/two', 'hp-2', ['src/b/', 'docs/registry.md'])).text).not.toContain('overlaps')
+  const second = (await register('feat/two', 'hp-2', ['src/b/', 'docs/registry.md'])).text
+  expect(second).toContain('files: src/b/, docs/registry.md (shared)\n')
+  expect(second).not.toContain('overlaps')
   expect((await register('feat/three', 'hp-3', ['src/a/x.ts', 'docs/registry.md'])).text)
-    .toContain(' — overlaps t1: whichever reaches implement second waits there until the other finishes')
+    .toContain('files: src/a/x.ts, docs/registry.md (shared) — overlaps t1: whichever reaches implement second ' +
+      'waits there until the other finishes')
 })
 
 const fetchedBase = async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null })
