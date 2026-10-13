@@ -33,7 +33,7 @@ import { HEALTH_REFRESH_MS, readDeliveryHealth, writeDeliveryHealth } from '../l
 import { enqueue, isCurrent, pruneOutbox, settleOutbox } from '../lib/outbox'
 import { isAgentReady } from '../lib/machine'
 import {
-  applyStalls, ladderFor, stallAwaiting, type StallDeps, stallCandidates,
+  applyStalls, ladderFor, probedRowPane, stallAwaiting, type StallCandidate, type StallDeps, stallCandidates,
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
@@ -516,6 +516,10 @@ async function main(): Promise<void> {
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
       const probeMax = config.STALL_PROBE_MAX
+      const probedWork = async (c: StallCandidate) => {
+        const pane = c.escalatable ? probedRowPane(c) : null
+        return pane === null ? undefined : background.work(pane, herdr)
+      }
       const stallDeps: StallDeps = {
         probeMax,
         now: () => Date.now(),
@@ -532,8 +536,7 @@ async function main(): Promise<void> {
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
             hpipe,
-            ladder: ladderFor(c, probeMax,
-              c.escalatable && c.actorPaneId !== null ? await background.work(c.actorPaneId, herdr) : undefined),
+            ladder: ladderFor(c, probeMax, await probedWork(c)),
           })
           const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
           return { ...sent, deferred: sent.held === 'budget' || sent.held === 'usage_limit' }

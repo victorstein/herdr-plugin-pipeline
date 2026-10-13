@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyStalls, bumpStall, ladderFor, stallAwaiting, stallCandidates, stallStateFor,
+  applyStalls, bumpStall, ladderFor, probedRowPane, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
@@ -403,6 +403,20 @@ test('a probe says what its pane runs, and waits only for a subagent, and only s
   expect(ladder(['1 shell'], [])).toEndWith(' Your pane shows background work running now (1 shell). This phase ' +
     'does not wait for it.')
   expect(ladder(['1 shell'], [])).not.toContain('stop it')
+})
+
+test('a probe describes background work only of the pane whose work holds its row', () => {
+  // A worker owed its brief is probed in the orchestrator's pane, but its row waits on the worker's pane.
+  const owed = runAt('execute', LONG_AGO)
+  owed.tasks = [mkTask({ phase: 'research', phase_entered_at: LONG_AGO, awaiting_brief: true })]
+  const [toOrchestrator] = taskStallCandidates([owed], NOW, 45, 3, 15)
+  expect(toOrchestrator?.paneId).toBe(ORCHESTRATOR_PANE)
+  expect(probedRowPane(toOrchestrator!)).toBeNull()
+
+  const working = runAt('execute', LONG_AGO)
+  working.tasks = [mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })]
+  expect(probedRowPane(taskStallCandidates([working], NOW, 45, 3)[0]!)).toBe('w7:p1')
+  expect(probedRowPane(stallCandidates([runAt('branch-review', LONG_AGO)], NOW, 15, 3)[0]!)).toBe(ORCHESTRATOR_PANE)
 })
 
 test('an excluded row is never promised a bound it does not have', () => {

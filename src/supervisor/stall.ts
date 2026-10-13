@@ -53,6 +53,17 @@ export function actorPaneFor(run: Run, row: PhaseRow<string>, task: Task | null)
 }
 
 /**
+ * The pane whose background work its row waits on, when the probe is sent there.
+ * A worker owed its brief is probed in the orchestrator's pane while its row reads
+ * the worker's, so the orchestrator's own work said nothing about it.
+ */
+export function probedRowPane(c: StallCandidate): string | null {
+  const row = c.task === null ? runRow(c.run.phase) : taskRow(c.task.phase)
+  const owner = actorPaneFor(c.run, row, c.task)
+  return owner !== null && owner === c.paneId ? owner : null
+}
+
+/**
  * A started but unbriefed agent is the orchestrator's fault, like #12's empty
  * worktree. Probed in its own pane, a brief-less agent took the probe as its
  * first instruction and began the phase without the brief.
