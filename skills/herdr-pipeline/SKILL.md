@@ -42,14 +42,19 @@ behaviour; this skill does.
 ## Running a batch
 
 1. `hpipe start "<title>" [--prefix <p>]` — the first start in a repo sets up its Beads store (needs
-   `bd` ≥ 1.3.1; the prefix must start with a letter) and prints the intake prompt. Follow it.
+   `bd` ≥ 1.3.1; the prefix must start with a letter) and prints the intake prompt. Follow it. A
+   second clone of a repo needs its own `--prefix`: the default comes from the repo's name, and
+   `start` refuses one another checkout's store already uses, naming that checkout.
    Add **`--single-pr [--batch-branch <name>]`** when the batch should ship as one release: every
    task lands on a batch branch instead of opening a PR, and the run ends with one PR, one CI run and
    one squash merge. The mode is fixed at start. It needs a repo that allows squash merges, and it
    wants an executable `.claude/pipeline-check` (the tests and the typecheck): with no per-task CI,
    that check is the only test a landing gets before the final PR, and without one `status` marks
    every landing unverified. A task whose only deliverable is a document under `docs/superpowers/` cannot
-   be submitted in such a run (`submit` counts those as the pipeline's, not as work to land). `start`
+   be submitted in such a run (`submit` counts those as the pipeline's, not as work to land). Its
+   pipeline documents still land with its change: the research, spec, plan and review files under
+   `docs/superpowers/` reach the batch and ship in the batch PR, as they ship in each task's PR
+   per-task. `start`
    refuses beside a supervisor that predates single-PR runs — restart it (see **Recovery**).
 2. One bead per task; **the bead's brief is the worker's entire brief** (goal, acceptance criteria,
    `file:line` pointers), captured when the task is registered. Check the backlog first: `hpipe next`
