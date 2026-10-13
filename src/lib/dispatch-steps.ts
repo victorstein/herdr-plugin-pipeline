@@ -115,7 +115,8 @@ class TaskDispatch {
 
   async dispatch(): Promise<boolean> {
     const { deps, task } = this
-    deps.say(`${this.id} ${task.branch} (${task.bead}) — ${tierOf(task)}, worker effort ${WORKER_EFFORT[tierOf(task)]}`)
+    const tier = tierOf(task)
+    deps.say(`${this.id} ${task.branch} (${task.bead}) — ${tier}, worker effort ${WORKER_EFFORT[tier]}`)
     try {
       const base = await this.base()
       const placed = await this.worktree(base)

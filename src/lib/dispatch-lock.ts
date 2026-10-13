@@ -163,7 +163,8 @@ export async function takeDispatchLock(
       if (!existsSync(path)) continue
       return {
         ok: false,
-        refusal: `the dispatch lock ${path} cannot be read; if no \`hpipe dispatch\` is running, delete it and run this again`,
+        refusal: `the dispatch lock ${path} cannot be read; if no \`hpipe dispatch\` is running, delete it and run ` +
+          'this again',
       }
     }
     if (await lockIsLive(existing, deps.startedAt)) return { ok: false, holder: existing }
@@ -215,14 +216,19 @@ export function dispatchUnderWay(locks: DispatchLocks, run: Run, task: Task): Di
   return lock.mode === 'ready' && unbriefedWorker(run, task) !== null ? lock : null
 }
 
-/** What status and the digest say instead of a dispatch step while one is under way. */
-export function underWayClause(lock: DispatchLock, task: Task, hpipe: string, now: number): string {
+/** "`hpipe dispatch` (pid 4242) is at bootstrap for t1, started 3m ago". */
+export function dispatchProgress(lock: DispatchLock, task: Task, hpipe: string, now: number): string {
   const command = lock.mode === 'ready' ? `\`${hpipe} dispatch --ready\`` : `\`${hpipe} dispatch\``
   const at = lock.task === null
     ? 'between tasks'
     : `at ${lock.step ?? 'its start'} for ${lock.task}, started ${minutesSince(lock.since, now)}m ago`
   const takes = lock.task === task.task_id ? '' : `; it takes ${task.task_id} before it ends`
-  return `nothing for you — ${command} (pid ${lock.pid}) is ${at}${takes}`
+  return `${command} (pid ${lock.pid}) is ${at}${takes}`
+}
+
+/** What status and the digest say instead of a dispatch step while one is under way. */
+export function underWayClause(lock: DispatchLock, task: Task, hpipe: string, now: number): string {
+  return `nothing for you — ${dispatchProgress(lock, task, hpipe, now)}`
 }
 
 export function staleDispatchLock(locks: DispatchLocks, run: Run): DispatchLock | null {

@@ -3,6 +3,7 @@ import { Bd } from '../lib/bd'
 import { readBeadsProject } from '../lib/beads-project'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
+import { readDispatchLocks } from '../lib/dispatch-lock'
 import { Gh } from '../lib/gh'
 import { beadClaimants } from '../lib/held'
 import { Herdr, liveAgentIn } from '../lib/herdr'
@@ -318,6 +319,8 @@ async function main(): Promise<void> {
       // on "now". `hpipe` moves up from the stall block below; same call count.
       const tickNow = Date.now()
       const hpipe = hpipeCommand(pluginRoot)
+      // A dispatch under way is no one's lapse, so no line tells anyone to start its agent.
+      const dispatches = await readDispatchLocks(stateDir, runs.map((run) => run.repo_key))
 
       const pending: PendingPrompt[] = []
       const unsaved = new Set<Run>()
@@ -403,7 +406,7 @@ async function main(): Promise<void> {
           const lines = filesPass.sift(run, wake, tickNow)
             .map((w) => {
               if (w.task) covered.add(w.task.task_id)
-              return `- ${describeWake(w, tickNow, hpipe, gate.holds())}`
+              return `- ${describeWake(w, tickNow, hpipe, gate.holds(), dispatches)}`
             })
           // Attached to every orchestrator-pane pending, not just the first: that
           // one is dropped when it has no text and no events, while a task prompt
@@ -415,7 +418,7 @@ async function main(): Promise<void> {
           for (const prompt of taskPrompts) {
             if (prompt.paneId === run.orchestrator_pane) covered.add(prompt.taskId)
           }
-          const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds())
+          const footer = parkedFooter(run, covered, tickNow, hpipe, gate.holds(), dispatches)
           footers.set(run, footer)
 
           addPending(run.orchestrator_pane, nextPrompt, lines, `run phase${phaseNote}`,
@@ -457,7 +460,7 @@ async function main(): Promise<void> {
 
       for (const run of deliverFrom) {
         pending.push(...outboxPending(run, footers.get(run)))
-        pending.push(...catchUps.pendingFor(run, (r) => catchUpDigest(r, tickNow, hpipe, gate.holds())))
+        pending.push(...catchUps.pendingFor(run, (r) => catchUpDigest(r, tickNow, hpipe, gate.holds(), dispatches)))
       }
       const settlements = await flushDeliveries(
         deliveriesFor(pending), send, undefined, (delivery, delivered) => catchUps.note(delivery, delivered),
@@ -516,6 +519,8 @@ async function main(): Promise<void> {
       // One binding, so the cap the candidates are built with, the cap the
       // ladder sentence quotes and the cap deferrals are bounded by cannot drift.
       const probeMax = config.STALL_PROBE_MAX
+      // Read again: the deliveries above can take long enough for a dispatch to have started or ended.
+      const dispatchesNow = await readDispatchLocks(stateDir, runs.map((run) => run.repo_key))
       const probedWork = async (c: StallCandidate) => {
         const pane = c.escalatable ? probedRowPane(c) : null
         return pane === null ? undefined : background.work(pane, herdr)
@@ -527,7 +532,7 @@ async function main(): Promise<void> {
         backgroundWork,
         persist: (run, effect) => saveOrReapply(stateDir, run, effect ? [effect] : []),
         probe: async (c) => {
-          const awaiting = stallAwaiting(c.run, c.task, hpipe)
+          const awaiting = stallAwaiting(c.run, c.task, hpipe, Date.now(), dispatchesNow)
           const text = await renderPrompt(pluginRoot, 'stall-probe', {
             run_id: c.run.run_id,
             phase: c.task
@@ -547,7 +552,7 @@ async function main(): Promise<void> {
           minutes: String(c.minutes),
           probes: String(c.probes),
           undelivered: undeliveredNote(c.undelivered),
-          awaiting_short: stallAwaiting(c.run, c.task, hpipe).short,
+          awaiting_short: stallAwaiting(c.run, c.task, hpipe, Date.now(), dispatchesNow).short,
           // Rendered before the transition writes `escalated_from`, so `from` is passed.
           resume_command: resumeCommand(hpipe, c.run, c.task, from),
           abandon: abandonParagraph(hpipe, c.run, c.task),
@@ -582,7 +587,7 @@ async function main(): Promise<void> {
       )
       await applyStalls(
         taskStallCandidates(
-          savedRuns, Date.now(), config.TASK_STALL_MINUTES, probeMax, config.STALL_MINUTES,
+          savedRuns, Date.now(), config.TASK_STALL_MINUTES, probeMax, config.STALL_MINUTES, dispatchesNow,
         ),
         stallDeps,
       )

@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
+import type { DispatchLock, DispatchLocks } from '../src/lib/dispatch-lock'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import { FILES_FREE_ON_ARRIVAL } from '../src/lib/machine'
@@ -929,4 +930,69 @@ test('hpipe show says which review was skipped and why, right after the phases v
   expect(lines[visitedAt + 1]).toBe('skipped:    pr-review (42 lines added outside docs/, spec-review cleared first pass)')
   run.tasks = [mkTask({ phase: 'ci' })]
   expect(formatTaskDetail(run, run.tasks[0]!)).not.toContain('skipped:')
+})
+
+const NOW_DISPATCHING = 10_000_000
+
+function dispatching(run: Run, over: Partial<DispatchLock> = {}, live = true): DispatchLocks {
+  return new Map([[run.repo_key, { live, lock: {
+    session: run.session, run_id: run.run_id, mode: 'task', task: 't1', step: 'bootstrap',
+    since: NOW_DISPATCHING - 3 * 60_000, pid: 4242, started_at_ms: 0, bootstrap: null, ...over,
+  } }]])
+}
+
+/** Each state the dispatch advice covers, every one already overdue and so waiting on you. */
+function owingADispatch(): Array<[string, Run]> {
+  const states: Array<[string, Partial<Task>]> = [
+    ['undispatched', { workspace_id: null, pane_id: null, awaiting_brief: true }],
+    ['unstarted', { workspace_id: 'w23', pane_id: null, awaiting_brief: true, adopted_at: 0 }],
+    ['unbriefed', { workspace_id: 'w23', pane_id: 'w23:p1', awaiting_brief: true }],
+  ]
+  return states.map(([name, over]) => {
+    const run = mkRun()
+    run.phase = 'execute'
+    run.tasks = [mkTask({ phase: 'research', agent_status: 'idle', phase_entered_at: 0, ...over })]
+    run.history.push({ at: 0, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' })
+    return [name, run]
+  })
+}
+
+test('a live dispatch naming the task stands in for its dispatch advice, and nothing waits on you', () => {
+  for (const [name, run] of owingADispatch()) {
+    expect(waitsOnYou(run, run.tasks[0]!, NOW_DISPATCHING), name).toBe(true)
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run))
+    expect(text, name).toContain(`— nothing for you — \`${HP} dispatch\` (pid 4242) is at bootstrap for t1, started 3m ago`)
+    expect(text, name).not.toContain('waiting on you:')
+    expect(text, name).not.toContain('herdr agent start')
+    expect(waitsOnYou(run, run.tasks[0]!, NOW_DISPATCHING, {}, dispatching(run)), name).toBe(false)
+    expect(actionFor(run, run.tasks[0]!, HP, NOW_DISPATCHING, {}, dispatching(run)), name)
+      .toStartWith('nothing for you — ')
+  }
+})
+
+test('a stale dispatch lock leaves the advice as it was, and status names it', () => {
+  for (const [name, run] of owingADispatch()) {
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run, {}, false))
+    expect(text, name).toContain('waiting on you:')
+    expect(text, name).toContain(`⚠ a dispatch lock for this repo is left by pid 4242, which is gone; the next ` +
+      `\`${HP} dispatch\` cleans it up`)
+  }
+})
+
+test('a live dispatch of another task, run or session changes nothing', () => {
+  for (const over of [{ task: 't2' }, { run_id: 'r-other' }, { session: 'other' }]) {
+    const [, run] = owingADispatch()[0]!
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run, over))
+    expect(text, JSON.stringify(over)).toContain('waiting on you:')
+    expect(text, JSON.stringify(over)).not.toContain('a dispatch lock for this repo')
+  }
+})
+
+test('the digest footer leaves out a task whose dispatch is under way', () => {
+  const [, run] = owingADispatch()[0]!
+  expect(parkedFooter(run, new Set(), NOW_DISPATCHING, HP)).toContain('t1 feat/x')
+  expect(parkedFooter(run, new Set(), NOW_DISPATCHING, HP, {}, dispatching(run))).toBe('')
 })

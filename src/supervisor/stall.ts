@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
+import { dispatchProgress, dispatchUnderWay, type DispatchLocks, NO_DISPATCHES } from '../lib/dispatch-lock'
 import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
 import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
 import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
@@ -135,7 +136,7 @@ function waitsOnLiveHolders(task: Task, all: Task[]): boolean {
  */
 export function taskStallCandidates(
   runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
-  unstartedThresholdMinutes: number = thresholdMinutes,
+  unstartedThresholdMinutes: number = thresholdMinutes, dispatches: DispatchLocks = NO_DISPATCHES,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
@@ -149,6 +150,8 @@ export function taskStallCandidates(
       // #22 again otherwise: the holder has its own ladder, and a probe about each
       // task behind it says nothing new.
       if (task.phase === 'land-queue' && landingSlotHolder(run.tasks) !== null) continue
+      // A bootstrap takes minutes, and what a probe would ask for is what the dispatch is doing.
+      if (dispatchUnderWay(dispatches, run, task) !== null) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
@@ -248,7 +251,7 @@ export interface Awaiting {
  * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
  */
 export function stallAwaiting(
-  run: Run, task: Task | null, hpipe: string, now: number = Date.now(),
+  run: Run, task: Task | null, hpipe: string, now: number = Date.now(), dispatches: DispatchLocks = NO_DISPATCHES,
 ): Awaiting {
   const row = task ? taskRow(task.phase) : runRow(run.phase)
   const phase = task ? task.phase : run.phase
@@ -279,6 +282,15 @@ export function stallAwaiting(
         'told, tell them now; once they have decided, ' +
         `\`${resumeCommand(hpipe, run, task)}\` resumes it` +
         (task ? `, \`${abandonCommand(hpipe, run, task)}\` abandons it.` : '.'),
+    }
+  }
+
+  const dispatching = task === null ? null : dispatchUnderWay(dispatches, run, task)
+  if (task !== null && dispatching !== null) {
+    return {
+      short: 'its dispatch to finish',
+      clause: 'This task is being dispatched now, not waiting on you: ' +
+        `${dispatchProgress(dispatching, task, hpipe, now)}.`,
     }
   }
 

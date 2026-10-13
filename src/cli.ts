@@ -26,7 +26,8 @@ import { detectCycle, filesOverlap, gateStatus } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  type DispatchLock, type DispatchMode, type HeldDispatchLock, holderLine, type LockDeps, type LockTaken, takeDispatchLock,
+  type DispatchLock, type DispatchMode, type HeldDispatchLock, holderLine, type LockDeps, type LockTaken,
+  readDispatchLocks, takeDispatchLock,
 } from './lib/dispatch-lock'
 import {
   dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
@@ -2391,6 +2392,7 @@ export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkToo
     Date.now(),
     panes,
     toolsLine(await tools()),
+    await readDispatchLocks(ctx.stateDir, runs.map((run) => run.repo_key)),
   ))
 }
 

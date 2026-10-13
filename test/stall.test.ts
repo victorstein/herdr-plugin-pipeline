@@ -6,6 +6,7 @@ import {
   applyStalls, bumpStall, ladderFor, probedRowPane, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
+import type { DispatchLock, DispatchLocks } from '../src/lib/dispatch-lock'
 import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
 import { absoluteArtifactPath } from '../src/supervisor/deliver'
@@ -1333,4 +1334,38 @@ test('status names the same pane for a held probe that the ladder sends it to', 
     expect(candidate, JSON.stringify(over)).toBeDefined()
     expect(owedByRecipient(run)[0]?.pane, JSON.stringify(over)).toBe(candidate?.paneId)
   }
+})
+
+function dispatchingFor(run: Run, over: Partial<DispatchLock> = {}, live = true): DispatchLocks {
+  return new Map([[run.repo_key, { live, lock: {
+    session: run.session, run_id: run.run_id, mode: 'task', task: 't1', step: 'bootstrap',
+    since: NOW - 3 * 60_000, pid: 4242, started_at_ms: 0, bootstrap: null, ...over,
+  } }]])
+}
+
+test('a task whose dispatch is under way is no one\'s fault, and gets no probe however long it has waited', () => {
+  const entered = NOW - 20 * 60_000
+  const cases: Array<[string, Partial<Task>]> = [
+    ['unstarted', { phase: 'research', pane_id: null, awaiting_brief: true, phase_entered_at: entered, adopted_at: entered }],
+    ['undispatched', { phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true, phase_entered_at: entered }],
+    ['unbriefed', { phase: 'research', pane_id: 'w7:p1', awaiting_brief: true, phase_entered_at: entered }],
+  ]
+  for (const [name, over] of cases) {
+    const run = runWithTask(over)
+    expect(taskStallCandidates([run], NOW, 45, 3, 15), name).toHaveLength(1)
+    expect(taskStallCandidates([run], NOW, 45, 3, 15, dispatchingFor(run)), name).toHaveLength(0)
+    expect(taskStallCandidates([run], NOW, 45, 3, 15, dispatchingFor(run, { task: 't2' })), name).toHaveLength(1)
+    expect(taskStallCandidates([run], NOW, 45, 3, 15, dispatchingFor(run, {}, false)), name).toHaveLength(1)
+  }
+})
+
+test('a probe about a task whose dispatch is under way says so, never to start an agent', () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true, checkout_path: null })
+  run.tasks = [task]
+  const a = stallAwaiting(run, task, 'hp', NOW, dispatchingFor(run))
+  expect(a.clause).toBe('This task is being dispatched now, not waiting on you: `hp dispatch` (pid 4242) is at ' +
+    'bootstrap for t1, started 3m ago.')
+  expect(a.short).toBe('its dispatch to finish')
+  expect(stallAwaiting(run, task, 'hp', NOW).clause).toContain('no worktree and no agent')
 })

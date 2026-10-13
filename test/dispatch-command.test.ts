@@ -2,15 +2,19 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cmdDispatchSteps, type DispatchWiring, recordWorkerPane } from '../src/cli'
-import { dispatchLockPath, type DispatchLock, takeDispatchLock } from '../src/lib/dispatch-lock'
+import { cmdDispatchSteps, cmdStatus, type DispatchWiring, recordWorkerPane } from '../src/cli'
+import { dispatchLockPath, type DispatchLock, readDispatchLocks, takeDispatchLock } from '../src/lib/dispatch-lock'
 import type { DispatchHerdr } from '../src/lib/dispatch-steps'
 import type { CallResult } from '../src/lib/herdr'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import { processStartedAtMs } from '../src/lib/pidfile'
+import { hpipeCommand } from '../src/lib/render'
+import { taskStallCandidates } from '../src/supervisor/stall'
 import type { Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 import { cmdDispatchTask } from './helpers/cmd-dispatch'
+import { READY_TOOLS } from './helpers/cmd-start'
+import { makeFakeBin } from './helpers/fake-bin'
 
 let dir: string
 const ctx = () => ({ stateDir: dir, pluginRoot: join(import.meta.dir, '..'), session: 's' })
@@ -234,4 +238,55 @@ test('the lock names each task and step as the dispatch moves', async () => {
   })
   expect((await cmdDispatchSteps(ctx(), input('t1'), w.wiring)).ok).toBe(true)
   expect(seen).toEqual(['task t1 agent'])
+})
+
+/** A task rewound into research with no worktree: its dispatch advice is owed at once. */
+async function seedOwingADispatch(): Promise<Run> {
+  const run = await seed([owed('t1', { phase_entered_at: 0 })])
+  run.phase_entered_at = 0
+  run.history.push({ at: 0, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' })
+  await saveRun(dir, run)
+  return run
+}
+
+async function statusText(): Promise<string> {
+  const herdrBefore = process.env.HERDR_BIN_PATH
+  process.env.HERDR_BIN_PATH = await makeFakeBin(dir, { 'pane list': { result: { panes: [] } } })
+  try {
+    return (await cmdStatus(ctx(), async () => READY_TOOLS)).text
+  } finally {
+    if (herdrBefore === undefined) delete process.env.HERDR_BIN_PATH
+    else process.env.HERDR_BIN_PATH = herdrBefore
+  }
+}
+
+test('status and the stall ladder read a live dispatch lock off disk, and leave its task alone', async () => {
+  const run = await seedOwingADispatch()
+  expect(await statusText()).toContain('YOUR move: no worktree and no agent')
+  const [onDisk] = await listRuns(dir, 's')
+  expect(taskStallCandidates([onDisk!], Date.now(), 45, 3, 15)).toHaveLength(1)
+
+  const taken = await takeDispatchLock(dir, run.repo_key, await holder({ run_id: run.run_id }))
+  if (!taken.ok) throw new Error('lock not taken')
+  try {
+    const text = await statusText()
+    expect(text).toContain(`nothing for you — \`${hpipeCommand(ctx().pluginRoot)} dispatch\` (pid ${process.pid}) ` +
+      'is at bootstrap for t1, started 3m ago')
+    expect(text).not.toContain('waiting on you:')
+    const locks = await readDispatchLocks(dir, [run.repo_key])
+    expect(taskStallCandidates([onDisk!], Date.now(), 45, 3, 15, locks)).toHaveLength(0)
+  } finally {
+    taken.lock.release()
+  }
+})
+
+test('status names a dispatch lock its holder left behind, and keeps the advice', async () => {
+  const run = await seedOwingADispatch()
+  const dead = Bun.spawn(['true'])
+  await dead.exited
+  await takeDispatchLock(dir, run.repo_key, await holder({ run_id: run.run_id, pid: dead.pid, started_at_ms: 1 }))
+  const text = await statusText()
+  expect(text).toContain('YOUR move: no worktree and no agent')
+  expect(text).toContain(`⚠ a dispatch lock for this repo is left by pid ${dead.pid}, which is gone; the next ` +
+    `\`${hpipeCommand(ctx().pluginRoot)} dispatch\` cleans it up`)
 })
