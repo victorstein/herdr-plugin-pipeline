@@ -1,6 +1,7 @@
 import { type Bd, type BdFailure, type BeadUpdate, type Done, type ExportedBead, isBdFailure } from '../lib/bd'
 import { sha8 } from '../lib/batch'
 import { type DesiredBead, desiredBead, isManagedLabel } from '../lib/bead-desired'
+import { heldForTheHuman } from '../lib/before-merge'
 import { beadsSlug } from '../lib/beads-project'
 import { type BeadClaimant, holdsBead } from '../lib/held'
 import type { RunEffect } from '../lib/ledger'
@@ -112,8 +113,9 @@ export function callsFor(desired: DesiredBead, actual: ExportedBead, reason: str
     const linked = (actual.dependencies ?? []).some((d) => d.depends_on_id === dependsOn && d.type === 'blocks')
     if (linked) calls.push({ kind: 'depRemove', dependsOn })
   }
-  for (const comment of desired.comments) {
-    if (!(actual.comments ?? []).some((c) => c.text.includes(comment.marker))) calls.push({ kind: 'comment', ...comment })
+  for (const { marker, text, whileOpen } of desired.comments) {
+    if (whileOpen === true && wasClosed && wantsClosed) continue
+    if (!(actual.comments ?? []).some((c) => c.text.includes(marker))) calls.push({ kind: 'comment', marker, text })
   }
   if (wantsClosed && !wasClosed) calls.push({ kind: 'close', reason })
   return calls
@@ -189,7 +191,9 @@ function beadDrivers(localRuns: readonly Run[], elsewhere: readonly BeadClaimant
 const isDriver = (driver: Driver | undefined, run: Run, task: Task): boolean =>
   driver?.session === run.session && driver.run_id === run.run_id && driver.task_id === task.task_id
 
-const waitsOnClose = (task: Task): boolean => task.merged_at_ms !== null && task.bead_closed_at_ms === null
+/** A merged task the human still owes a check is not waiting on its close: its bead stays open until they rule. */
+const waitsOnClose = (run: Run, task: Task): boolean =>
+  task.merged_at_ms !== null && task.bead_closed_at_ms === null && !heldForTheHuman(run, task)
 
 function groupBySlug(runs: readonly Run[]): Map<string, Run[]> {
   const bySlug = new Map<string, Run[]>()
@@ -264,7 +268,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
     for (const run of slugRuns) {
       const effects: RunEffect[] = []
       const fail = failureOf(slug, effects)
-      for (const task of run.tasks.filter(waitsOnClose)) fail(task, why(run))
+      for (const task of run.tasks.filter((t) => waitsOnClose(run, t))) fail(task, why(run))
       await save(slug, run, effects)
     }
   }
@@ -308,7 +312,7 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
         const current = actual.get(task.bead)
         const driver = drivers.get(driverKey(slug, task.bead))
         if (!isDriver(driver, run, task)) {
-          if (!waitsOnClose(task)) continue
+          if (!waitsOnClose(run, task)) continue
           if (current?.status === 'closed') effects.push(recordBeadClosed(task.task_id, deps.now()))
           else {
             fail(task, `bead ${task.bead} is driven by ${driver?.task_id} of run ${driver?.run_id} ` +
@@ -320,7 +324,9 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
           fail(task, `bead ${task.bead} is not in the Beads export`)
           continue
         }
-        if (current.status === 'closed' && waitsOnClose(task)) effects.push(recordBeadClosed(task.task_id, deps.now()))
+        if (current.status === 'closed' && waitsOnClose(run, task)) {
+          effects.push(recordBeadClosed(task.task_id, deps.now()))
+        }
 
         const calls = callsFor(desiredBead(task, run), current, closeReason(task, run), modeOf(run))
         if (calls.length === 0) continue

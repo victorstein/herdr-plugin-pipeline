@@ -59,11 +59,14 @@ export function clearPid(stateDir: string, session: SessionKey): void {
 /** Without it, a supervisor locks the paths a run's snapshot shares. */
 export const SHARED_PATHS_CAPABILITY = 'shared-paths'
 
+/** Without it, a supervisor hands out the merge command whatever check is owed. */
+export const BEFORE_MERGE_CAPABILITY = 'before-merge'
+
 /**
- * The CLI reads these to say what a running supervisor will not do, without a
- * schema bump.
+ * What this release's supervisor honours, so a newer CLI can warn about or refuse
+ * what an older one would undo, without a schema bump.
  */
-export const SUPERVISOR_CAPABILITIES: readonly string[] = [SHARED_PATHS_CAPABILITY]
+export const SUPERVISOR_CAPABILITIES: readonly string[] = [SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY]
 
 /** A supervisor that predates the field has none. */
 export function supervisorCapabilities(info: SupervisorPid): string[] {
@@ -73,6 +76,10 @@ export function supervisorCapabilities(info: SupervisorPid): string[] {
 /** A supervisor that predates the field drove only the per-task schema. */
 export function drivenSchemas(info: SupervisorPid): number[] {
   return info.schemas ?? [3]
+}
+
+export function honours(info: SupervisorPid, capability: string): boolean {
+  return (info.capabilities ?? []).includes(capability)
 }
 
 export async function supervisorState(

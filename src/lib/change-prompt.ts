@@ -159,6 +159,12 @@ export function sharedMergeNote(run: Run, task: Task, hpipe: string): string {
     `of ${onTopOf} and it is reviewed.`
 }
 
+/** `{{held_shared_note}}` of the per-task hold: the same rebase step, ahead of asking the human. */
+export function heldSharedNote(run: Run, task: Task, hpipe: string): { held_shared_note: string } {
+  const note = sharedMergeNote(run, task, hpipe)
+  return { held_shared_note: note === '' ? '' : ` ${note}` }
+}
+
 /**
  * Single-PR. Any resolution already makes the sync dirty, so it is reviewed; a
  * collision in meaning is better redone by the worker than patched in a merge commit.

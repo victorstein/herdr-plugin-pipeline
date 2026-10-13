@@ -224,7 +224,8 @@ it already filed; a retry carries on from there and files nothing twice.
 
 When a decision needs you, the orchestrator runs `hpipe escalate --task <id> --decision <id>
 --recommend "<its recommendation>"`: the task's bead turns `blocked`, gains `hpipe:awaiting-human`,
-and carries the question as a comment until you answer.
+and carries the question as a comment until you answer. A check only you can make before a merge, a
+device test say, holds that merge until you rule on it (**Before-merge checks**).
 
 Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
@@ -541,6 +542,12 @@ not, which is only stricter: `hpipe start` warns when this session's live superv
 a restart lets the run share them. Runs started before the upgrade carry no list and keep locking
 everything until they finish. Rolling back to an earlier release locks shared paths again.
 
+The before-merge release adds optional fields an earlier release ignores: `before_merge` on a task and
+on a run, and `capabilities` on the supervisor's pid file. `hold` and `answer --before-merge` refuse
+until this session's supervisor is restarted. Rolling back drops every hold: an earlier supervisor
+sends the merge command and probes as before. Confirm or waive every owed check before rolling back,
+or tell the user the hold is gone.
+
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
 smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,
@@ -548,11 +555,66 @@ a copy or a link into another checkout, with the **Install the hpipe shorthand**
 
 ## Answering a decision
 
-    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
+    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human \
+                 [--before-merge "<check>"]... [--run <run-id>]
 
 The answer is recorded immediately but the worker resumes **only once the answer has actually been
 delivered** to its pane — a worker that is busy stays blocked, and `status` reports
-"answered but undelivered" rather than pretending the decision was applied.
+"answered but undelivered" rather than pretending the decision was applied. `--before-merge` records
+a check only the user can make, in the same save; see **Before-merge checks**.
+
+## Before-merge checks
+
+Some checks only the user can make: a test on a device, a look at the UI. Record one, and the merge it
+guards waits for the user's ruling:
+
+    hpipe answer … --before-merge "<what they check>"      # carried by a decision's answer
+    hpipe hold --task <id> --before-merge "<check>"         # one task's merge, with no decision behind it
+    hpipe hold --before-merge "<check>"                     # single-PR: the batch PR
+
+`--before-merge` may be repeated: each one is a check, numbered `c1`, `c2`, … across the run, and a
+comma is part of its text. Per-task, a check holds its task's merge. Single-PR, every check, on a task
+or on the run, holds the batch PR, never a task's landing: one task lands at a time, so a landing held
+for the user would hold every landing behind it, and the batch PR's head is what ships.
+
+While a check is owed:
+
+- The merge command is never sent. The orchestrator gets **Hold — … waits on the human before it
+  merges** instead, which has it make the PR mergeable first (by `gh pr view --json
+  mergeStateStatus`: a rebase, `gh pr update-branch`, `gh pr ready`), since a rebase replaces the head
+  the user would check; then tell the user once, in a message of its own, what to check and on which
+  build; then end its turn.
+- No stall probe comes for it, however long the user takes.
+- `hpipe status` lists it under **waiting on the human:**, and the run header gets a `before merge:`
+  line. `hpipe show --task <id>` prints one `before merge:` line per check. Per-task, the task's bead
+  is `blocked` + `hpipe:awaiting-human`, with the check and each ruling as comments.
+
+The user's ruling is recorded with:
+
+    hpipe confirm --check <id> --by human                    # they checked it, and it holds
+    hpipe confirm --check <id> --by human --waive "<why>"    # they chose to skip it
+    hpipe confirm --check <id> --by human --failed "<what they saw>"
+
+- **What a confirmation covers.** The head CI ran on, read live from origin. It holds only while
+  that is the head that merges: a push after it makes the check owed again, on the new head. A waiver
+  covers any head.
+- **When.** Only near the gate: per-task while the task is in `ci` or `merge`, or once its PR has
+  merged; single-PR while the run is in `ship-ci` or `ship-merge`. Only `--by human` is taken, and
+  never from a worker's pane.
+- **What it does.** The last ruling at the gate queues the merge prompt and restarts the stall ladder.
+  A per-task `--failed` sends the task back to `implement`, and its worker is told what the user saw.
+  A single-PR one keeps the run in `ship-merge` until a patch on the batch or a fix task moves the
+  head, which the user then checks again. After the merge `--failed` is refused: record `--waive
+  "failed on device; fixed by <task>"`, and register the fix as a new task.
+
+A PR merged by hand while a check is owed is recorded, since it is GitHub's fact, but the task waits in
+`merge` (single-PR, the run in `ship-merge`) until the user rules. Its bead stays open, it can be
+rewound only back to `merge` (any other phase would finish it or forget the merge), `hpipe close` is
+refused, and a per-task run cannot reach `done`. `hpipe abort` lists
+what is still owed, and the done notice says what was ruled.
+
+`hold` and `answer --before-merge` refuse beside a supervisor that predates before-merge checks, which
+would send the merge command anyway: restart it first (see **Upgrading**).
 
 ## Claude's usage limit
 

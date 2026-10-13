@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { advanceRun, enterRunPhase, counterFor, type RunSignals } from '../src/lib/machine'
 import { newRun, withBatch } from '../src/lib/ledger'
-import type { Run, RunPhase, Task } from '../src/lib/types'
+import type { BeforeMergeCheck, Run, RunPhase, Task } from '../src/lib/types'
 import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -114,4 +114,15 @@ test('branch-review escalates at MAX_PASSES on its own counter', () => {
   expect(counterFor(run, 'branch-review')).toBe(1)
   advanceRun(run, s)
   expect(run.phase).toBe('escalated')
+})
+
+test('a per-task execute waits while a merged task still owes a before-merge check', () => {
+  const run = fixture('execute')
+  run.intake_closed = true
+  const check: BeforeMergeCheck = { id: 'c1', check: 'no ghost', recorded_at: 1, recorded_pane: 'w1:p1', resolutions: [] }
+  run.tasks = [mkTask({ phase: 'done', merged_at_ms: 1, before_merge: [check] }), mkTask({ task_id: 't2', phase: 'done', merged_at_ms: 1 })]
+  const allLanded = signals({ tasksAllTerminal: true, landedTaskCount: 2 })
+  expect(advanceRun(run, allLanded)).toBeNull()
+  check.resolutions.push({ as: 'waived', at: 2, head: null, note: 'release window', pane: 'w1:p1' })
+  expect(advanceRun(run, allLanded)?.phase).toBe('branch-review')
 })

@@ -52,3 +52,7 @@ tier.
 
 `--by` is the audit trail and only you know which it was: `orchestrator` if you settled it from the
 repo, `human` if you asked. The worker resumes `{{phase}}` when the answer reaches its pane.
+
+If the answer makes the merge wait on something only the human can check (a device test, a look at
+the UI), add `--before-merge "<what they check>"`: the merge is held until they confirm it. Not for
+anything you or the worker can verify — put that in the answer.

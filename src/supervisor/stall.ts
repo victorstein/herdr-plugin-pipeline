@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
+import { idList, type OwedCheck, owedAt, waitsOnlyOnTheHuman } from '../lib/before-merge'
 import { beadOutOfSync } from '../lib/bead-desired'
 import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
 import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
@@ -110,6 +111,7 @@ export function stallCandidates(
     const row = runRow(run.phase)
     if (!row.stallable) continue
     if (row.stallWhen && !row.stallWhen(run)) continue
+    if (run.phase === 'ship-merge' && waitsOnlyOnTheHuman(run, null)) continue
     const c = candidateFor(run, run, row, null, now, thresholdMinutes, probeMax)
     if (c) out.push(c)
   }
@@ -149,6 +151,9 @@ export function taskStallCandidates(
       // #22 again otherwise: the holder has its own ladder, and a probe about each
       // task behind it says nothing new.
       if (task.phase === 'land-queue' && landingSlotHolder(run.tasks) !== null) continue
+      // Only the human can end this wait, and the gate row never escalates, so a probe
+      // would only nag. A ruling that lifts the hold re-arms the ladder.
+      if (task.phase === 'merge' && waitsOnlyOnTheHuman(run, task)) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
@@ -377,6 +382,8 @@ export function stallAwaiting(
     // `gatherSignals` returns early on a null PR (tasks.ts:278), so `merged` is
     // never true and machine.ts:165-171 never fires.
     if (task.pr === null) return missingPr(task, 'so no merge is ever seen.')
+    const owed = owedAt(run, task)
+    if (owed.length > 0) return heldMergeClause(run, task, owed, hpipe)
     // Not "the PR is unmerged": this row is evaluated only while the orchestrator
     // is idle or has no agent, so a merged PR can sit here as long as it stays busy.
     return {
@@ -437,8 +444,68 @@ export function stallAwaiting(
   return sentence(`whatever clears ${phase}`)
 }
 
+const confirmHint = (owed: readonly OwedCheck[], hpipe: string): string =>
+  `When they answer: \`${hpipe} confirm --check ${owed[0]?.check.id} --by human\`, or with \`--waive "<why>"\` or ` +
+  '`--failed "<what they saw>"`.'
+
+/** Never "merge it": while a check is owed, a probe that names the merge puts the wrong move one paste away. */
+function heldMergeClause(run: Run, task: Task, owed: readonly OwedCheck[], hpipe: string): Awaiting {
+  const ids = idList(owed.map((o) => o.check.id))
+  const pr = `PR #${task.pr}`
+  if (task.merged_at_ms !== null) {
+    return {
+      short: awaitedFor(run, task),
+      clause: `${pr} merged before the human confirmed ${ids}. This task waits here until ${ids} ` +
+        `${owed.length === 1 ? 'is' : 'are'} confirmed or waived; there is nothing to merge.`,
+    }
+  }
+  const failed = owed.find((o) => o.state.kind === 'waiting-on-a-fix')
+  if (failed !== undefined) {
+    return {
+      short: `a fix for ${failed.check.id}`,
+      clause: `The human's check ${failed.check.id} failed on this head, and ${pr} must not be merged until it is ` +
+        `fixed: \`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\` sends it back to its worker.`,
+    }
+  }
+  return {
+    short: awaitedFor(run, task),
+    clause: `This phase waits on the human's check ${ids} before ${pr} merges, and ${pr} must not be merged until ` +
+      `they rule. ${confirmHint(owed, hpipe)}`,
+  }
+}
+
+function heldShipClause(run: Run, batch: Batch, owed: readonly OwedCheck[], hpipe: string): Awaiting {
+  const pr = batch.pr === null ? 'the batch PR' : `PR #${batch.pr}`
+  const ids = idList(owed.map((o) => o.check.id))
+  if (batch.merged_at_ms !== null) {
+    return {
+      short: `the human's check ${ids}`,
+      clause: `${pr} merged before the human ruled on ${ids}. The run waits here until ` +
+        `${owed.length === 1 ? 'it is' : 'they are'} confirmed or waived; there is nothing to merge.`,
+    }
+  }
+  const failed = owed.find((o) => o.state.kind === 'waiting-on-a-fix')
+  if (failed?.state.kind === 'waiting-on-a-fix') {
+    const failedOn = sha8(failed.state.ruling.head ?? 'unknown')
+    return {
+      short: `a fix for ${failed.check.id}, which failed on ${failedOn}`,
+      clause: `The human's check ${failed.check.id} failed on ${failedOn}: ${failed.state.ruling.note ?? ''}. This ` +
+        "phase waits on a fix, which is yours: a subagent's patch in the batch checkout, then " +
+        `\`${hpipe} batch-check\`, or a fix task through \`${hpipe} task …\`. Either moves the head, and the human ` +
+        `checks the new head; ${pr} must not be merged until they rule.`,
+    }
+  }
+  return {
+    short: `the human's check ${ids} before ${pr} merges`,
+    clause: `This phase waits on the human's check ${ids} before ${pr} merges, and ${pr} must not be merged until ` +
+      `they rule. ${confirmHint(owed, hpipe)}`,
+  }
+}
+
 function shipClause(run: Run, batch: Batch, hpipe: string): Awaiting | null {
   const pr = batch.pr === null ? 'the batch PR' : `PR #${batch.pr}`
+  const owed = run.phase === 'ship-merge' ? owedAt(run, null) : []
+  if (owed.length > 0) return heldShipClause(run, batch, owed, hpipe)
   switch (run.phase) {
     case 'ship':
       return {

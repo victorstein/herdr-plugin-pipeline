@@ -1,10 +1,12 @@
+import { sha8 } from './batch'
 import { BD_ACTOR } from './bd'
+import { fromDecision, heldForTheHuman } from './before-merge'
 import { escalatedUnanswered } from './decisions'
 import { fileHolders, TERMINAL_BAD } from './gating'
 import { phaseHoldsBead } from './held'
 import { wasAborted } from './ledger'
 import { rowRunsIn, type RunMode, TASK_ROWS } from './phases'
-import type { Run, Task } from './types'
+import type { Resolution, Run, Task } from './types'
 
 /**
  * A metadata key, not a label: bd sorts labels, and a long `hpipe:run=…` label
@@ -47,6 +49,11 @@ export type BeadStatus = 'open' | 'in_progress' | 'blocked' | 'closed'
 export interface DesiredComment {
   marker: string
   text: string
+  /**
+   * Posted only while the bead is open. A single-PR task's bead closes at landing,
+   * long before the human rules at the batch PR, and the run's record covers it from there.
+   */
+  whileOpen?: true
 }
 
 export interface DesiredBead {
@@ -70,8 +77,14 @@ export interface DesiredBead {
 export const isManagedLabel = (label: string, mode: RunMode): boolean =>
   PHASE_LABELS[mode].has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
 
-export function commentMarker(taskId: string, decisionId: string, kind: 'asked' | 'ruling'): string {
-  return `[hpipe ${taskId}/${decisionId}/${kind}]`
+/**
+ * Keyed by a decision (`asked`, `ruling`), or by a before-merge check: `before-merge`,
+ * then `r1`, `r2`, … per ruling.
+ */
+export function commentMarker(
+  taskId: string, recordId: string, kind: 'asked' | 'ruling' | 'before-merge' | `r${number}`,
+): string {
+  return `[hpipe ${taskId}/${recordId}/${kind}]`
 }
 
 export function beadOutOfSync(task: Task): boolean {
@@ -92,6 +105,35 @@ function dependencyBeads(task: Task, run: Run): string[] {
 function blockerBeads(task: Task, run: Run): string[] {
   const holders = task.phase === 'blocked-on-files' ? fileHolders(run, task).map((t) => t.bead) : []
   return [...new Set([...dependencyBeads(task, run), ...holders])]
+}
+
+function taskComments(task: Task): DesiredComment[] {
+  return [...decisionComments(task), ...checkComments(task)]
+}
+
+function rulingText(ruling: Resolution): string {
+  const on = ruling.head === null ? '' : ` on ${sha8(ruling.head)}`
+  switch (ruling.as) {
+    case 'confirmed': return `Confirmed by the human${on}`
+    case 'waived': return `Waived by the human: ${ruling.note ?? ''}`
+    case 'failed': return `Failed${on}: ${ruling.note ?? ''}`
+  }
+}
+
+function checkComments(task: Task): DesiredComment[] {
+  return (task.before_merge ?? []).flatMap((check) => {
+    const recorded = commentMarker(task.task_id, check.id, 'before-merge')
+    return [
+      {
+        marker: recorded, whileOpen: true as const,
+        text: [`Before merge, the human checks: ${check.check}${fromDecision(check)}`, '', recorded].join('\n'),
+      },
+      ...check.resolutions.map((ruling, i) => {
+        const marker = commentMarker(task.task_id, check.id, `r${i + 1}`)
+        return { marker, whileOpen: true as const, text: [rulingText(ruling), '', marker].join('\n') }
+      }),
+    ]
+  })
 }
 
 /** One per escalated question and one per ruling, each ending in the marker that makes posting it idempotent. */
@@ -135,9 +177,14 @@ export function desiredBead(task: Task, run: Run): DesiredBead {
     .map((t) => t.bead)
   const shared = {
     bead: task.bead, metadata: { [RUN_METADATA_KEY]: run.run_id },
-    blockedBy, unblockedBy, comments: decisionComments(task),
+    blockedBy, unblockedBy, comments: taskComments(task),
   }
 
+  // A merge made while the human still owes a check is recorded, but the bead waits
+  // for their ruling as an escalated decision does, rather than closing on the merge.
+  if (heldForTheHuman(run, task)) {
+    return { ...shared, status: 'blocked', assignee: BD_ACTOR, labels: [phaseLabel, AWAITING_HUMAN_LABEL] }
+  }
   if (task.merged_at_ms !== null) {
     return { ...shared, status: 'closed', assignee: BD_ACTOR, labels: [] }
   }
