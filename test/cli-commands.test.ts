@@ -1296,6 +1296,7 @@ test('the dispatched return keeps every header line above the one blank line', a
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
   expect(lines.slice(6)).toEqual([
+    expect.stringMatching(/^dispatch: .* dispatch --task t1 \(run it in the background\) — runs the steps below and stops at /),
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     expect.stringMatching(/^ {4}# its JSON gives the new checkout as \.result\.worktree\.path and its pane as /),
@@ -1806,8 +1807,10 @@ test('a rewind into research with no worker owes nothing: the dispatched brief c
   await saveRun(dir, run)
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'research', taskId: 't1' })
-  // The F10 shape: no workspace either, so the first step is a worktree, not a dispatch.
-  expect(result.text).toContain("no worker is bound, so nothing is sent — `herdr worktree create --cwd '/r' --branch b")
+  // The F10 shape: no workspace either, so the first manual step is a worktree, not a dispatch.
+  expect(result.text).toContain('no worker is bound, so nothing is sent — `' +
+    `${hpipeCommand(ctx().pluginRoot)} dispatch --task t1\` (run it in the background) runs every step; by hand, ` +
+    "`herdr worktree create --cwd '/r' --branch b")
   expect(result.text.indexOf('herdr agent start')).toBeLessThan(result.text.indexOf('dispatch --task t1 --pane <root pane>'))
   expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
 })

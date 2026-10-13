@@ -8,6 +8,9 @@ import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
 import { landCommand, landsCleanSync, landsUnmergedSync, sha8 } from './batch'
 import { CHECK_REL, repoCheck } from './check'
+import {
+  dispatchUnderWay, type DispatchLocks, NO_DISPATCHES, staleDispatchLock, underWayClause,
+} from './dispatch-lock'
 import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
 import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
@@ -22,7 +25,7 @@ import type {
 } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
-  remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
+  remainingDispatchSteps, startWorkerCommand, unbriefedWorker, undispatchedWorker, unstartedWorker,
 } from './unstarted'
 
 export interface StatusSupervisor {
@@ -182,7 +185,21 @@ export function abandonParagraph(hpipe: string, run: Run, task: Task | null): st
     'stay queued; abandoning it moves them to `blocked-on-failure`.'
 }
 
-function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds = {}): Move {
+/**
+ * A dispatch under way for this task is not the orchestrator's lapse, and the
+ * advice it would otherwise get — start an agent, hand it the brief — is a step
+ * that dispatch is taking now.
+ */
+function dispatchingNow(run: Run, task: Task, hpipe: string, now: number, dispatches: DispatchLocks): Move | null {
+  const owesADispatch = unstartedWorker(run, task) !== null || undispatchedWorker(run, task) !== null ||
+    unbriefedWorker(run, task) !== null
+  const lock = owesADispatch ? dispatchUnderWay(dispatches, run, task) : null
+  return lock === null ? null : { waitsOnYou: false, clause: underWayClause(lock, task, hpipe, now) }
+}
+
+function moveFor(
+  run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
+): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
   const notYours = (clause: string): Move => ({ waitsOnYou: false, clause })
@@ -217,6 +234,8 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       : notYours(`nothing for you — waiting for ${awaitedFor(run, task)}`)
   }
   if (row.actor === 'worker') {
+    const underWay = dispatchingNow(run, task, hpipe, now, dispatches)
+    if (underWay) return underWay
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
@@ -342,9 +361,9 @@ function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move 
  * one, and the footer renders its clause through `actionFor` separately.
  */
 export function waitsOnYou(
-  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {},
+  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
 ): boolean {
-  return moveFor(run, task, '', now, holds).waitsOnYou
+  return moveFor(run, task, '', now, holds, dispatches).waitsOnYou
 }
 
 /**
@@ -355,8 +374,9 @@ export function waitsOnYou(
  */
 export function actionFor(
   run: Run, task: Task, hpipe: string, now: number = Date.now(), holds: PaneHolds = {},
+  dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
-  return moveFor(run, task, hpipe, now, holds).clause
+  return moveFor(run, task, hpipe, now, holds, dispatches).clause
 }
 
 /**
@@ -365,8 +385,10 @@ export function actionFor(
  * a live run. The grace's full recipe is left to `show`: on a line where nothing
  * is owed yet it only buried the task.
  */
-function taskLineMove(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds): string {
-  const move = moveFor(run, task, hpipe, now, holds)
+function taskLineMove(
+  run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds, dispatches: DispatchLocks,
+): string {
+  const move = moveFor(run, task, hpipe, now, holds, dispatches)
   if (move.waitsOnYou) return ''
   if (move.clause.startsWith(DISPATCH_UNDER_WAY)) {
     return ` — ${DISPATCH_UNDER_WAY} — see \`${hpipe} show --task ${task.task_id}\``
@@ -389,12 +411,12 @@ function runMove(run: Run): string | null {
   return 'YOUR move: the whole-branch review — the branch-review prompt names its verdict path'
 }
 
-function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): string[] {
+function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds, dispatches: DispatchLocks): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const own = runMove(run)
   const runLine = own === null ? [] : [`    run [${run.phase} ${ageMinutes(run.phase_entered_at, now)}m] — ${own}`]
   const lines = [...runLine, ...byId.flatMap((task) => {
-    const move = moveFor(run, task, hpipe, now, holds)
+    const move = moveFor(run, task, hpipe, now, holds, dispatches)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
     return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
@@ -517,6 +539,13 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
   return lines
 }
 
+/** A stale lock changes no advice; it is named so the leftover file is not a mystery. */
+function staleDispatchWarning(run: Run, hpipe: string, dispatches: DispatchLocks): string[] {
+  const stale = staleDispatchLock(dispatches, run)
+  return stale === null ? [] : [`  ⚠ a dispatch lock for this repo is left by pid ${stale.pid}, which is gone; the ` +
+    `next \`${hpipe} dispatch\` cleans it up`]
+}
+
 function intakeWarning(run: Run, hpipe: string): string[] {
   if (run.phase !== 'execute' || run.intake_closed || run.tasks.length === 0) return []
   if (!run.tasks.every(hasStoppedMoving)) return []
@@ -595,7 +624,7 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
-  panes: PaneObservations = {}, tools: string | null = null,
+  panes: PaneObservations = {}, tools: string | null = null, dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
   const holds = panes.holds ?? {}
   const lines: string[] = []
@@ -671,11 +700,12 @@ export function formatStatus(
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds))
+      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds, dispatches))
     }
 
     lines.push(...intakeWarning(run, hpipe))
-    lines.push(...waitingOnYou(run, hpipe, now, holds))
+    lines.push(...staleDispatchWarning(run, hpipe, dispatches))
+    lines.push(...waitingOnYou(run, hpipe, now, holds, dispatches))
     lines.push(...waitingOnTheHuman(run, hpipe, now))
     lines.push(...taskWarnings(run, hpipe, now))
     lines.push(...deliveryWarnings(run, livePanes, now, panes))

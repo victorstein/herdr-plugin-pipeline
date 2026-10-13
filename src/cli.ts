@@ -30,9 +30,19 @@ import { detectCycle, filesOverlap, gateStatus, lockingFiles } from './lib/gatin
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
-  runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  wasAborted, withBatch, writeOrchestrator,
+  type DispatchLock, type DispatchMode, type HeldDispatchLock, holderLine, type LockDeps, type LockTaken,
+  readDispatchLocks, REAL_LOCK_DEPS, takeDispatchLock,
+} from './lib/dispatch-lock'
+import {
+  dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
+} from './lib/dispatch-process'
+import {
+  type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask,
+} from './lib/dispatch-steps'
+import {
+  allOrchestratorPanes, BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun,
+  retryOnStaleRun, runById, runForRepo, runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal,
+  unlandedSaveMessage, wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
@@ -932,10 +942,100 @@ export type ReadPaneLimit = (paneId: string) => Promise<LimitReading | null>
 
 const cliReadPaneLimit: ReadPaneLimit = (paneId) => readLimit(new Herdr(), paneId)
 
+/** What hands a brief to a pane, on both the manual `--pane` form and the one-command dispatch. */
+export interface HandOver {
+  send: SendBrief
+  recordPane: typeof recordWorkerPane
+  claim: ClaimBead
+  readPaneLimit: ReadPaneLimit
+}
+
+type HandedOver = { ok: true; unrecorded: string | null } | { ok: false; text: string }
+
+async function handOverBrief(ctx: Ctx, run: Run, task: Task, paneId: string, deps: HandOver): Promise<HandedOver> {
+  // A brief typed into a pane Claude's usage limit has stopped is rejected on
+  // arrival, yet herdr confirms it, and the task would wait on a worker that never
+  // read it.
+  const limit = await deps.readPaneLimit(paneId)
+  if (limit?.line != null && isAgentReady(limit.status)) {
+    const reset = resetText(limit.line)
+    return {
+      ok: false,
+      text: `the agent in ${paneId} is stopped by Claude's usage limit` +
+        `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`,
+    }
+  }
+
+  // Before the send: a brief cannot be recalled, and a bead someone else holds
+  // must refuse the dispatch rather than surface later as a reconciler failure.
+  // Until `recordPane` clears `awaiting_brief` the desired bead is still open and
+  // unassigned, so a reconciler pass in between un-assigns this claim once and the
+  // next pass re-assigns it: harmless, and not worth a ledger write before the send.
+  const claimed = await deps.claim(run.repo_key, task.bead)
+  if (isBdFailure(claimed)) {
+    return {
+      ok: false, text: `bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`,
+    }
+  }
+
+  const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
+  const sent = await deps.send(paneId, brief)
+  if (!sent.ok) {
+    const reason = `brief for ${task.task_id} not confirmed in ${paneId}: ` +
+      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
+    // Only these two come back after herdr accepted the text; every other code
+    // is a rejection before anything reached the pane.
+    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
+    return {
+      ok: false,
+      text: mayHaveLanded
+        ? `${reason}\n  → herdr pane read ${paneId} before retrying: the brief was ` +
+          'submitted and may already be in the pane, and a retry would send it twice; if it ' +
+          `sits unsubmitted in the input box, \`herdr agent send-keys ${paneId} ctrl+c\` ` +
+          'empties it while the worker is idle'
+        : `${reason}\n  → nothing was sent; fix the cause and run it again`,
+    }
+  }
+
+  const unrecorded = await deps.recordPane(ctx, {
+    runId: run.run_id, taskId: task.task_id, paneId, briefedPhase: taskRow('queued').onClear as TaskPhase,
+  })
+  return { ok: true, unrecorded }
+}
+
+/**
+ * Null when `ps` cannot say when this process started. A guess would not match the
+ * time later readers get, and the live lock would read as stale and be taken over.
+ */
+async function dispatchHolder(
+  ctx: Ctx, run: Run, mode: DispatchMode, task: string | null, now: number, lockDeps: LockDeps,
+): Promise<DispatchLock | null> {
+  const startedAt = await lockDeps.startedAt(process.pid)
+  if (startedAt === null) return null
+  return {
+    session: ctx.session, run_id: run.run_id, mode, task, step: null, since: now,
+    pid: process.pid, started_at_ms: startedAt, bootstrap: null,
+  }
+}
+
+const UNKNOWN_START = "could not read this process's start time with `ps`, which the dispatch lock needs to tell " +
+  'a live dispatch from a dead one; nothing was started'
+
+function lockRefusal(ctx: Ctx, run: Run, taken: Exclude<LockTaken, { ok: true }>, wanted: string | null): string {
+  if ('refusal' in taken) return taken.refusal
+  const holder = taken.holder
+  const takesIt = holder.mode === 'ready' && holder.session === ctx.session && holder.run_id === run.run_id
+    ? `; it takes every task that becomes ready before it ends${wanted === null ? '' : `, ${wanted} included`}`
+    : ''
+  return `${holderLine(holder, Date.now())}: one dispatch runs per repo at a time${takesIt}. Run this again once it ` +
+    'ends'
+}
+
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
   claim: ClaimBead = cliClaimBead(ctx.stateDir), readPaneLimit: ReadPaneLimit = cliReadPaneLimit,
+  lockDeps: LockDeps = REAL_LOCK_DEPS,
 ): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
@@ -983,52 +1083,267 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
       'root pane, from `herdr pane list --workspace <its workspace>`')
   }
 
-  // A brief typed into a pane Claude's usage limit has stopped is rejected on
-  // arrival, yet herdr confirms it, and the task would wait on a worker that never
-  // read it.
-  const limit = await readPaneLimit(input.paneId)
-  if (limit?.line != null && isAgentReady(limit.status)) {
-    const reset = resetText(limit.line)
-    return fail(`the agent in ${input.paneId} is stopped by Claude's usage limit` +
-      `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`)
+  // Re-checking `awaiting_brief` just before the send cannot close the window in
+  // which a one-command dispatch sends the same brief; only exclusion can.
+  const holding = await dispatchHolder(ctx, run, 'pane', task.task_id, Date.now(), lockDeps)
+  if (holding === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, { ...holding, step: 'brief' }, lockDeps)
+  if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task.task_id))
+  const untrap = trapDispatchSignals({
+    lock: taken.lock, children: noChildren(), interrupt: new DispatchInterrupt(), say: (line) => { console.log(line) },
+  })
+  let handed: HandedOver
+  try {
+    // Read again under the lock: a dispatch that held it may have handed this pane its brief.
+    const fresh = await runById(ctx.stateDir, ctx.session, run.run_id)
+    const current = fresh?.tasks.find((t) => t.task_id === task.task_id)
+    if (!fresh || !current) return fail(`${task.task_id} is gone from the ledger; nothing was sent`)
+    if (current.phase !== briefedPhase) return fail(`${task.task_id} is now in ${current.phase}; nothing was sent`)
+    if (current.pane_id === input.paneId && current.awaiting_brief !== true) {
+      return fail(`${task.task_id}'s worker in ${input.paneId} already has the brief; ` +
+        `\`${hpipeCommand(ctx.pluginRoot)} brief --task ${task.task_id}\` prints it to reread`)
+    }
+    handed = await handOverBrief(ctx, fresh, current, input.paneId, { send, recordPane, claim, readPaneLimit })
+  } finally {
+    taken.lock.release()
+    untrap()
   }
-
-  // Before the send: a brief cannot be recalled, and a bead someone else holds
-  // must refuse the dispatch rather than surface later as a reconciler failure.
-  // Until `recordPane` clears `awaiting_brief` the desired bead is still open and
-  // unassigned, so a reconciler pass in between un-assigns this claim once and the
-  // next pass re-assigns it: harmless, and not worth a ledger write before the send.
-  const claimed = await claim(run.repo_key, task.bead)
-  if (isBdFailure(claimed)) {
-    return fail(`bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`)
-  }
-
-  const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  const sent = await send(input.paneId, brief)
-  if (!sent.ok) {
-    const reason = `brief for ${task.task_id} not confirmed in ${input.paneId}: ` +
-      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
-    // Only these two come back after herdr accepted the text; every other code
-    // is a rejection before anything reached the pane.
-    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
-    return fail(mayHaveLanded
-      ? `${reason}\n  → herdr pane read ${input.paneId} before retrying: the brief was ` +
-        'submitted and may already be in the pane, and a retry would send it twice; if it ' +
-        `sits unsubmitted in the input box, \`herdr agent send-keys ${input.paneId} ctrl+c\` ` +
-        'empties it while the worker is idle'
-      : `${reason}\n  → nothing was sent; fix the cause and run it again`)
-  }
+  if (!handed.ok) return fail(handed.text)
 
   const delivered = `brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`
-  const unrecorded = await recordPane(ctx, {
-    runId: run.run_id, taskId: task.task_id, paneId: input.paneId, briefedPhase,
-  })
-  if (unrecorded === null) return ok(delivered)
+  if (handed.unrecorded === null) return ok(delivered)
   // Still `ok`, and never "run it again": the brief has landed, and a re-run is
   // let through by the briefed-phase guard and would hand the worker a second one.
-  return ok(`${delivered}\n  ⚠ but its pane was not recorded (${unrecorded}). Do not run ` +
+  return ok(`${delivered}\n  ⚠ but its pane was not recorded (${handed.unrecorded}). Do not run ` +
     '`dispatch --task` again — that would brief the worker twice. The pane binds on its own ' +
     'once herdr reports the agent.')
+}
+
+/** Everything `cmdDispatchSteps` drives outside the ledger, so a test can stand in for herdr, git and the process. */
+export interface DispatchWiring {
+  herdr: DispatchHerdr
+  git: DispatchGit
+  base: DispatchBaseFor
+  runBootstrap: (checkout: string, logPath: string, lock: HeldDispatchLock) => Promise<CheckRun>
+  handOver: HandOver
+  lock?: LockDeps
+  say: (line: string) => void
+  now: () => number
+  sleep: (ms: number) => Promise<void>
+  /** Installs the signal traps for the life of the dispatch, and returns their removal. */
+  trap: (lock: HeldDispatchLock) => () => void
+  /** Never settles while a signal is being handled, so nothing outruns the handler. */
+  gate: () => Promise<void>
+}
+
+function realDispatchWiring(ctx: Ctx): DispatchWiring {
+  const herdr = new Herdr()
+  const children = noChildren()
+  const interrupt = new DispatchInterrupt()
+  const say = (line: string): void => { console.log(line) }
+  return {
+    herdr: dispatchHerdr(herdr, children),
+    git: dispatchGit,
+    base: freshDispatchBase,
+    runBootstrap: (checkout, logPath, lock) => runTrackedBootstrap(checkout, logPath, lock, children),
+    handOver: {
+      send: (paneId, text) => herdr.agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS),
+      recordPane: recordWorkerPane,
+      claim: cliClaimBead(ctx.stateDir),
+      readPaneLimit: cliReadPaneLimit,
+    },
+    say,
+    now: Date.now,
+    sleep: (ms) => Bun.sleep(ms),
+    trap: (lock) => trapDispatchSignals({ lock, children, interrupt, say }),
+    gate: () => interrupt.gate(),
+  }
+}
+
+function dispatchLedger(ctx: Ctx): DispatchLedger {
+  const briefedPhase = taskRow('queued').onClear as TaskPhase
+  // Best effort: a lost record costs one bootstrap more, or a skip the hook's binding undoes first.
+  const setBootstrapped: DispatchLedger['setBootstrapped'] = async (runId, taskId, record) => {
+    try {
+      await retryOnStaleRun(async () => {
+        const run = await runById(ctx.stateDir, ctx.session, runId)
+        const task = run?.tasks.find((t) => t.task_id === taskId)
+        if (!run || !task) return
+        if (record === null) {
+          if (task.bootstrapped === undefined) return
+          delete task.bootstrapped
+        } else {
+          task.bootstrapped = record
+        }
+        await saveRun(ctx.stateDir, run)
+      })
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+    }
+  }
+  return {
+    reread: async (runId, taskId) => {
+      const run = await runById(ctx.stateDir, ctx.session, runId)
+      const task = run?.tasks.find((t) => t.task_id === taskId)
+      return run && task ? { run, task } : null
+    },
+    setBootstrapped,
+    recordPane: (runId, taskId, paneId) => recordWorkerPane(ctx, { runId, taskId, paneId, briefedPhase }),
+    sessionRuns: () => listRuns(ctx.stateDir, ctx.session),
+    orchestratorPanes: () => allOrchestratorPanes(ctx.stateDir, ctx.session),
+  }
+}
+
+/** Why `hpipe dispatch --task` will not take this task, or null when it is owed its brief. */
+function notOwedItsBrief(run: Run, task: Task, hpipe: string): string | null {
+  if (unbriefedWorker(run, task) !== null) return null
+  const id = task.task_id
+  if (runRow(run.phase).releasesPane === true) return `run ${run.run_id} is in ${run.phase}: it drives no task`
+  if (task.phase === 'queued') {
+    const gate = gateStatus(task, run.tasks)
+    const waitingOn = gate.state === 'ready' ? '' : `: waiting on ${gate.on.join(', ')}`
+    return `${id} is still queued${waitingOn} — you will be told when it is ready`
+  }
+  if (taskPhaseIsTerminal(task.phase)) return `${id} is finished (phase: ${task.phase}) — there is no worker to brief`
+  const briefedPhase = taskRow('queued').onClear
+  const reread = `\`${hpipe} brief --task ${id}\` prints it to reread`
+  if (task.phase === briefedPhase) return `${id}'s worker has the brief; ${reread}`
+  if (taskRow(task.phase).actor === 'worker' && task.pane_id === null) {
+    const setUp = task.workspace_id === null
+      ? dispatchWorkerCommand(run, task, hpipe)
+      : startWorkerCommand(run, task, task.workspace_id, hpipe)
+    return `${id} is in ${task.phase}, past ${briefedPhase}, with no worker: ${setUp}`
+  }
+  return `${id} is already in ${task.phase}, past ${briefedPhase} — its worker has the brief; ${reread}`
+}
+
+const byTaskId = (a: Task, b: Task): number => a.task_id.localeCompare(b.task_id, undefined, { numeric: true })
+
+/**
+ * Takes every task owed its brief, in task id order, and scans again before it
+ * lets go of the lock: a \`Dispatch tN\` prompt for a task that became ready
+ * meanwhile would send the orchestrator to a command the lock refuses.
+ */
+async function dispatchReady(ctx: Ctx, runId: string, deps: DispatchDeps): Promise<CmdResult> {
+  const attempted = new Set<string>()
+  const dispatched: string[] = []
+  for (;;) {
+    const run = await runById(ctx.stateDir, ctx.session, runId)
+    if (!run) return fail(`run ${runId} is gone from the ledger`)
+    const owed = run.tasks
+      .filter((task) => unbriefedWorker(run, task) !== null && !attempted.has(task.task_id))
+      .sort(byTaskId)
+    const [next, ...behind] = owed
+    if (next === undefined) break
+    attempted.add(next.task_id)
+    if (!(await dispatchTask(run, next, deps))) {
+      return fail([
+        dispatched.length === 0 ? 'dispatched nothing' : `dispatched ${dispatched.join(', ')}`,
+        `stopped at ${next.task_id}`,
+        ...(behind.length === 0 ? [] : [`not started: ${behind.map((task) => task.task_id).join(', ')}`]),
+      ].join('; '))
+    }
+    dispatched.push(next.task_id)
+  }
+  return ok(dispatched.length === 0
+    ? 'nothing to dispatch: no task in this run is waiting for its brief'
+    : `dispatched ${dispatched.join(', ')}`)
+}
+
+export interface DispatchStepsInput {
+  /** Null dispatches every task owed its brief. */
+  taskId: string | null
+  repoKey: string | null
+  runId: string | null
+  socketPath: string
+}
+
+/**
+ * The whole dispatch block, run by the CLI and never by the supervisor: its tick
+ * is serial, a bootstrap takes minutes, and a failure there has nobody to read it.
+ * The orchestrator runs it in the background, so there is no foreground timeout
+ * to fit under.
+ */
+export async function cmdDispatchSteps(
+  ctx: Ctx, input: DispatchStepsInput, wiring: DispatchWiring = realDispatchWiring(ctx),
+): Promise<CmdResult> {
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  let run: Run
+  let task: Task | null = null
+  if (input.taskId === null) {
+    const found = await resolveFor(ctx, {
+      runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'unfinished',
+    }, null)
+    if (!found.ok) return found.result
+    run = found.value
+  } else {
+    const found = await resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'unfinished', escape: null,
+    })
+    if (!found.ok) return found.result
+    ;({ run, task } = found.value)
+  }
+
+  // Outside the run's own session, herdr and the ledger would both be the wrong ones.
+  if (input.socketPath === '' || input.socketPath !== run.socket_path) {
+    return fail(`hpipe dispatch drives herdr itself: run it from a pane of session ${run.session}`)
+  }
+  if (task !== null) {
+    const refusal = notOwedItsBrief(run, task, hpipe)
+    if (refusal !== null) return fail(refusal)
+  }
+
+  const lockDeps = wiring.lock ?? REAL_LOCK_DEPS
+  const mode = task === null ? 'ready' : 'task'
+  const wanted = await dispatchHolder(ctx, run, mode, task?.task_id ?? null, wiring.now(), lockDeps)
+  if (wanted === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, wanted, lockDeps)
+  if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task?.task_id ?? null))
+  const lock = taken.lock
+  const untrap = wiring.trap(lock)
+  // A child a signal stopped answers with a failure, and the handler, not that answer, says what happened.
+  const afterGate = async <T>(answer: T): Promise<T> => {
+    await wiring.gate()
+    return answer
+  }
+  const deps: DispatchDeps = {
+    herdr: { ...wiring.herdr, agentStart: async (request) => afterGate(await wiring.herdr.agentStart(request)) },
+    git: wiring.git,
+    ledger: dispatchLedger(ctx),
+    base: (r, t) => wiring.base(r.repo_root, dependencyMerges(t, r.tasks), r.batch?.branch ?? null),
+    runBootstrap: async (checkout, logPath) => afterGate(await wiring.runBootstrap(checkout, logPath, lock)),
+    bootstrapLog: (t) =>
+      join(ctx.stateDir, 'runs', ctx.session, `${run.run_id}.dispatch`, `${t.task_id}-bootstrap.log`),
+    brief: async (r, t, paneId) => {
+      const handed = await afterGate(await handOverBrief(ctx, r, t, paneId, wiring.handOver))
+      if (!handed.ok) return handed
+      const delivered = `claimed ${t.bead}; delivered to ${paneId}, and the worker is working on it`
+      if (handed.unrecorded === null) return { ok: true, text: delivered }
+      return {
+        ok: true,
+        text: `${delivered}, but its pane was not recorded (${handed.unrecorded}); it binds on its own once herdr ` +
+          `reports the agent — do not dispatch ${t.task_id} again`,
+      }
+    },
+    at: async (taskId, step) => {
+      await wiring.gate()
+      await lock.at(taskId, step, wiring.now())
+    },
+    say: wiring.say,
+    now: wiring.now,
+    sleep: wiring.sleep,
+    hpipe,
+  }
+  try {
+    const result = task === null
+      ? await dispatchReady(ctx, run.run_id, deps)
+      : (await dispatchTask(run, task, deps) ? ok('') : fail(''))
+    await wiring.gate()
+    return result
+  } finally {
+    lock.release()
+    untrap()
+  }
 }
 
 /**
@@ -2648,6 +2963,7 @@ export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkToo
     Date.now(),
     panes,
     toolsLine(await tools()),
+    await readDispatchLocks(ctx.stateDir, runs.map((run) => run.repo_key)),
   ))
 }
 
@@ -2796,7 +3112,9 @@ const USAGE: Record<string, string[]> = {
   bead: ['hpipe bead show <id>'],
   next: ['hpipe next [--limit <n>] [--label <label>]   (--label filters bv\'s top 10 recommendations, not every bead)'],
   dispatch: [
-    'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
+    'hpipe dispatch --task <id> [--run <run-id>]                    (every step: worktree, bootstrap, agent, brief)',
+    'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]   (the brief only, to an agent you started)',
+    'hpipe dispatch --ready [--run <run-id>]                         (every task waiting for its brief)',
     'hpipe dispatch --done [--run <run-id>]',
   ],
   status: ['hpipe status'],
@@ -2828,7 +3146,9 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set([
+  '--done', '--ready', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS,
+])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
 const FREE_TEXT_FLAGS = new Set([
@@ -2880,9 +3200,12 @@ async function dispatch(argv: string[]): Promise<number> {
     console.log(commandUsage(usage))
     return 0
   }
-  if (command === 'dispatch' && rest.includes('--done') === (flag(rest, 'task') !== null)) {
-    console.error(commandUsage(usage))
-    return 1
+  if (command === 'dispatch') {
+    const forms = ['--done', '--task', '--ready'].filter((form) => rest.includes(form))
+    if (forms.length !== 1 || (rest.includes('--pane') && !rest.includes('--task'))) {
+      console.error(commandUsage(usage))
+      return 1
+    }
   }
   const valueless = command === 'start' ? null : identifierWithoutValue(rest)
   if (valueless !== null) {
@@ -2978,12 +3301,21 @@ async function dispatch(argv: string[]): Promise<number> {
         })
         break
       }
-      out = await cmdDispatchTask(ctx, {
-        taskId: flag(rest, 'task')!,
-        paneId: flag(rest, 'pane') ?? '',
+      if (rest.includes('--pane')) {
+        out = await cmdDispatchTask(ctx, {
+          taskId: flag(rest, 'task')!,
+          paneId: flag(rest, 'pane') ?? '',
+          repoKey: repo?.repoKey ?? null,
+          runId: flag(rest, 'run'),
+        }, (paneId, text) => new Herdr().agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS))
+        break
+      }
+      out = await cmdDispatchSteps(ctx, {
+        taskId: rest.includes('--ready') ? null : flag(rest, 'task')!,
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
-      }, (paneId, text) => new Herdr().agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS))
+        socketPath: process.env.HERDR_SOCKET_PATH ?? '',
+      })
       break
 
     case 'rewind':
@@ -3142,7 +3474,8 @@ async function dispatch(argv: string[]): Promise<number> {
       return 1
   }
 
-  console.log(out.text)
+  // A step-running dispatch has said its lines as it went.
+  if (out.text !== '') console.log(out.text)
   return out.ok ? 0 : 1
 }
 

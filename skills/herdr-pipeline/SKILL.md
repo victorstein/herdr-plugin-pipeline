@@ -29,14 +29,15 @@ behaviour; this skill does.
   needs it, and the allow rule that would cover it. A denial is Claude Code's permission check, not
   GitHub or herdr refusing. Don't work around it or carry on with other steps first: an orchestrator
   always has more queued, and the skipped step stalls the run. A run needs `git push`, `gh pr create`,
-  `gh pr merge`, `git pull`, `herdr worktree create`, `herdr agent start` and `hpipe`; ask for them
-  before intake.
+  `gh pr merge`, `git pull` and `hpipe`; ask for them before intake. `hpipe` is the one permission
+  dispatch needs: `hpipe dispatch` runs `herdr worktree create` and `herdr agent start` itself, so
+  those two matter only when you dispatch by hand.
 - `--surface <s>` needs `<repo>/.claude/agents/<s>-dev.md`. A repo may declare an executable
   `.claude/pipeline-bootstrap` to set up fresh worktrees.
 - Run Claude with Opus as the default model. The orchestrator, the workers and every reviewer
   inherit it; only `implement`'s coding subagent is pinned, to Sonnet. Effort is pinned by tier
-  instead: the `agent start` line in the dispatch block carries the worker's `--effort`, so run it as
-  printed, and never drop the flag. Each review prompt names its own `effort:`; a standard task's
+  instead: `hpipe dispatch` starts the worker with its `--effort`, and so does the `agent start` line
+  in the dispatch block, so run that as printed when you dispatch by hand, and never drop the flag. Each review prompt names its own `effort:`; a standard task's
   `plan-review` runs at `medium`, below its other reviews, and the `effort:` line says so.
 
 ## Running a batch
@@ -86,14 +87,19 @@ behaviour; this skill does.
    **While it runs**); heavy never skips it, and runs its spec review at the highest effort. A heavy task already in `pr-review-intent` or
    `pr-review-quality` from before an upgrade finishes it and goes on to `ci` (or `land-queue`).
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
-   `Dispatch tN` prompt carrying the same block — run it then) or a brief with a
-   **`dispatch, in order:`** block. **Run that block exactly
-   as printed**: `herdr worktree create … --base <commit>` (the fetched commit — never `--base main`;
-   the `#` line under it says where its JSON gives the new checkout's path and pane), bootstrap (an
-   `# optional:` step when the repo's setup script is not wired in as `.claude/pipeline-bootstrap`),
-   `herdr agent start … -- --dangerously-skip-permissions`, then
-   `hpipe dispatch --task <id> --pane <root pane>`, which submits the brief and confirms it landed. It claims the task's bead first; if bd refuses, nothing is sent.
-   `dispatch --task` only works while the task is in `research`.
+   `Dispatch tN` prompt) or a brief with a `dispatch:` line and a **`dispatch, in order:`** block.
+   Register every task, then run **`hpipe dispatch --ready`** with the Bash tool's
+   `run_in_background` and end your turn (`hpipe dispatch --task <id>` for one task, as for a
+   `Dispatch tN` prompt). For each task owed its brief it fetches the base, runs
+   `herdr worktree create … --base <commit>`, the repo's `.claude/pipeline-bootstrap` in the new
+   checkout, `herdr agent start … -- --dangerously-skip-permissions --effort <tier's>`, and hands
+   the brief over, claiming the task's bead first; it skips steps already done and stops at the first
+   failure. Read its step lines when the completion notice arrives. One dispatch runs per repo at a
+   time: a second is refused, naming the first. The block is the manual fallback — run it exactly as
+   printed, ending in `hpipe dispatch --task <id> --pane <root pane>`, which submits the brief to the
+   agent you started and confirms it landed. `hpipe dispatch --task` only takes a task in `research`
+   that is still owed its brief; the `--pane` form takes a task in `research`, but never a pane that
+   already has the brief.
 4. After the last task: `hpipe dispatch --done`. Until then the run can never finish. Registering
    another task later reopens intake — run `dispatch --done` again afterwards.
 
@@ -143,7 +149,8 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 |---|---|
 | Task `escalated` | `hpipe rewind <run> <phase> --task <id>` resumes it (status prints the exact command); `hpipe rewind <run> failed --task <id>` abandons it. `release` is NOT for this |
 | `⚠ stuck input in <pane>` | A human's unsubmitted text sits in that pane's input box (often the user's own draft in the orchestrator pane); the supervisor holds prompts rather than overwrite it. Tell the user — it's their text to submit or clear (ctrl+c). Don't send keys to it yourself. Delivery resumes the next tick after the box is empty |
-| Worker pane closed / task `failed` | A closed pane fails the task (in `merge`/`close` it only releases the pane). `hpipe rewind <run> <phase> --task <id>`, then follow the advice `hpipe status` prints (`herdr worktree open`, or `create` if no checkout exists; `agent start`; `dispatch --task` only if back in `research`). The rewind queues the brief + phase prompt for the new agent — don't also paste a brief. Base for any new worktree: the `base:` line `hpipe show --task <id>` prints |
+| Worker pane closed / task `failed` | A closed pane fails the task (in `merge`/`close` it only releases the pane). `hpipe rewind <run> <phase> --task <id>`, then follow the advice `hpipe status` prints: back in `research` that is `hpipe dispatch --task <id>`; past it, `herdr worktree open` (or `create` if no checkout exists) and `agent start`. The rewind queues the brief + phase prompt for the new agent — don't also paste a brief. Base for any new worktree: the `base:` line `hpipe show --task <id>` prints |
+| `hpipe dispatch` stopped at `<step>` | Fix what its last line names, then run the same command again: it skips every step already done. `worktree`: the ledger and herdr disagree about the task's workspace, or a checkout has no workspace bound — it names the `herdr worktree open` or `hpipe forget` step. `bootstrap`: its log tail says why. `agent`/`brief`: `herdr pane read` the pane it names. It refuses while another dispatch holds the repo, naming it: wait for that one's completion notice |
 | Orchestrator pane died / replaced | Run inside the new orchestrator pane (it claims the pane it runs in): `herdr plugin action invoke claim --plugin stein.pipeline`. Held prompts and a catch-up digest follow |
 | Supervisor dead | `herdr plugin action invoke supervisor --plugin stein.pipeline` |
 | Task blocked behind a failed sibling's `--files` | `hpipe release --task <id>` |

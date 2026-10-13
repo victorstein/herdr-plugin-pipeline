@@ -44,39 +44,64 @@ export const CHECK_DEADLINE_MS = 9 * 60_000
 
 const spoken = (ms: number): string => (ms % 60_000 === 0 ? `${ms / 60_000}m` : `${ms / 1000}s`)
 
+export interface LoggedRunOptions {
+  deadlineMs: number
+  /** How the script's process group is stopped at the deadline; SIGKILL at once unless the caller grants a grace. */
+  stop?: (pgid: number) => Promise<void>
+  /** Hears the script's pid, which is also its process group. */
+  onStart?: (pgid: number) => void
+}
+
+async function killGroupNow(pgid: number): Promise<void> {
+  try {
+    process.kill(-pgid, 'SIGKILL')
+  } catch {
+    // Already gone.
+  }
+}
+
 /**
- * Runs the repo's check in `checkout`, writing everything it prints to `logPath`.
- * Never in the supervisor's tick, which is serial: a test suite takes minutes. Its
- * own process group, so a deadline stops whatever the check started too.
+ * Runs the repo's `rel` script in `checkout`, writing everything it prints to
+ * `logPath`. Never in the supervisor's tick, which is serial: a test suite or a
+ * bootstrap takes minutes. Its own process group, so a deadline stops whatever
+ * the script started too.
  */
-export async function runCheck(checkout: string, logPath: string, deadlineMs = CHECK_DEADLINE_MS): Promise<CheckRun> {
+export async function runLogged(
+  checkout: string, rel: string, logPath: string, options: LoggedRunOptions,
+): Promise<CheckRun> {
   mkdirSync(dirname(logPath), { recursive: true })
   const log = openSync(logPath, 'w')
+  const deadline: { hit: boolean; stopped: Promise<void> } = { hit: false, stopped: Promise.resolve() }
   let code: number
-  let timedOut = false
   try {
-    const proc = Bun.spawn([join(checkout, CHECK_REL)], {
+    const proc = Bun.spawn([join(checkout, rel)], {
       cwd: checkout, stdin: 'ignore', stdout: log, stderr: log, detached: true,
     })
+    options.onStart?.(proc.pid)
     const timer = setTimeout(() => {
-      timedOut = true
-      try { process.kill(-proc.pid, 'SIGKILL') } catch { proc.kill('SIGKILL') }
-    }, deadlineMs)
+      deadline.hit = true
+      deadline.stopped = (options.stop ?? killGroupNow)(proc.pid)
+    }, options.deadlineMs)
     try {
       code = await proc.exited
     } finally {
       clearTimeout(timer)
     }
+    await deadline.stopped
   } catch (error) {
-    writeFileSync(logPath, `${CHECK_REL} could not be run: ${String(error)}\n`)
+    writeFileSync(logPath, `${rel} could not be run: ${String(error)}\n`)
     code = -1
   } finally {
     closeSync(log)
   }
-  if (timedOut) appendFileSync(logPath, `\n${CHECK_REL} was stopped after ${spoken(deadlineMs)}\n`)
+  if (deadline.hit) appendFileSync(logPath, `\n${rel} was stopped after ${spoken(options.deadlineMs)}\n`)
   const lines = readFileSync(logPath, 'utf8').replace(/\n+$/, '').split('\n')
   const tail = lines.slice(-TAIL_LINES).join('\n')
-  return timedOut ? { code, tail, timedOutAfterMs: deadlineMs } : { code, tail }
+  return deadline.hit ? { code, tail, timedOutAfterMs: options.deadlineMs } : { code, tail }
+}
+
+export function runCheck(checkout: string, logPath: string, deadlineMs = CHECK_DEADLINE_MS): Promise<CheckRun> {
+  return runLogged(checkout, CHECK_REL, logPath, { deadlineMs })
 }
 
 /** How a refusal names a check that did not pass. */

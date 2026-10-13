@@ -1502,6 +1502,140 @@ is a **finding**.
 
 ---
 
+## 12. One-command dispatch
+
+`hpipe dispatch --task <id>` and `hpipe dispatch --ready` drive herdr from the CLI: `worktree
+create`, the repo's bootstrap, `agent start` and the brief. The unit and process tests stand in for
+herdr, so only this run proves herdr answers the way they assume. Fresh `pipesmokeN` session,
+`victorstein/hpipe-smoke`. Set `STALL_MINUTES=2` and `TASK_STALL_MINUTES=3` in the plugin's
+`config.env` first, so a probe that should not come would come within minutes.
+
+Commit a bootstrap on `main` whose behaviour a marker file in the state dir picks:
+
+```sh
+#!/bin/sh
+# .claude/pipeline-bootstrap — chmod +x before committing
+echo "bootstrap in $PWD"
+[ -f "$HOME/.local/state/herdr/plugins/stein.pipeline/smoke-boot-fail" ] && { echo "marker says fail"; exit 1; }
+[ -f "$HOME/.local/state/herdr/plugins/stein.pipeline/smoke-boot-slow" ] && sleep 600
+sleep 2
+exit 0
+```
+
+The `sleep 2` keeps a passing bootstrap slower than herdr's `worktree.created` hook. A record of a
+bootstrap that finished before the hook fired is cleared by the binding, by design, and the next
+re-run would bootstrap once more, which 12c would misread.
+
+Every dispatch below is run by the orchestrator with the Bash tool's `run_in_background`, and it ends
+its turn. Each one prints a line per step (`base`, `worktree`, `bootstrap`, `agent`, `brief`) and ends
+`dispatched tN` or `stopped tN at <step>: <why>`.
+
+### 12a. The tool facts the code rests on — record each verbatim
+
+- **The create response (Verify 1).** Register one throwaway task and dispatch it **by hand** with
+  its printed block, and save `herdr worktree create`'s JSON. **Assert** it carries
+  `.result.worktree.path`, `.result.root_pane.pane_id`, and the workspace id at
+  `.result.workspace.workspace_id` or `.result.root_pane.workspace_id`. If the id is in neither, every
+  one-command dispatch stops at `worktree` with `herdr may have created the worktree, but herdr's
+  create response named no workspace id`: a **finding** — record where the id actually is.
+- **The workspace list entry (Verify 2).** `herdr --session "$SMOKE" workspace list` for that
+  task's workspace. **Assert** `worktree.is_linked_worktree` is `true` and `worktree.repo_root` is
+  the checkout's own path, not the repo's. If it is the repo's, a re-run of any bound task stops at
+  `worktree` with `herdr says wN is the checkout at <repo>`: a **finding** — the design's fallback
+  (match `repo_root` against the run's repo, plus `worktree list`'s entry for the ledger's path) is
+  then the fix.
+- **`worktree list` (Verify, pass 2).** `herdr --session "$SMOKE" worktree list --cwd <repo>`.
+  **Assert** `.result.worktrees[]` entries carry `path`, `branch`, `is_linked_worktree` and
+  `is_prunable`. Any other shape makes every dispatch stop at `worktree` with `could not be read`.
+- **`agent start` (Verify 3).** The dispatch passes `--timeout 80000`. **Record** herdr's error code
+  and message for a name already in use (12c) and for an agent blocked by a dialog at start, if one
+  shows up.
+- **Focus.** The dispatch passes `--no-focus` to `worktree create`. **Assert** focus stays on the
+  orchestrator pane while a background dispatch creates worktrees.
+- **Background Bash (Verify 4).** **Record** that the dispatch outlives Claude Code's 10-minute
+  foreground limit (12d's slow bootstrap), that its completion notice carries the step lines, and
+  which signal reaches it if the orchestrator's session ends while it runs (`hpipe status` and the
+  lock show what was left).
+- **Auto mode.** With auto mode on, **record** that `hpipe dispatch` needed no separate approval for
+  the `herdr agent start` inside it.
+
+### 12b. Three tasks, one command
+
+Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispatch --ready`.
+**Assert:**
+
+- the step lines name each task in task id order, each `worktree   created wN at <path>, pane
+  wN:p1`, `bootstrap  ./.claude/pipeline-bootstrap passed in <n>s (log: …)`, `agent      started
+  <bead> in wN:p1 (--effort <tier's>)`, and `brief      claimed <bead>; delivered to wN:p1, and the
+  worker is working on it`; the last line is `dispatched t1, t2, t3`;
+- one pane per new workspace, each worker working on its brief (`herdr pane read`), and
+  `hpipe show --task tN` names the workspace and pane within a tick;
+- `$STATE/dispatch/` is empty once it ends.
+
+### 12c. Stops, and re-runs that skip what is done
+
+- **Bootstrap.** `touch "$STATE/smoke-boot-fail"`, register t4, `hpipe dispatch --task t4`. It
+  stops `at bootstrap: ./.claude/pipeline-bootstrap failed (exit 1)` with `marker says fail` in the
+  tail. Remove the marker and run it again: `worktree   wN at <path> exists (pane wN:p1) — skipped`,
+  then the bootstrap runs and the rest follows.
+- **Straight after a create.** Repeat with t5, but re-run within a second or two of the failure,
+  before the supervisor's tick binds the worktree. **Assert** it waits for the binding (up to 15 s)
+  and carries on, rather than stopping on `no workspace is bound`.
+- **A name in use.** Register t6. Before dispatching it, start an agent named after t6's bead in
+  some other shell pane (`herdr agent start <bead> --kind claude --pane <other>`). With the fail
+  marker absent, `hpipe dispatch --task t6` stops `at agent: an agent named <bead> already runs in
+  <other>`, without retrying. Close that agent, run it again: `bootstrap  passed in this checkout
+  before — skipped`, and the agent starts.
+- **A workspace closed after a failed bootstrap.** Fail t7's bootstrap as above, then
+  `herdr --session "$SMOKE" workspace close <its workspace>`. Remove the marker and re-run: it stops
+  `at worktree` naming the kept checkout and the `herdr worktree open --cwd '<repo>' --branch <b>`
+  step. Run that step, wait for `hpipe show --task t7` to name the new workspace, re-run: the
+  bootstrap runs again (the binding cleared the record). **Assert** at no point did an agent start
+  in a pane outside t7's workspace.
+- **A branch that is not the task's.** `git branch smoke/stale <a commit before main's tip>` and push
+  nothing; register t8 on `smoke/stale` and dispatch it: refused `` at worktree: `smoke/stale`
+  already exists at <sha8> and does not contain the base <sha8> ``, nothing created.
+- **Another session.** From a pane of a different herdr session, cd'd into the repo,
+  `hpipe dispatch --task t8 --run <run_id>` is refused: `hpipe dispatch drives herdr itself: run it
+  from a pane of session <smoke session>`.
+
+### 12d. The lock while a bootstrap runs
+
+`touch "$STATE/smoke-boot-slow"`, register t9 and t10, and `hpipe dispatch --task t9`. While its
+bootstrap sleeps:
+
+- `hpipe dispatch --task t10` is refused: `t9 is being dispatched by pid <pid> (bootstrap, <n>m), in
+  session <s> (run <id>): one dispatch runs per repo at a time`. So is `hpipe dispatch --task t10
+  --pane <any>`.
+- `hpipe status`'s t9 line reads ``nothing for you — `<hpipe> dispatch` (pid <pid>) is at bootstrap
+  for t9, started <n>m ago``, and nothing anywhere says `YOUR move: … herdr agent start` for t9. Wait
+  five minutes, past both shortened thresholds: **assert** no stall probe about t9 reaches the
+  orchestrator, and the digest's footer does not list it.
+- `cat "$STATE"/dispatch/*.lock` names `t9`, `bootstrap`, the pid and `bootstrap.pgid`.
+- `kill -TERM <pid>`. **Assert** within 10 s: `ps -g <pgid>` lists nothing, the lock file is gone,
+  and the dispatch's output ends `stopped t9 at bootstrap: interrupted` (exit 143).
+- Remove the slow marker. `hpipe dispatch --task t9` carries on from the worktree.
+- Slow marker on again, register t13 and `hpipe dispatch --task t13`. While its bootstrap sleeps,
+  `herdr --session "$SMOKE" workspace close <t13's workspace>`, then remove the marker. **Assert** the
+  dispatch stops `at agent` (herdr lists no workspace, or the ledger no longer binds it) and that no
+  agent started anywhere: the workspace, the ledger and the pane are all checked again just before
+  `agent start`, since a bootstrap can take twenty minutes.
+
+A dispatch killed with `kill -KILL` leaves its lock: `hpipe status` then says `⚠ a dispatch lock for
+this repo is left by pid <pid>, which is gone`, and the next dispatch stops the dead one's bootstrap
+group (when its leader is provably the one recorded) and takes the lock over. Record what you see.
+
+### 12e. `--ready` takes what becomes ready while it runs
+
+Slow marker on. Register t11, start `hpipe dispatch --ready`, and while t11 bootstraps register t12.
+Remove the marker. **Assert** the same run dispatches t12 before it ends (`dispatched t11, t12`), and
+that a `Dispatch t12` prompt arriving meanwhile, if any, is answered by waiting for the notice: a
+`dispatch --task t12` then would be refused with `it takes every task that becomes ready before it
+ends, t12 included`.
+
+**Record:** each dispatch's wall-clock time from command to `dispatched`, against the manual block's
+in §1.
+
 ## 13. Shared paths
 
 A path listed in `.claude/pipeline-shared-paths` never holds the file lock, so two tasks that both

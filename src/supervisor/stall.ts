@@ -2,6 +2,9 @@ import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { idList, type OwedCheck, owedAt, waitsOnlyOnTheHuman } from '../lib/before-merge'
 import { beadOutOfSync } from '../lib/bead-desired'
+import {
+  dispatchProgress, dispatchUnderWay, type DispatchLocks, NO_DISPATCHES, runDispatchUnderWay,
+} from '../lib/dispatch-lock'
 import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
 import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
 import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
@@ -104,7 +107,7 @@ function candidateFor(
 }
 
 export function stallCandidates(
-  runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
+  runs: Run[], now: number, thresholdMinutes: number, probeMax: number, dispatches: DispatchLocks = NO_DISPATCHES,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
@@ -112,6 +115,9 @@ export function stallCandidates(
     if (!row.stallable) continue
     if (row.stallWhen && !row.stallWhen(run)) continue
     if (run.phase === 'ship-merge' && waitsOnlyOnTheHuman(run, null)) continue
+    // `--ready` creates one worktree at a time, each after the last task's bootstrap,
+    // so a row waiting on worktrees can outlast its threshold while nothing is wrong.
+    if (row.signal === 'worktree' && runDispatchUnderWay(dispatches, run) !== null) continue
     const c = candidateFor(run, run, row, null, now, thresholdMinutes, probeMax)
     if (c) out.push(c)
   }
@@ -137,7 +143,7 @@ function waitsOnLiveHolders(run: Run, task: Task): boolean {
  */
 export function taskStallCandidates(
   runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
-  unstartedThresholdMinutes: number = thresholdMinutes,
+  unstartedThresholdMinutes: number = thresholdMinutes, dispatches: DispatchLocks = NO_DISPATCHES,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
@@ -154,6 +160,8 @@ export function taskStallCandidates(
       // Only the human can end this wait, and the gate row never escalates, so a probe
       // would only nag. A ruling that lifts the hold re-arms the ladder.
       if (task.phase === 'merge' && waitsOnlyOnTheHuman(run, task)) continue
+      // A bootstrap takes minutes, and what a probe would ask for is what the dispatch is doing.
+      if (dispatchUnderWay(dispatches, run, task) !== null) continue
       const orchestratorsFault = overdueUnstartedWorker(run, task, now) !== null ||
         overdueUndispatchedWorker(run, task, now) !== null || owedABrief(run, task)
       const minutes = orchestratorsFault
@@ -253,7 +261,7 @@ export interface Awaiting {
  * `{{hpipe}}` inside a VALUE would ship to an agent verbatim.
  */
 export function stallAwaiting(
-  run: Run, task: Task | null, hpipe: string, now: number = Date.now(),
+  run: Run, task: Task | null, hpipe: string, now: number = Date.now(), dispatches: DispatchLocks = NO_DISPATCHES,
 ): Awaiting {
   const row = task ? taskRow(task.phase) : runRow(run.phase)
   const phase = task ? task.phase : run.phase
@@ -284,6 +292,15 @@ export function stallAwaiting(
         'told, tell them now; once they have decided, ' +
         `\`${resumeCommand(hpipe, run, task)}\` resumes it` +
         (task ? `, \`${abandonCommand(hpipe, run, task)}\` abandons it.` : '.'),
+    }
+  }
+
+  const dispatching = task === null ? null : dispatchUnderWay(dispatches, run, task)
+  if (task !== null && dispatching !== null) {
+    return {
+      short: 'its dispatch to finish',
+      clause: 'This task is being dispatched now, not waiting on you: ' +
+        `${dispatchProgress(dispatching, task, hpipe, now)}.`,
     }
   }
 

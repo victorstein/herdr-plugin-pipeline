@@ -354,6 +354,12 @@ export interface Task {
   review_skip?: ReviewSkip
   /** Per-task, they hold this task's merge; single-PR, the batch PR's. Absent is none, as on older ledgers. */
   before_merge?: BeforeMergeCheck[]
+  /**
+   * The checkout `hpipe dispatch` last ran the bootstrap to success in. Cleared
+   * whenever a worktree is created or bound for the task: herdr reuses workspace
+   * ids, and a re-created worktree can sit at the same path.
+   */
+  bootstrapped?: { checkout: string; at: number }
   notes: string
 }
 

@@ -411,6 +411,45 @@ test('dispatch needs exactly one of --task and --done', async () => {
   expect(run.intake_closed).toBe(false)
 })
 
+test('dispatch takes exactly one of --done, --task and --ready, and --pane only with --task', async () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  const log = await withFakeHerdr(f, {})
+
+  for (const args of [
+    ['dispatch', '--ready', '--task', 't1'], ['dispatch', '--ready', '--done'], ['dispatch', '--ready', '--pane', 'w1-2'],
+  ]) {
+    const r = hpipe(args, f)
+    expect(r.code, args.join(' ')).toBe(1)
+    expect(r.out, args.join(' ')).toContain('usage: hpipe dispatch')
+  }
+  expect(existsSync(log)).toBe(false)
+})
+
+test('dispatch --help names all four forms', () => {
+  const r = hpipe(['dispatch', '--help'], fixture())
+  expect(r.code).toBe(0)
+  for (const form of [
+    'hpipe dispatch --task <id> [--run <run-id>]', 'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
+    'hpipe dispatch --ready [--run <run-id>]', 'hpipe dispatch --done [--run <run-id>]',
+  ]) {
+    expect(r.out).toContain(form)
+  }
+})
+
+test('dispatch --task and --ready drive herdr only from a pane of the run\'s own session', async () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  const log = await withFakeHerdr(f, {})
+
+  for (const [args, socket] of [[['dispatch', '--task', 't1'], ''], [['dispatch', '--ready'], '/sessions/other/herdr.sock']] as const) {
+    const r = hpipe([...args], { ...f, env: { ...f.env, HERDR_SOCKET_PATH: socket } })
+    expect(r.code, args.join(' ')).toBe(1)
+    expect(r.out, args.join(' ')).toContain('hpipe dispatch drives herdr itself: run it from a pane of session argv-fixture')
+  }
+  expect(existsSync(log)).toBe(false)
+})
+
 test('task --tier reaches registration, and a pipeline:tier label read through bd overrides it', () => {
   const f = started()
 
