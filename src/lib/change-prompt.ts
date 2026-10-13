@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { checkoutSteps, landCommand, landsCleanSync, landsUnmergedSync, mergeBatchCommand, sha8 } from './batch'
 import { trackingRefspec } from './dispatch-base'
 import { CHECK_REL, repoCheck } from './check'
+import { filesOverlap, sharedFiles } from './gating'
 import { modeOf } from './phases'
 import { renderPrompt } from './render'
 import type { Batch, Run, Task } from './types'
@@ -118,16 +119,69 @@ function firstReviewOfResync(batch: Batch, task: Task, dirtyAt: string | undefin
 const CLEAR_FIX_PUSHED_LATER = ' Pushed later, a fix moves the branch off the head the `CLEAR` recorded, and ' +
   'sends the change through `sync` and another review.'
 
+const spokenList = (items: readonly string[]): string =>
+  items.length === 1 ? items[0] as string : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
+
+const pathList = (paths: readonly string[]): string => spokenList(paths.map((path) => `\`${path}\``))
+
+const asParagraph = (note: string, indent = ''): string => (note === '' ? '' : `\n\n${indent}${note}`)
+
+/** Most conflicts on a shared path stay mechanical when each task adds its own part and leaves the rest alone. */
+export function sharedImplementNote(shared: readonly string[]): string {
+  if (shared.length === 0) return ''
+  const one = shared.length === 1
+  return `${pathList(shared)} ${one ? 'is' : 'are'} shared: other tasks edit ${one ? 'it' : 'them'} at the same ` +
+    `time. Keep your change to ${one ? 'it' : 'each'} self-contained — add your own section, never reflow or ` +
+    "reorder anyone else's — so a merge stays mechanical."
+}
+
+/**
+ * Per-task, before the merge. A conflict on a shared path is expected, not a sign
+ * that `--files` was wrong: a mechanical union is the rebase's, and CI checks it,
+ * but a collision in meaning is new code, so it goes back through the worker and
+ * its review. Empty when the task declares no shared path.
+ */
+export function sharedMergeNote(run: Run, task: Task, hpipe: string): string {
+  const shared = sharedFiles(run, task)
+  if (shared.length === 0) return ''
+  const them = shared.length === 1 ? 'it' : 'them'
+  const merged = run.tasks.filter((t) =>
+    t.task_id !== task.task_id && t.merged_at_ms !== null && filesOverlap(shared, t.files))
+  const cause = merged.length === 0
+    ? 'which other work may have changed since this branch was cut'
+    : `and ${spokenList(merged.map((t) => `${t.task_id} (merged)`))} ` +
+      `${merged.length === 1 ? 'declares' : 'declare'} ${them} too`
+  const onTopOf = merged.length === 1 ? `${(merged[0] as Task).task_id}'s` : 'what merged'
+  return `This task declares the shared ${pathList(shared)}, ${cause}, so this PR may conflict there. Rebase onto ` +
+    "the default branch and keep both sides' additions; CI runs again on the rebased head. If the two additions " +
+    'collide in meaning — the same id, number or section — do not resolve it by hand: ' +
+    `\`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\`, so the worker redoes its addition on top ` +
+    `of ${onTopOf} and it is reviewed.`
+}
+
+/**
+ * Single-PR. Any resolution already makes the sync dirty, so it is reviewed; a
+ * collision in meaning is better redone by the worker than patched in a merge commit.
+ */
+export function sharedSyncNote(shared: readonly string[], hpipe: string): string {
+  if (shared.length === 0) return ''
+  return `${pathList(shared)} ${shared.length === 1 ? 'is' : 'are'} shared, so a conflict there is expected: keep ` +
+    "both sides' additions. If they collide in meaning — the same id, number or section — do not resolve it: " +
+    `raise it with \`${hpipe} decide\`, recommending that the task go back to \`implement\`; the orchestrator ` +
+    'rewinds it.'
+}
+
 export async function changePromptVars(
   pluginRoot: string, hpipe: string, run: Run, task: Task,
 ): Promise<Record<string, string>> {
   const batch = run.batch
+  const sharedNote = asParagraph(sharedImplementNote(sharedFiles(run, task)))
   if (modeOf(run) === 'per-task' || batch === undefined) {
     const pr = task.pr === null ? 'unknown' : String(task.pr)
     return {
       subject: `PR #${pr}`, the_change: 'the PR', change_noun: 'PR', whose_head: "the PR's",
       diff_command: `gh pr diff ${pr}`, review_context: '', sync_step: '', reply_place: 'the PR body',
-      clear_fix_note: '',
+      clear_fix_note: '', shared_note: sharedNote,
       handoff: await fragment(pluginRoot, 'handoff-pr', { bead: task.bead }),
       handoff_rule: prHandoffRule(task.bead),
     }
@@ -144,7 +198,7 @@ export async function changePromptVars(
       resyncNote(batch, task),
     sync_step: syncStep(batch),
     reply_place: 'the message of an empty commit on the branch',
-    clear_fix_note: CLEAR_FIX_PUSHED_LATER,
+    clear_fix_note: CLEAR_FIX_PUSHED_LATER, shared_note: sharedNote,
     handoff: await fragment(pluginRoot, 'handoff-batch', {
       task_id: task.task_id, batch: batch.branch, into: batch.into, check_note: check.note,
     }),
@@ -153,12 +207,13 @@ export async function changePromptVars(
 }
 
 /** The `sync` row's own variables; only a single-PR task reaches that row. */
-export function syncPromptVars(run: Run, task: Task): Record<string, string> {
+export function syncPromptVars(run: Run, task: Task, hpipe: string): Record<string, string> {
   const batch = run.batch as Batch
   const check = checkWording(task.checkout_path ?? run.repo_root)
   return {
     batch: batch.branch, merge_batch: mergeBatchCommand(batch), check_note: check.note, check_until: check.until,
     cleared_as: task.review_skip === undefined ? 'was reviewed' : 'skipped its PR review as a small change',
+    shared_note: asParagraph(sharedSyncNote(sharedFiles(run, task), hpipe), '   '),
   }
 }
 
@@ -174,7 +229,7 @@ export function ciCheckFirst(pr: string): string {
  * Pinned to the head the pass was read on, so a push between the prompt and the
  * merge makes GitHub refuse it rather than merge a head CI never passed.
  */
-export function mergePromptVars(task: Task): Record<string, string> {
+export function mergePromptVars(run: Run, task: Task, hpipe: string): Record<string, string> {
   const pr = task.pr === null ? 'unknown' : String(task.pr)
   const green = task.ci === 'pass'
   const passedOn = green ? task.ci_head?.sha : undefined
@@ -187,6 +242,7 @@ export function mergePromptVars(task: Task): Record<string, string> {
       : `\`${sha8(passedOn)}\`, the head CI ran on: the command below merges only while the PR's head is still ` +
         'that commit',
     match_head: passedOn === undefined ? '' : ` --match-head-commit ${shellWord(passedOn)}`,
+    shared_note: asParagraph(sharedMergeNote(run, task, hpipe)),
   }
 }
 

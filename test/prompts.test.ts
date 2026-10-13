@@ -1035,3 +1035,97 @@ test('the README and the skill name the PR review skip, its threshold and the al
   expect(skill).toContain('`pr-review skipped`')
   expect(skill).toContain('`.claude/pipeline-always-review`')
 })
+
+// ——— shared paths: two tasks edit one file at once, and a conflict there is expected ———
+
+const SHARED = '`docs/file-formats.md` is shared: other tasks edit it at the same time. Keep your change to it ' +
+  "self-contained — add your own section, never reflow or reorder anyone else's — so a merge stays mechanical."
+
+async function renderSharing(
+  prefixes: string[], phase: TaskPhase, over: Partial<Task>, cameFrom: TaskPhase, mode: RunMode, siblings: Task[] = [],
+): Promise<string> {
+  const run = runIn(mode)
+  run.shared_paths = { prefixes, ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  const task = briefTask({ task_id: 't2', phase, pr: 7, ...over })
+  run.tasks = [...siblings, task]
+  return renderTaskPhasePrompt(run, task, { pluginRoot: ROOT, ciDetail: async () => '- build (fail)' }, cameFrom)
+}
+
+test('a task declaring a shared path tells its implementer to keep its change self-contained', async () => {
+  const files = ['src/reader/', 'docs/file-formats.md']
+  const implement = await renderSharing(['docs/file-formats.md'], 'implement', { files }, 'blocked-on-files', 'per-task')
+  const ciRed = await renderSharing(['docs/file-formats.md'], 'implement', { files }, 'ci', 'per-task')
+  const batch = await renderSharing(['docs/file-formats.md'], 'implement', { files }, 'blocked-on-files', 'single-pr')
+  for (const text of [implement, ciRed, batch]) expect(prose(implementersBrief(text))).toContain(SHARED)
+  expect(implementersBrief(ciRed)).toBe(implementersBrief(implement))
+
+  const two = await renderSharing(['docs/', 'CHANGELOG.md'], 'implement', { files: ['docs/a.md', 'CHANGELOG.md'] },
+    'blocked-on-files', 'per-task')
+  expect(prose(two)).toContain('`docs/a.md` and `CHANGELOG.md` are shared: other tasks edit them at the same time. ' +
+    'Keep your change to each self-contained')
+
+  const unshared = await renderSharing(['CHANGELOG.md'], 'implement', { files }, 'blocked-on-files', 'per-task')
+  expect(unshared).not.toContain('is shared')
+  expect(unshared).toBe(await renderPhase('implement', { task_id: 't2', files }, 'blocked-on-files'))
+})
+
+test('the per-task merge prompt names the shared path, the merged task that declares it too, and the rewind', async () => {
+  const files = ['src/reader/', 'docs/file-formats.md']
+  const merged = briefTask({ task_id: 't6', phase: 'done', merged_at_ms: 1, files: ['docs/file-formats.md'] })
+  const unmerged = briefTask({ task_id: 't7', phase: 'implement', files: ['docs/file-formats.md'] })
+  const elsewhere = briefTask({ task_id: 't8', phase: 'done', merged_at_ms: 1, files: ['src/other/'] })
+  const text = await renderSharing(['docs/file-formats.md'], 'merge', { files }, 'ci', 'per-task',
+    [merged, unmerged, elsewhere])
+  const hpipe = hpipeCommand(ROOT)
+  expect(prose(text)).toContain('This task declares the shared `docs/file-formats.md`, and t6 (merged) declares it ' +
+    "too, so this PR may conflict there. Rebase onto the default branch and keep both sides' additions; CI runs " +
+    'again on the rebased head. If the two additions collide in meaning — the same id, number or section — do not ' +
+    `resolve it by hand: \`${hpipe} rewind `)
+  expect(prose(text)).toMatch(new RegExp(` rewind \\S+ implement --task t2\`, so the worker redoes its addition on ` +
+    "top of t6's and it is reviewed\\."))
+  expect(text.indexOf('This task declares the shared')).toBeGreaterThan(text.indexOf('re-run it in that'))
+  expect(text.indexOf('This task declares the shared')).toBeLessThan(text.indexOf('Green is for'))
+})
+
+test('with nothing merged that declares it, the merge note still names the shared path and the way out', async () => {
+  const text = await renderSharing(['docs/file-formats.md'], 'merge', { files: ['docs/file-formats.md'] }, 'ci',
+    'per-task', [briefTask({ task_id: 't7', phase: 'implement', files: ['docs/'] })])
+  expect(prose(text)).toContain('This task declares the shared `docs/file-formats.md`, which other work may have ' +
+    'changed since this branch was cut, so this PR may conflict there.')
+  expect(prose(text)).toContain('so the worker redoes its addition on top of what merged and it is reviewed.')
+
+  const twoMerged = await renderSharing(['docs/'], 'merge', { files: ['docs/a.md', 'docs/b.md'] }, 'ci', 'per-task', [
+    briefTask({ task_id: 't4', phase: 'done', merged_at_ms: 1, files: ['docs/a.md'] }),
+    briefTask({ task_id: 't5', phase: 'close', merged_at_ms: 2, files: ['docs/'] }),
+  ])
+  expect(prose(twoMerged)).toContain('This task declares the shared `docs/a.md` and `docs/b.md`, and t4 (merged) ' +
+    'and t5 (merged) declare them too, so this PR may conflict there.')
+  expect(prose(twoMerged)).toContain('on top of what merged and it is reviewed.')
+})
+
+test('a merge prompt for a task declaring no shared path carries no note', async () => {
+  const text = await renderSharing(['docs/file-formats.md'], 'merge', { files: ['src/reader/'] }, 'ci', 'per-task',
+    [briefTask({ task_id: 't6', phase: 'done', merged_at_ms: 1, files: ['docs/file-formats.md'] })])
+  expect(text).not.toContain('shared')
+  expect(text).toBe(await renderPhase('merge', { task_id: 't2', files: ['src/reader/'] }, 'ci'))
+})
+
+test('the sync prompt expects a conflict on a shared path, and raises a collision in meaning', async () => {
+  const text = await renderSharing(['docs/file-formats.md'], 'sync', { files: ['docs/file-formats.md'], land_sha: 'a' },
+    'land-queue', 'single-pr')
+  expect(prose(text)).toContain("`docs/file-formats.md` is shared, so a conflict there is expected: keep both sides' " +
+    'additions. If they collide in meaning — the same id, number or section — do not resolve it: raise it with ' +
+    `\`${hpipeCommand(ROOT)} decide\`, recommending that the task go back to \`implement\`; the orchestrator rewinds it.`)
+  expect(text.indexOf('is shared, so a conflict')).toBeGreaterThan(text.indexOf('2. **On a conflict**'))
+  expect(text.indexOf('is shared, so a conflict')).toBeLessThan(text.indexOf('3. **If the merge changed'))
+
+  const unshared = await renderSharing(['CHANGELOG.md'], 'sync', { files: ['docs/file-formats.md'], land_sha: 'a' },
+    'land-queue', 'single-pr')
+  expect(unshared).not.toContain('is shared')
+})
+
+test('a landing is a fast-forward with nothing to resolve, so merge-batch carries no shared-path note', async () => {
+  const text = await renderSharing(['docs/file-formats.md'], 'merge', { files: ['docs/file-formats.md'], land_sha: 'a' },
+    'sync', 'single-pr')
+  expect(text).not.toContain('shared')
+})

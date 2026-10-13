@@ -165,9 +165,10 @@ export async function promptForTaskPhase(
 export async function renderTaskPhasePrompt(
   run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
 ): Promise<string> {
+  const hpipe = hpipeCommand(deps.pluginRoot)
   const common = {
     ...tierPromptVars(run, task),
-    ...(await changePromptVars(deps.pluginRoot, hpipeCommand(deps.pluginRoot), run, task)),
+    ...(await changePromptVars(deps.pluginRoot, hpipe, run, task)),
     run_id: run.run_id,
     branch: task.branch,
     ...beadPromptVars(task),
@@ -196,9 +197,9 @@ export async function renderTaskPhasePrompt(
     case 'merge':
       return modeOf(run) === 'single-pr'
         ? renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
-        : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(task) })
+        : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(run, task, hpipe) })
     case 'sync':
-      return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task) })
+      return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task, hpipe) })
     case 'implement':
       // Re-entry from a red CI needs the failing checks inlined; every other
       // entry gets the standing brief, which points a returning worker at the
