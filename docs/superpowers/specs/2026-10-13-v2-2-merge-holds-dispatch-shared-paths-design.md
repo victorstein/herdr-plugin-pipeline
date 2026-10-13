@@ -1,8 +1,9 @@
 # v2.2: before-merge checks, one-command dispatch, shared paths — design
 
-Pass 2. Written against `1ca25eb` (v2.1.1). Pass 1 drew an adversarial review (1 BLOCKER, 6 MAJOR,
-8 MINOR), and the owner answered its nine open questions. This pass folds in both, and "After the
-pass-1 review" at the end maps each finding and question to what changed.
+Pass 3. Written against `1ca25eb` (v2.1.1). Pass 1 drew an adversarial review (1 BLOCKER, 6 MAJOR,
+8 MINOR), and the owner answered its nine open questions; pass 2 folded in both. The pass-2 review
+cleared every pass-1 fix and found 1 MAJOR and 5 MINORs in the new remedies, which this pass folds in.
+"After the pass-1 review" and "After the pass-2 review" at the end map each finding to what changed.
 
 The owner chose what to build on 2026-10-13, from the berean-os notes
 (`docs/superpowers/notes/2026-10-11-berean-os-live-run.md`, findings #5, #17, #18 and #24) and from
@@ -43,8 +44,10 @@ release ignores all five; what that costs on a rollback is in §5.
 | The plugin pins the merge to the head CI passed on (`--match-head-commit`) | `change-prompt.ts:177-191`, `deliver.ts:554-562` |
 | The dispatch block is five lines: `worktree create`, a `#` line about the JSON, the optional bootstrap, `agent start`, and `dispatch --task --pane`. For seven tasks the orchestrator scripted a loop. It broke on zsh word-splitting, and the retry parsed the JSON with inline `python3`. Measured on a live run | `unstarted.ts:137-150`, notes #5 |
 | `dispatch --task --pane` refuses the run's orchestrator pane and another task's pane, but only just before it sends the brief | `cli.ts:938-946` |
-| `Herdr` has no `worktree create`/`open`/`list` and no `agent start` method; only the orchestrator's shell runs them. `herdr worktree list` exists, with a JSON shape this plugin has never read | `herdr.ts:72-238`; the pass-1 review |
-| `worktree.created`/`worktree.opened` bind a task by branch, and only while its `workspace_id` is null, on the supervisor's next tick | `tick.ts:430-439` |
+| `Herdr` has no `worktree create`/`open`/`list` and no `agent start` method; only the orchestrator's shell runs them | `herdr.ts:72-238` |
+| `herdr worktree list --cwd <repo>` returns `.result.worktrees[]` as `{ branch, is_bare, is_detached, is_linked_worktree, is_prunable, label, path }`, with **no workspace id**. Without `--cwd` it errors `not_git_worktree`. Verified for the pass-2 review | the pass-2 review |
+| `herdr workspace list` gives each workspace `worktree: { repo_key, repo_root, is_linked_worktree } \| null`, and the claim action already matches a workspace to a checkout by `repo_root` | `herdr.ts:42-46`, `orchestrator.ts:16-22` |
+| `worktree.created`/`worktree.opened` bind a task by branch, from herdr's own payload, only while its `workspace_id` is null, and on the supervisor's next tick. `workspace.closed` unbinds it and keeps the checkout | `hooks/_hook.ts:59-61`, `tick.ts:430-450` |
 | `repoBootstrap` reads the primary checkout's working tree, which may be on any branch, not the new worktree | `bootstrap.ts:27-47` |
 | `submit` and `batch-check` run the repo's check under a 9-minute deadline in its own process group, because the agent's foreground Bash call times out at 10 | `check.ts:43-78` |
 | The bootstrap "must be idempotent — it can run more than once" | `README.md:105` |
@@ -99,10 +102,11 @@ release ignores all five; what that costs on a rollback is in §5.
 | Where dispatch runs | Only the `hpipe` CLI, from a pane whose `HERDR_SOCKET_PATH` equals the run's `socket_path`. Never the supervisor | The tick is serial, and a bootstrap takes minutes. A failure there has nobody to read it. Outside the right session, herdr and the ledger would be the wrong ones |
 | How the orchestrator runs it | With the Bash tool's `run_in_background`, then it ends its turn. The completion notice brings the output | No 10-minute timeout to fit under, and the orchestrator stays free to take digests |
 | Deadlines | 20 minutes on the bootstrap, as a safety net: SIGTERM, then SIGKILL after 10 s. 80 s on `agent start`. 30 s on the brief, as today | A hung bootstrap would hold the repo's dispatch lock for good, and nobody watches a background shell |
-| Finding an existing worktree | `herdr worktree list`, matched on path and branch. If its output cannot be read, nothing is skipped | A stale record file let pass 1 start a permission-skipping agent in an unrelated pane (BLOCKER 1). Herdr's own view is the only record that is never stale |
-| Before `agent start` | The target pane must be in herdr's workspace for a linked worktree at the task's checkout, on `task.branch`, and must not be any run's orchestrator pane or another task's pane | An agent that skips permissions must never start in a pane that is not the task's |
-| The bootstrap | Only a wired `.claude/pipeline-bootstrap`, looked up in the new checkout. Success is recorded on `Task.bootstrapped`, keyed by workspace and checkout | Owner answer 7. The checkout is what the bootstrap runs in; the primary checkout may be on any branch |
-| Concurrency | One dispatch at a time per repo, under a lock holding the pid, its start time and the bootstrap's process group | Bootstraps in worktrees of one repo share its `.git/config`, and a dead dispatch's bootstrap must not run on unseen |
+| Which workspace is the task's | The one the ledger's hook binding names (`task.workspace_id`, `task.checkout_path`). It is cross-checked against `herdr workspace list` (a linked worktree whose `repo_root` is the checkout) and `herdr worktree list --cwd <repo_root>` (that path is on `task.branch`). Right after this command's own `create`, the `create` response is used instead | The binding comes from herdr's own payload and is undone when the workspace closes. `worktree list` has no workspace id, so it can confirm a checkout but cannot name its workspace (pass-2 MAJOR 1) |
+| A checkout with no workspace tied to it | Stop, and say what was found and how to bind it by hand. The command never runs `worktree open`, and never `create`s when a checkout exists | Routing to `open` or `create` on a guess is how a dispatch ends up in the wrong pane |
+| Before `agent start` | The pane is in that workspace, and is no run's orchestrator pane and no other task's pane | An agent that skips permissions must never start in a pane that is not the task's |
+| The bootstrap | Only a wired `.claude/pipeline-bootstrap`, looked up in the new checkout. Success is recorded on `Task.bootstrapped` for that checkout, and cleared whenever a worktree is created or bound for the task | Owner answer 7. The checkout is what the bootstrap runs in. herdr reuses workspace ids, so a record that survived a re-created worktree would skip a bootstrap the new checkout never had |
+| Concurrency | One dispatch at a time per repo, under a lock naming the session, run, task, step, pid and the bootstrap's process group. The `--pane` form takes it too | Bootstraps in worktrees of one repo share its `.git/config`. A dead dispatch's bootstrap must not run on unseen. Status reads the lock to say a dispatch is under way |
 | Shared paths: when read | Once, at `hpipe start`, from the default branch as just fetched, and stored as `Run.shared_paths`. No refresh mid-run (owner answer 9) | A list that shrank mid-run could leave two tasks past the file gate on a path that locks again. Per-task snapshots would not be symmetric |
 | Shared paths: globs | Ignored, with a warning | Cutting a glob to its prefix widens the list. That is safe for always-review and unsafe here: `docs/*.md` would share all of `docs/` |
 | A declared `--files` entry under a shared prefix | Still recorded and printed, marked `(shared)`. It is just not part of the lock | The record says what the task touches, and the merge and sync notes read it |
@@ -234,7 +238,9 @@ The state of a binding check comes from its last resolution:
   - `waitsOnlyOnTheHuman(run, task | null)` is true when there are owed checks and every one waits on
     the human.
   - `heldForTheHuman(run, task)` is true for a per-task task in `merge` with owed checks, merged or
-    not.
+    not, while the run is driven (`runIsDriven`, `ledger.ts:317-323`). An aborted or escalated run is
+    driving nothing, so its merged tasks' beads close as usual, and the run's record keeps the owed
+    check (MINOR 3).
 
 ### 1.5 The gate in the machine
 
@@ -266,9 +272,9 @@ finish:
 
 | Route | Change |
 |---|---|
-| `hpipe rewind <run> close\|teardown\|done\|orphaned --task tN` | Refused while tN has an owed binding check: "t1 owes c1: confirm or `--waive` it first" |
+| `hpipe rewind <run> <phase> --task tN` to `close`, `teardown` or any terminal phase (`done`, `failed`, `orphaned`, `blocked-on-failure`) | Refused while tN has a merge recorded (or GitHub reports one, §1.6) and an owed binding check: "t1 owes c1: confirm or `--waive` it first". An unmerged task may still be rewound to `done` or `failed`: its check is then void (§1.4) |
 | `hpipe close --task tN` (`cli.ts:1571-1596`) | Refused while `heldForTheHuman` |
-| Per-task run `execute` → `branch-review`/`done` (`machine.ts:103-112`) | Also waits while any task with a merge recorded has an owed binding check. That backstop catches a merged task rewound to `failed` |
+| Per-task run `execute` → `branch-review`/`done` (`machine.ts:103-112`) | Also waits while any task with a merge recorded has an owed binding check. A backstop for any route the refusals above miss, such as an older CLI's rewind |
 | `waitsOnClose` (`beads-sync.ts:192`) | A held task does not count, so a store failure cannot mark it out of sync |
 
 `hasLanded` (`ledger.ts:342-343`) needs no change: it requires `done` or `orphaned`, so a held task
@@ -304,22 +310,18 @@ Do not merge, and do not ask again because a digest lists it: the merge command 
 prompt once nothing is owed.{{held_failed_route}}
 ```
 
-`{{held_mergeable}}` per-task carries `merge.md`'s pre-merge step:
+`{{held_mergeable}}` reads `gh pr view <n> --json mergeStateStatus` and acts on its value. The same
+table serves both modes, with the move for each:
 
-- `gh pr view <n> --json mergeStateStatus`;
-- if it is `BEHIND` or `DIRTY`, rebase onto the default branch and re-run the bootstrap in that
-  checkout. The rebase pushes a new head, the task goes back to `ci`, and this prompt comes again for
-  the new head, so do not ask the human until then;
-- the shared-path note (§3.4) when the task declares one.
+| `mergeStateStatus` | Per-task | Single-PR |
+|---|---|---|
+| `UNKNOWN` | GitHub is still computing it: ask again a few seconds later, at most three times. Still `UNKNOWN`: go on as for `CLEAN`, and say so to the human | the same |
+| `CLEAN`, `UNSTABLE`, `HAS_HOOKS` | Mergeable: go to step 2 | the same |
+| `BEHIND`, `DIRTY` | `merge.md`'s step: rebase onto the default branch, then re-run the bootstrap in that checkout. The rebase pushes a new head, the task goes back to `ci`, and this prompt comes again for the new head, so do not ask the human until then | `BEHIND` → `gh pr update-branch <n>`; `DIRTY` → the merge of `origin/<into>` from `ship.md` step 2. Either moves the head, so the run goes back through `ship`, and the human checks the head that reaches `ship-merge` |
+| `BLOCKED` | A required review or required check. Name it from `gh pr view <n> --json reviewDecision,statusCheckRollup`. A required review can go in the same message to the human. A required check that never ran is fixed before asking | the same |
+| `DRAFT` | `gh pr ready <n>`, which moves no head, then ask again | the same |
 
-Single-PR, it carries:
-
-- `gh pr view <n> --json mergeStateStatus`;
-- `BEHIND` → `gh pr update-branch <n>`;
-- `DIRTY` → the merge of `origin/<into>` from `ship.md` step 2.
-
-Either moves the head, so the run goes back through `ship`, and the human checks the head that
-reaches `ship-merge`. A `BLOCKED` on a required review can go in the same message to the human.
+Per-task, the shared-path note (§3.4) follows when the task declares one.
 
 `{{held_build}}` names the head to check:
 
@@ -573,50 +575,81 @@ whether it is already done, and only from a source that cannot be stale: herdr, 
 | # | Step | Already done when | Otherwise |
 |---|---|---|---|
 | 0 | **base** | — | `freshDispatchBase(repo_root, dependencyMerges(task), batch)` (`dispatch-base.ts:223`). A fetch error stops here |
-| 1 | **worktree** | `herdr worktree list` has an entry on `task.branch` whose path is the checkout (below), and that entry has an open workspace | See below |
+| 1 | **worktree** | The ledger binds a workspace to the task, and herdr agrees (below) | See below |
 | guard | **pane** | — | Checks run before step 3 (below). Any that cannot be settled stops |
-| 2 | **bootstrap** | `task.bootstrapped` names this workspace and checkout, or an agent is already in the pane | See below |
+| 2 | **bootstrap** | `task.bootstrapped` names this checkout, or an agent is already in the pane | See below |
 | 3 | **agent** | `herdr pane list --workspace <ws>` shows an agent in the pane (`!paneHasNoAgent`, `herdr.ts:25`) | See below |
 | 4 | **brief** | The task, as just re-read from the ledger, is no longer owed its brief | See below |
 
-**Step 1, worktree.** The checkout path is `task.checkout_path` when the ledger has one. Otherwise it
-is the path `git -C <repo_root> worktree list --porcelain` gives for `refs/heads/<branch>`. Then:
+**Step 1, worktree.** `herdr worktree list` names checkouts but not their workspaces, so the
+workspace comes from the ledger. The hook binds `task.workspace_id` and `task.checkout_path` from
+herdr's own `worktree.created`/`opened` payload (`hooks/_hook.ts:59-61`), and `workspace.closed`
+unbinds the workspace while keeping the checkout (`tick.ts:444-450`). Every herdr call passes `--cwd
+<run.repo_root>`. Three cases:
 
-- **`herdr worktree list` cannot be parsed:** nothing is skipped. The command goes to `worktree
-  create`, which fails on an existing checkout and stops the step with herdr's error. It fails closed.
-- **Herdr lists the checkout, on the branch, with a workspace:** the step is skipped.
-- **Git has the checkout but herdr has no workspace for it:** `herdr worktree open --cwd <repo_root>
-  --branch <branch>`.
-- **No checkout:**
+- **The ledger binds workspace W at checkout P.** Two cross-checks, and both must hold:
+  - `herdr workspace list` lists W, with `worktree.is_linked_worktree` true and `worktree.repo_root`
+    equal to P (Verify 2);
+  - `herdr worktree list --cwd <repo_root>` has an entry with `path` P and `branch` `task.branch`,
+    linked and not prunable.
+
+  Both hold: the step is skipped, and W and P are the task's. Either fails, or either list cannot be
+  read: **stop**. The message names what the ledger says, what herdr said, and that nothing was
+  started. For example: "the ledger binds t1 to w5 at /…/feat-x, but herdr lists no workspace w5. If
+  it closed, `hpipe forget w5` and bind the kept checkout with `herdr worktree open --cwd '<repo>'
+  --branch feat-x`, then run this again; or dispatch by hand: <block>".
+- **The ledger binds no workspace, and `worktree list` has a checkout on `task.branch`.** Nothing ties
+  a live workspace to it, so **stop**: "a checkout of feat-x exists at /…/feat-x, but no workspace is
+  bound to t1: `herdr worktree open --cwd '<repo>' --branch feat-x` binds it; run this again once
+  `hpipe show --task t1` names a workspace". The common way here is a re-run just after this command's
+  own `create`, before the supervisor's tick has bound it. So before stopping, the command re-reads
+  the ledger for up to 15 s (the binding lands within a tick), and carries on if it binds.
+- **No checkout on `task.branch`** (`worktree list` read, and no entry on the branch):
   - if `refs/heads/<branch>` exists and does not contain the base, stop: "`<branch>` already exists
     at 3c4d5e6f and does not contain the base 1fb8a43c: it is not this task's; rename the task's branch
     or delete it";
-  - otherwise `herdr worktree create --cwd <repo_root> --branch <branch> --base <commit>`, reading the
-    workspace and pane from its JSON (Verify 1).
-- **The pane:** the workspace's only pane, or the ledger's `task.pane_id` when it is in that
-  workspace. Otherwise stop, and name `--pane`.
+  - otherwise `herdr worktree create --cwd <repo_root> --branch <branch> --base <commit>`, reading
+    the workspace, root pane and path from its response (Verify 1), and clearing `task.bootstrapped`
+    (MINOR 4).
+
+  A `worktree list` that cannot be read **stops** too: the command cannot tell this case from the
+  last, and creating on a guess is what this step must not do.
+
+The command never runs `worktree open`. Binding a kept checkout stays the orchestrator's explicit
+move, which settles what `open` would do on a checkout whose workspace is already open: it is never
+asked.
+
+**The pane.** Right after its own `create`, the command uses the root pane from the response. Otherwise
+it is the workspace's only pane, or the ledger's `task.pane_id` when that pane is in W. Otherwise stop,
+and name `--pane`.
 
 **The pane guard, before step 3.**
 
-- The pane is in workspace W.
-- W is herdr's workspace for a linked worktree whose path is the task's checkout and whose branch is
-  `task.branch`, according to `herdr worktree list`, or the create/open response just made.
-- That path equals `task.checkout_path` when the ledger has one.
-- The pane is no run's orchestrator pane and no other task's pane in this session. These checks
-  (`cli.ts:938-946`) used to run only before the brief; they now run before `agent start` too.
-- Pass 1 took the workspace and pane from a record file that a forgotten or reused workspace could
-  make stale. The guard is what stops an agent that skips permissions from starting in a pane that is
-  not the task's (BLOCKER 1).
+- **After this command's own `create`:** the ledger has not caught up yet, so the guard compares with
+  the response. The pane is the response's root pane, in the response's workspace, at the response's
+  path.
+- **Otherwise:** the pane is listed in W by `herdr pane list --workspace W`, and W passed step 1's two
+  cross-checks.
+- **Always:** the pane is no run's orchestrator pane and no other task's pane in this session. These
+  checks (`cli.ts:938-946`) used to run only before the brief; they now run before `agent start` too.
+- **Why the guard exists.** Pass 1 took the workspace and pane from a record file that a forgotten
+  or reused workspace could make stale (BLOCKER 1). Pass 2 replaced it with `worktree list`, which
+  cannot name a workspace (pass-2 MAJOR 1). The ledger binding, checked against herdr, is the record
+  that is never left stale: herdr's own events set it and clear it.
 
 **Step 2, bootstrap.** The script is looked up in **the new checkout**, not through
 `repoBootstrap(repo_root)`, which reads the primary checkout's tree (`bootstrap.ts:27-47`).
 
 - `.claude/pipeline-bootstrap` executable there: run it from the checkout (§2.3). Its output goes to
   `<stateDir>/runs/<session>/<run_id>.dispatch/<task>-bootstrap.log`, and the last 40 lines are
-  printed on failure. On success, `task.bootstrapped = { workspace_id, checkout, at }` is saved
-  (`retryOnStaleRun`), so a re-run after a later step fails does not redo it. A new workspace (a
-  re-created or re-opened worktree) does not match, so the bootstrap runs again, which the README's
-  idempotence rule allows.
+  printed on failure. On success, `task.bootstrapped = { checkout, at }` is saved
+  (`retryOnStaleRun`), so a re-run after a later step fails does not redo it.
+- `task.bootstrapped` is cleared whenever a worktree is created or bound for the task: by this
+  command's `create`, and by the supervisor's hook binding (`tick.ts:430-439`), which also covers a
+  `create` or `open` run by hand. herdr reuses workspace ids, and a re-created worktree can sit at the
+  same path, so neither identifies a fresh checkout on its own (MINOR 4). One race runs the safe way:
+  a binding applied after a fast bootstrap records its success clears that record, and the cost is one
+  bootstrap more on a later re-run.
 - Present but not executable: stop, with the `chmod +x` hint.
 - Absent: skipped. When a conventional script is there (`bin/bootstrap`, …), the step says so and
   names the wiring, but does not run it (owner answer 7).
@@ -640,7 +673,11 @@ is the path `git -C <repo_root> worktree list --porcelain` gives for `refs/heads
   - `null` means no box is on screen (a dialog or a boot screen): "not ready: `herdr pane read <pane>`".
   - Text means a brief may be sitting there unsubmitted: "the input box of w5:p1 holds text: `herdr
     pane read w5:p1`; if it is the brief, `herdr agent send-keys w5:p1 ctrl+c`, then run this again".
-- An agent reading `working` already has the brief, so the pane is recorded and the step is done.
+- **When step 3 was skipped** (the agent was already in the pane), an agent reading `working`
+  already has the brief, from an earlier run, so the pane is recorded and the step is done.
+- **After this run's own `agent start`**, `working` proves nothing about a brief. The step waits, up to
+  30 s, for `isAgentReady` and a recognised empty box, and stops "not ready" if they don't come
+  (MINOR 1).
 - Then it runs `cmdDispatchTask`'s body from the usage-limit read on (`cli.ts:950-992`): claim, render,
   `agentPromptConfirmed` (30 s, `--until working`), and record the pane.
 - Why the box, and not memory of an earlier send: the manual path's rule after an uncertain send is
@@ -665,13 +702,37 @@ ends `stopped t1 at <step>: <why>. <how to resume>`; §2.4 lists them.
 ### 2.3 Locks, signals, and the one deadline
 
 **The lock.** It lives at `<stateDir>/dispatch/<beadsSlug(repo_key)>.lock`, one per repo, so it
-crosses sessions. It is created with `O_EXCL` and holds `{ pid, started_at_ms, run_id, task,
-bootstrap: { pgid, started_at_ms } | null }`, and the bootstrap field is written when the script
-starts.
+crosses sessions. It is created with `O_EXCL` and holds:
 
-- **A held lock** refuses a second dispatch in the repo: "t1 is being dispatched by pid 4242; wait for
-  it, or use `--ready` for several". Bootstraps in worktrees of one repo share its `.git/config`, so
-  even different tasks wait.
+```ts
+{ session, run_id, mode: 'task' | 'ready' | 'pane', task, step, since, pid, started_at_ms,
+  bootstrap: { pgid, started_at_ms } | null }
+```
+
+`task`, `step` and `since` are rewritten (atomically, by rename) as the command moves from task to task
+and step to step. The bootstrap field is written when the script starts.
+
+- **A held lock** refuses a second dispatch in the repo. Bootstraps in worktrees of one repo share its
+  `.git/config`, so even different tasks wait. The refusal names the holder, as "t1 is being
+  dispatched by pid 4242 (bootstrap, 3m)". When the holder is `--ready`, it adds "it takes every task
+  that becomes ready before it ends, t4 included".
+- **The `--pane` form takes the lock too** (`mode: 'pane'`). Re-checking `awaiting_brief` just before
+  sending cannot close the window between the check and a one-command step 4 sending the same brief;
+  only exclusion can. The cost is that the manual form waits behind a running dispatch in the repo,
+  and both are the orchestrator's own serial moves.
+- **`--ready` re-scans before it lets go.** When its list is done it re-reads the ledger, takes any
+  task that has become owed its brief meanwhile (a dependency finished, or a task was registered), and
+  releases the lock only when a scan finds none. A `Dispatch tN` prompt that arrives mid-run would
+  otherwise send the orchestrator to a command the lock refuses.
+- **Status and stall read the lock.** `cmdStatus` and the supervisor's tick read the repo's lock, and
+  treat it as live only when its pid is alive with a matching start time, and its session and run are
+  this one. For the task it names, the unstarted, undispatched and unbriefed advice in `moveFor`
+  (`status.ts:213-233`) and `stallAwaiting` (`stall.ts:287-315`) gives way to "nothing for you —
+  `hpipe dispatch` (pid 4242) is at bootstrap for t1, started 3m ago". `taskStallCandidates` treats
+  that task as not the orchestrator's fault and sends no probe. So no "YOUR move: herdr agent start"
+  appears mid-bootstrap. A task the lock does not name keeps today's advice. A stale lock is ignored
+  here, and status names it: "⚠ a dispatch lock for this repo is left by pid 4242, which is gone; the
+  next `hpipe dispatch` cleans it up".
 - **A lock whose pid is dead,** or whose start time (`processStartedAtMs`, `pidfile.ts:15`) differs,
   is stale.
 - **Taking over a stale lock** with a recorded bootstrap:
@@ -680,7 +741,6 @@ starts.
   - if a process with that pgid exists but cannot be shown to be ours, the command refuses: "process
     group 4321 may be an earlier dispatch's bootstrap: check `ps -g 4321`, stop it, then run again";
   - otherwise the lock is taken over.
-- **The manual `--pane` form** takes no lock: it runs no bootstrap.
 
 **Signals.** SIGTERM, SIGINT and SIGHUP are trapped. The handler:
 
@@ -708,8 +768,8 @@ the agent in the pane is what tells the re-run the bootstrap is done.
 | Stops at | Typical cause | The message | A re-run |
 |---|---|---|---|
 | base | origin unreachable | the fetch error | starts again |
-| worktree | the branch exists at an unrelated commit; herdr refuses (path taken, unreadable `worktree list` and a checkout that exists) | herdr's code and message, or the branch refusal | starts again |
-| pane guard | the workspace is not the task's linked worktree; the pane is another task's or an orchestrator's; several panes | which check failed, and `--pane` | starts again; nothing was started |
+| worktree | the ledger's workspace fails a cross-check; a checkout exists with no workspace bound; a list cannot be read; the branch exists at an unrelated commit; herdr refuses the `create` | what the ledger says and what herdr said, with the `herdr worktree open --cwd … --branch …` or `hpipe forget` step and the block; or herdr's code and message | starts again once the binding is right; nothing was started |
+| pane guard | the pane is another task's or an orchestrator's; several panes; after a `create`, a pane or path that is not the response's | which check failed, and `--pane` | starts again; nothing was started |
 | bootstrap | exit ≠ 0 | the log tail, "fix what it names" | runs it again (it did not succeed, so nothing was recorded) |
 | bootstrap | the 20-minute deadline | the hand route (§2.3) | runs it again unless an agent is in the pane |
 | agent | `agent_not_ready` (a dialog, seen once on the orchestrator's own start, `2026-09-24-live-smoke-run.md:31`); the name taken elsewhere; the 80/90 s bound | the code, and `herdr pane read <pane>` | skips worktree and bootstrap; starts the agent unless one is in the pane |
@@ -857,19 +917,20 @@ wrong. The existing flows resolve it. A `{{shared_note}}` is supplied once, by `
 | `machine-task.test.ts` | Per-task `merge`: merged and owed records once and returns null; then resolved goes to `close`; a moved head goes to `ci` with the check owed again on re-entry. `execute` holds while a merged task owes a check |
 | `machine-ship.test.ts` | `ship-merge`: merged and owed records once and returns null, so `evaluateRun` renders no prompt; later ticks skip the head rules; resolved goes to `done`; a fix-task landing moves the gate head and re-owes a confirmation |
 | `stall.test.ts` | No candidate for a held `merge` or `ship-merge`, however long open. A candidate for a single-PR check waiting on a fix, with its clause. The per-task `merged` clause's held and merged-while-held forms never contain "merge it" or `gh pr merge`. A candidate once nothing is owed. A ladder re-armed by `confirm` probes a full threshold later |
-| `cli-commands.test.ts` | `answer --before-merge`: repeated, empty refused, one save, `--by orchestrator` allowed. `hold`: task and run; refused per-task without `--task`, single-PR `--task` after landing (pointing at the run check), after a merge recorded **or reported by a stubbed gh**, when gh fails, from any session run's worker pane, with `HERDR_PANE_ID` unset, beside a supervisor without the capability; at an open gate it replaces the queued merge prompt. `confirm`: the window per mode (refused in `pr-review`, `ship`, and in `ci` before a head); `--by` other than human; the live read and a moved branch; no live read after a merge; `--waive` with no head; per-task `--failed` from `ci` and from `merge` to `implement`, recording the PR head with `check-failed` queued and no counter; single-PR `--failed` stays, and is refused on a moved head; `--failed` after a merge refused; the last ruling queues the gate prompt (not after a merge) and re-arms the ladder. Every gh and git read happens once across stale retries (a counting stub, as `askedOnce`'s tests do). `rewind` to `close`/`teardown`/`done`/`orphaned` refused while owed. `close` refused while held. `abort` lists what is owed |
+| `cli-commands.test.ts` | `answer --before-merge`: repeated, empty refused, one save, `--by orchestrator` allowed. `hold`: task and run; refused per-task without `--task`, single-PR `--task` after landing (pointing at the run check), after a merge recorded **or reported by a stubbed gh**, when gh fails, from any session run's worker pane, with `HERDR_PANE_ID` unset, beside a supervisor without the capability; at an open gate it replaces the queued merge prompt. `confirm`: the window per mode (refused in `pr-review`, `ship`, and in `ci` before a head); `--by` other than human; the live read and a moved branch; no live read after a merge; `--waive` with no head; per-task `--failed` from `ci` and from `merge` to `implement`, recording the PR head with `check-failed` queued and no counter; single-PR `--failed` stays, and is refused on a moved head; `--failed` after a merge refused; the last ruling queues the gate prompt (not after a merge) and re-arms the ladder. Every gh and git read happens once across stale retries (a counting stub, as `askedOnce`'s tests do). `rewind` of a merged task to `close`, `teardown` or any terminal phase (`failed` included) refused while owed, and an unmerged task rewound to `done` voiding its check. `close` refused while held. `abort` lists what is owed |
 | `status.test.ts` | Every line in §1.8, including the `execute` backstop line. The `files:` lines and the `shared:` header in §3.5 |
-| `bead-desired.test.ts`, `beads-sync.test.ts` | A held per-task task is `blocked` + awaiting-human, merged or not, never `closed`. The comment markers. `callsFor` drops a check comment on a closed bead and posts a releasing ruling before the close. `waitsOnClose` ignores a held task |
+| `bead-desired.test.ts`, `beads-sync.test.ts` | A held per-task task is `blocked` + awaiting-human, merged or not, never `closed`. The comment markers. `callsFor` drops a check comment on a closed bead and posts a releasing ruling before the close. `waitsOnClose` ignores a held task. A merged task with an owed check in an aborted or escalated run is `closed` (`heldForTheHuman` only while driven) |
 | `deliver.test.ts`, `tasks.test.ts` | The gate prompt is `before-merge.md` while owed and the normal one after. Its mergeable step per mode, and the shared-path note. `{{before_merge}}` in `ship-merge.md`. The done notice line |
 | `prompts.test.ts` | `before-merge` and `check-failed` declared. Every edited prompt renders in both modes with no unresolved token (`answer`, `merge`, `ship-merge`, `sync`, `implement`, `dispatch`, `intake`, `decision`, `ship`), and `before-merge` has no token a common bag also supplies |
-| `dispatch-steps.test.ts` (new) | Fresh: all steps in order. Resume from each stop. Step 1: herdr lists the checkout (skip), git only (`open`), neither (`create`), an unparseable `worktree list` (`create`, never a skip), the branch-exists refusal, several panes. The pane guard: the wrong workspace, a non-linked worktree, the wrong branch or path, an orchestrator pane, another task's pane — each stops before `agent start` is called. Step 2: run in the new checkout, `bootstrapped` recorded and honoured, a new workspace re-runs it, an unwired script not run, not executable. Step 3: the name held elsewhere stops without retrying; `--timeout 80000` passed. Step 4: re-read ledger, not ready, a `null` box, a box with text, `working` recorded. `--ready` order and stop at first failure. Refusal on a socket mismatch |
-| `dispatch-lock.test.ts` (new, real processes) | The per-repo lock refuses a second dispatch; a dead pid is taken over; a provably-ours orphaned group is killed, and an unprovable live group refused. SIGTERM to a running `hpipe dispatch` kills a sleeping fake bootstrap's whole group (SIGTERM, then SIGKILL) and removes the lock. The 20-minute deadline (shortened in the test) stops it with the hand-route message, not "fix what it names" |
-| `herdr.test.ts` | `worktreeCreate`/`worktreeOpen`/`worktreeList`/`agentStart` read the envelope from stdout or stderr (`herdr.ts:97-107`); `worktreeList` returns "unknown" on any shape it cannot read |
+| `dispatch-steps.test.ts` (new) | Fresh: all steps in order. Resume from each stop. Step 1: a bound workspace that passes both cross-checks (skip); each cross-check failing in turn — W missing from `workspace list`, not linked, `repo_root` ≠ checkout, no `worktree list` entry, wrong branch, prunable — stops with its message; either list unreadable stops; a checkout on the branch with no binding stops after waiting for one, and carries on when the binding lands within the wait; no checkout → `create` with `--cwd`, clearing `bootstrapped`; the branch-exists refusal; `open` is never called. The pane guard: after `create`, a pane or path differing from the response stops; otherwise a pane outside W, an orchestrator pane, another task's pane, several panes — each stops before `agent start` is called. Step 2: run in the new checkout, `bootstrapped` recorded and honoured for its checkout, an unwired script not run, not executable. Step 3: the name held elsewhere stops without retrying; `--timeout 80000` passed. Step 4: re-read ledger, not ready, a `null` box, a box with text; `working` recorded only when step 3 was skipped; after this run's own start, it waits for ready and an empty box. `--ready` order and stop at first failure. Refusal on a socket mismatch |
+| `dispatch-lock.test.ts` (new, real processes) | The per-repo lock refuses a second dispatch and names its holder, task and step; the `--pane` form takes it too; `--ready` takes a task that became ready mid-run before it releases the lock; a dead pid is taken over; a provably-ours orphaned group is killed, and an unprovable live group refused. SIGTERM to a running `hpipe dispatch` kills a sleeping fake bootstrap's whole group (SIGTERM, then SIGKILL) and removes the lock. The 20-minute deadline (shortened in the test) stops it with the hand-route message, not "fix what it names" |
+| `herdr.test.ts` | `worktreeCreate`/`worktreeList`/`agentStart` read the envelope from stdout or stderr (`herdr.ts:97-107`), and always pass `--cwd`; `worktreeList` parses `.result.worktrees[]` and returns "unreadable" on any other shape |
+| `tick.test.ts` | Binding a worktree (`created` or `opened`) clears `task.bootstrapped` |
 | `cli-argv.test.ts` | The four `dispatch` forms; `--ready` with `--task` refused; free-text `--before-merge`/`--waive`/`--failed` |
 | real git, temp dir | `git worktree list` detection, the existing-branch refusal, and `start` reading the shared file at the fetched commit, a missing file, and an unreadable ref |
 | `shared-paths.test.ts` (new) | The parser: comments, blanks, globs and empty prefixes ignored, normalisation |
 | `gating.test.ts` | `lockingFiles`. A shared-only overlap does not hold; a broader prefix still does. `releasableFromFiles` with shared entries. Symmetry |
-| `unstarted.test.ts`, `stall.test.ts`, `status.test.ts` | Briefed-phase advice leads with `hpipe dispatch --task`. The paneless `land-queue` and rewound-`implement` advice is unchanged |
+| `unstarted.test.ts`, `stall.test.ts`, `status.test.ts` | Briefed-phase advice leads with `hpipe dispatch --task`. The paneless `land-queue` and rewound-`implement` advice is unchanged. A live lock naming the task replaces the unstarted, undispatched and unbriefed advice with "`hpipe dispatch` … is at <step>", and no probe goes out; a stale lock, or one naming another task, run or session, changes nothing but the stale-lock warning |
 
 ### Wiring tests
 
@@ -939,15 +1000,23 @@ a probe that should not come would come within minutes.
 - Break `agent start` after a good bootstrap (start an agent named after the bead in another pane
   first). The step stops, naming that pane. Close it and re-run: the bootstrap is skipped
   (`bootstrapped`).
-- A second `dispatch --task` for another task in the repo is refused by the lock.
+- A second `dispatch --task` for another task in the repo is refused by the lock, naming the holder's
+  task and step. So is a `--pane` dispatch. During the slow bootstrap, `hpipe status` reads "`hpipe
+  dispatch` … is at bootstrap for t1", never "YOUR move: … herdr agent start", and no probe comes.
+- During a `--ready` run, register a new task: it is dispatched before the run ends.
 - `kill -TERM <hpipe pid>` during a slow bootstrap: `ps -g <pgid>` is empty within 10 s, and the lock
   is gone.
-- `hpipe forget` the task's workspace, then close that workspace and re-run. Nothing starts in a pane
-  that is not the task's worktree.
+- Close the task's workspace after a failed bootstrap (`herdr workspace close`) and re-run. The command
+  stops: a checkout exists with no workspace bound, with the `herdr worktree open` step. Run that step,
+  wait for `hpipe show` to name the workspace, and re-run: the bootstrap runs again, because the
+  binding cleared `bootstrapped`. Nothing ever starts in a pane that is not the task's worktree.
+- Re-run straight after a `create` whose bootstrap failed fast: the command waits for the binding and
+  carries on, rather than stopping on "no workspace bound".
 - A pre-existing branch that lacks the base is refused.
 - From a pane of another session, the command is refused.
 - With auto mode on, `hpipe dispatch` needs no separate `herdr agent start` approval. Record it.
-- **Record** the `worktree create` and `worktree list` JSON, verbatim (Verify 1–2).
+- **Record** the `worktree create` JSON and the `workspace list` entry for the new workspace,
+  verbatim (Verify 1–2).
 
 **§13 Shared paths.**
 
@@ -1000,16 +1069,19 @@ Each needs the real tool, so the smoke run settles it.
 
 1. The `herdr worktree create` response: where the workspace id, `root_pane.pane_id` and
    `worktree.path` sit. The plugin only ever names the last two (`unstarted.ts:114-115`).
-2. The `herdr worktree list` JSON: does each entry carry its path, branch, workspace id and whether it
-   is linked, and does it take `--cwd`? Step 1 fails closed on any shape it cannot read, so a wrong
-   guess costs a refused re-run, never a wrong skip.
-3. `herdr worktree open --branch` on a checkout with no workspace: its response shape.
-4. `herdr agent start`: that `--timeout` is in milliseconds, and the error codes for a name in use and
+2. `herdr workspace list` for a linked worktree's workspace: `worktree.repo_root` is that checkout's
+   own path, not the primary repo's. Step 1's cross-check rests on it. If it is the primary's, the
+   cross-check matches on `repo_root` = `run.repo_root` plus `worktree list`'s entry for the ledger's
+   path, and the design says so.
+3. `herdr agent start`: that `--timeout` is in milliseconds, and the error codes for a name in use and
    for a dialog.
-5. Claude Code's background Bash: no foreground timeout, a completion notice on exit, and which signal
+4. Claude Code's background Bash: no foreground timeout, a completion notice on exit, and which signal
    reaches a background command when the session ends. The traps and the deadline cover any answer.
-6. `gh pr view --json mergeStateStatus` values for a PR behind its base, a conflicting PR, and one
-   blocked on a review.
+5. `gh pr view --json mergeStateStatus` values for a PR behind its base, a conflicting PR, one blocked
+   on a review, and a draft.
+
+`herdr worktree list`'s shape was verified for the pass-2 review (Evidence). `worktree open` is no
+longer called, so its response no longer matters.
 
 ## Rejected
 
@@ -1023,7 +1095,9 @@ Each needs the real tool, so the smoke run settles it.
 | Reminders while held | Owner answer 2, and #22 |
 | A per-task run check gating every merge to come | One confirmation cannot cover several heads |
 | The supervisor running the dispatch | The serial tick, minute-long bootstraps, and a failure nobody reads |
-| A dispatch record file (pass 1) | A forgotten or reused workspace makes it stale, and a stale one started an agent that skips permissions in an unrelated pane (BLOCKER 1). herdr's own list and the pane guard replace it |
+| A dispatch record file (pass 1) | A forgotten or reused workspace makes it stale, and a stale one started an agent that skips permissions in an unrelated pane (BLOCKER 1). The ledger's hook binding, cross-checked against herdr, and the pane guard replace it |
+| Taking the workspace from `herdr worktree list` (pass 2) | Its entries carry no workspace id, so it can confirm a checkout but not name its workspace (pass-2 MAJOR 1) |
+| The command running `worktree open` on a kept checkout | It would pick a workspace on a guess, and what `open` does on a checkout whose workspace is already open is unknown. Binding stays the orchestrator's explicit move, and the command stops with the step |
 | A 9-minute overall budget (pass 1) | It existed only to fit the foreground timeout. In the background, only a hung bootstrap needs a bound |
 | Bootstraps in parallel under `--ready` | Contention on one machine and on one `.git/config`, and interleaved failures |
 | A unique agent name per start | Status, the advice texts and `herdr agent list` all name the worker by its bead. A taken name is stopped and named instead |
@@ -1056,7 +1130,7 @@ Each needs the real tool, so the smoke run settles it.
 
 | Finding | What changed |
 |---|---|
-| **BLOCKER 1**: a stale dispatch record could start an agent that skips permissions in an unrelated pane | The record file is gone. Step 1 asks `herdr worktree list`, matched on path and branch, and fails closed on output it cannot read. A pane guard before `agent start` requires herdr's linked worktree at the task's checkout on `task.branch`, and runs the orchestrator-pane and other-task-pane checks there (§2.2) |
+| **BLOCKER 1**: a stale dispatch record could start an agent that skips permissions in an unrelated pane | The record file is gone, and a pane guard runs before `agent start`, including the orchestrator-pane and other-task-pane checks (§2.2). Pass 2 took the workspace from `herdr worktree list`, which pass 3 replaced: see "After the pass-2 review", MAJOR 1 |
 | **MAJOR 2**: a per-task "waiting on a fix" had no exit, and the merge probe said "merge it" | Rulings are accepted only near the gate: per-task in `ci` or `merge` (or after its merge), single-PR in `ship-ci` or `ship-merge`. The judged head is `ci_head`. A per-task `--failed` sends the task to `implement` at once, unmerged only. The per-task `merged` clause gets held forms that never say "merge" (§1.6, §1.7) |
 | **MAJOR 3**: a per-task run could reach `done` with a check owed | Per-task void is now "terminal **and** no merge recorded". Rewinds past `merge` and `hpipe close` are refused while owed, and per-task `execute` holds while a merged task owes a check (§1.4, §1.5) |
 | **MAJOR 4**: the CLI read a lagging `merged_at_ms` | Ask GitHub once, before the retried save (`askedOnce`). Fail closed. A GitHub-merged PR counts as merged for `hold`, `answer --before-merge` and `confirm` (§1.6) |
@@ -1074,6 +1148,20 @@ Each needs the real tool, so the smoke run settles it.
 | Scope cuts | The `merge=union` advice and its Verify item are gone (Rejected). Pre-gate confirmations are gone except in `ci`/`ship-ci`. The record file is gone |
 | Open questions 1–9 | Answered by the owner and folded in: see "The owner's answers to pass 1's open questions". Verify 5 of pass 1 (`bd comment` on a closed bead) is gone with MINOR 13 |
 
+## After the pass-2 review
+
+The pass-2 review cleared every pass-1 fix, and found one MAJOR and five MINORs in the new remedies.
+
+| Finding | What changed |
+|---|---|
+| **MAJOR 1**: `herdr worktree list` carries no workspace id, so pass 2's step 1 could not name the task's workspace, and "unreadable → `create`" was a guess | The workspace and checkout come from the ledger's hook binding. They are cross-checked against `herdr workspace list` (W exists, linked, `repo_root` is the checkout; Verify 2) and `herdr worktree list --cwd <repo_root>` (the path is on `task.branch`). Every call passes `--cwd`. Right after its own `create`, the guard compares with the `create` response. A checkout with no live workspace tied to it stops, with the manual binding step, after a short wait for a binding that is on its way. An unreadable list stops. The command never runs `worktree open` (§2.2, Rejected) |
+| **MINOR 1**: after this run's own `agent start`, "`working` means it has the brief" is false | That rule applies only when step 3 was skipped. After its own start, step 4 waits up to 30 s for `isAgentReady` and an empty recognised box (§2.2) |
+| **MINOR 2**: `mergeStateStatus` handling was partial | `UNKNOWN` is asked again, at most three times. `CLEAN`, `UNSTABLE` and `HAS_HOOKS` are mergeable. `BLOCKED` (a required review or check) and `DRAFT` (`gh pr ready`) are named, in both modes. `BEHIND` and `DIRTY` are as before (§1.5) |
+| **MINOR 3**: held-state edges | A rewind of a merged, held task to `failed` (any terminal phase, or `close`/`teardown`) is refused. The refusal applies only when a merge is recorded, so an unmerged task can still be rewound to `done` and its check becomes void. `heldForTheHuman` holds only while the run is driven, so an aborted or escalated run's merged beads close (§1.4, §1.5) |
+| **MINOR 4**: herdr reuses workspace ids, so `bootstrapped` keyed by workspace could survive a re-created worktree | `bootstrapped` is keyed by checkout. The command's `create` clears it, and so does the supervisor's hook binding, which also covers a `create` or `open` run by hand. The one race runs the safe way, at the cost of a bootstrap (§2.2) |
+| **MINOR 5**: side effects of a background dispatch | The lock names the session, run, task and step. Status and stall read a live lock and say a dispatch is under way, with no "YOUR move: herdr agent start" and no probe. `--ready` re-scans before it releases the lock. The `--pane` form takes the lock, because a re-check of `awaiting_brief` cannot close the window before a send (§2.3) |
+
 **Not resolved by this pass.** Two judgement calls remain as Open questions: the 20-minute bootstrap
-deadline, and the cross-session lock. Six tool facts remain as Verify items, chiefly the JSON shapes
-of `worktree create` and `worktree list`.
+deadline, and the cross-session lock. Five tool facts remain as Verify items. The ones step 1 rests
+on are the `worktree create` response and what `workspace list` gives as a linked worktree's
+`repo_root`; Verify 2 says what changes if that is the primary repo's path.
