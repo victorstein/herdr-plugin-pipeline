@@ -206,10 +206,16 @@ export function parkedFooter(
 
   if (parked.length === 0) return ''
 
-  const lines = parked.map((task) =>
-    `- ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ` +
-    actionFor(run, task, hpipe, now, holds, dispatches))
+  const lines = parked.map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
   return ['also waiting on you:', ...lines].join('\n')
+}
+
+function digestLine(
+  run: Run, task: Task, now: number, hpipe: string, holds: PaneHolds, dispatches: DispatchLocks,
+): string {
+  const age = ageMinutes(task.phase_entered_at, now)
+  const move = actionFor(run, task, hpipe, now, holds, dispatches)
+  return `- ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move}`
 }
 
 /**
@@ -223,9 +229,7 @@ export function catchUpDigest(
 ): string {
   const lines = [...run.tasks]
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
-    .map((task) =>
-      `- ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ` +
-      actionFor(run, task, hpipe, now, holds, dispatches))
+    .map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
   return [
     `catch-up: digests for this run did not reach you, so here is where it stands now ` +
     `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,

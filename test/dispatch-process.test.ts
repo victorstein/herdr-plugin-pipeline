@@ -2,14 +2,16 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dispatchLockPath, type DispatchLock, groupExists, stopGroup, takeDispatchLock } from '../src/lib/dispatch-lock'
-import { DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals } from '../src/lib/dispatch-process'
+import {
+  DispatchInterrupt, dispatchGit, noChildren, runTrackedBootstrap, trapDispatchSignals,
+} from '../src/lib/dispatch-process'
 import { newRun, saveRun } from '../src/lib/ledger'
 import { processStartedAtMs } from '../src/lib/pidfile'
 import { repoContext } from '../src/lib/repo'
 import type { Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 import { makeFakeBin } from './helpers/fake-bin'
-import { cleanupFixtures, cloneOfRemote, tempDir } from './helpers/git-worktree'
+import { cleanupFixtures, cloneOfRemote, commitAs, git, revParse, tempDir } from './helpers/git-worktree'
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts')
 const PLUGIN_ROOT = join(import.meta.dir, '..')
@@ -150,3 +152,17 @@ test('SIGTERM to a running `hpipe dispatch` stops its bootstrap\'s whole group a
   expect(groupExists(pgid!)).toBe(false)
   expect(existsSync(lockPath)).toBe(false)
 }, 30_000)
+
+test('git names a branch\'s commit exactly, tells a missing branch from a failed read, and answers containment', async () => {
+  const { clone } = cloneOfRemote('main')
+  const base = revParse(clone, 'HEAD')
+  git(['branch', 'feat/x/old'], clone)
+  expect(await dispatchGit.branchCommit(clone, 'feat/x')).toBeNull()
+  git(['checkout', '-q', '-b', 'feat/y'], clone)
+  commitAs(clone, 'y.txt', 'y\n')
+  const ahead = revParse(clone, 'HEAD')
+  expect(await dispatchGit.branchCommit(clone, 'feat/y')).toBe(ahead)
+  expect(await dispatchGit.branchCommit(tempDir('not-a-repo-'), 'feat/y')).toBeUndefined()
+  expect(await dispatchGit.contains(clone, base, ahead)).toBe(true)
+  expect(await dispatchGit.contains(clone, ahead, base)).toBe(false)
+})

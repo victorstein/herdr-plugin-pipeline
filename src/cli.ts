@@ -32,11 +32,13 @@ import {
 import {
   dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
 } from './lib/dispatch-process'
-import { type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask } from './lib/dispatch-steps'
 import {
-  allOrchestratorPanes, BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
-  runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  wasAborted, withBatch, writeOrchestrator,
+  type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask,
+} from './lib/dispatch-steps'
+import {
+  allOrchestratorPanes, BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun,
+  retryOnStaleRun, runById, runForRepo, runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal,
+  unlandedSaveMessage, wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
@@ -932,7 +934,9 @@ async function handOverBrief(ctx: Ctx, run: Run, task: Task, paneId: string, dep
   // next pass re-assigns it: harmless, and not worth a ledger write before the send.
   const claimed = await deps.claim(run.repo_key, task.bead)
   if (isBdFailure(claimed)) {
-    return { ok: false, text: `bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}` }
+    return {
+      ok: false, text: `bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`,
+    }
   }
 
   const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
@@ -976,7 +980,8 @@ function lockRefusal(ctx: Ctx, run: Run, taken: Exclude<LockTaken, { ok: true }>
   const takesIt = holder.mode === 'ready' && holder.session === ctx.session && holder.run_id === run.run_id
     ? `; it takes every task that becomes ready before it ends${wanted === null ? '' : `, ${wanted} included`}`
     : ''
-  return `${holderLine(holder, Date.now())}: one dispatch runs per repo at a time${takesIt}. Run this again once it ends`
+  return `${holderLine(holder, Date.now())}: one dispatch runs per repo at a time${takesIt}. Run this again once it ` +
+    'ends'
 }
 
 export async function cmdDispatchTask(ctx: Ctx, input: {
@@ -1238,15 +1243,17 @@ export async function cmdDispatchSteps(
     ledger: dispatchLedger(ctx),
     base: (r, t) => wiring.base(r.repo_root, dependencyMerges(t, r.tasks), r.batch?.branch ?? null),
     runBootstrap: (checkout, logPath) => wiring.runBootstrap(checkout, logPath, lock),
-    bootstrapLog: (t) => join(ctx.stateDir, 'runs', ctx.session, `${run.run_id}.dispatch`, `${t.task_id}-bootstrap.log`),
+    bootstrapLog: (t) =>
+      join(ctx.stateDir, 'runs', ctx.session, `${run.run_id}.dispatch`, `${t.task_id}-bootstrap.log`),
     brief: async (r, t, paneId) => {
       const handed = await handOverBrief(ctx, r, t, paneId, wiring.handOver)
       if (!handed.ok) return handed
       const delivered = `claimed ${t.bead}; delivered to ${paneId}, and the worker is working on it`
+      if (handed.unrecorded === null) return { ok: true, text: delivered }
       return {
         ok: true,
-        text: handed.unrecorded === null ? delivered : `${delivered}, but its pane was not recorded ` +
-          `(${handed.unrecorded}); it binds on its own once herdr reports the agent — do not dispatch ${t.task_id} again`,
+        text: `${delivered}, but its pane was not recorded (${handed.unrecorded}); it binds on its own once herdr ` +
+          `reports the agent — do not dispatch ${t.task_id} again`,
       }
     },
     at: async (taskId, step) => {

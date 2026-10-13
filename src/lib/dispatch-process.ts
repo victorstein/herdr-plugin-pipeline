@@ -130,7 +130,11 @@ export function trapDispatchSignals(trap: Trap): () => void {
     await Promise.all(running.map(stop))
     const { task, step } = trap.lock.record
     trap.lock.release()
-    trap.say(`stopped ${task === null ? 'the dispatch' : `${task} at ${step ?? 'its start'}`}: interrupted`)
+    try {
+      trap.say(`stopped ${task === null ? 'the dispatch' : `${task} at ${step ?? 'its start'}`}: interrupted`)
+    } catch {
+      // A SIGHUP can mean the terminal is gone; the exit below must still happen.
+    }
     exit(128 + (SIGNAL_NUMBERS[signal] ?? 0))
   }
   const listeners = Object.keys(SIGNAL_NUMBERS).map((signal) => [signal, () => { void handle(signal) }] as const)

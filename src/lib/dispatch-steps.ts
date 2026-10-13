@@ -174,8 +174,8 @@ class TaskDispatch {
     const workspaceId = task.workspace_id as string
     const checkout = task.checkout_path
     if (checkout === null) {
-      throw new Stop('worktree', nothingStarted(`the ledger binds ${this.id} to ${workspaceId} but records no checkout ` +
-        'for it, so herdr cannot confirm it'))
+      throw new Stop('worktree', nothingStarted(`the ledger binds ${this.id} to ${workspaceId} but records no ` +
+        'checkout for it, so herdr cannot confirm it'))
     }
     const [workspaces, worktrees] = await Promise.all([
       this.deps.herdr.workspaceListing(), this.deps.herdr.worktreeList(run.repo_root),
@@ -184,8 +184,8 @@ class TaskDispatch {
       throw new Stop('worktree', nothingStarted(`herdr workspace list could not be read (${workspaces.reason})`))
     }
     if (!worktrees.ok) {
-      throw new Stop('worktree', nothingStarted(`herdr worktree list --cwd ${shellQuoted(run.repo_root)} could not be ` +
-        `read (${worktrees.reason})`))
+      throw new Stop('worktree', nothingStarted(`herdr worktree list --cwd ${shellQuoted(run.repo_root)} could not ` +
+        `be read (${worktrees.reason})`))
     }
     const said = `the ledger binds ${this.id} to ${workspaceId} at ${checkout}`
     const listed = workspaces.items.find((workspace) => workspace.workspace_id === workspaceId)
@@ -241,7 +241,10 @@ class TaskDispatch {
       'workspace. Nothing was started'
   }
 
-  /** `worktree create` on an existing branch checks it out rather than cutting it from the base. Measured on herdr 0.9.0. */
+  /**
+   * `worktree create` on an existing branch checks it out rather than cutting it
+   * from the base. Measured on herdr 0.9.0.
+   */
   private async refuseForeignBranch(base: string): Promise<void> {
     const { branch } = this.task
     const existing = await this.deps.git.branchCommit(this.run.repo_root, branch)
@@ -251,7 +254,8 @@ class TaskDispatch {
     if (existing === null) return
     const contains = await this.deps.git.contains(this.run.repo_root, base, existing)
     if (contains === null) {
-      throw new Stop('worktree', nothingStarted(`git could not tell whether \`${branch}\` contains the base ${sha8(base)}`))
+      throw new Stop('worktree', nothingStarted(`git could not tell whether \`${branch}\` contains the base ` +
+        sha8(base)))
     }
     if (!contains) {
       throw new Stop('worktree', `\`${branch}\` already exists at ${sha8(existing)} and does not contain the base ` +
@@ -263,9 +267,9 @@ class TaskDispatch {
     const created = await this.deps.herdr.worktreeCreate(this.run.repo_root, this.task.branch, base)
     if (!created.ok || created.result === undefined) {
       if (created.code === 'unreadable_response') {
-        throw new Stop('worktree', `herdr may have created the worktree, but ${created.message ?? 'its response could ' +
-          'not be read'}: nothing was started. Run this again once \`${this.deps.hpipe} show --task ${this.id}\` names ` +
-          'a workspace')
+        const unread = created.message ?? 'its response could not be read'
+        throw new Stop('worktree', `herdr may have created the worktree, but ${unread}: nothing was started. Run ` +
+          `this again once \`${this.deps.hpipe} show --task ${this.id}\` names a workspace`)
       }
       throw new Stop('worktree', `herdr refused the worktree: ${created.code ?? 'error'}` +
         `${created.message ? ` — ${created.message}` : ''}. Nothing was started`)
@@ -277,7 +281,9 @@ class TaskDispatch {
   private async pane(placed: Placed): Promise<{ paneId: string; agentAlready: boolean }> {
     await this.deps.at(this.id, 'pane')
     const { created } = placed
-    if (created !== null) this.line('worktree', `created ${created.workspaceId} at ${created.path}, pane ${created.paneId}`)
+    if (created !== null) {
+      this.line('worktree', `created ${created.workspaceId} at ${created.path}, pane ${created.paneId}`)
+    }
     const chosen = created === null ? await this.chosenPane(placed) : await this.createdPane(created)
     if (created === null) {
       this.line('worktree', `${placed.workspaceId} at ${placed.checkout} exists (pane ${chosen.paneId}) — skipped`)
@@ -286,7 +292,7 @@ class TaskDispatch {
     return chosen
   }
 
-  /** The ledger has not caught up with this command's own create, so the create's response is what is checked against. */
+  /** The ledger has not caught up with this command's own create, so the guard checks against its response. */
   private async createdPane(created: CreatedWorktree): Promise<{ paneId: string; agentAlready: boolean }> {
     await this.reread()
     const { workspace_id: workspaceId, checkout_path: checkout } = this.task
@@ -303,7 +309,8 @@ class TaskDispatch {
     const { workspaceId } = placed
     const panes = await this.deps.herdr.paneListing(workspaceId)
     if (!panes.ok) {
-      throw new Stop('pane', nothingStarted(`herdr pane list --workspace ${workspaceId} could not be read (${panes.reason})`))
+      throw new Stop('pane', nothingStarted(`herdr pane list --workspace ${workspaceId} could not be read ` +
+        `(${panes.reason})`))
     }
     const recorded = panes.items.find((pane) => pane.pane_id === this.task.pane_id)
     const only = panes.items.length === 1 ? panes.items[0] : undefined
@@ -340,7 +347,8 @@ class TaskDispatch {
   private async bootstrap(placed: Placed, paneId: string, agentAlready: boolean): Promise<void> {
     await this.deps.at(this.id, 'bootstrap')
     if (agentAlready) {
-      this.line('bootstrap', `skipped: an agent already runs in ${paneId}, so the checkout was set up before it started`)
+      this.line('bootstrap', `skipped: an agent already runs in ${paneId}, so the checkout was set up before it ` +
+        'started')
       return
     }
     const done = this.task.bootstrapped
@@ -350,8 +358,8 @@ class TaskDispatch {
     }
     const declared = repoBootstrap(placed.checkout)
     if (declared.kind === 'not-executable') {
-      throw new Stop('bootstrap', `${placed.checkout}/${BOOTSTRAP_REL} is not executable: \`chmod +x ${BOOTSTRAP_REL}\` ` +
-        'on the default branch, or in the checkout, then run this again')
+      throw new Stop('bootstrap', `${placed.checkout}/${BOOTSTRAP_REL} is not executable: ` +
+        `\`chmod +x ${BOOTSTRAP_REL}\` on the default branch, or in the checkout, then run this again`)
     }
     if (declared.kind === 'none') {
       this.line('bootstrap', declared.unwired === undefined
@@ -369,7 +377,8 @@ class TaskDispatch {
       throw new Stop('bootstrap', `./${BOOTSTRAP_REL} failed (exit ${ran.code}); fix what it names, then run this ` +
         `again (log: ${log}). Its last lines:\n${tail}`)
     }
-    await this.deps.ledger.setBootstrapped(this.run.run_id, this.id, { checkout: placed.checkout, at: this.deps.now() })
+    const record = { checkout: placed.checkout, at: this.deps.now() }
+    await this.deps.ledger.setBootstrapped(this.run.run_id, this.id, record)
     const seconds = Math.round((this.deps.now() - startedAt) / 1000)
     this.line('bootstrap', `./${BOOTSTRAP_REL} passed in ${seconds}s (log: ${log})`)
   }
@@ -380,9 +389,10 @@ class TaskDispatch {
    */
   private handRoute(checkout: string, paneId: string, ran: CheckRun): string {
     const minutes = Math.round((ran.timedOutAfterMs ?? BOOTSTRAP_DEADLINE_MS) / 60_000)
+    const byHand = `(cd ${shellQuoted(checkout)} && ./${BOOTSTRAP_REL})`
     return `the bootstrap did not finish within ${minutes} minutes and was stopped, with everything it started. If ` +
-      `it really takes longer, run it by hand in the background, \`(cd ${shellQuoted(checkout)} && ./${BOOTSTRAP_REL})\`, ` +
-      `then \`${startAgentCommand(this.task, paneId)}\`, then \`${this.deps.hpipe} dispatch --task ${this.id}\``
+      `it really takes longer, run it by hand in the background, \`${byHand}\`, then ` +
+      `\`${startAgentCommand(this.task, paneId)}\`, then \`${this.deps.hpipe} dispatch --task ${this.id}\``
   }
 
   /** Whether this run started the agent: only then does `working` prove nothing about a brief. */
@@ -402,15 +412,16 @@ class TaskDispatch {
     }
     if (named !== null) {
       throw new Stop('agent', `an agent named ${this.task.bead} already runs in ${named} (an earlier dispatch of ` +
-        `${this.id}?): close it, or \`${this.deps.hpipe} dispatch --task ${this.id} --pane ${named}\` to brief that one`)
+        `${this.id}?): close it, or \`${this.deps.hpipe} dispatch --task ${this.id} --pane ${named}\` to brief ` +
+        'that one')
     }
     const started = await this.deps.herdr.agentStart({
       name: this.task.bead, kind: 'claude', paneId, timeoutMs: AGENT_START_TIMEOUT_MS, args: workerAgentArgs(this.task),
     })
     if (!started.ok) {
-      throw new Stop('agent', `herdr agent start answered ${started.code ?? 'error'}` +
-        `${started.message ? ` — ${started.message}` : ''}: \`herdr pane read ${paneId}\`; a re-run skips the worktree ` +
-        'and the bootstrap, and starts the agent unless one is in the pane')
+      const answer = `${started.code ?? 'error'}${started.message ? ` — ${started.message}` : ''}`
+      throw new Stop('agent', `herdr agent start answered ${answer}: \`herdr pane read ${paneId}\`; a re-run skips ` +
+        'the worktree and the bootstrap, and starts the agent unless one is in the pane')
     }
     this.line('agent', `started ${this.task.bead} in ${paneId} (--effort ${WORKER_EFFORT[tierOf(this.task)]})`)
     return true
@@ -452,11 +463,12 @@ class TaskDispatch {
       if (box === '') return
       if (waited >= waitMs) {
         if (box !== null) {
-          throw new Stop('brief', `the input box of ${paneId} holds text: \`herdr pane read ${paneId}\`; if it is the ` +
-            `brief, \`herdr agent send-keys ${paneId} ctrl+c\`, then run this again`)
+          throw new Stop('brief', `the input box of ${paneId} holds text: \`herdr pane read ${paneId}\`; if it is ` +
+            `the brief, \`herdr agent send-keys ${paneId} ctrl+c\`, then run this again`)
         }
         const why = isAgentReady(status) ? 'no input box on screen' : `it reads ${status}`
-        throw new Stop('brief', `the agent in ${paneId} is not ready (${why}): \`herdr pane read ${paneId}\`; nothing was sent`)
+        throw new Stop('brief', `the agent in ${paneId} is not ready (${why}): \`herdr pane read ${paneId}\`; ` +
+          'nothing was sent')
       }
       await this.deps.sleep(POLL_MS)
     }

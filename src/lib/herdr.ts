@@ -46,7 +46,7 @@ export interface WorkspaceInfo {
   worktree?: { repo_key: string; repo_root: string; is_linked_worktree: boolean } | null
 }
 
-/** One checkout `herdr worktree list` names. It carries no workspace id: it can confirm a checkout, never name its workspace. */
+/** A checkout `herdr worktree list` names. With no workspace id, it confirms a checkout, never its workspace. */
 export interface WorktreeEntry {
   path: string
   /** The short branch name; null for a detached or bare checkout. */
@@ -233,7 +233,9 @@ export class Herdr {
    * focus would move the human's keystrokes into the new worker's pane mid-sentence.
    */
   async worktreeCreate(repoRoot: string, branch: string, base: string): Promise<CallResult<CreatedWorktree>> {
-    const res = await this.call(['worktree', 'create', '--cwd', repoRoot, '--branch', branch, '--base', base, '--no-focus'])
+    const res = await this.call([
+      'worktree', 'create', '--cwd', repoRoot, '--branch', branch, '--base', base, '--no-focus',
+    ])
     if (!res.ok) return { ok: false, code: res.code, message: res.message }
     const created = createdWorktree(res.result)
     return typeof created === 'string'
@@ -258,7 +260,8 @@ export class Herdr {
       return { ok: false, code: 'timeout', message: `herdr agent start did not return within ${boundMs / 1000}s` }
     }
     const res = envelopeResult<unknown>(ran.stdout, ran.stderr)
-    return res.code === 'unparseable' && ran.code === -1 ? { ok: false, code: 'spawn_failed', message: ran.stderr } : res
+    if (res.code === 'unparseable' && ran.code === -1) return { ok: false, code: 'spawn_failed', message: ran.stderr }
+    return res
   }
 
   /** The pane an agent of this name runs in; null when herdr names none, for any reason. */
