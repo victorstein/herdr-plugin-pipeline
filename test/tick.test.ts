@@ -181,6 +181,19 @@ test('worktree.opened binds a surviving checkout exactly as worktree.created doe
   expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
 })
 
+test('binding a worktree, created or opened, clears the bootstrap a dispatch recorded for the task', () => {
+  for (const kind of ['worktree.created', 'worktree.opened'] as const) {
+    const run = mkRun([mkTask({
+      workspace_id: null, pane_id: null, branch: 'feat/x', bootstrapped: { checkout: '/r/.worktrees/feat-x', at: 1 },
+    })])
+    const events: QueuedEvent[] = [{
+      kind, session: 'personal', at: 2, workspace_id: 'w9', branch: 'feat/x', checkout_path: '/r/.worktrees/feat-x',
+    }]
+    applyEvents([run], events, 'personal', new Set())
+    expect(run.tasks[0]?.bootstrapped, kind).toBeUndefined()
+  }
+})
+
 test('worktree.opened on an already-bound task does not rebind it — #94', () => {
   const run = mkRun([
     mkTask({ task_id: 't1', workspace_id: 'w5', pane_id: 'w5:p1', branch: 'feat/x' }),

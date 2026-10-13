@@ -434,6 +434,11 @@ export function applyEvents(
         found.task.workspace_id = event.workspace_id
         found.task.checkout_path = event.checkout_path ?? found.task.checkout_path
         found.task.adopted_at = Date.now()
+        // herdr reuses workspace ids and a re-created worktree can sit at the same
+        // path, so a bootstrap recorded before this binding is no proof for the
+        // checkout bound now. Cleared after a dispatch's fast bootstrap recorded it,
+        // it costs one bootstrap more on a re-run.
+        delete found.task.bootstrapped
         changed = true
       }
       continue

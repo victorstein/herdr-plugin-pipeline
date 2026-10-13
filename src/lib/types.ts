@@ -322,6 +322,12 @@ export interface Task {
   landed?: Landing[]
   /** Absent unless the last `implement` exit skipped the PR review; older ledgers never carry it. */
   review_skip?: ReviewSkip
+  /**
+   * The checkout `hpipe dispatch` last ran the bootstrap to success in. Cleared
+   * whenever a worktree is created or bound for the task: herdr reuses workspace
+   * ids, and a re-created worktree can sit at the same path.
+   */
+  bootstrapped?: { checkout: string; at: number }
   notes: string
 }
 
