@@ -125,6 +125,41 @@ test('the clean-up deletes only task branches whose head landed, and names the r
     .toContain(`git -C '${clone}' push origin --delete t1-branch`)
 })
 
+/** A batch checkout, as the ship prompt has the orchestrator make it, with a submodule bootstrap initialised. */
+function bootstrappedCheckout(clone: string, other: string): string {
+  const sub = tempDir('hpipe-sub-')
+  git(['init', '-q', '--initial-branch=main', '.'], sub)
+  commitAs(sub, 'sdk.h', 'sdk\n')
+  git(['checkout', '-q', '-B', 'batch/x', 'origin/batch/x'], other)
+  git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'sdk'], other)
+  git(['commit', '-qm', 'chore: vendor the sdk'], other)
+  git(['push', '-q', 'origin', 'HEAD:refs/heads/batch/x'], other)
+  git(['fetch', '-q', 'origin', '+refs/heads/batch/x:refs/remotes/origin/batch/x'], clone)
+  const checkout = join(tempDir('hpipe-checkouts-'), 'r1')
+  git(['worktree', 'add', '-q', '--detach', checkout, 'origin/batch/x'], clone)
+  git(['-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init'], checkout)
+  return checkout
+}
+
+// The trial's `worktree remove` of a bootstrapped batch checkout failed: "working trees containing
+// submodules cannot be moved or removed". Measured on a live run.
+test('a batch checkout with submodules is removed with --force once nothing in it is uncommitted', async () => {
+  const { cleanupLines } = await import('../src/supervisor/deliver')
+  const { clone, other } = landingRepo()
+  const checkout = bootstrappedCheckout(clone, other)
+  const run = runIn(clone, [])
+  run.batch = { ...run.batch!, checkout }
+
+  expect(await cleanupLines(run, run.batch)).toContain(`  git -C '${clone}' worktree remove --force '${checkout}'` +
+    '  # git refuses its submodules without --force, and nothing in it is uncommitted')
+
+  writeFileSync(join(checkout, 'sdk', 'sdk.h'), 'edited in the batch checkout\n')
+  const dirty = await cleanupLines(run, run.batch)
+  expect(dirty).toContain(`  git -C '${clone}' worktree remove '${checkout}'`)
+  expect(dirty).toContain(`  ${checkout} has uncommitted work (sdk); review it, then add --force, which its ` +
+    'submodules need')
+})
+
 test('a shipped run names what its clean-up leaves: local task branches, the batch on origin, a stale default branch, the review', async () => {
   const { renderRunPhasePrompt } = await import('../src/supervisor/deliver')
   const { clone, other, t1 } = landingRepo()

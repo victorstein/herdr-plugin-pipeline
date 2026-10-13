@@ -743,9 +743,35 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
     'Clean up when you are done with it:',
     ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
-    `  git -C ${repo} worktree remove ${shellQuoted(batch.checkout)}`,
+    ...await checkoutRemovalLines(batch.checkout, repo),
     `  git -C ${repo} branch -D ${shellWord(batch.branch)}`,
   ]
+}
+
+/**
+ * git refuses to remove a worktree with initialised submodules unless forced, and
+ * the ship prompts have the orchestrator bootstrap the batch checkout, which is how
+ * a repo that vendors an SDK as a submodule gets them. Measured on a live run.
+ * `--force` also throws away uncommitted work, so it is offered only when there is
+ * none, submodules included.
+ */
+async function checkoutRemovalLines(checkout: string, repo: string): Promise<string[]> {
+  const remove = `  git -C ${repo} worktree remove`
+  const quoted = shellQuoted(checkout)
+  if (!existsSync(checkout)) return [`${remove} ${quoted}`]
+  const submodules = await git(checkout, ['submodule', 'status'])
+  const initialised = submodules.code === 0 &&
+    submodules.text.split('\n').some((line) => line.length > 0 && !line.startsWith('-'))
+  if (!initialised) return [`${remove} ${quoted}`]
+  const status = await git(checkout, ['status', '--porcelain', '--ignore-submodules=none'])
+  const dirty = status.code === 0 ? status.text.split('\n').filter((line) => line.length > 0).map((line) => line.slice(3)) : null
+  if (dirty !== null && dirty.length === 0) {
+    return [`${remove} --force ${quoted}  # git refuses its submodules without --force, and nothing in it is uncommitted`]
+  }
+  const what = dirty === null
+    ? 'work git could not read'
+    : `uncommitted work (${dirty.slice(0, 3).join(', ')}${dirty.length > 3 ? ', …' : ''})`
+  return [`${remove} ${quoted}`, `  ${checkout} has ${what}; review it, then add --force, which its submodules need`]
 }
 
 /**
