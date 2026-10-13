@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.1.0...v2.1.1) (2026-10-13)
+
+
+### Performance
+
+* **effort:** heavy runs at high, keeping xhigh for its spec review ([#160](https://github.com/victorstein/herdr-plugin-pipeline/issues/160)) ([5d3d096](https://github.com/victorstein/herdr-plugin-pipeline/commit/5d3d096aa4722e8dc75b20bb02d7f8015968034f))
+
 ## [2.1.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.0.0...v2.1.0) (2026-10-13)
 
 
