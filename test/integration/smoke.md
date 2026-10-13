@@ -566,8 +566,11 @@ escalated anyway. Nothing waits forever.
 Each probe states the cadence in force — `sent every 15 minutes` at the defaults, whatever
 `config.env` sets otherwise — that a reply does not answer it, and what holds the escalation off; a
 probe whose minutes differ from the `This phase has been open N minutes` steps it arrives at is a
-finding. A probe to a pane showing background work ends `Your pane shows background work running now
-(…), which this phase waits for.`
+finding. A probe to the pane whose work holds its row, when that pane shows background work, names
+it: `… This phase does not wait for it.` for a shell or a monitor, and `… it waits up to 10 minutes for
+<subagent> to finish, and no longer.` for a subagent. A probe that tells the orchestrator a phase waits
+for a shell is a **finding**, and so is one listing the orchestrator's work in a probe about a worker
+owed its brief.
 
 ### 4d. Delivery to a pane that cannot answer
 
