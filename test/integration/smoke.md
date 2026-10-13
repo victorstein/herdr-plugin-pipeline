@@ -1479,7 +1479,7 @@ with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
 - Merge the PR by hand while held. Before the supervisor's next idle tick, `hpipe hold --task t1
   --before-merge "y"` is refused as merged: GitHub was asked. t1 stays in `merge` with the `⚠ t1: PR
   #<n> merged before the human confirmed c1` line, and its bead stays open. `hpipe rewind <run> done
-  --task t1` and `hpipe close --task t1` are refused. `hpipe confirm --check c1 --by human --waive
+  --task t1`, `hpipe rewind <run> implement --task t1` and `hpipe close --task t1` are refused. `hpipe confirm --check c1 --by human --waive
   "<why>"` → `close → done`, and the waiver comment (`[hpipe t1/c1/r<n>]`) is on the bead before it
   closes.
 

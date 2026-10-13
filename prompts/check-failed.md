@@ -1,7 +1,7 @@
 # The human's check failed — {{branch}} ({{bead}}), PR #{{pr}}
 
-The human checked PR #{{pr}} at {{failed_head}} before it merges, and the check failed. The PR is not
-merged, and this task is back in `implement`.
+The human checked PR #{{pr}} at {{failed_head}} before letting it merge, and the check failed. The PR
+is not merged, and this task is back in `implement`.
 
 **The check{{failed_from}}:** {{failed_check}}
 

@@ -562,8 +562,9 @@ The user's ruling is recorded with:
   "failed on device; fixed by <task>"`, and register the fix as a new task.
 
 A PR merged by hand while a check is owed is recorded, since it is GitHub's fact, but the task waits in
-`merge` (single-PR, the run in `ship-merge`) until the user rules. Its bead stays open, a rewind past
-`merge` and `hpipe close` are refused, and a per-task run cannot reach `done`. `hpipe abort` lists
+`merge` (single-PR, the run in `ship-merge`) until the user rules. Its bead stays open, it can be
+rewound only back to `merge` (any other phase would finish it or forget the merge), `hpipe close` is
+refused, and a per-task run cannot reach `done`. `hpipe abort` lists
 what is still owed, and the done notice says what was ruled.
 
 `hold` and `answer --before-merge` refuse beside a supervisor that predates before-merge checks, which
