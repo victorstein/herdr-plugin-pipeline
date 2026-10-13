@@ -100,14 +100,20 @@ executable `.claude/pipeline-bootstrap` at the repo root:
     git submodule update --init
     uv sync
 
-The orchestrator is told to run it in each new checkout before starting the worker, and the worker's
+`hpipe dispatch` runs it in each new checkout, from that checkout's own copy, before it starts the
+worker, and the worker's
 brief names it as the recovery if a build fails on a missing dependency. It runs from the worktree
-root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
-the file; every dispatch then reports `bootstrap: none`. If the repo has a conventional setup script
-(`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no `.claude/pipeline-bootstrap`, the
-line names it and the `dispatch, in order:` block carries it as an optional step in the new checkout;
-point a `.claude/pipeline-bootstrap` at it to have it run every time. herdr picks the new checkout's
-path, so the block names it by where `worktree create`'s JSON gives it, `.result.worktree.path`, and
+root and **must be idempotent** — it can run more than once. Its output goes to
+`$HERDR_PLUGIN_STATE_DIR/runs/<session>/<run>.dispatch/<task>-bootstrap.log`, and a run that fails
+prints the last 40 lines. A bootstrap that passed is recorded for that checkout, so a dispatch run
+again after a later step failed does not repeat it. One still running after 20 minutes is stopped with
+everything it started; a bootstrap that really needs longer is run by hand, as the message says. A
+repo that needs nothing simply omits the file; every dispatch then reports `bootstrap: none`. If the
+repo has a conventional setup script (`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no
+`.claude/pipeline-bootstrap`, the line names it and `hpipe dispatch` does not run it; the
+`dispatch, in order:` block carries it as an optional step in the new checkout. Point a
+`.claude/pipeline-bootstrap` at it to have it run every time. herdr picks the new checkout's path, so
+the block names it by where `worktree create`'s JSON gives it, `.result.worktree.path`, and
 `hpipe show --task <id>` prints it once herdr reports the worktree.
 
 It is also where a sibling package's build step belongs. If your apps consume another package's
@@ -126,12 +132,16 @@ The orchestrator pushes, opens and merges PRs, and starts workers. Allow these i
 session it runs in before you start a run, or the permission check (and auto mode's classifier) will
 stop it partway through, once per command:
 
-    git push · git pull · gh pr create · gh pr merge
-    herdr worktree create · herdr agent start · hpipe
+    git push · git pull · gh pr create · gh pr merge · hpipe
 
 For example, `Bash(gh pr merge:*)` under `permissions.allow` in the repo's
 `.claude/settings.local.json`. Workers run with `--dangerously-skip-permissions` in their own
 worktrees and need nothing.
+
+`hpipe dispatch` runs `herdr worktree create` and `herdr agent start … --dangerously-skip-permissions`
+itself, so allowing `hpipe` allows starting workers that skip permissions, and auto mode's classifier
+sees only `hpipe dispatch --task t1`, never the `agent start` inside it. `herdr worktree create` and
+`herdr agent start` are needed only for the manual fallback.
 
 ## Use
 
@@ -155,17 +165,31 @@ other check has passed, and registers the task under its id. Adopting with `--be
 that is closed, assigned, held by a live task in any session, blocked by an open bead, or the parent
 of open child beads — each would trip one of bd's close guards at merge.
 
-When a task is ready the orchestrator creates its worktree, starts a bare agent in the root pane, and
-hands it the brief with:
+When tasks are ready the orchestrator dispatches them with one command, run in the background:
+
+    hpipe dispatch --ready [--run <run-id>]        # every task waiting for its brief
+    hpipe dispatch --task <id> [--run <run-id>]    # one task
+
+For each task it fetches the base, creates the task's worktree from it with `--cwd` pinned to the
+repo, runs `.claude/pipeline-bootstrap` in the new checkout, starts the worker with
+`--dangerously-skip-permissions` at its tier's effort, and hands it the brief. It prints one line per
+step as it goes, skips any step already done, and stops at the first failure with what to do next; run
+the same command again once that is fixed. Only one dispatch runs in a repo at a time, across
+sessions, and only from a pane of the run's own herdr session. `--ready` also takes any task that
+becomes ready while it runs. A killed dispatch stops its bootstrap with it, and `hpipe status` says
+when one is under way rather than asking for an agent to be started.
+
+The manual fallback is the `dispatch, in order:` block `hpipe task` and the `Dispatch tN` prompt print,
+ending in:
 
     hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]
 
-which submits the rendered brief over `herdr agent prompt` and exits non-zero unless herdr sees the
-worker start on it. The brief cannot ride on `herdr agent start` itself: herdr refuses to pass an
-argument containing its fences and backticks. When the batch is complete the orchestrator closes
-intake with `hpipe dispatch --done`. `dispatch --task` claims the task's bead first; if bd refuses the
-claim, nothing is sent. Everything after that is injected: each worker gets its next
-instruction as each phase completes.
+which submits the rendered brief to an agent you started over `herdr agent prompt`, and exits
+non-zero unless herdr sees the worker start on it. The brief cannot ride on `herdr agent start`
+itself: herdr refuses to pass an argument containing its fences and backticks. Both forms claim the
+task's bead first; if bd refuses the claim, nothing is sent. When the batch is complete the
+orchestrator closes intake with `hpipe dispatch --done`. Everything after that is injected: each
+worker gets its next instruction as each phase completes.
 
 `hpipe status` shows the fleet, every open decision, and anything waiting on you. For one task:
 
@@ -494,6 +518,10 @@ branch review, so beside an old one a new CLI still gets a batch merge command w
 `--match-head-commit` and a branch review git can see. The release adds optional fields an earlier one
 ignores: a sync submission's `merges` (an old supervisor calls any clean sync a clean sync) and an
 outbox entry's `carry-on` kind (an old supervisor delivers it but does not count it as a resume).
+
+`hpipe dispatch --task` and `--ready` are the CLI's alone, so they work beside a supervisor that
+predates them; that supervisor's `Dispatch tN` prompt just lacks its `dispatch:` line. A task's
+`bootstrapped` record is optional, and an earlier release ignores it.
 
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a

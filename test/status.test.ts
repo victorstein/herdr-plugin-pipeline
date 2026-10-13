@@ -315,6 +315,7 @@ test('a started worker that has not been briefed names dispatch, not a missing a
   const section = out.slice(out.indexOf('waiting on you:'))
   expect(section).toContain(
     't1 feat/x (hp-1) [research 9m] — YOUR move: its agent in w7:p1 has not been handed the brief — ' +
+    `\`${HP} dispatch --task t1\` (run it in the background) hands it over, or by hand ` +
     `\`${HP} dispatch --task t1 --pane w7:p1\``,
   )
   expect(out).not.toContain('with nothing at')
@@ -576,7 +577,8 @@ test('a task dispatched at registration is not flagged before its grace, and sta
   expect(inGrace).not.toContain('waiting on you:')
   expect(inGrace).not.toContain('no agent has been started')
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now + 5 * 60_000))
-    .toContain("YOUR move: no worktree and no agent — `herdr worktree create --cwd '/r' --branch feat/x")
+    .toContain(`YOUR move: no worktree and no agent — \`${HP} dispatch --task t1\` (run it in the background) runs ` +
+      "every step; by hand, `herdr worktree create --cwd '/r' --branch feat/x")
 })
 
 test('hpipe show names the pane a failed worker last ran in — #12', () => {

@@ -54,8 +54,20 @@ export function unbriefedWorker(run: Run, task: Task): UnbriefedWorker | null {
   return { paneId: task.pane_id }
 }
 
-export function briefCommand(task: Task, paneId: string | null, hpipe: string): string {
+/**
+ * The one command that runs every dispatch step a task still needs. Run in the
+ * background, it leaves the orchestrator free to take digests while a bootstrap runs.
+ */
+export function oneCommandDispatch(task: Task, hpipe: string): string {
+  return `\`${hpipe} dispatch --task ${task.task_id}\` (run it in the background)`
+}
+
+function briefByPane(task: Task, paneId: string | null, hpipe: string): string {
   return `\`${hpipe} dispatch --task ${task.task_id} --pane ${paneId ?? '<pane>'}\``
+}
+
+export function briefCommand(task: Task, paneId: string | null, hpipe: string): string {
+  return `${oneCommandDispatch(task, hpipe)} hands it over, or by hand ${briefByPane(task, paneId, hpipe)}`
 }
 
 /**
@@ -110,7 +122,8 @@ export function workerAgentArgs(task: Task): string[] {
  * line could not be run as printed.
  */
 export function startAgentCommand(task: Task, paneId: string): string {
-  return `herdr agent start ${shellWord(task.bead)} --kind claude --pane ${paneId} -- ${workerAgentArgs(task).join(' ')}`
+  return `herdr agent start ${shellWord(task.bead)} --kind claude --pane ${paneId} -- ` +
+    workerAgentArgs(task).join(' ')
 }
 
 const startAgent = (task: Task): string => `\`${startAgentCommand(task, '<root pane>')}\``
@@ -150,7 +163,9 @@ export function dispatchSequence(
     startAgentCommand(task, CREATED_ROOT_PANE),
     `${hpipe} dispatch --task ${task.task_id} --pane ${CREATED_ROOT_PANE}`,
   ]
-  return ['dispatch, in order:', ...steps.map((step) => `    ${step}`)].join('\n')
+  const oneCommand = `dispatch: ${hpipe} dispatch --task ${task.task_id} (run it in the background) — runs the ` +
+    'steps below and stops at the first failure; the block is the manual fallback'
+  return [oneCommand, 'dispatch, in order:', ...steps.map((step) => `    ${step}`)].join('\n')
 }
 
 /**
@@ -186,7 +201,10 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
       "the repo's bootstrap in it"
   const setUp = `${worktree}, then ${startAgent(task)}`
   if (task.phase === taskRow('queued').onClear) {
-    return `${setUp}, then ${briefCommand(task, '<root pane>', hpipe)}`
+    const byHand = `${setUp}, then ${briefByPane(task, '<root pane>', hpipe)}`
+    return unbriefedWorker(run, task) === null
+      ? byHand
+      : `${oneCommandDispatch(task, hpipe)} runs every step; by hand, ${byHand}`
   }
   return `${setUp}; ${handoffPastBrief(run, task, hpipe)}`
 }
@@ -197,8 +215,8 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
  */
 export function remainingDispatchSteps(run: Run, task: Task, hpipe: string): string {
   if (task.workspace_id === null) return dispatchWorkerCommand(run, task, hpipe)
-  return `once the repo's bootstrap has run in its checkout, ${startAgent(task)}, then ` +
-    briefCommand(task, '<root pane>', hpipe)
+  return `${oneCommandDispatch(task, hpipe)} runs what is left; by hand, once the repo's bootstrap has run in its ` +
+    `checkout, ${startAgent(task)}, then ${briefByPane(task, '<root pane>', hpipe)}`
 }
 
 /**
@@ -248,10 +266,14 @@ export function releaseWorkerPane(task: Task): void {
 export function startWorkerCommand(run: Run, task: Task, workspaceId: string, hpipe: string): string {
   const look = `check \`herdr pane list --workspace ${workspaceId}\` first`
   if (task.phase === taskRow('queued').onClear) {
-    const dispatch = briefCommand(task, null, hpipe)
-    return `${look}. If an agent is already there, its detection was missed: ${dispatch} records ` +
+    const dispatch = briefByPane(task, null, hpipe)
+    const byHand = `${look}. If an agent is already there, its detection was missed: ${dispatch} records ` +
       'it and hands it the brief, so `herdr pane read` it before, in case it already has one. ' +
       `If there is none, ${startAgent(task)}, then ${dispatch}`
+    return unbriefedWorker(run, task) === null
+      ? byHand
+      : `${oneCommandDispatch(task, hpipe)} finds the agent in ${workspaceId} or starts one, then hands it the ` +
+        `brief; by hand, ${byHand}`
   }
   // `dispatch --task` refuses every phase but the briefed one.
   return `${look}. If there is none, ${startAgent(task)}; ${handoffPastBrief(run, task, hpipe)}`

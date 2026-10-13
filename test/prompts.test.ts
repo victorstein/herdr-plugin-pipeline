@@ -1035,3 +1035,48 @@ test('the README and the skill name the PR review skip, its threshold and the al
   expect(skill).toContain('`pr-review skipped`')
   expect(skill).toContain('`.claude/pipeline-always-review`')
 })
+
+test('dispatch runs the one command in the background, ends the turn, and keeps the block as the manual fallback', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'dispatch.md')).text())
+  expect(text).toContain('{{hpipe}} dispatch --ready')
+  expect(text).toContain('`{{hpipe}} dispatch --task <task_id>` takes one')
+  expect(text).toContain("Run it with the Bash tool's `run_in_background`, then end your turn.")
+  expect(text).toContain('When its completion notice arrives, read its step lines.')
+  expect(text).toContain('fix what it names, then run the same command again')
+  expect(text).toContain('Only one dispatch runs in a repo at a time')
+  expect(text.indexOf('{{hpipe}} dispatch --ready')).toBeLessThan(text.indexOf('## If you must do it by hand'))
+  expect(text.indexOf('## If you must do it by hand')).toBeLessThan(text.indexOf('herdr worktree create --cwd {{repo_root}}'))
+})
+
+test('intake registers every task, then dispatches them all with one command in the background', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'intake.md')).text())
+  expect(text).toContain("Register every task first, then dispatch them all with one command, run with the Bash tool's " +
+    '`run_in_background`: {{hpipe}} dispatch --ready')
+  expect(text).toContain("Every task's `base:` commit is fixed when it is dispatched")
+  expect(text).toContain('The block is the manual fallback')
+  expect(text).not.toContain('run it as printed, filling in the pane and path')
+})
+
+test('the dispatch prompt renders in both modes with every token resolved', async () => {
+  for (const mode of ['per-task', 'single-pr'] as const) {
+    const run = runIn(mode)
+    run.phase = 'dispatch'
+    run.tasks = [briefTask({ awaiting_brief: true })]
+    const text = await renderRunPhasePrompt(run, ROOT)
+    expect(text, mode).toContain(`${hpipeCommand(ROOT)} dispatch --ready`)
+    expect(text, mode).not.toContain('{{')
+  }
+})
+
+test('the README and the skill say what hpipe dispatch runs, and that allowing hpipe allows it', async () => {
+  const readme = prose(await Bun.file(join(ROOT, 'README.md')).text())
+  expect(readme).toContain('`hpipe dispatch` runs `herdr worktree create` and `herdr agent start … ' +
+    '--dangerously-skip-permissions` itself, so allowing `hpipe` allows starting workers that skip permissions, and ' +
+    "auto mode's classifier sees only `hpipe dispatch --task t1`, never the `agent start` inside it. " +
+    '`herdr worktree create` and `herdr agent start` are needed only for the manual fallback.')
+  expect(readme).toContain('hpipe dispatch --ready [--run <run-id>]')
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  expect(skill).toContain('`hpipe` is the one permission dispatch needs')
+  expect(skill).toContain("run **`hpipe dispatch --ready`** with the Bash tool's `run_in_background` and end your turn")
+  expect(skill).toContain('| `hpipe dispatch` stopped at `<step>` | Fix what its last line names, then run the same command again')
+})

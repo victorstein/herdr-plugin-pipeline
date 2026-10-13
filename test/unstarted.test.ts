@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import {
-  bindWorkerPane, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, remainingDispatchSteps,
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, remainingDispatchSteps,
   startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -81,11 +81,15 @@ test('past the briefed phase the command does not offer the dispatch that would 
 
 const FETCHED = { commit: 'c0ffee1', ref: 'origin/main', fetchError: null }
 
+const ONE_COMMAND = 'dispatch: hp dispatch --task t1 (run it in the background) — runs the steps below and stops at ' +
+  'the first failure; the block is the manual fallback'
+
 const WHERE_CREATE_PUTS_IT = '    # its JSON gives the new checkout as .result.worktree.path and its pane as ' +
   '.result.root_pane.pane_id; `hp show --task t1` prints the checkout too'
 
 test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, then the brief — #118', () => {
   expect(dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'ready' }, 'hp').split('\n')).toEqual([
+    ONE_COMMAND,
     'dispatch, in order:',
     "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
     WHERE_CREATE_PUTS_IT,
@@ -114,6 +118,7 @@ test('a setup script the repo never wired in is an optional step in the new chec
   // Measured on a live run.
   expect(dispatchSequence(mkRun(), mkTask({}), FETCHED, { kind: 'none', unwired: 'bin/bootstrap' }, 'hp').split('\n'))
     .toEqual([
+      ONE_COMMAND,
       'dispatch, in order:',
       "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
       WHERE_CREATE_PUTS_IT,
@@ -186,4 +191,32 @@ test('binding a pane re-arms the ladder from now; rebinding the same pane change
                                last_probe_at: NOW, probes: 0, undelivered: 0, holds: 0 })
   expect(bindWorkerPane(run, task, 'w23:p1', NOW + 1)).toBe(false)
   expect(task.stall?.last_probe_at).toBe(NOW)
+})
+
+test('on the briefed phase with the brief owed, every advice leads with the one command, the manual steps after it', () => {
+  const owed = { awaiting_brief: true } as const
+  for (const text of [
+    startWorkerCommand(mkRun(), mkTask(owed), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ ...owed, workspace_id: null, checkout_path: null }), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask(owed), 'hp'),
+    remainingDispatchSteps(mkRun(), mkTask({ ...owed, workspace_id: null, checkout_path: null }), 'hp'),
+    briefCommand(mkTask(owed), 'w23:p1', 'hp'),
+  ]) {
+    expect(text).toStartWith('`hp dispatch --task t1` (run it in the background)')
+    expect(text.indexOf('`hp dispatch --task t1`')).toBeLessThan(text.indexOf('--pane'))
+  }
+  expect(briefCommand(mkTask(owed), 'w23:p1', 'hp')).toBe(
+    '`hp dispatch --task t1` (run it in the background) hands it over, or by hand `hp dispatch --task t1 --pane w23:p1`')
+})
+
+test('a rewind past the briefed phase, or a brief already given, keeps the manual advice', () => {
+  for (const text of [
+    startWorkerCommand(mkRun(), mkTask({ phase: 'implement' }), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ phase: 'implement', workspace_id: null, checkout_path: null }), 'hp'),
+    startWorkerCommand(mkRun(), mkTask({}), 'w23', 'hp'),
+    dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
+  ]) {
+    expect(text).not.toContain('`hp dispatch --task t1`')
+    expect(text).not.toContain('in the background')
+  }
 })
