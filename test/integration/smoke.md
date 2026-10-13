@@ -1318,8 +1318,10 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 - `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n
   squash-merged as <sha8>` and deletes only the task branches whose head is on the batch. In a repo
   whose bootstrap initialises submodules, the batch checkout's line reads `worktree remove --force …  #
-  git refuses its submodules without --force, …` while the checkout is clean, and drops `--force` with
-  a review note once anything in it, a submodule included, is uncommitted. Run every clean-up line it
+  git refuses its submodules without --force; nothing in them is unpushed` while the checkout is
+  clean, and drops `--force` with a review note naming what is unrecorded once anything in it is
+  uncommitted, a submodule is off the commit the checkout records, or a submodule's commit is on no
+  remote branch: `--force` deletes the submodules' git data in a linked worktree. Run every clean-up line it
   prints, then check nothing is left: no local task branch (`git branch`), the
   default branch at the squash commit, `git status` clean (the branch review was written to
   `$STATE/runs/$SMOKE/<run>.reviews/`, never into the repo), and the batch branch on origin only when

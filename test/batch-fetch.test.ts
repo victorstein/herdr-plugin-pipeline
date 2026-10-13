@@ -151,13 +151,22 @@ test('a batch checkout with submodules is removed with --force once nothing in i
   run.batch = { ...run.batch!, checkout }
 
   expect(await cleanupLines(run, run.batch)).toContain(`  git -C '${clone}' worktree remove --force '${checkout}'` +
-    '  # git refuses its submodules without --force, and nothing in it is uncommitted')
+    '  # git refuses its submodules without --force; nothing in them is unpushed')
 
+  const review = (reasons: string) => `  ${checkout} has ${reasons}: review it before adding --force, which its ` +
+    'submodules need and which deletes their git data in this checkout'
   writeFileSync(join(checkout, 'sdk', 'sdk.h'), 'edited in the batch checkout\n')
   const dirty = await cleanupLines(run, run.batch)
   expect(dirty).toContain(`  git -C '${clone}' worktree remove '${checkout}'`)
-  expect(dirty).toContain(`  ${checkout} has uncommitted work (sdk); review it, then add --force, which its ` +
-    'submodules need')
+  expect(dirty).toContain(review('uncommitted work (sdk)'))
+
+  // A commit in the submodule that nothing pushed lives only in this checkout's submodule git data.
+  git(['-c', 'user.email=t@e', '-c', 'user.name=T', 'commit', '-qam', 'local fix'], join(checkout, 'sdk'))
+  expect(await cleanupLines(run, run.batch)).toContain(review('uncommitted work (sdk); submodules not at the commit ' +
+    'it records (sdk); submodule commits on no remote branch (sdk)'))
+
+  git(['-c', 'user.email=t@e', '-c', 'user.name=T', 'commit', '-qam', 'chore: take the local fix'], checkout)
+  expect(await cleanupLines(run, run.batch)).toContain(review('submodule commits on no remote branch (sdk)'))
 })
 
 test('a shipped run names what its clean-up leaves: local task branches, the batch on origin, a stale default branch, the review', async () => {

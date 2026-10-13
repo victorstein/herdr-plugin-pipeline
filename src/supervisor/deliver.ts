@@ -760,30 +760,46 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
   ]
 }
 
+const nonEmptyLines = (text: string): string[] => text.split('\n').filter((line) => line.length > 0)
+
+const sample = (paths: readonly string[]): string => `${paths.slice(0, 3).join(', ')}${paths.length > 3 ? ', …' : ''}`
+
 /**
  * git refuses to remove a worktree with initialised submodules unless forced, and
  * the ship prompts have the orchestrator bootstrap the batch checkout, which is how
  * a repo that vendors an SDK as a submodule gets them. Measured on a live run.
- * `--force` also throws away uncommitted work, so it is offered only when there is
- * none, submodules included.
+ * `--force` deletes a linked worktree's submodule git data and any uncommitted work
+ * with it, so it is offered only when nothing there is unrecorded: no uncommitted
+ * work, every initialised submodule at the commit the checkout records, and that
+ * commit on one of the submodule's remote branches.
  */
 async function checkoutRemovalLines(checkout: string, repo: string): Promise<string[]> {
   const remove = `  git -C ${repo} worktree remove`
   const quoted = shellQuoted(checkout)
   if (!existsSync(checkout)) return [`${remove} ${quoted}`]
-  const submodules = await git(checkout, ['submodule', 'status'])
-  const initialised = submodules.code === 0 &&
-    submodules.text.split('\n').some((line) => line.length > 0 && !line.startsWith('-'))
-  if (!initialised) return [`${remove} ${quoted}`]
+  const submodules = await git(checkout, ['submodule', 'status', '--recursive'])
+  const initialised = nonEmptyLines(submodules.text).filter((line) => !line.startsWith('-'))
+  if (submodules.code === 0 && initialised.length === 0) return [`${remove} ${quoted}`]
+  const pathOf = (line: string): string => line.slice(1).trim().split(' ')[1] ?? line
+  const moved = initialised.filter((line) => line.startsWith('+') || line.startsWith('U')).map(pathOf)
   const status = await git(checkout, ['status', '--porcelain', '--ignore-submodules=none'])
-  const dirty = status.code === 0 ? status.text.split('\n').filter((line) => line.length > 0).map((line) => line.slice(3)) : null
-  if (dirty !== null && dirty.length === 0) {
-    return [`${remove} --force ${quoted}  # git refuses its submodules without --force, and nothing in it is uncommitted`]
+  const unpushed = await git(checkout, ['submodule', 'foreach', '--quiet', '--recursive',
+    'git branch -r --contains HEAD | grep -q . || echo "$displaypath"'])
+  const reasons = [
+    ...(submodules.code !== 0 || status.code !== 0 || unpushed.code !== 0 ? ['work git could not read'] : []),
+    ...(nonEmptyLines(status.text).length > 0
+      ? [`uncommitted work (${sample(nonEmptyLines(status.text).map((line) => line.slice(3)))})`]
+      : []),
+    ...(moved.length > 0 ? [`submodules not at the commit it records (${sample(moved)})`] : []),
+    ...(nonEmptyLines(unpushed.text).length > 0
+      ? [`submodule commits on no remote branch (${sample(nonEmptyLines(unpushed.text))})`]
+      : []),
+  ]
+  if (reasons.length === 0) {
+    return [`${remove} --force ${quoted}  # git refuses its submodules without --force; nothing in them is unpushed`]
   }
-  const what = dirty === null
-    ? 'work git could not read'
-    : `uncommitted work (${dirty.slice(0, 3).join(', ')}${dirty.length > 3 ? ', …' : ''})`
-  return [`${remove} ${quoted}`, `  ${checkout} has ${what}; review it, then add --force, which its submodules need`]
+  return [`${remove} ${quoted}`, `  ${checkout} has ${reasons.join('; ')}: review it before adding --force, which ` +
+    'its submodules need and which deletes their git data in this checkout']
 }
 
 /**
