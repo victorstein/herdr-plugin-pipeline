@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, PaneAbsence, parkedFooter,
-  pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence, workerStillNeeded,
+  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, noteBackgroundWork,
+  PaneAbsence, parkedFooter, pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence,
+  workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
@@ -816,6 +817,26 @@ test('the footer agrees with hpipe status on the rows no actor column can see', 
     '- t3 feat/x (hp-1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
     '(src/b.ts) — have it commit and push',
   )
+})
+
+test('a worker reported idle or done says what it still runs in the background', () => {
+  // The trial's orchestrator read `agent:done` on t3 as a stopped worker while its subagent built firmware.
+  // Measured on a live run.
+  const run = mkRun([])
+  const task = mkTask({ phase: 'implement', agent_status: 'done' })
+  const quiet = mkTask({ task_id: 't2', pane_id: 'w8:p1', agent_status: 'done' })
+  run.tasks = [task, quiet]
+  const wake: WakeLine[] = [
+    { run, task, event: 'agent:done', phaseAtEvent: 'implement' },
+    { run, task, event: 'agent:blocked', phaseAtEvent: 'implement' },
+    { run, task: quiet, event: 'agent:idle', phaseAtEvent: 'implement' },
+  ]
+  noteBackgroundWork(wake, (pane) => (pane === 'w7:p1' ? ['1 shell', '4 monitors', 'ui-dev subagent'] : []))
+  expect(wake.map((line) => line.event)).toEqual([
+    'agent:done, background work running (1 shell, 4 monitors, ui-dev subagent)', 'agent:blocked', 'agent:idle',
+  ])
+  expect(describeWake(wake[0]!, 0, 'hp')).toStartWith(
+    't1 feat/x (hp-1) [implement 0m] agent:done, background work running (1 shell, 4 monitors, ui-dev subagent) — ')
 })
 
 test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12', () => {

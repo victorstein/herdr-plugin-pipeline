@@ -3,7 +3,7 @@ import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
 import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
 import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
-import { modeOf, type PhaseRow, runRow, taskRow } from '../lib/phases'
+import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
 import { enterRunPhase, enterTaskPhase } from '../lib/machine'
@@ -16,9 +16,6 @@ import { absoluteArtifactPath } from './deliver'
 import type { AgentStatus, Batch, Run, StallState, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
-
-/** Signals the probed actor produces by its own work. Only these escalate. */
-const ESCALATING_SIGNALS: ReadonlySet<string> = new Set(['artifact', 'verdict', 'pr', 'synced'])
 
 export type StallAction = 'probe' | 'escalate'
 
@@ -77,7 +74,7 @@ function candidateFor(
   // makes every rung due at once for a record first seen past its threshold.
   if (now - state.last_probe_at < thresholdMs) return null
 
-  const escalatable = ESCALATING_SIGNALS.has(row.signal)
+  const escalatable = producedByActor(row)
   return {
     run,
     task,
@@ -578,6 +575,11 @@ export interface StallDeps {
   queueEscalation: (c: StallCandidate, text: string) => void
   agentStatus: (paneId: string) => Promise<AgentStatus>
   /**
+   * What Claude Code shows running in the background of the pane. An actor idle at
+   * its prompt while a subagent it dispatched works is as busy as a working one.
+   */
+  backgroundWork?: (paneId: string) => Promise<readonly string[]>
+  /**
    * `effect` re-records an action already taken — a probe that was sent — should
    * the save lose to a CLI write; see `saveOrReapply`.
    */
@@ -659,15 +661,17 @@ async function applyStall(c: StallCandidate, deps: StallDeps): Promise<SaveOutco
   }
 
   const { holds } = stallStateFor(c.run, record)
-  if (
-    holds < deps.probeMax && c.actorPaneId !== null &&
-    (await deps.agentStatus(c.actorPaneId)) === 'working'
-  ) {
+  if (holds < deps.probeMax && c.actorPaneId !== null && await actorBusy(deps, c.actorPaneId)) {
     bumpStall(c.run, record, 'holds', deps.now())
     return deps.persist(c.run)
   }
 
   await escalate(c, deps)
+}
+
+async function actorBusy(deps: StallDeps, paneId: string): Promise<boolean> {
+  if ((await deps.agentStatus(paneId)) === 'working') return true
+  return ((await deps.backgroundWork?.(paneId)) ?? []).length > 0
 }
 
 /**

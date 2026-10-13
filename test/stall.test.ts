@@ -738,6 +738,38 @@ test('only `working` defers — blocked and unknown escalate', async () => {
   }
 })
 
+test('an actor idle at its prompt with background work running is held like a working one', async () => {
+  // The trial's orchestrator survived its branch review's ladder only by busy-waiting in a shell for the
+  // reviewer subagent it was told to dispatch. Measured on a live run.
+  const asked: string[] = []
+  const run = runAt('branch-review', LONG_AGO)
+  run.stall = { at: run.phase_entered_at, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+  const deps = mkDeps({
+    agentStatus: async () => 'done',
+    backgroundWork: async (pane) => { asked.push(pane); return ['general-purpose subagent'] },
+  })
+  await applyStalls(stallCandidates([run], NOW, 15, 3), deps)
+  expect(deps.sent).toEqual([])
+  expect(asked).toEqual([ORCHESTRATOR_PANE])
+  expect(stallStateFor(run, run)).toMatchObject({ probes: 3, holds: 1, last_probe_at: NOW })
+
+  const quiet = runAt('branch-review', LONG_AGO)
+  quiet.stall = { at: quiet.phase_entered_at, run_at: quiet.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 0 }
+  const quietDeps = mkDeps({ agentStatus: async () => 'done', backgroundWork: async () => [] })
+  await applyStalls(stallCandidates([quiet], NOW, 15, 3), quietDeps)
+  expect(quietDeps.sent).toEqual(['escalate:run'])
+})
+
+test('background work defers within the same cap as working', async () => {
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'implement', phase_entered_at: LONG_AGO })
+  run.tasks = [task]
+  task.stall = { at: LONG_AGO, run_at: run.phase_entered_at, last_probe_at: LONG_AGO, probes: 3, holds: 3 }
+  const deps = mkDeps({ agentStatus: async () => 'done', backgroundWork: async () => ['1 shell'] })
+  await applyStalls(taskStallCandidates([run], NOW, 45, 3), deps)
+  expect(deps.sent).toEqual(['escalate:t1'])
+})
+
 test('a paneless worker escalates without consulting anyone (A7, through applyStalls)', async () => {
   // The candidate-level test pins actorPaneId === null. This drives it through
   // applyStalls: the deferral gate must be skipped entirely rather than asking

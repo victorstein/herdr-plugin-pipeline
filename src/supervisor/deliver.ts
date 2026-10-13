@@ -12,7 +12,7 @@ import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
 import { IMPLEMENT_MODEL } from '../lib/models'
-import { modeOf, runRow, taskRow } from '../lib/phases'
+import { modeOf, producedByActor, runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
@@ -363,14 +363,19 @@ const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
  */
 export async function evaluateRun(
   run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
-  extras: RunRenderExtras = {},
+  extras: RunRenderExtras = {}, backgroundWork?: (paneId: string) => Promise<readonly string[]>,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
   if (!pane) return stay
 
-  const signal = runRow(run.phase).signal
-  const actorIdle = await liveIdle(pane)
+  const row = runRow(run.phase)
+  const signal = row.signal
+  // A branch review the orchestrator handed to a subagent is written while it sits
+  // idle at its prompt, and on a CLEAR it fixes the findings once the subagent
+  // reports back: read before then, the ship prompt overtook both.
+  const actorIdle = await liveIdle(pane) &&
+    !(producedByActor(row) && ((await backgroundWork?.(pane)) ?? []).length > 0)
 
   let artifactFresh = false
   let verdict: VerdictResult | null = null

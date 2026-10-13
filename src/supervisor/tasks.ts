@@ -18,7 +18,7 @@ import {
   syncOverdue,
 } from '../lib/machine'
 import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
-import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
+import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
@@ -44,6 +44,11 @@ export interface TaskDeps extends TeardownDeps {
    * wake cache and can be stale by a whole turn.
    */
   liveIdle: (paneId: string) => Promise<boolean>
+  /**
+   * What Claude Code shows running in the background of the pane: subagents,
+   * shells, monitors. Absent reads as nothing running.
+   */
+  backgroundWork?: (paneId: string) => Promise<readonly string[]>
   /**
    * Whether herdr lists the pane with an agent in it. A pane with none never
    * reads idle, so without this an orchestrator-owned row is never evaluated
@@ -396,8 +401,9 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // back. Measured on a live run.
     if (row.actor === 'orchestrator' && !actorIdle && pane !== null && deps.hasLiveAgent(pane)) continue
 
-    await noteUncommittedWork(run, task, actorIdle, deps)
-    const signals = await gatherSignals(run, task, deps, actorIdle, landingFor)
+    const actorDone = actorIdle && !(producedByActor(row) && await runsInBackground(deps, pane))
+    await noteUncommittedWork(run, task, actorDone, deps)
+    const signals = await gatherSignals(run, task, deps, actorDone, landingFor)
     if (!signals) continue
 
     const cameFrom = task.phase
@@ -415,6 +421,10 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   }
 
   return prompts
+}
+
+async function runsInBackground(deps: Pick<TaskDeps, 'backgroundWork'>, pane: string | null): Promise<boolean> {
+  return pane !== null && ((await deps.backgroundWork?.(pane)) ?? []).length > 0
 }
 
 /**

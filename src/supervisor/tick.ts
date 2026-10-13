@@ -73,6 +73,21 @@ export function describeWake(
   return `${head}\n${indented}`
 }
 
+/**
+ * herdr reports a pane `done` the moment its turn ends, whatever it left running.
+ * The trial's orchestrator read `agent:done` on a worker whose implementer
+ * subagent was still building firmware as a worker that had stopped. Measured on a
+ * live run. `blocked` keeps its pane tail instead.
+ */
+export function noteBackgroundWork(wake: WakeLine[], runningIn: (pane: string) => readonly string[]): void {
+  for (const line of wake) {
+    const pane = line.task?.pane_id
+    if (pane == null || (line.event !== 'agent:done' && line.event !== 'agent:idle')) continue
+    const running = runningIn(pane)
+    if (running.length > 0) line.event = `${line.event}, background work running (${running.join(', ')})`
+  }
+}
+
 /** Long enough to cover the orchestrator's next shell call after `agent start`. */
 export const BRIEF_HOLD_MS = 30_000
 

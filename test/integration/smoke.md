@@ -735,6 +735,30 @@ the rule stops matching and the question reopens. The await-and-do-not-end-your-
 four review prompts is therefore worth keeping as defence in depth, but it is not load-bearing today —
 and the verdict-file predicate remains an independent guard regardless.
 
+#### §5 again: shells, monitors and a parent that took another turn — the pane DOES read `done`
+
+Measured on the berean-os trial run of 2026-10-12. The answer above holds only while the parent's
+last line is `✻ Waiting for N background agents to finish`: herdr's claude manifest (2026.09.11.1,
+`herdr agent explain <pane> --json`) rules that line, and `· N MCP tasks still running`, as
+`working`, and nothing else. Once the parent takes another turn — a Monitor event, its subagent's
+report — its last line reads `✻ Cogitated for 2m 27s · done 5:25 PM · 1 shell, 4 monitors still
+running` and the pane reads `done`. t3 sat there with its implementer subagent waiting on a firmware
+build, and the digest told the orchestrator to have it commit and push. The supervisor now reads the
+footer for that work: `⏵⏵ bypass permissions on · 1 shell, 4 monitors · ← 1 agent`, and the agents
+panel's `◯ ui-dev  Waiting on x4pro firmware build … · ↓ 112.8k tokens` row. `← 1 agent` is the
+agents-view hint, which a fresh session shows too, and is not work.
+
+To check it: have a worker in `implement` start a background shell (`sleep 600`, run in the
+background) and end its turn with an uncommitted edit. Its digest line should read `agent:done,
+background work running (1 shell)`, and `hpipe status` must **not** list it under `waiting on you:`.
+Kill the shell: the uncommitted-work line should appear within a minute, which is how often the
+supervisor re-reads a pane that showed work. A design row whose artifact appears while the pane
+shows work must not advance until the pane is quiet. In `branch-review`, let the orchestrator
+dispatch its reviewer subagent in the background and end its turn: once the escalation falls due,
+`hpipe show` or the ledger's `stall.holds` should climb instead of the run escalating, for as long as
+the panel lists the subagent. A pill or a panel row worded differently from these is a **finding**:
+record the footer verbatim.
+
 #### Environment note
 
 `herdr agent start` returns `agent_not_ready` when Claude Code shows its folder-trust dialog on a

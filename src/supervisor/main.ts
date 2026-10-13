@@ -37,7 +37,7 @@ import {
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
-  applyEvents, BriefHolds, catchUpDigest, describeWake, PaneAbsence, parkedFooter, pickOneAdvance,
+  applyEvents, BriefHolds, catchUpDigest, describeWake, noteBackgroundWork, PaneAbsence, parkedFooter, pickOneAdvance,
   saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
 import { fetchBatches } from './batch-fetch'
@@ -46,6 +46,7 @@ import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
 import { liftLimits } from './usage-lift'
 import { checkLimits, limitedNow, UsageLimits } from './usage-limits'
+import { observedScreens, PaneBackground } from './pane-background'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
@@ -228,6 +229,9 @@ async function main(): Promise<void> {
   let healthRevision = -1
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
+  const background = new PaneBackground()
+  const screens = observedScreens(herdr, background)
+  const backgroundWork = (pane: string) => background.running(pane, herdr)
   const paneAbsence = new PaneAbsence()
   const workspaceAbsence = new WorkspaceAbsence()
   let lastCiPollMs = 0
@@ -246,9 +250,11 @@ async function main(): Promise<void> {
       const listed = await herdr.paneList()
       const livePanes = new Set(listed.map((p) => p.pane_id))
       gate.beginTick(livePanes)
+      background.forgetGone(livePanes)
+      background.noteTurns(drained)
       for (const pane of readyPanes(drained)) gate.wake(pane)
       // Before the wake lines and delivery, so both already see a pane the limit stopped.
-      await checkLimits(gate.limits, herdr, drained, new Set([
+      await checkLimits(gate.limits, screens, drained, new Set([
         ...panes,
         ...allRuns.flatMap((run) => [run.orchestrator_pane, ...run.tasks.map((task) => task.pane_id)]),
       ].filter((pane): pane is string => pane !== null)))
@@ -274,6 +280,7 @@ async function main(): Promise<void> {
         : { runs: tickRuns, wake: applied.wake }
       knownRuns = [...allRuns, ...runs]
       const wake = briefHolds.sift(appliedWake, runs, Date.now())
+      noteBackgroundWork(wake, (pane) => background.lastSeen(pane))
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -340,12 +347,15 @@ async function main(): Promise<void> {
           await rebindOrchestrator(stateDir, herdr, session, run)
 
           const runGh = ghFor(run.repo_root)
-          const { nextPrompt, phaseNote } = await evaluateRun(run, runGh, config, liveIdle, { stateDir })
+          const { nextPrompt, phaseNote } = await evaluateRun(
+            run, runGh, config, liveIdle, { stateDir }, backgroundWork,
+          )
 
           const runPhaseBefore = run.phase
           const taskPrompts = await advanceTasks(run, {
             pluginRoot,
             liveIdle,
+            backgroundWork,
             hasLiveAgent: liveAgentIn(listed),
             maxPasses: config.MAX_PASSES,
             fileSettleMs: config.FILE_SETTLE_MS,
@@ -508,6 +518,7 @@ async function main(): Promise<void> {
         probeMax,
         now: () => Date.now(),
         agentStatus: (paneId) => herdr.agentStatus(paneId),
+        backgroundWork,
         persist: (run, effect) => saveOrReapply(stateDir, run, effect ? [effect] : []),
         probe: async (c) => {
           const awaiting = stallAwaiting(c.run, c.task, hpipe)
@@ -537,7 +548,7 @@ async function main(): Promise<void> {
         queueEscalation: (c, text) => {
           enqueue(c.run, { to: 'orchestrator', taskId: c.task?.task_id ?? null, text }, Date.now())
         },
-        limited: limitedNow(gate.limits, herdr),
+        limited: limitedNow(gate.limits, screens),
       }
 
       // Before the stall step, and in the same tick: a pane the step lifts is re-armed

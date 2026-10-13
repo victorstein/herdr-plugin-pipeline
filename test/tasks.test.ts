@@ -856,6 +856,46 @@ test('a busy worker drops the record, so its next idle spell is inspected afresh
   expect(git.calls).toHaveLength(0)
 })
 
+const backgroundIn = (busy: Record<string, string[]>) => async (pane: string) => busy[pane] ?? []
+
+test('a worker idle at its prompt with background work running is not stopped: no uncommitted work is recorded', async () => {
+  // t3 on the berean-os trial run: herdr said `done`, its implementer subagent was still building, and the
+  // two paths were that subagent's unfinished step. Measured on a live run.
+  const git = dirtyTree(['src/components/themes/BaseTheme.cpp', 'src/components/themes/BaseTheme.h'])
+  const run = mkRun([mkTask({ phase: 'implement', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({
+    uncommittedPaths: git.uncommittedPaths,
+    backgroundWork: backgroundIn({ 'w7:p1': ['1 shell', '4 monitors', 'ui-dev subagent'] }),
+  }))
+  expect(run.tasks[0]?.uncommitted_work).toBeUndefined()
+  expect(git.calls).toEqual([])
+
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths, backgroundWork: backgroundIn({}) }))
+  expect(run.tasks[0]?.uncommitted_work?.count).toBe(2)
+})
+
+test('a worker\'s artifact is not taken while its background work may still be writing it', async () => {
+  const artifacts = designArtifacts()
+  const run = mkRun([mkTask({
+    phase: 'research', phase_entered_at: 0, checkout_path: worktreeWith(artifacts.research as string), artifacts,
+  })])
+  await advanceTasks(run, deps({ backgroundWork: backgroundIn({ 'w7:p1': ['general-purpose subagent'] }) }))
+  expect(run.tasks[0]?.phase).toBe('research')
+
+  await advanceTasks(run, deps({ backgroundWork: backgroundIn({}) }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('the orchestrator\'s background work does not hold the task rows it owns', async () => {
+  // Its monitors are usually about other tasks, and a single-PR `merge` holds the landing slot.
+  const run = mkRun([mkTask({ phase: 'merge', pr: 42, phase_entered_at: 1_000 })])
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w1:p1': ['2 monitors'] }),
+    prView: async () => ({ merged: true, mergedAtMs: 2_000, headSha: 'x' }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('close')
+})
+
 test('design rows record nothing', async () => {
   const designGit = dirtyTree(['docs/x.md'])
   const design = mkRun([mkTask({ phase: 'spec', phase_entered_at: 5 })])

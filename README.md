@@ -520,6 +520,28 @@ nudge it, and status lists that worker under "waiting on you".
 The limits are kept in `delivery.<session>.json` in the state dir, so a supervisor restarted
 mid-outage carries them on.
 
+## Background work
+
+herdr reads a Claude pane as `done` once its turn ends, whatever the turn left running behind the
+prompt: its claude manifest counts `Waiting for N background agents to finish` and `N MCP tasks still
+running` as work, and no shell or monitor. The supervisor reads Claude Code's footer for the rest —
+the pill in `⏵⏵ bypass permissions on · 1 shell, 4 monitors · ← 1 agent`, and the agents panel's
+`◯ ui-dev  Waiting on x4pro firmware build …` rows — from the screen it already reads when a pane
+goes idle, and reads a pane again once a minute while it shows work. `← 1 agent` is the hint for the
+agents view, which a fresh session shows too; it is not work. While a pane shows background work:
+
+- a worker's phase does not advance on its artifact, verdict or submission, and its uncommitted
+  work is not reported as a stop;
+- the run's `branch-review` and `ship` do not advance either, so a CLEAR review written by the
+  orchestrator's subagent is not read before the orchestrator has acted on it;
+- the stall ladder holds the escalation as it does for a working pane, within the same cap;
+- the digest's line says so: `agent:done, background work running (1 shell, 4 monitors, ui-dev
+  subagent)`.
+
+The orchestrator's background work does not hold the task rows it owns, such as `merge`: those
+clear on GitHub's or the batch's facts, and a single-PR `merge` holds the landing slot. A background
+job that never ends keeps its row where it is, and the stall probe says why.
+
 ## Getting out
 
 | | |
@@ -572,9 +594,11 @@ worst being that herdr wraps every event as `{event, data:{…}}` while the hook
 so **no task ever bound its pane** and the suite passed anyway, because the test fed the inner shape.
 
 Two questions the unit suite cannot reach were measured there rather than asserted in `bun test`:
-per-pane prompt fan-out, and whether a review subagent perturbs its worker pane's reported status. It
-does not — a backgrounded subagent keeps the pane reading `working` for its whole duration, because
-herdr's detection manifest has a dedicated rule for it. Re-run the runbook if you change either.
+per-pane prompt fan-out, and whether a review subagent perturbs its worker pane's reported status. A
+backgrounded subagent keeps the pane reading `working` while the parent's last line is `Waiting for N
+background agents to finish`, which herdr's detection manifest has a rule for; once the parent takes
+another turn, or leaves a shell or a monitor running, the pane reads `done` (see **Background
+work**). Re-run the runbook if you change either.
 
 ## License
 

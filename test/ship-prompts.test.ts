@@ -208,6 +208,27 @@ test('ship finds the batch PR by its branch, and clears on a checked head', asyn
   expect(run.phase).toBe('ship-ci')
 })
 
+test('ship waits while the orchestrator\'s background work runs, and still records the PR it found', async () => {
+  const run = shipping('ship', { checked: { head_sha: 'h1', at: 1, check: 'passed' } })
+  run.orchestrator_pane = 'w1:p1'
+  const { gh } = ghFake({ number: 301, headSha: 'h1', merged: false, mergedAtMs: null, mergeCommit: null })
+  const busy = async () => ['1 shell']
+  expect((await evaluateRun(run, gh, CONFIG, async () => true, {}, busy)).advanced).toBe(false)
+  expect(run.phase).toBe('ship')
+  expect(run.batch?.pr).toBe(301)
+
+  expect((await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => [])).advanced).toBe(true)
+  expect(run.phase).toBe('ship-ci')
+})
+
+test('ship-merge is GitHub\'s fact: the orchestrator\'s background work does not hold it', async () => {
+  const run = shipping('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 } })
+  run.orchestrator_pane = 'w1:p1'
+  const { gh } = ghFake({ number: 301, headSha: 'h1', merged: true, mergedAtMs: 9, mergeCommit: '1a2b3c4d5e' })
+  await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => ['2 monitors'])
+  expect(run.phase).toBe('done')
+})
+
 test('ship-merge records the squash merge and ends the run with a done notice that names it', async () => {
   const run = shipping('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 } })
   run.orchestrator_pane = 'w1:p1'

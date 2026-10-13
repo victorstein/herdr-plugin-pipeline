@@ -104,6 +104,18 @@ export interface PhaseRow<P extends string> {
   anyWorker?: boolean
 }
 
+const ACTOR_PRODUCED: ReadonlySet<Signal> = new Set(['artifact', 'verdict', 'pr', 'synced'])
+
+/**
+ * The row waits on something its actor produces by its own work: an artifact, a
+ * verdict, a PR or submission, a sync. Only these escalate, and only these wait for
+ * the actor's background work, which may be what is producing it. Every one is
+ * stallable, so a background job that never ends still reaches a probe.
+ */
+export function producedByActor(row: PhaseRow<string>): boolean {
+  return ACTOR_PRODUCED.has(row.signal)
+}
+
 const TERMINAL_OR_SETTLED: ReadonlySet<string> = new Set([
   'done', 'failed', 'orphaned', 'blocked-on-failure', 'escalated',
 ])
