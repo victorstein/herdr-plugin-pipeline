@@ -435,3 +435,23 @@ test('hold and answer --before-merge ask GitHub and the supervisor once, however
     expect(slow.calls, command).toEqual(['supervisor', 'pr 255'])
   }
 })
+
+test('at an open gate with no head CI read, which only a rewind leaves, a ruling is taken as given', async () => {
+  const run = await seeded(perTaskRun([heldTask({ ci_head: undefined, before_merge: [checkOf('c1')] })]))
+  const deps = reads()
+  const out = await confirm(run, 'c1', {}, deps)
+  expect(out.text).toBe('c1 confirmed by the human; nothing more is owed before t1 merges: its merge prompt is queued for you')
+  expect(taskOf(await saved(run)).before_merge?.[0]?.resolutions).toMatchObject([{ as: 'confirmed', head: null }])
+
+  const batch = await seeded(withRunCheck(singlePrRun([]), (r) => { delete r.batch!.ci_head }))
+  const shipped = await confirm(batch, 'c1')
+  expect(shipped.ok, shipped.text).toBe(true)
+  expect(shipped.text).toContain('nothing more is owed before PR #301 merges')
+})
+
+test('a confirmation reads the branch before its retried save even while the window is shut, since a tick may open it', async () => {
+  const run = await seeded(perTaskRun([heldTask({ phase: 'pr-review', before_merge: [checkOf('c1')] })]))
+  const deps = reads()
+  expect((await confirm(run, 'c1', {}, deps)).ok).toBe(false)
+  expect(deps.calls).toEqual(['pr 255', 'head feat/ghost'])
+})

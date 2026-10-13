@@ -2201,11 +2201,20 @@ function windowRefusal(run: Run, held: HeldCheck, ruling: Resolution['as'], merg
 
 type RuledHead = { ok: true; sha: string | null } | { ok: false; why: string }
 
+/** The branch whose head a ruling judges: the batch's single-PR, the task's per-task. */
+const judgedBranch = (run: Run, held: HeldCheck): string => run.batch?.branch ?? held.task?.branch ?? ''
+
+/** Whether a ruling of this kind reads the branch's head live: a waiver reads none, a per-task failure the PR's. */
+const readsTheBranch = (run: Run, ruling: Resolution['as']): boolean =>
+  ruling === 'confirmed' || (ruling === 'failed' && run.batch !== undefined)
+
 /**
  * A confirmation names the head it covers, which must be the branch's head right now:
  * a check of one head says nothing about the next. After the merge the judged head is
  * what merged, and GitHub may already have deleted the branch. A per-task failure
- * records the PR head, as a send-back does, so the worker must push past it.
+ * records the PR head, as a send-back does, so the worker must push past it. At an
+ * open gate with no head CI read, which only a manual rewind past CI leaves, nothing
+ * will ever read one, so the ruling is taken as given, as `checkState` takes it.
  */
 async function ruledHead(
   run: Run, held: HeldCheck, ruling: Resolution['as'], merge: { merged: boolean; prHead: string | null },
@@ -2215,16 +2224,17 @@ async function ruledHead(
   const judged = gateHead(run, held.task)
   if (merge.merged) return { ok: true, sha: judged }
   const batch = run.batch
-  if (judged === null) {
-    const whose = batch === undefined ? held.task?.task_id ?? 'its' : 'the batch PR'
-    return { ok: false, why: `CI has not read ${whose}'s head yet: run it again after the next poll` }
-  }
   if (ruling === 'failed' && batch === undefined) {
     return merge.prHead === null
       ? { ok: false, why: `could not read ${gateSubject(run, held.task)}'s head from GitHub; run it again` }
       : { ok: true, sha: merge.prHead }
   }
-  const branch = batch?.branch ?? held.task?.branch ?? ''
+  if (judged === null) {
+    if (gateIsOpen(run, gateOf(run, held.task))) return { ok: true, sha: null }
+    const whose = batch === undefined ? held.task?.task_id ?? 'its' : 'the batch PR'
+    return { ok: false, why: `CI has not read ${whose}'s head yet: run it again after the next poll` }
+  }
+  const branch = judgedBranch(run, held)
   const live = await reads.branchHead(run.repo_root, branch)
   if (!live.ok) return { ok: false, why: `could not ask origin where \`${branch}\` is (${live.reason}); run it again` }
   if (live.sha !== judged) {
@@ -2335,8 +2345,10 @@ export async function cmdConfirm(
   if (found?.ok === true) {
     const { run, held } = found.value
     const merge = await gateMerge(run, gateOf(run, held.task), once)
-    const as = rulingOf(input)
-    if (merge.ok && windowRefusal(run, held, as, merge.merged) === null) await ruledHead(run, held, as, merge, once)
+    // Whatever the window says now: the supervisor may open it before the retried attempt.
+    if (merge.ok && !merge.merged && readsTheBranch(run, rulingOf(input))) {
+      await once.branchHead(run.repo_root, judgedBranch(run, held))
+    }
   }
   return retryingOnStale(confirm)(ctx, input, once)
 }
