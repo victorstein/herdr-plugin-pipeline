@@ -2594,7 +2594,11 @@ test('nudge refuses a task it cannot help, saying why, and sends nothing', async
     ['working', {}, { readPane: async () => limitedReading('working') }, "t1's agent is working; nothing to nudge"],
     ['no sign of a limit', {}, {
       readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}),
-    }, 'shows no usage-limit message and the supervisor holds nothing for it'],
+    }, 'shows no usage-limit message, the supervisor holds nothing for it, and it has no uncommitted work on record'],
+    ['background work', { uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } }, {
+      readPane: async () => ({ ...limitedReading(), line: null, background: ['1 shell', 'ui-dev subagent'] }),
+      holds: async () => ({}),
+    }, "t1's pane shows background work running (1 shell, ui-dev subagent); its phase waits for it"],
   ]
   for (const [why, over, depsOver, message] of cases) {
     rmSync(join(dir, 'runs'), { recursive: true, force: true })
@@ -2608,6 +2612,39 @@ test('nudge refuses a task it cannot help, saying why, and sends nothing', async
     expect(released, why).toEqual([])
     expect((await listRuns(dir, 'personal'))[0]?.outbox ?? [], why).toEqual([])
   }
+})
+
+test('nudge tells a worker that stopped with uncommitted work to commit, push and finish its phase', async () => {
+  const run = runWithTasks([worker({
+    phase: 'implement', uncommitted_work: { at: 5, count: 4, sample: ['src/a.ts', 'src/b.ts', 'src/c.ts'] },
+  })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps, released } = nudgeDeps({
+    readPane: async () => ({ ...limitedReading('done'), line: null, background: [] }), holds: async () => ({}),
+  })
+
+  const result = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(result.text).toBe('t1: told to carry on in w7:p1 (implement), with 4 uncommitted paths')
+  expect(released).toEqual([])
+  const saved = (await listRuns(dir, 'personal'))[0] as Run
+  expect(saved.outbox?.map((e) => [e.to, e.task_id, e.kind])).toEqual([['worker', 't1', 'carry-on']])
+  const text = saved.outbox?.[0]?.text ?? ''
+  expect(text).toContain('# Carry on — implement (t1, b)')
+  expect(text).toContain('4 uncommitted paths (src/a.ts, src/b.ts, src/c.ts, …)')
+  expect(text).not.toContain('usage limit')
+  expect(saved.tasks[0]?.stall).toMatchObject({ probes: 0, holds: 0 })
+
+  const again = await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)
+  expect(again.text).toBe('t1: a resume is already queued for w7:p1')
+})
+
+test('uncommitted work recorded for an earlier phase entry is no reason to nudge', async () => {
+  const run = runWithTasks([worker({ uncommitted_work: { at: 1, count: 1, sample: ['src/a.ts'] } })])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  const { deps } = nudgeDeps({ readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}) })
+  expect((await cmdNudge(ctx(), { taskId: 't1', all: false, repoKey: 'k', runId: null }, deps)).ok).toBe(false)
 })
 
 test('nudge does not queue a second resume, or one behind a queued phase prompt', async () => {

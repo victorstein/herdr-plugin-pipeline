@@ -95,6 +95,7 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | You see | Do |
 |---|---|
 | A digest line reads `agent:done, background work running (1 shell, ui-dev subagent)` | Nothing: the worker is still at work behind its prompt. Its phase waits for that work, and its uncommitted files are not a stop |
+| `YOUR move: worker idle with N uncommitted paths (…)` | `hpipe nudge --task <id>`: it tells the worker, through the supervisor, to commit, push and finish its phase. It refuses while the worker's pane shows background work |
 | Workers raise decisions with `hpipe decide`; you get a prompt naming the task and decision id (also under "waiting on you" in `hpipe status`) | — |
 | A decision you escalate to the user | Ask it on its own, never bundled with another question: the worker waits for the whole dialog |
 | A worker's decision you can settle from the repo | `hpipe answer --task <id> --decision <d> --answer "…" --by orchestrator` |

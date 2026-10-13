@@ -123,10 +123,12 @@ export interface OutboxEntry {
   entered_at: number
   text: string
   /**
-   * `resume`: carry on where Claude's usage limit stopped the worker. Absent: the
-   * phase's own prompt, which a worker that has not read it cannot have answered.
+   * `resume`: carry on where Claude's usage limit stopped the worker. `carry-on`:
+   * `hpipe nudge` telling a worker that stopped with uncommitted work to finish it.
+   * Absent: the phase's own prompt, which a worker that has not read it cannot
+   * have answered.
    */
-  kind?: 'resume'
+  kind?: 'resume' | 'carry-on'
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number

@@ -372,7 +372,7 @@ test('an idle worker sitting on uncommitted work is waiting on you, not thinking
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain(
     '    t1 feat/x (hp-1) [implement 30m] — YOUR move: worker idle with 4 uncommitted paths ' +
-    '(src/a.ts, src/b.ts, src/c.ts, …) — have it commit and push',
+    `(src/a.ts, src/b.ts, src/c.ts, …) — \`${HP} nudge --task t1\` tells it to commit, push and finish implement`,
   )
 })
 
@@ -746,6 +746,14 @@ test('a worker owed a usage-limit resume is not called idle with nothing, in sta
   const failing = { 'w3:p1': { since: now - 60_000, failures: 2, code: 'agent_not_found' } }
   expect(actionFor(run, task, HP, now, failing))
     .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — see the ⚠ delivery line below")
+})
+
+test('a worker told to carry on is nobody\'s move until that prompt lands', () => {
+  const { run, now } = heldSpecPrompt()
+  run.outbox = []
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'carry-on' }, now)
+  const task = run.tasks[0] as Task
+  expect(actionFor(run, task, HP, now)).toBe('nothing for you — its nudge to carry on is queued for w3:p1')
 })
 
 test('a send refused before it went out is named stuck from the gate\'s holds, as the digest passes them — #136', () => {

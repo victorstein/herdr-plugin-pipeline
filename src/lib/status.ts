@@ -67,17 +67,19 @@ function adoptionOutcome(missing: MissingArtifact): string {
     : `${missing.candidates.length} candidates, too many to adopt: ${missing.candidates.join(', ')}`
 }
 
-function currentUncommittedWork(run: Run, task: Task): UncommittedWork | null {
+/** The worker's last idle spell in this phase found uncommitted work, and nothing has been seen since. */
+export function currentUncommittedWork(run: Run, task: Task): UncommittedWork | null {
   const work = task.uncommitted_work
   return work !== undefined && work.count > 0 && isCurrentObservation(run, task, work.at)
     ? work
     : null
 }
 
-function describeUncommitted(work: UncommittedWork): string {
+/** `2 uncommitted paths (src/a.ts, src/b.ts)`. */
+export function uncommittedSummary(work: UncommittedWork): string {
   const more = work.count > work.sample.length ? ', …' : ''
   const noun = work.count === 1 ? 'path' : 'paths'
-  return `worker idle with ${work.count} uncommitted ${noun} (${work.sample.join(', ')}${more})`
+  return `${work.count} uncommitted ${noun} (${work.sample.join(', ')}${more})`
 }
 
 interface Move {
@@ -103,7 +105,8 @@ function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move |
   const resume = phasePrompt === null ? queuedResume(run, task) : null
   const entry = phasePrompt ?? resume
   if (entry === null) return null
-  const what = resume === null ? `its ${task.phase} prompt` : 'its resume after Claude\'s usage limit'
+  const what = resume === null ? `its ${task.phase} prompt`
+    : resume.kind === 'carry-on' ? 'its nudge to carry on' : 'its resume after Claude\'s usage limit'
   const pane = task.pane_id ?? 'its pane'
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
   if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
@@ -240,7 +243,10 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       return yours(`YOUR move: worker idle with nothing at ${missing.path} (${adoptionOutcome(missing)})`)
     }
     const work = currentUncommittedWork(run, task)
-    if (work) return yours(`YOUR move: ${describeUncommitted(work)} — have it commit and push`)
+    if (work) {
+      return yours(`YOUR move: worker idle with ${uncommittedSummary(work)} — \`${hpipe} nudge --task ${task.task_id}\` ` +
+        `tells it to commit, push and finish ${task.phase}`)
+    }
     const waiters = task.phase === 'sync' ? waitingOn(run, task, 'sync') : ''
     return notYours(`worker's move: ${waiters}waiting for ${awaitedFor(run, task)}`)
   }

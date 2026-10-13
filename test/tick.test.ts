@@ -815,7 +815,7 @@ test('the footer agrees with hpipe status on the rows no actor column can see', 
     'also waiting on you:\n' +
     '- t2 feat/x (hp-1) [blocked-on-files 0m] — YOUR move: `hp release --task t1`\n' +
     '- t3 feat/x (hp-1) [implement 0m] — YOUR move: worker idle with 1 uncommitted path ' +
-    '(src/b.ts) — have it commit and push',
+    '(src/b.ts) — `hp nudge --task t3` tells it to commit, push and finish implement',
   )
 })
 

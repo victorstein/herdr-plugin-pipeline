@@ -30,9 +30,12 @@ export function queuedWorkerPrompt(run: Run, task: Task): OutboxEntry | null {
   return queuedFor(run, task, undefined)
 }
 
-/** A usage-limit resume still waiting in the outbox, from the supervisor or `hpipe nudge`. */
+/**
+ * A resume still waiting in the outbox: the supervisor's or `hpipe nudge`'s after a
+ * usage limit, or `hpipe nudge` carrying on a worker that stopped with uncommitted work.
+ */
 export function queuedResume(run: Run, task: Task): OutboxEntry | null {
-  return queuedFor(run, task, 'resume')
+  return queuedFor(run, task, 'resume') ?? queuedFor(run, task, 'carry-on')
 }
 
 function queuedFor(run: Run, task: Task, kind: OutboxEntry['kind']): OutboxEntry | null {

@@ -43,7 +43,7 @@ import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
-import { formatStatus, formatTaskDetail, resumeCommand } from './lib/status'
+import { currentUncommittedWork, formatStatus, formatTaskDetail, resumeCommand, uncommittedSummary } from './lib/status'
 import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
@@ -58,9 +58,13 @@ import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
 import { checkReleaseTitle, releaseSections } from './lib/release-title'
 import { headOf, isAncestor, nothingToLand, resolveCommit, syncWalk, type SyncWalk } from './lib/sync-walk'
-import type { Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase } from './lib/types'
+import type {
+  Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase, UncommittedWork,
+} from './lib/types'
 import { isAgentReady } from './lib/machine'
-import { type LimitReading, readLimit, resetText } from './supervisor/usage-limits'
+import { type LimitReading, readingFrom, readLimit, resetText } from './supervisor/usage-limits'
+import { backgroundWorkOn } from './lib/background-work'
+import { SCREEN_LINES } from './lib/screen'
 
 export interface Ctx { stateDir: string; pluginRoot: string; session: string }
 export interface CmdResult { ok: boolean; text: string; json?: string }
@@ -1605,16 +1609,28 @@ async function release(ctx: Ctx, input: {
 }
 export const cmdRelease = retryingOnStale(release)
 
+/** A pane's limit reading, and what Claude Code shows running in its background. */
+export interface PaneReading extends LimitReading {
+  background?: readonly string[]
+}
+
 export interface NudgeDeps {
-  readPane: ReadPaneLimit
+  readPane: (paneId: string) => Promise<PaneReading | null>
   /** The live supervisor's holds, to say when a usage-limit hold is being released. */
   holds: () => Promise<Record<string, PaneHold>>
   /** Tells the supervisor to drop its usage-limit hold on the pane. */
   release: (paneId: string) => Promise<void>
 }
 
+const cliReadPane = async (paneId: string): Promise<PaneReading | null> => {
+  const herdr = new Herdr()
+  const screen = await herdr.paneReadStyled(paneId, SCREEN_LINES)
+  if (screen === '') return null
+  return { ...readingFrom(screen, await herdr.agentStatus(paneId)), background: backgroundWorkOn(screen).running }
+}
+
 const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
-  readPane: cliReadPaneLimit,
+  readPane: cliReadPane,
   holds: async () => {
     const state = await supervisorState(ctx.stateDir, ctx.session)
     return readPaneHolds(ctx.stateDir, ctx.session, state.state === 'live' ? state.info.pid : undefined)
@@ -1629,15 +1645,19 @@ const cliNudgeDeps = (ctx: Ctx): NudgeDeps => ({
 /** Why a task is not nudged; `quiet` ones are left out of `--all`'s output, which lists them by id. */
 interface NudgeRefusal { why: string; short: string }
 
+/** Stopped by Claude's usage limit, or stopped in its phase with work it never committed. */
+type Stopped = { by: 'limit' } | { by: 'uncommitted'; work: UncommittedWork }
+
 /**
- * Only a worker Claude's usage limit stopped: its pane still shows the line, or
- * the supervisor holds it. An idle review worker waiting on its background
- * reviewer reads `done` too, and told the limit cut its subagent off it would
- * dispatch a second reviewer.
+ * Only a worker Claude's usage limit stopped — its pane still shows the line, or
+ * the supervisor holds it — or one whose last idle spell in this phase found
+ * uncommitted work and whose pane runs nothing in the background. An idle review
+ * worker waiting on its background reviewer reads `done` too, and told the limit
+ * cut its subagent off it would dispatch a second reviewer.
  */
-async function nudgeRefusal(
+async function nudgeTarget(
   run: Run, task: Task, hpipe: string, deps: NudgeDeps, holds: Record<string, PaneHold>,
-): Promise<NudgeRefusal | null> {
+): Promise<NudgeRefusal | Stopped> {
   const row = taskRow(task.phase)
   if (row.actor !== 'worker') {
     return { why: `${task.task_id} is in ${task.phase}, which does not wait on its worker; nothing to nudge`, short: task.phase }
@@ -1659,19 +1679,28 @@ async function nudgeRefusal(
   if (reading?.status === 'working') {
     return { why: `${task.task_id}'s agent is working; nothing to nudge`, short: 'working' }
   }
-  if (reading?.line == null && holds[task.pane_id]?.code !== 'usage_limit') {
+  if (reading?.line != null || holds[task.pane_id]?.code === 'usage_limit') return { by: 'limit' }
+  const background = reading?.background ?? []
+  if (background.length > 0) {
     return {
-      why: `${task.task_id}'s pane ${task.pane_id} shows no usage-limit message and the supervisor holds nothing for ` +
-        `it; nudge only resumes a worker Claude's usage limit stopped — \`${hpipe} status\` says what it waits for`,
-      short: 'no limit',
+      why: `${task.task_id}'s pane shows background work running (${background.join(', ')}); its phase waits for it, ` +
+        'and nothing needs nudging',
+      short: 'background work',
     }
   }
-  return null
+  const work = currentUncommittedWork(run, task)
+  if (work !== null) return { by: 'uncommitted', work }
+  return {
+    why: `${task.task_id}'s pane ${task.pane_id} shows no usage-limit message, the supervisor holds nothing for it, and ` +
+      'it has no uncommitted work on record; nudge only resumes a worker Claude\'s usage limit stopped or one that ' +
+      `stopped with uncommitted work — \`${hpipe} status\` says what it waits for`,
+    short: 'nothing stopped it',
+  }
 }
 
 /**
  * Tells idle workers to carry on where they stopped — after Claude's usage limit,
- * or whenever one sits idle mid-phase. Unlike a same-phase rewind it touches no
+ * or with uncommitted work in their phase. Unlike a same-phase rewind it touches no
  * phase, passes, verdict reservation or history, so a review in flight is not
  * dispatched twice. It restarts each one's stall ladder and releases the
  * supervisor's usage-limit hold on its pane.
@@ -1700,12 +1729,12 @@ async function nudge(ctx: Ctx, input: {
   }
 
   const holds = await deps.holds()
-  const nudged: Task[] = []
+  const nudged: Array<[Task, Stopped]> = []
   const skipped: Array<[Task, NudgeRefusal]> = []
   for (const task of candidates) {
-    const refusal = await nudgeRefusal(run, task, hpipe, deps, holds)
-    if (refusal === null) nudged.push(task)
-    else skipped.push([task, refusal])
+    const target = await nudgeTarget(run, task, hpipe, deps, holds)
+    if ('by' in target) nudged.push([task, target])
+    else skipped.push([task, target])
   }
   if (input.taskId !== null && skipped[0] !== undefined) return fail(skipped[0][1].why)
   const skippedLine = skipped.length === 0 ? [] :
@@ -1713,18 +1742,25 @@ async function nudge(ctx: Ctx, input: {
   if (nudged.length === 0) return ok(['nothing to nudge', ...skippedLine].join('\n'))
 
   const now = Date.now()
-  for (const task of nudged) {
-    const text = await renderPrompt(ctx.pluginRoot, 'usage-resume', {
-      phase: task.phase, task_id: task.task_id, branch: task.branch,
-    })
-    enqueue(run, { to: 'worker', taskId: task.task_id, text, kind: 'resume' }, now)
+  for (const [task, stopped] of nudged) {
+    const vars = { phase: task.phase, task_id: task.task_id, branch: task.branch }
+    const text = stopped.by === 'limit'
+      ? await renderPrompt(ctx.pluginRoot, 'usage-resume', vars)
+      : await renderPrompt(ctx.pluginRoot, 'carry-on', { ...vars, uncommitted: uncommittedSummary(stopped.work) })
+    const kind = stopped.by === 'limit' ? 'resume' : 'carry-on'
+    enqueue(run, { to: 'worker', taskId: task.task_id, text, kind }, now)
     task.stall = freshLadder(run, task, now)
   }
   await saveRun(ctx.stateDir, run)
 
   const lines: string[] = []
-  for (const task of nudged) {
+  for (const [task, stopped] of nudged) {
     const pane = task.pane_id as string
+    if (stopped.by === 'uncommitted') {
+      lines.push(`${task.task_id}: told to carry on in ${pane} (${task.phase}), with ${stopped.work.count} uncommitted ` +
+        (stopped.work.count === 1 ? 'path' : 'paths'))
+      continue
+    }
     await deps.release(pane)
     const held = holds[pane]?.code === 'usage_limit'
     lines.push(`${task.task_id}: resume queued for ${pane} (${task.phase})` +

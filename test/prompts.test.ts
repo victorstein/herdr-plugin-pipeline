@@ -21,7 +21,7 @@ const REVIEW_PROMPTS = [
 const ALL = [
   'spec', 'plan', 'dispatch', 'dispatch-registering', 'worker-brief', 'ci-red', 'merge',
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
-  'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted',
+  'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted', 'carry-on',
   'sync', 'merge-batch', 'ship', 'ship-ci-red', 'ship-merge', 'handoff-pr', 'handoff-batch',
 ]
 

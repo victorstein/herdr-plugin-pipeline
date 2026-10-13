@@ -342,9 +342,13 @@ watch -n 2 'hpipe status'
   different recovery command between the two is a finding. Every `hpipe status` task line should
   read `[<phase> Nm]`, and the minutes should match the digest's box for the same task.
 - **Leave one worker idle with an uncommitted edit** in `implement` (or either PR review): within a
-  tick of it going idle, `hpipe status` should list it under `waiting on you:` as `YOUR move:
-  worker idle with N uncommitted path(s) (…) — have it commit and push`, and the entry should
-  vanish the moment the worker goes busy. The supervisor runs one `git status` per idle spell, not
+  tick of it going idle, `hpipe status` should list it under `waiting on you:` as ``YOUR move:
+  worker idle with N uncommitted path(s) (…) — `hpipe nudge --task tN` tells it to commit, push
+  and finish implement``, and the entry should vanish the moment the worker goes busy. Run that
+  nudge: the worker should get `# Carry on — implement (tN, …)` naming the paths, `status` should
+  read `its nudge to carry on is queued` until it lands, and a second nudge should answer `a resume
+  is already queued`. With a background shell running in the worker's pane the nudge must be
+  refused, naming the shell. The supervisor runs one `git status` per idle spell, not
   per tick; a git process per second in `ps` while it sits idle is a finding. So is a checkout
   whose bootstrap leaves untracked, un-ignored files, which would flag every idle worker.
 - **Independently of any digest, a task parked in `ci`, `merge`, `close`, `teardown` or `escalated`
