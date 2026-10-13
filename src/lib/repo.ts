@@ -1,4 +1,5 @@
-import { dirname } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 async function gitOut(args: string[], cwd?: string): Promise<string> {
   const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'ignore' })
@@ -48,4 +49,30 @@ export async function actionRepoContext(
 ): Promise<{ repoKey: string; repoRoot: string } | null> {
   const cwd = focusedCwd(env)
   return cwd === null ? null : repoContext(cwd)
+}
+
+/**
+ * Lists one repo-relative path in the repo's shared `info/exclude`, so `git status`
+ * never shows it and `git add -A` never stages it, in every worktree of the repo.
+ * Idempotent. Returns why it could not, or null.
+ */
+export async function excludeFromGit(repoRoot: string, rel: string): Promise<string | null> {
+  let commonDir: string
+  try {
+    commonDir = await gitOut(['-C', repoRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  } catch {
+    commonDir = ''
+  }
+  if (commonDir.length === 0) return `${repoRoot} is not a git repository`
+  const exclude = join(commonDir, 'info', 'exclude')
+  const entry = `/${rel}`
+  try {
+    const current = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
+    if (current.split('\n').includes(entry)) return null
+    mkdirSync(dirname(exclude), { recursive: true })
+    appendFileSync(exclude, `${current.length === 0 || current.endsWith('\n') ? '' : '\n'}${entry}\n`)
+    return null
+  } catch (error) {
+    return `${exclude} could not be written: ${error instanceof Error ? error.message : String(error)}`
+  }
 }

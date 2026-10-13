@@ -482,6 +482,13 @@ a batch started before it repeats the ruleset advice at `ship`. A supervisor tha
 single-PR runs ignores a v4 run rather than driving it as a per-task one, and `hpipe start --single-pr`
 refuses while this session's live supervisor is that old: restart it first.
 
+Restart the supervisor before using this release's CLI on a run in `branch-review` or a shipping
+phase (`ship`, `ship-ci`, `ship-merge`). The supervisor renders those phases' prompts and reserves the
+branch review, so beside an old one a new CLI still gets a batch merge command with no
+`--match-head-commit` and a branch review git can see. The release adds optional fields an earlier one
+ignores: a sync submission's `merges` (an old supervisor calls any clean sync a clean sync) and an
+outbox entry's `carry-on` kind (an old supervisor delivers it but does not count it as a resume).
+
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
 smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,

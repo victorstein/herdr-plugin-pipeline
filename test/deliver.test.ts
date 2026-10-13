@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
   isRetryable, mergeAddedDocsArgs, promptForRunPhase, renderRunPhasePrompt, taskSignalsFor, uncommittedPaths,
@@ -798,28 +798,28 @@ test('a worker delivery never carries the footer', () => {
   expect(out[0]?.text).toBe('worker prompt')
 })
 
-test('branch-review reserves its verdict under the plugin\'s state, out of the user\'s working copy', async () => {
-  const stateDir = tempDir('hpipe-state-')
+test('branch-review reserves a run-level verdict path under the run id', async () => {
   const run = mkRun()
   run.phase = 'branch-review'
 
-  const text = await promptForRunPhase(run, {} as Config, { stateDir })
+  const text = await promptForRunPhase(run, {} as Config)
 
-  const path = join(stateDir, 'runs', run.session, `${run.run_id}.reviews`, `${run.run_id}-branch-review-0.md`)
   expect(run.verdict_seq?.['branch-review']).toBe(1)
-  expect(run.artifacts.verdicts['branch-review-0']).toBe(path)
-  expect(absoluteArtifactPath(run, null)).toBe(path)
-  expect(text).toContain(`    ${path}\n`)
-  expect(text).not.toContain('/r/docs/superpowers/reviews')
-  expect(existsSync(dirname(path))).toBe(true)
+  expect(run.artifacts.verdicts['branch-review-0'])
+    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(text)
+    .toContain(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
-test('a branch review a run recorded in the repo before the move still resolves there', () => {
+test('a run\'s branch review is excluded from git as it is reserved, in the working copy it is written to', async () => {
+  const worktree = repoWithWorktree(['README.md'])
   const run = mkRun()
   run.phase = 'branch-review'
-  run.verdict_seq = { 'branch-review': 1 }
-  run.artifacts.verdicts['branch-review-0'] = `docs/superpowers/reviews/${run.run_id}-branch-review-0.md`
-  expect(absoluteArtifactPath(run, null)).toBe(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  run.repo_root = worktree
+  await promptForRunPhase(run, {} as Config)
+  const commonDir = (await Bun.$`git -C ${worktree} rev-parse --path-format=absolute --git-common-dir`.text()).trim()
+  expect(readFileSync(join(commonDir, 'info', 'exclude'), 'utf8'))
+    .toContain(`\n/docs/superpowers/reviews/${run.run_id}-branch-review-0.md\n`)
 })
 
 test('a run phase that is not a review reserves nothing', async () => {

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  resolveArtifact, REVIEWS_DIR, reserveVerdict, runReviewsDir, verdictFilename, verdictFor, verdictPrefix,
+  REVIEWS_DIR, reserveVerdict, verdictFilename, verdictFor, verdictPrefix,
 } from '../src/lib/verdict-path'
 import { newRun } from '../src/lib/ledger'
 import { cleanupFixtures, tempDir } from './helpers/git-worktree'
@@ -174,24 +174,6 @@ test('a reservation that finds a free name says nothing', () => {
   reserveVerdict(run, task, 'spec-review', (m) => warnings.push(m))
 
   expect(warnings).toEqual([])
-})
-
-test('a run review reserved into a directory is recorded at its absolute path there', () => {
-  // The trial's branch review sat untracked in the user's working copy, one `git add -A` from shipping.
-  // Measured on a live run.
-  const run = mkRun()
-  const dir = runReviewsDir(tempDir('hpipe-state-'), run)
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, `${run.run_id}-branch-review-0.md`), 'an earlier pass\n')
-  const reserved = reserveVerdict(run, null, 'branch-review', () => {}, dir)
-  expect(reserved).toBe(join(dir, `${run.run_id}-branch-review-1.md`))
-  expect(verdictFor(run, 'branch-review')).toBe(reserved)
-  expect(resolveArtifact('/repo', reserved)).toBe(reserved)
-  expect(resolveArtifact('/repo', 'docs/superpowers/reviews/x.md')).toBe('/repo/docs/superpowers/reviews/x.md')
-})
-
-test('the run reviews directory sits beside the run\'s ledger', () => {
-  expect(runReviewsDir('/state', { session: 'personal', run_id: 'r1' })).toBe('/state/runs/personal/r1.reviews')
 })
 
 test('a run reserves under its run id against the repo root', () => {

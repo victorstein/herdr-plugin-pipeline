@@ -54,8 +54,8 @@ this prompt has you patch a BLOCKER: nothing later asks for them.
 The supervisor reads the review from disk once you are idle and no subagent you started is still running,
 waiting for one at most 10 minutes after the review appears, so you may end your turn while the reviewer
 subagent works. Never wait for this phase to end with a background shell or monitor polling
-`{{hpipe}} status`: end your turn, and the next prompt arrives on its own. The path is outside the repo on
-purpose: the review is the run's record, not part of the work, so never copy it into the repo or commit
-it.
+`{{hpipe}} status`: end your turn, and the next prompt arrives on its own. Leave the review uncommitted: it
+is the run's record, not part of the work. The plugin lists it in the repo's git `info/exclude`, so
+`git status` does not show it and `git add -A` does not pick it up; never add it by name.
 
 {{blocker_note}}

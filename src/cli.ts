@@ -53,7 +53,7 @@ import {
 } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import { cleanupLines, renderRunPhasePrompt, reviewsDirOf, uncommittedPaths } from './supervisor/deliver'
+import { cleanupLines, renderRunPhasePrompt, reserveRunReview, uncommittedPaths } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
 import { checkReleaseTitle, releaseSections } from './lib/release-title'
@@ -1245,7 +1245,7 @@ async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Prom
     if (run.batch !== undefined && run.phase === 'ship-ci') run.batch.ci = null
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (runRow(run.phase).signal === 'verdict') {
-      reserved = reserveVerdict(run, null, run.phase, undefined, reviewsDirOf(ctx.stateDir, run))
+      reserved = await reserveRunReview(run, () => {})
     }
   }
 

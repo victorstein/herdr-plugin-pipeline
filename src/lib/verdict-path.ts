@@ -1,34 +1,14 @@
 import { existsSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { join } from 'node:path'
 import type { Run, RunArtifacts, Task } from './types'
 
 /** Where every research, spec, plan and verdict the pipeline commissions is written. */
 export const ARTIFACT_ROOT = 'docs/superpowers'
 export const REVIEWS_DIR = join(ARTIFACT_ROOT, 'reviews')
 
-const verdictName = (prefix: string, phase: string, ordinal: number): string => `${prefix}-${phase}-${ordinal}.md`
-
 /** The ONE place a verdict filename is spelled. Always repo-relative. */
 export function verdictFilename(prefix: string, phase: string, ordinal: number): string {
-  return join(REVIEWS_DIR, verdictName(prefix, phase, ordinal))
-}
-
-/**
- * A run's own reviews, beside its ledger. The branch review must not be committed,
- * so in the repo it sat untracked in the user's working copy, one `git add -A`
- * from shipping. Measured on a live run.
- */
-export function runReviewsDir(stateDir: string, run: Pick<Run, 'session' | 'run_id'>): string {
-  return join(stateDir, 'runs', run.session, `${run.run_id}.reviews`)
-}
-
-/**
- * A recorded artifact path, resolved. A review reserved into a directory is recorded
- * absolute; everything else, and every run review recorded before they moved, is
- * relative to `base`.
- */
-export function resolveArtifact(base: string, recorded: string): string {
-  return isAbsolute(recorded) ? recorded : join(base, recorded)
+  return join(REVIEWS_DIR, `${prefix}-${phase}-${ordinal}.md`)
 }
 
 /** The ONE place the prefix is chosen, so a reserver and a reader cannot spell it differently. */
@@ -95,20 +75,18 @@ export type ReserveWarn = (message: string) => void
  * the call sites are the discipline: the two prompt renders and `cmdRewind`.
  */
 export function reserveVerdict(
-  run: Run, task: Task | null, phase: string, warn: ReserveWarn = () => {}, into?: string,
+  run: Run, task: Task | null, phase: string, warn: ReserveWarn = () => {},
 ): string {
   const record: VerdictRecord = task ?? run
   const prefix = verdictPrefix(run, task)
   const base = artifactBase(run, task)
   const seq = record.verdict_seq?.[phase] ?? 0
   const held = new Set(Object.values(record.artifacts.verdicts))
-  const filename = (ordinal: number) =>
-    into === undefined ? verdictFilename(prefix, phase, ordinal) : join(into, verdictName(prefix, phase, ordinal))
 
   let chosen = ''
   for (let ordinal = seq; ordinal < seq + PROBE_LIMIT; ordinal++) {
-    const candidate = filename(ordinal)
-    if (held.has(candidate) || existsSync(resolveArtifact(base, candidate))) continue
+    const candidate = verdictFilename(prefix, phase, ordinal)
+    if (held.has(candidate) || existsSync(join(base, candidate))) continue
     chosen = candidate
     break
   }
@@ -117,7 +95,7 @@ export function reserveVerdict(
     // The floor, not ordinal 0: the recorded key and the rendered prompt must agree
     // even when every candidate is taken, or the supervisor watches a file no agent
     // was told to write.
-    chosen = filename(seq)
+    chosen = verdictFilename(prefix, phase, seq)
     warn(
       `${prefix}: ${PROBE_LIMIT} verdict paths from ${phase}-${seq} are taken — ` +
       `falling back to ${chosen}, which may already hold a review`,

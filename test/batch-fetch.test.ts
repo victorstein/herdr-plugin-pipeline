@@ -195,8 +195,8 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
   expect(text).toContain(`  git -C '${clone}' pull --ff-only  # main predates PR #51's squash merge`)
   expect(text).toContain(`  origin keeps batch/x, which is harmless; deleting it, \`git -C '${clone}' push origin --delete batch/x\`, ` +
     'needs a bypass if a ruleset protects batch/*')
-  expect(text).toContain(`  ${join(clone, review)} is this run's branch review and its record: keep it or delete it, ` +
-    'but do not commit it')
+  expect(text).toContain(`  rm '${join(clone, review)}'  # this run's branch review, kept out of git: delete it ` +
+    'once you no longer need the record')
 
   git(['checkout', '-q', '-b', 'elsewhere'], clone)
   git(['push', '-q', 'origin', '--delete', 'batch/x'], other)
@@ -210,11 +210,6 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
   expect(await renderRunPhasePrompt(run, ROOT)).toContain(`  git -C '${clone}' fetch origin main:main  # main predates`)
 
   run.batch.merged_at_ms = null
-  expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
-
-  run.batch.merged_at_ms = 1
-  run.artifacts.verdicts = { 'branch-review-0': join(tempDir('hpipe-state-'), 'r1-branch-review-0.md') }
-  writeFileSync(run.artifacts.verdicts['branch-review-0']!, 'VERDICT: CLEAR\n')
   expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
 })
 
