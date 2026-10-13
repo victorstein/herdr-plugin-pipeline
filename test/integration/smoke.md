@@ -1551,12 +1551,11 @@ jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths",
   `.result.workspace.workspace_id` or `.result.root_pane.workspace_id`. If the id is in neither, every
   one-command dispatch stops at `worktree` with `herdr may have created the worktree, but herdr's
   create response named no workspace id`: a **finding** — record where the id actually is.
-- **The workspace list entry (Verify 2).** `herdr --session "$SMOKE" workspace list` for that
-  task's workspace. **Assert** `worktree.is_linked_worktree` is `true` and `worktree.repo_root` is
-  the checkout's own path, not the repo's. If it is the repo's, a re-run of any bound task stops at
-  `worktree` with `herdr says wN is the checkout at <repo>`: a **finding** — the design's fallback
-  (match `repo_root` against the run's repo, plus `worktree list`'s entry for the ledger's path) is
-  then the fix.
+- **The workspace list entry (Verify 2, settled on smoke run 17).** `herdr --session "$SMOKE"
+  workspace list` for that task's workspace. **Assert** `worktree.is_linked_worktree` is `true`,
+  `worktree.repo_root` is the run's repo (herdr gives the primary checkout there, even for a linked
+  worktree) and `worktree.checkout_path` is the task's own checkout. A dispatch that stops at `agent`
+  with `herdr says wN is the checkout at …` or `is a checkout of …` is a **finding**.
 - **`worktree list` (Verify, pass 2).** `herdr --session "$SMOKE" worktree list --cwd <repo>`.
   **Assert** `.result.worktrees[]` entries carry `path`, `branch`, `is_linked_worktree` and
   `is_prunable`. Any other shape makes every dispatch stop at `worktree` with `could not be read`.
