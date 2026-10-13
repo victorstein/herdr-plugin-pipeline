@@ -181,7 +181,7 @@ test('worktree.opened binds a surviving checkout exactly as worktree.created doe
   expect(run.tasks[0]?.adopted_at).toBeGreaterThan(0)
 })
 
-test('binding a worktree, created or opened, clears the bootstrap a dispatch recorded for the task', () => {
+test('binding a worktree, created or opened, clears a bootstrap recorded before it, even at the same path', () => {
   for (const kind of ['worktree.created', 'worktree.opened'] as const) {
     const run = mkRun([mkTask({
       workspace_id: null, pane_id: null, branch: 'feat/x', bootstrapped: { checkout: '/r/.worktrees/feat-x', at: 1 },
@@ -192,6 +192,18 @@ test('binding a worktree, created or opened, clears the bootstrap a dispatch rec
     applyEvents([run], events, 'personal', new Set())
     expect(run.tasks[0]?.bootstrapped, kind).toBeUndefined()
   }
+})
+
+test('a bootstrap the dispatch recorded after herdr created the worktree survives that worktree\'s binding', () => {
+  const run = mkRun([mkTask({
+    workspace_id: null, pane_id: null, branch: 'feat/x', bootstrapped: { checkout: '/r/.worktrees/feat-x', at: 5 },
+  })])
+  applyEvents([run], [{
+    kind: 'worktree.created', session: 'personal', at: 2, workspace_id: 'w9', branch: 'feat/x',
+    checkout_path: '/r/.worktrees/feat-x',
+  }], 'personal', new Set())
+  expect(run.tasks[0]?.workspace_id).toBe('w9')
+  expect(run.tasks[0]?.bootstrapped).toEqual({ checkout: '/r/.worktrees/feat-x', at: 5 })
 })
 
 test('worktree.opened on an already-bound task does not rebind it — #94', () => {
@@ -427,14 +439,16 @@ test('actionFor answers whose move it is, by rung', () => {
   // #120: inside the bootstrap grace a dispatch is still under way, so it is not
   // flagged; with no worktree yet the steps left start at the worktree.
   expect(at('research', { awaiting_brief: true, pane_id: null }))
-    .toBe("dispatch under way — once the repo's bootstrap has run in its checkout, " +
+    .toBe('dispatch under way — `hp dispatch --task t1` (run it in the background) runs what is left; by hand, ' +
+      "once the repo's bootstrap has run in its checkout, " +
       '`herdr agent start hp-1 --kind claude --pane <root pane> -- --dangerously-skip-permissions --effort high`, ' +
       'then `hp dispatch --task t1 --pane <root pane>`')
   const justDispatched = {
     awaiting_brief: true as const, pane_id: null, workspace_id: null, checkout_path: null, phase_entered_at: Date.now(),
   }
   expect(at('research', justDispatched))
-    .toStartWith("dispatch under way — `herdr worktree create --cwd '/r' --branch feat/x --base <commit>`")
+    .toStartWith('dispatch under way — `hp dispatch --task t1` (run it in the background) runs every step; by hand, ' +
+      "`herdr worktree create --cwd '/r' --branch feat/x --base <commit>`")
   expect(at('research')).toBe("worker's move: waiting for its research artifact")
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")
   expect(at('spec-review')).toBe("worker's move: waiting for its review verdict")
