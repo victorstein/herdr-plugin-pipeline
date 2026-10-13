@@ -2359,11 +2359,16 @@ async function askBeforeTheSave(run: Run, gate: Task | null, reads: BeforeMergeR
   await gateMerge(run, gate, reads)
 }
 
-/** Why `pane` may not record or rule on a check, or null. */
+/**
+ * Why `pane` may not record or rule on a check, or null. A finished task and a run
+ * nothing drives keep their `pane_id`, and herdr reuses workspace ids, so such a
+ * record may now name the orchestrator's pane or the human's.
+ */
 async function paneRefusal(ctx: Ctx, pane: string | null, why: string): Promise<string | null> {
   if (pane === null) return 'run it from a pane of this herdr session: HERDR_PANE_ID is unset'
   for (const run of await listRuns(ctx.stateDir, ctx.session)) {
-    const worker = run.tasks.find((t) => t.pane_id === pane)
+    if (!runIsDriven(run)) continue
+    const worker = run.tasks.find((t) => t.pane_id === pane && !taskPhaseIsTerminal(t.phase))
     if (worker) return `${pane} is ${worker.task_id}'s worker pane in ${run.run_id}: ${why}`
   }
   return null

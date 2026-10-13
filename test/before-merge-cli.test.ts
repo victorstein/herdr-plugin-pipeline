@@ -160,6 +160,29 @@ test('hold refuses a worker\'s pane, from any run in the session', async () => {
   }
 })
 
+test('a pane a finished task or an undriven run still records is no worker\'s: herdr reuses workspace ids', async () => {
+  const finished = heldTask({ task_id: 't2', branch: 'feat/old', bead: 'hp-2', phase: 'done', merged_at_ms: 1, pane_id: 'w3:p1' })
+  const failed = heldTask({ task_id: 't3', branch: 'feat/dead', bead: 'hp-3', phase: 'failed', pane_id: 'w4:p1' })
+  const run = await seeded(perTaskRun([heldTask({ before_merge: [checkOf('c1')] }), finished, failed]))
+  const aborted = perTaskRun([heldTask({ phase: 'implement', pane_id: 'w9:p1' })])
+  aborted.run_id = 'aborted-run'
+  aborted.repo_key = 'other'
+  aborted.phase = 'done'
+  const parked = perTaskRun([heldTask({ phase: 'implement', pane_id: 'w8:p1' })])
+  parked.run_id = 'parked-run'
+  parked.repo_key = 'parked'
+  parked.phase = 'escalated'
+  parked.escalated_from = 'execute'
+  await seeded(aborted)
+  await seeded(parked)
+  for (const pane of ['w3:p1', 'w4:p1', 'w9:p1', 'w8:p1']) {
+    const held = await hold(run, ['no ghost'], 't1', reads(), pane)
+    expect(held.ok, `hold from ${pane}: ${held.text}`).toBe(true)
+  }
+  const ruled = await confirm(run, 'c1', { pane: 'w9:p1' })
+  expect(ruled.ok, ruled.text).toBe(true)
+})
+
 test('a supervisor that honours before-merge checks lets hold through', async () => {
   const run = await seeded(perTaskRun([heldTask({ phase: 'ci' })]))
   const out = await hold(run, ['no ghost'], 't1', reads({
