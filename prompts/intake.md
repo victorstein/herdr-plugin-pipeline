@@ -13,6 +13,11 @@ and plans its own bead.{{mode_note}}
    Name the command, why the run needs it, and the allow rule that would cover it. Don't carry on
    with other steps first: the run stalls on whatever you skipped. Measured on a live run.
 
+   If the user wants to check the work themselves before it merges, record it as soon as you know:
+   `{{hpipe}} hold --before-merge "<check>"` (single-PR), or
+   `{{hpipe}} hold --task <id> --before-merge "<check>"` once that task is registered. The merge waits
+   for their ruling, and nothing nags anyone while it does.
+
 1. **Understand the problem first.** If the user handed you a report, verify it against the code
    before you decompose: the files that actually own the behaviour, what already exists, what is
    really broken. A task cut from an unverified report sends a worker down a path nobody checked.

@@ -17,6 +17,9 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
    checkout. If it runs in the background, end your turn and carry on when its completion notice
    arrives; never poll for it or sleep while it runs. Then verify, commit, push, and run `batch-check`
    again.
+
+   If the user wants to check the work themselves before it merges, record it as soon as you know:
+   `{{hpipe}} hold --before-merge "<check>"`. The merge waits for their ruling.
 2. **Bring `{{into}}` in only if it conflicts.** A PR that conflicts with its base gets no CI, so ask
    git, against `{{into}}` as just fetched:
 

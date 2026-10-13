@@ -4,6 +4,7 @@ import {
   batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
   suggestedPrTitle,
 } from '../lib/batch'
+import { holdPromptVars, owedAt, rulingsNote } from '../lib/before-merge'
 import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
@@ -576,8 +577,10 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     subject: shellQuoted(squashSubject(run)),
   }
   if (run.phase === 'ship-merge') {
+    const owed = owedAt(run, null)
+    if (owed.length > 0) return renderPrompt(pluginRoot, 'before-merge', holdPromptVars(run, null, owed, hpipeCommand(pluginRoot)))
     return renderPrompt(pluginRoot, 'ship-merge', {
-      ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch),
+      ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch), before_merge: rulingsNote(run),
     })
   }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')

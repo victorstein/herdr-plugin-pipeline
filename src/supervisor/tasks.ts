@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { answerCheckNote, checkFailedVars, holdPromptVars, lastFailure, owedAt } from '../lib/before-merge'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { DEFAULT_STALL_MINUTES } from '../lib/config'
 import {
@@ -192,21 +193,31 @@ export async function renderTaskPhasePrompt(
       return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
     case 'pr-review-quality':
       return renderPrompt(deps.pluginRoot, 'pr-review-quality', common)
-    case 'merge':
-      return modeOf(run) === 'single-pr'
-        ? renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
+    case 'merge': {
+      if (modeOf(run) === 'single-pr') {
+        return renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
+      }
+      // While a check is owed the merge command is never rendered: a prompt that shows it
+      // while saying "don't" puts the wrong move one paste away.
+      const owed = owedAt(run, task)
+      return owed.length > 0
+        ? renderPrompt(deps.pluginRoot, 'before-merge', holdPromptVars(run, task, owed, hpipeCommand(deps.pluginRoot)))
         : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(task) })
+    }
     case 'sync':
       return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task) })
-    case 'implement':
-      // Re-entry from a red CI needs the failing checks inlined; every other
-      // entry gets the standing brief, which points a returning worker at the
-      // review file that sent it back.
-      return cameFrom === 'ci'
-        ? renderPrompt(deps.pluginRoot, 'ci-red', {
-            ...common, ci_failure: await deps.ciDetail(task.pr),
-          })
-        : renderPrompt(deps.pluginRoot, 'implement', common)
+    case 'implement': {
+      // Re-entry from a red CI needs the failing checks inlined, and one from a check
+      // the human failed needs what they saw; every other entry gets the standing
+      // brief, which points a returning worker at the review file that sent it back.
+      if (cameFrom === 'ci') {
+        return renderPrompt(deps.pluginRoot, 'ci-red', { ...common, ci_failure: await deps.ciDetail(task.pr) })
+      }
+      const failure = cameFrom === 'merge' ? lastFailure(task) : null
+      return failure === null
+        ? renderPrompt(deps.pluginRoot, 'implement', common)
+        : renderPrompt(deps.pluginRoot, 'check-failed', { ...common, ...checkFailedVars(failure) })
+    }
     case 'escalated': {
       const from = task.escalated_from ?? cameFrom
       return renderPrompt(deps.pluginRoot, 'escalate', {
@@ -892,6 +903,7 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       answer: decision.answer ?? '',
       answered_by: decision.answered_by ?? 'orchestrator',
       phase: resumeTo,
+      before_merge: answerCheckNote(run, task, decision.id),
     })
 
     const taskId = task.task_id

@@ -23,6 +23,7 @@ const ALL = [
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted', 'carry-on',
   'sync', 'merge-batch', 'ship', 'ship-ci-red', 'ship-merge', 'handoff-pr', 'handoff-batch',
+  'before-merge', 'check-failed',
 ]
 
 test('every declared prompt file exists', () => {
