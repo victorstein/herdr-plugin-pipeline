@@ -32,7 +32,7 @@ Never commit to or push the default branch.
 Re-read every file you are about to touch before you edit it. A sibling task may have landed changes
 on the same files while this one waited; code written against the old text will conflict, or will
 quietly undo work that has already merged. Where the tree has moved under what you were given,
-follow the tree and say so in your report.
+follow the tree and say so in your report.{{shared_note}}
 
 Work step by step, in order: the failing test first, run it, the minimum code that passes it, run it
 again, commit. One commit per step, with a conventional-commit message. Do not batch steps, and do

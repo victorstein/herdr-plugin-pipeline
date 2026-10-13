@@ -118,18 +118,24 @@ test('ship-merge says what was ruled before merge, and nothing when the run has 
 
 test('a task sent back by a failed check gets check-failed, carrying what the human saw and the implementer\'s brief', async () => {
   const task = heldTask({
-    phase: 'implement', tier: 'standard',
+    phase: 'implement', tier: 'standard', files: ['src/ghost/', 'docs/registry.md'],
     before_merge: [checkOf('c1', [ruling('failed', CHECKED_HEAD, 'a ghost on page 3')], { decision: 'd1' })],
   })
-  const text = await taskPrompt(perTaskRun([task]), task, 'merge')
-  expect(text).toStartWith("# The human's check failed — feat/ghost (hp-1), PR #255")
-  expect(text).toContain('the reader shows no ghost after a page turn')
-  expect(text).toContain('a ghost on page 3')
-  expect(text).toContain('(from d1)')
-  const implement = await taskPrompt(perTaskRun([task]), task, 'blocked-on-files')
+  const sharing = perTaskRun([task])
+  sharing.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: 'abc', ref: 'origin/main', read_at: 1 }
   const brief = (t: string) => t.slice(t.indexOf("## The implementer's brief"))
-  expect(brief(text)).toBe(brief(implement))
-  expect(text).not.toContain('{{')
+  for (const run of [perTaskRun([task]), sharing]) {
+    const text = await taskPrompt(run, task, 'merge')
+    expect(text).toStartWith("# The human's check failed — feat/ghost (hp-1), PR #255")
+    expect(text).toContain('the reader shows no ghost after a page turn')
+    expect(text).toContain('a ghost on page 3')
+    expect(text).toContain('(from d1)')
+    const implement = await taskPrompt(run, task, 'blocked-on-files')
+    expect(brief(text)).toBe(brief(implement))
+    expect(text).not.toContain('{{')
+  }
+  expect(prose(brief(await taskPrompt(sharing, task, 'merge'))))
+    .toContain('say so in your report. `docs/registry.md` is shared: other tasks edit it at the same time.')
 })
 
 test('an answer that carries a check tells the worker to make it checkable, where its mode replies', async () => {
