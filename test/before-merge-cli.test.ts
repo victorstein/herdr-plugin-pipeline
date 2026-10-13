@@ -455,3 +455,17 @@ test('a confirmation reads the branch before its retried save even while the win
   expect((await confirm(run, 'c1', {}, deps)).ok).toBe(false)
   expect(deps.calls).toEqual(['pr 255', 'head feat/ghost'])
 })
+
+test('a check recorded while a decision opened in merge waits says the merge command already given is not to be run', async () => {
+  const task = heldTask({ phase: 'blocked-on-decision', decision_from: 'merge' })
+  openDecision(task, { question: 'q', recommendation: 'r' })
+  const run = await seeded(perTaskRun([task]))
+  const held = await hold(run, ['no ghost'], 't1')
+  expect(held.text).toContain('t1 goes back to merge once its answer is delivered, and the hold comes then: do not run ' +
+    'the merge command you were given')
+  const answered = await cmdAnswer(ctx(), {
+    task: 't1', decision: 'd1', answer: 'a', by: 'human', repoKey: null, runId: run.run_id,
+    beforeMerge: ['the menu closes'], callerPane: ORCHESTRATOR,
+  }, reads())
+  expect(answered.text).toContain('t1 goes back to merge once its answer is delivered, and the hold comes then')
+})

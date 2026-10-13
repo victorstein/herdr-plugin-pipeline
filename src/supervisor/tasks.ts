@@ -920,6 +920,11 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       const seenWorking = check.working === true
       markAnswerDelivered(run, taskId, decisionId, resumeTo, seenWorking)
       deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo, seenWorking))
+      const hold = await holdOnResume(run, task, deps.pluginRoot)
+      if (hold !== null) {
+        queueHold(run, taskId, hold)
+        deps.effects?.push((fresh) => queueHold(fresh, taskId, hold))
+      }
       continue
     }
 
@@ -937,6 +942,24 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
     markAnswerSent(run, taskId, decisionId, at)
     deps.effects?.push((fresh) => markAnswerSent(fresh, taskId, decisionId, at))
   }
+}
+
+/**
+ * A resume renders no prompt of its own, since `answer.md` has gone out, so a merge
+ * that came to owe a check during the decision would leave the orchestrator holding
+ * the merge command it was given on the earlier entry. The hold replaces it.
+ */
+async function holdOnResume(run: Run, task: Task, pluginRoot: string): Promise<string | null> {
+  if (task.phase !== 'merge' || owedAt(run, task).length === 0) return null
+  return renderTaskPhasePrompt(run, task, { pluginRoot, ciDetail: async () => '' }, 'merge')
+}
+
+function queueHold(run: Run, taskId: string, text: string): void {
+  const task = run.tasks.find((t) => t.task_id === taskId)
+  if (task?.phase !== 'merge') return
+  const queued = (run.outbox ?? []).some((entry) =>
+    entry.to === 'orchestrator' && entry.task_id === taskId && entry.entered_at === task.phase_entered_at)
+  if (!queued) enqueue(run, { to: 'orchestrator', taskId, text }, Date.now())
 }
 
 /**

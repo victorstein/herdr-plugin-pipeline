@@ -1931,6 +1931,7 @@ async function answer(ctx: Ctx, input: AnswerInput, reads: BeforeMergeReads): Pr
   return ok([
     `recorded answer to ${decision.id} on ${input.task}; pending delivery`,
     ...recorded.map((check) => recordedLine(run, task, check)),
+    ...(recorded.length > 0 ? backToAHeldMerge(run, task) : []),
   ].join('\n'))
 }
 
@@ -2086,6 +2087,14 @@ function recordedLine(run: Run, task: Task | null, check: BeforeMergeCheck): str
 const gateIsOpen = (run: Run, gate: Task | null): boolean =>
   (gate === null ? run.phase === 'ship-merge' : gate.phase === 'merge')
 
+/** A decision opened in merge resumes merge, where the supervisor sends the hold; the old merge command is still out. */
+function backToAHeldMerge(run: Run, task: Task | null): string[] {
+  if (task === null || gateOf(run, task) === null || task.phase !== 'blocked-on-decision') return []
+  if (task.decision_from !== 'merge') return []
+  return [`${task.task_id} goes back to merge once its answer is delivered, and the hold comes then: do not run the ` +
+    'merge command you were given']
+}
+
 /**
  * The gate row's prompt as it stands now, the hold or the merge, in place of any
  * still queued for the gate's current entry: the gate's prompt went out on entry, so
@@ -2137,6 +2146,7 @@ async function hold(ctx: Ctx, input: HoldInput, reads: BeforeMergeReads): Promis
       ? `the run is in ship-merge now: do not run the merge commands you were given; they come again ${confirmed}`
       : `${gate.task_id} is in merge now: do not run the merge command you were given; it comes again ${confirmed}`)
   }
+  lines.push(...backToAHeldMerge(run, task))
   await saveRun(ctx.stateDir, run)
   return ok(lines.join('\n'))
 }

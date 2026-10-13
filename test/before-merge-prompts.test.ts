@@ -162,3 +162,24 @@ test('the README, the skill and the runbook teach hold, confirm and what a hold 
   const runbook = await Bun.file(join(ROOT, 'test', 'integration', 'smoke.md')).text()
   expect(runbook).toContain('## 11. Before-merge checks')
 })
+
+test('a task resumed into a merge that came to owe a check meanwhile sends the orchestrator the hold', async () => {
+  const task = heldTask({ phase: 'blocked-on-decision', decision_from: 'merge', pane_id: 'w7:p1' })
+  openDecision(task, { question: 'q', recommendation: 'r' })
+  answerDecision(task, 'd1', 'yes', 'orchestrator')
+  task.pending_answer = 'd1'
+  task.before_merge = [checkOf('c1', [], { decision: 'd1' })]
+  const run = perTaskRun([task])
+  for (const state of ['pending', 'submitted'] as const) {
+    await deliverPendingAnswers(run, {
+      pluginRoot: ROOT, promptRetryMax: 5,
+      send: async () => ({ ok: true }),
+      checkSubmission: async () => ({ state }),
+    })
+  }
+  expect(task.phase).toBe('merge')
+  const queued = (run.outbox ?? []).filter((e) => e.to === 'orchestrator' && e.task_id === 't1')
+  expect(queued).toHaveLength(1)
+  expect(queued[0]?.entered_at).toBe(task.phase_entered_at)
+  expect(queued[0]?.text).toStartWith('# Hold — PR #255')
+})
