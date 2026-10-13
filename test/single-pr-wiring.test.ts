@@ -259,7 +259,7 @@ test('two tasks land one at a time on the batch branch, which ships as one squas
   }
   const toMerge = await evaluate()
   expect(toMerge.run.phase).toBe('ship-merge')
-  expect(toMerge.result.nextPrompt).toContain("--squash --subject 'feat(reader): add bookmarks'")
+  expect(toMerge.result.nextPrompt).toContain(`--squash --match-head-commit ${head} --subject 'feat(reader): add bookmarks'`)
   expect(readFileSync(join(stateDir, 'runs', 'personal', `${runId}.squash-body.md`), 'utf8'))
     .toBe("fix(menu): don't re-render\n")
 

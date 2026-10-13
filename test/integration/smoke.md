@@ -1301,8 +1301,11 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 - **red CI, the patch route:** with the run in `ship-merge`, push a failing test again; the moved head
   sends it to `ship-ci`, and the second red escalates the run. `hpipe rewind <run> ship`, patch
   through a subagent in the batch checkout, `batch-check`: `ship → ship-ci`, green;
-- squash-merge with the two rendered commands. **Pass/fail:** exactly one release PR follows, whose
-  notes list every landed title, the fix task's included, and nothing else;
+- squash-merge with the two rendered commands. The merge command carries `--match-head-commit <sha>`,
+  `<sha>` being the head `ship-ci` saw pass (`.batch.ci_head.sha` in the ledger), and the prompt names
+  its short sha as the green head; push an empty commit to the batch before running it once, and
+  GitHub must refuse the merge. **Pass/fail:** exactly one release PR follows, whose notes list every
+  landed title, the fix task's included, and nothing else;
 - on a throwaway PR with no override block, check that the squash body's extra lines alone give one
   entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);
 - `gh pr list --head batch/<…>` found the PR (Verify 4); the `done` notice prints `shipped: PR #n

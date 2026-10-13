@@ -153,6 +153,24 @@ test('ship-merge calls CI green only when a pass is recorded, and otherwise has 
   }
 })
 
+test('ship-merge pins the head CI passed on, and names it', async () => {
+  // The trial's ship-merge command carried no head guard although the skill says merges do: between a push
+  // and the supervisor's next fetch it would merge a head CI never ran on. Measured on a live run.
+  const sha = '2da97b97' + '4'.repeat(32)
+  const pinned = await renderRunPhasePrompt(shipping('ship-merge', { pr: 301, ci: 'pass', ci_head: { sha, seen_at: 1 } }),
+    ROOT, { stateDir: dir })
+  expect(pinned).toContain(`\n    gh pr merge 301 --squash --match-head-commit ${sha} --subject `)
+  expect(pinned.replace(/\s+/g, ' ')).toContain('**Green is for `2da97b97`, the head CI ran on.** The merge command ' +
+    'merges only while the PR\'s head is still that commit. If anything is pushed to `batch/x` now')
+
+  for (const over of [{ ci: 'pass' as const }, { ci: 'fail' as const, ci_head: { sha, seen_at: 1 } }]) {
+    const text = await renderRunPhasePrompt(shipping('ship-merge', { pr: 301, ...over }), ROOT, { stateDir: dir })
+    expect(text).toContain('\n    gh pr merge 301 --squash --subject ')
+    expect(text).not.toContain('--match-head-commit')
+    expect(text.replace(/\s+/g, ' ')).toContain('**Green is for the head CI ran on.** If anything is pushed')
+  }
+})
+
 test('ship-merge warns that the body edit replaces the description, and that a 5xx is rerun', async () => {
   const text = (await renderRunPhasePrompt(shipping('ship-merge', { pr: 301 }), ROOT, { stateDir: dir }))
     .replace(/\s+/g, ' ')

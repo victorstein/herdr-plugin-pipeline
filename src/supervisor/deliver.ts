@@ -538,6 +538,22 @@ function rulesetAdvice(batch: Batch): string {
     'landing gate.'
 }
 
+/**
+ * As the per-task merge prompt's: pinned to the head the pass was read on, so a push
+ * between the prompt and the merge makes GitHub refuse it. The batch merge carried
+ * no guard, and a push reaches `ship-ci` only at the supervisor's next fetch.
+ * Measured on a live run.
+ */
+function greenHeadVars(batch: Batch): { green_head: string; pinned: string; match_head: string } {
+  const passedOn = batch.ci === 'pass' ? batch.ci_head?.sha : undefined
+  if (passedOn === undefined) return { green_head: 'the head CI ran on', pinned: '', match_head: '' }
+  return {
+    green_head: `\`${sha8(passedOn)}\`, the head CI ran on`,
+    pinned: " The merge command merges only while the PR's head is still that commit.",
+    match_head: ` --match-head-commit ${shellWord(passedOn)}`,
+  }
+}
+
 function shipCiStatus(batch: Batch, pr: string): string {
   const what = `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`.`
   return batch.ci === 'pass' ? `CI is green on ${what} ` : `No green CI is recorded on ${what} ${ciCheckFirst(pr)}\n`
@@ -553,7 +569,9 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     subject: shellQuoted(squashSubject(run)),
   }
   if (run.phase === 'ship-merge') {
-    return renderPrompt(pluginRoot, 'ship-merge', { ...vars, ci_status: shipCiStatus(batch, vars.pr) })
+    return renderPrompt(pluginRoot, 'ship-merge', {
+      ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch),
+    })
   }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
   const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'
