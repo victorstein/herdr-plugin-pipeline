@@ -81,7 +81,9 @@ export function checkState(run: Run, held: HeldCheck): CheckState {
       ? { kind: 'confirmed', ruling: last }
       : { kind: 'waiting-on-the-human', last, headNow: head }
   }
-  return last.head === head ? { kind: 'waiting-on-a-fix', ruling: last } : { kind: 'waiting-on-the-human', last, headNow: head }
+  return last.head === head
+    ? { kind: 'waiting-on-a-fix', ruling: last }
+    : { kind: 'waiting-on-the-human', last, headNow: head }
 }
 
 export const isOwed = (state: CheckState): state is OwedState =>
@@ -168,12 +170,14 @@ export function stateClause(state: CheckState, now?: number): string {
     case 'not-needed':
       return `not needed: ${state.why}`
     case 'confirmed':
-      return `confirmed by the human${state.ruling.head === null ? '' : ` on ${sha8(state.ruling.head)}`}${ago(state.ruling.at)}`
+      return `confirmed by the human${state.ruling.head === null ? '' : ` on ${sha8(state.ruling.head)}`}` +
+        ago(state.ruling.at)
     case 'waived':
       return `waived by the human${now === undefined ? '' : ` ${minutesSince(state.ruling.at, now)}m ago`}: ` +
         (state.ruling.note ?? '')
     case 'waiting-on-a-fix':
-      return `failed on ${headName(state.ruling.head)}${ago(state.ruling.at)}: ${state.ruling.note ?? ''}; waiting on a fix`
+      return `failed on ${headName(state.ruling.head)}${ago(state.ruling.at)}: ${state.ruling.note ?? ''}; ` +
+        'waiting on a fix'
     case 'waiting-on-the-human': {
       const last = state.last
       if (last === null) return 'waiting on the human'
@@ -230,9 +234,9 @@ function batchMergeable(pr: string, batch: Batch): string {
     '   - `UNKNOWN`: GitHub is still computing it. Ask again a few seconds later, at most three times; if it is',
     '     still `UNKNOWN`, go on as for `CLEAN`, and say so to the human.',
     '   - `CLEAN`, `UNSTABLE` or `HAS_HOOKS`: it is mergeable. Go to step 2.',
-    `   - \`BEHIND\`: \`gh pr update-branch ${pr}\`. \`DIRTY\`: merge \`origin/${batch.into}\` into the batch checkout, as`,
-    "     the ship prompt's step 2 does, resolve, and push. Either moves the head, so the run goes back through",
-    '     `ship`, and the human checks the head that reaches this prompt again.',
+    `   - \`BEHIND\`: \`gh pr update-branch ${pr}\`. \`DIRTY\`: merge \`origin/${batch.into}\` into the batch`,
+    "     checkout, as the ship prompt's step 2 does, resolve, and push. Either moves the head, so the run goes back",
+    '     through `ship`, and the human checks the head that reaches this prompt again.',
     ...sharedMergeableCases(pr),
   ].join('\n')
 }

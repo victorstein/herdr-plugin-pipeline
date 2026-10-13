@@ -7,7 +7,8 @@ import {
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
 import {
-  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck, owedAt, owedInRun,
+  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck, owedAt,
+  owedInRun,
 } from './lib/before-merge'
 import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
@@ -1078,7 +1079,9 @@ async function owePhasePrompt(
 
   // A rewind's `cameFrom` is the phase itself: the standing prompt, not a CI failure it never read.
   const phasePrompt = task
-    ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, cameFrom ?? task.phase)
+    ? await renderTaskPhasePrompt(
+      run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, cameFrom ?? task.phase,
+    )
     : await renderRunPhasePrompt(run, ctx.pluginRoot, { stateDir: ctx.stateDir })
   if (phasePrompt.length === 0) return ''
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
@@ -2013,7 +2016,8 @@ function checkTextRefusal(checks: readonly string[]): string | null {
   for (const check of checks) {
     if (check.trim().length === 0) return '--before-merge cannot be empty: say what the human checks'
     if (check.startsWith('--')) {
-      return `--before-merge got a flag where the check belongs: "${check}" — the value after --before-merge is missing`
+      return `--before-merge got a flag where the check belongs: "${check}" — the value after --before-merge is ` +
+        'missing'
     }
   }
   return null
@@ -2095,7 +2099,9 @@ interface HoldInput {
 
 async function holdTarget(ctx: Ctx, input: HoldInput): Promise<Resolved<{ run: Run; task: Task | null }>> {
   if (input.taskId !== null) {
-    return resolveTask(ctx, { taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'unfinished', escape: null })
+    return resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'unfinished', escape: null,
+    })
   }
   const found = await resolveFor(ctx, {
     runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'unfinished',
@@ -2158,7 +2164,9 @@ function confirmInputRefusal(input: ConfirmInput): string | null {
   for (const [name, value, what] of texts) {
     if (value === null) continue
     if (value.trim().length === 0) return `${name} needs ${what}`
-    if (value.startsWith('--')) return `${name} got a flag where its text belongs: "${value}" — the value after ${name} is missing`
+    if (value.startsWith('--')) {
+      return `${name} got a flag where its text belongs: "${value}" — the value after ${name} is missing`
+    }
   }
   return null
 }
@@ -2172,7 +2180,8 @@ function windowRefusal(run: Run, held: HeldCheck, ruling: Resolution['as'], merg
   const id = held.check.id
   if (modeOf(run) === 'single-pr') {
     if (run.phase === 'ship-ci' || run.phase === 'ship-merge') return null
-    return `${id} is ruled on at the merge it holds: the run is in ${run.phase}; confirm it once the run reaches ship-ci`
+    return `${id} is ruled on at the merge it holds: the run is in ${run.phase}; confirm it once the run reaches ` +
+      'ship-ci'
   }
   const task = held.task
   if (task === null) return `${id} holds no task's merge in a per-task run, so there is nothing to rule on`
@@ -2213,8 +2222,8 @@ async function ruledHead(
   if (live.sha !== judged) {
     return {
       ok: false,
-      why: `\`${branch}\` is at ${live.sha === null ? 'nothing' : sha8(live.sha)}, not ${sha8(judged)}, the head CI ran ` +
-        `on: a check of ${sha8(judged)} does not cover it; wait for the next prompt`,
+      why: `\`${branch}\` is at ${live.sha === null ? 'nothing' : sha8(live.sha)}, not ${sha8(judged)}, the head ` +
+        `CI ran on: a check of ${sha8(judged)} does not cover it; wait for the next prompt`,
     }
   }
   return { ok: true, sha: judged }
@@ -2269,7 +2278,8 @@ async function confirm(ctx: Ctx, input: ConfirmInput, reads: BeforeMergeReads): 
   const found = await confirmTarget(ctx, input)
   if (!found.ok) return found.result
   const { run, held } = found.value
-  const fromPane = await paneRefusal(ctx, input.callerPane, "a worker does not rule on a check; the orchestrator records the human's ruling")
+  const fromPane = await paneRefusal(ctx, input.callerPane,
+    "a worker does not rule on a check; the orchestrator records the human's ruling")
   if (fromPane !== null) return fail(fromPane)
 
   const gate = gateOf(run, held.task)
@@ -2287,7 +2297,9 @@ async function confirm(ctx: Ctx, input: ConfirmInput, reads: BeforeMergeReads): 
 
   const now = Date.now()
   const note = input.waive ?? input.failed
-  const ruling: Resolution = { as, at: now, head: head.sha, pane: input.callerPane ?? '', ...(note === null ? {} : { note }) }
+  const ruling: Resolution = {
+    as, at: now, head: head.sha, pane: input.callerPane ?? '', ...(note === null ? {} : { note }),
+  }
   held.check.resolutions.push(ruling)
   const outcome = as === 'failed'
     ? await afterFailure(ctx, run, held, ruling)
@@ -2602,7 +2614,8 @@ function stillOwedLines(run: Run): string[] {
   return owedInRun(run).map((o) => {
     const gate = gateOf(run, o.task)
     const merged = (gate === null ? run.batch?.merged_at_ms ?? null : gate.merged_at_ms) !== null
-    return `still owed to the human: ${checkName(o)} ${o.check.check} — ${gate === null ? 'the batch PR' : gateSubject(run, gate)} ` +
+    const subject = gate === null ? 'the batch PR' : gateSubject(run, gate)
+    return `still owed to the human: ${checkName(o)} ${o.check.check} — ${subject} ` +
       (merged ? 'merged before it was confirmed' : 'is not merged')
   })
 }

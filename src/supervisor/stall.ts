@@ -463,8 +463,8 @@ function heldMergeClause(run: Run, task: Task, owed: readonly OwedCheck[], hpipe
   if (failed !== undefined) {
     return {
       short: `a fix for ${failed.check.id}`,
-      clause: `The human's check ${failed.check.id} failed on this head, and ${pr} must not be merged until it is fixed: ` +
-        `\`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\` sends it back to its worker.`,
+      clause: `The human's check ${failed.check.id} failed on this head, and ${pr} must not be merged until it is ` +
+        `fixed: \`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\` sends it back to its worker.`,
     }
   }
   return {
@@ -480,8 +480,8 @@ function heldShipClause(run: Run, batch: Batch, owed: readonly OwedCheck[], hpip
   if (batch.merged_at_ms !== null) {
     return {
       short: `the human's check ${ids}`,
-      clause: `${pr} merged before the human ruled on ${ids}. The run waits here until ${owed.length === 1 ? 'it is' : 'they are'} ` +
-        'confirmed or waived; there is nothing to merge.',
+      clause: `${pr} merged before the human ruled on ${ids}. The run waits here until ` +
+        `${owed.length === 1 ? 'it is' : 'they are'} confirmed or waived; there is nothing to merge.`,
     }
   }
   const failed = owed.find((o) => o.state.kind === 'waiting-on-a-fix')
@@ -489,10 +489,10 @@ function heldShipClause(run: Run, batch: Batch, owed: readonly OwedCheck[], hpip
     const failedOn = sha8(failed.state.ruling.head ?? 'unknown')
     return {
       short: `a fix for ${failed.check.id}, which failed on ${failedOn}`,
-      clause: `The human's check ${failed.check.id} failed on ${failedOn}: ${failed.state.ruling.note ?? ''}. This phase ` +
-        `waits on a fix, which is yours: a subagent's patch in the batch checkout, then \`${hpipe} batch-check\`, ` +
-        `or a fix task through \`${hpipe} task …\`. Either moves the head, and the human checks the new head; ` +
-        `${pr} must not be merged until they rule.`,
+      clause: `The human's check ${failed.check.id} failed on ${failedOn}: ${failed.state.ruling.note ?? ''}. This ` +
+        "phase waits on a fix, which is yours: a subagent's patch in the batch checkout, then " +
+        `\`${hpipe} batch-check\`, or a fix task through \`${hpipe} task …\`. Either moves the head, and the human ` +
+        `checks the new head; ${pr} must not be merged until they rule.`,
     }
   }
   return {
