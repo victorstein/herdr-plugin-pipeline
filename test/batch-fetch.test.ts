@@ -198,6 +198,12 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
   expect(text).toContain(`  rm '${join(clone, review)}'  # this run's branch review, kept out of git: delete it ` +
     'once you no longer need the record')
 
+  // Smoke run 16: start had recorded the ruleset, and the notice still hedged on one.
+  run.batch.ruleset_protected = true
+  const protectedText = await renderRunPhasePrompt(run, ROOT)
+  expect(protectedText).toContain('  origin keeps batch/x, which the ruleset on batch/* protects from deletion: leave it\n')
+  expect(protectedText).not.toContain('push origin --delete batch/x')
+
   git(['checkout', '-q', '-b', 'elsewhere'], clone)
   git(['push', '-q', 'origin', '--delete', 'batch/x'], other)
   run.batch.merge_commit = revParse(clone, 'main')

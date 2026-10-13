@@ -874,6 +874,9 @@ async function staleBranchLines(
 async function originBatchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
   const onOrigin = await remoteBranchHeadCooled(run.repo_root, batch.branch)
   if (!onOrigin.ok || onOrigin.sha === null) return []
+  if (batch.ruleset_protected === true) {
+    return [`  origin keeps ${batch.branch}, which the ruleset on ${rulesetPattern(batch.branch)} protects from deletion: leave it`]
+  }
   return [`  origin keeps ${batch.branch}, which is harmless; deleting it, ` +
     `\`git -C ${repo} push origin --delete ${shellWord(batch.branch)}\`, needs a bypass if a ruleset protects ` +
     rulesetPattern(batch.branch)]

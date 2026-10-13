@@ -1351,7 +1351,10 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
   prints, then check nothing is left: no local task branch (`git branch`), the
   default branch at the squash commit, `git status` clean (the plugin listed the branch review in
   `$(git rev-parse --git-common-dir)/info/exclude` when it reserved it, and the notice offers `rm` for
-  it), and the batch branch on origin only when a ruleset kept it. When GitHub deleted the batch
+  it), and the batch branch on origin only when a ruleset kept it. With `.batch.ruleset_protected`
+  `true`, the notice says `origin keeps batch/<…>, which the ruleset on batch/* protects from deletion:
+  leave it` and offers no `push origin --delete`; without it, the delete is offered with its bypass
+  caveat. When GitHub deleted the batch
   on merge, the notice carries `git -C <repo> branch -dr origin/batch/<…>  # origin no longer has it`,
   and after it `git branch -r` lists no `origin/batch/<…>`; a per-task run's notice does the same for
   merged PR branches GitHub deleted.
