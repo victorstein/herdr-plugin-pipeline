@@ -8,6 +8,11 @@ export interface VerdictResult {
 }
 
 export async function isFresh(path: string, phaseEnteredAt: number): Promise<boolean> {
+  return isFreshNow(path, phaseEnteredAt)
+}
+
+/** For text composed without awaiting, such as a stall probe's clause. */
+export function isFreshNow(path: string, phaseEnteredAt: number): boolean {
   try {
     // `mtimeMs` carries sub-millisecond precision while `phase_entered_at` comes from
     // `Date.now()`, which truncates. Without flooring, a file written a fraction of a

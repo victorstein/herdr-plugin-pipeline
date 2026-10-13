@@ -6,8 +6,9 @@ import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
 import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
 import { isUnlandedSave, runIsDriven, type RunEffect, type SaveOutcome } from '../lib/ledger'
 import { abandonCommand, ageMinutes, resumeCommand } from '../lib/status'
-import { enterRunPhase, enterTaskPhase } from '../lib/machine'
+import { artifactFreshAfter, enterRunPhase, enterTaskPhase } from '../lib/machine'
 import { probeRecipient } from '../lib/outbox'
+import { isFreshNow } from '../lib/predicates'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker, shellQuoted, shellWord,
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
@@ -329,6 +330,15 @@ export function stallAwaiting(
       return sentence('a worktree for this task, which has never been dispatched')
     }
     const path = absoluteArtifactPath(run, task)
+    // A fresh verdict with its worker idle is taken once it is committed, so "nothing
+    // has appeared" would be false here, and the worker could rewrite a sound review.
+    if (path !== null && task !== null && row.signal === 'verdict' && isFreshNow(path, artifactFreshAfter(task))) {
+      return {
+        short: `${short}, committed`,
+        clause: `Your verdict is written at:\n\n    ${path}\n\nThis phase clears once you are idle with it ` +
+          'committed and pushed, and no subagent of yours is running.',
+      }
+    }
     if (path !== null) {
       // An `onBlocker` re-entry leaves the previous pass's file in place, so
       // "nothing has appeared" is simply false there. What the phase waits for is

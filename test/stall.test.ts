@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   applyStalls, bumpStall, ladderFor, probedRowPane, stallAwaiting, stallCandidates, stallStateFor,
   type StallDeps, taskStallCandidates, undeliveredNote,
 } from '../src/supervisor/stall'
 import { listRuns, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { TASK_ROWS } from '../src/lib/phases'
+import { absoluteArtifactPath } from '../src/supervisor/deliver'
 import { actionFor } from '../src/lib/status'
 import { bindWorkerPane } from '../src/lib/unstarted'
 import { rollUpBucket } from '../src/lib/gh'
@@ -283,6 +284,22 @@ test('a verdict row shares the path branch but not the short form', () => {
   const a = stallAwaiting(run, task, 'hp')
   expect(a.short).toBe('its review verdict')
   expect(a.clause).toContain('/wt/docs/superpowers/reviews/')
+})
+
+test('a worker verdict written since its phase began is not called missing: the phase waits on its commit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stall-awaiting-'))
+  const run = runAt('execute', LONG_AGO)
+  const task = mkTask({ phase: 'spec-review', checkout_path: dir })
+  run.tasks = [task]
+  const verdict = absoluteArtifactPath(run, task) as string
+  mkdirSync(dirname(verdict), { recursive: true })
+  writeFileSync(verdict, 'VERDICT: CLEAR\n')
+  const a = stallAwaiting(run, task, 'hp', NOW)
+  expect(a.short).toBe('its review verdict, committed')
+  expect(a.clause).not.toContain('Nothing')
+  expect(a.clause).toContain(`Your verdict is written at:\n\n    ${verdict}\n\nThis phase clears once you are idle ` +
+    'with it committed and pushed, and no subagent of yours is running.')
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test('a run verdict row resolves against the repo root, not a worktree', () => {
