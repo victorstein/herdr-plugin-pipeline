@@ -350,7 +350,7 @@ watch -n 2 'hpipe status'
   ends, which the footer leaves out) — both use one predicate and render `actionFor`, so a
   different recovery command between the two is a finding. Every `hpipe status` task line should
   read `[<phase> Nm]`, and the minutes should match the digest's box for the same task.
-- **Leave one worker idle with an uncommitted edit** in `implement` (or either PR review): within a
+- **Leave one worker idle with an uncommitted edit** in `implement` (or any review): within a
   tick of it going idle, `hpipe status` should list it under `waiting on you:` as ``YOUR move:
   worker idle with N uncommitted path(s) (…) — `hpipe nudge --task tN` tells it to commit, push
   and finish implement``, and the entry should vanish the moment the worker goes busy. Run that

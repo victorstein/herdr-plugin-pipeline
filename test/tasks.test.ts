@@ -962,6 +962,13 @@ test('the orchestrator\'s background work does not hold the task rows it owns', 
   expect(run.tasks[0]?.phase).toBe('close')
 })
 
+test('a design review records it too: its verdict waits on a commit, and a stopped worker must say so', async () => {
+  const git = dirtyTree(['docs/superpowers/reviews/hp-1-plan-review-0.md'])
+  const run = mkRun([mkTask({ phase: 'plan-review', phase_entered_at: 5 })])
+  await advanceTasks(run, deps({ uncommittedPaths: git.uncommittedPaths }))
+  expect(run.tasks[0]?.uncommitted_work).toEqual({ at: 5, count: 1, sample: ['docs/superpowers/reviews/hp-1-plan-review-0.md'] })
+})
+
 test('design rows record nothing', async () => {
   const designGit = dirtyTree(['docs/x.md'])
   const design = mkRun([mkTask({ phase: 'spec', phase_entered_at: 5 })])

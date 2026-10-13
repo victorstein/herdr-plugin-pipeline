@@ -114,15 +114,17 @@ const UNCOMMITTED_SAMPLE = 3
  * An idle worker with uncommitted work is the most common real stopped state, and
  * without this it reads exactly like one that is thinking. Measured on a live run.
  *
- * Only on a code row — the design rows' artifacts are judged by the artifact
- * signal — and only once per idle spell: the worker has to go busy to change the
- * tree, and going busy drops the record, so the next idle spell checks afresh.
+ * Only on a code row or a review row, whose verdict waits on a commit — the design
+ * rows' artifacts are judged by the artifact signal — and only once per idle spell:
+ * the worker has to go busy to change the tree, and going busy drops the record, so
+ * the next idle spell checks afresh.
  */
 async function noteUncommittedWork(
   run: Run, task: Task, actorIdle: boolean, deps: TaskDeps,
 ): Promise<void> {
   const row = taskRow(task.phase)
-  if (row.actor !== 'worker' || row.holdsFiles !== true || task.checkout_path === null) return
+  const waitsOnCommits = row.holdsFiles === true || row.signal === 'verdict'
+  if (row.actor !== 'worker' || !waitsOnCommits || task.checkout_path === null) return
   if (!actorIdle) {
     delete task.uncommitted_work
     return
