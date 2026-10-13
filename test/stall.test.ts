@@ -1369,3 +1369,13 @@ test('a probe about a task whose dispatch is under way says so, never to start a
   expect(a.short).toBe('its dispatch to finish')
   expect(stallAwaiting(run, task, 'hp', NOW).clause).toContain('no worktree and no agent')
 })
+
+test('the run\'s dispatch phase waits on what a live dispatch of the run is creating, so it is not probed meanwhile', () => {
+  const run = runAt('dispatch', LONG_AGO)
+  run.tasks = [mkTask({ phase: 'research', workspace_id: null, pane_id: null, awaiting_brief: true })]
+  expect(stallCandidates([run], NOW, 15, 3)).toHaveLength(1)
+  expect(stallCandidates([run], NOW, 15, 3, dispatchingFor(run, { mode: 'ready', task: null, step: null })))
+    .toHaveLength(0)
+  expect(stallCandidates([run], NOW, 15, 3, dispatchingFor(run, {}, false))).toHaveLength(1)
+  expect(stallCandidates([run], NOW, 15, 3, dispatchingFor(run, { run_id: 'r-other' }))).toHaveLength(1)
+})

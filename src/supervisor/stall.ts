@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor, UNRECORDED_PR } from '../lib/awaiting'
 import { beadOutOfSync } from '../lib/bead-desired'
-import { dispatchProgress, dispatchUnderWay, type DispatchLocks, NO_DISPATCHES } from '../lib/dispatch-lock'
+import {
+  dispatchProgress, dispatchUnderWay, type DispatchLocks, NO_DISPATCHES, runDispatchUnderWay,
+} from '../lib/dispatch-lock'
 import { landCommand, mergeBatchCommand, sha8 } from '../lib/batch'
 import { fileHolders, landingQueue, landingSlotHolder } from '../lib/gating'
 import { modeOf, type PhaseRow, producedByActor, runRow, taskRow } from '../lib/phases'
@@ -104,13 +106,16 @@ function candidateFor(
 }
 
 export function stallCandidates(
-  runs: Run[], now: number, thresholdMinutes: number, probeMax: number,
+  runs: Run[], now: number, thresholdMinutes: number, probeMax: number, dispatches: DispatchLocks = NO_DISPATCHES,
 ): StallCandidate[] {
   const out: StallCandidate[] = []
   for (const run of runs) {
     const row = runRow(run.phase)
     if (!row.stallable) continue
     if (row.stallWhen && !row.stallWhen(run)) continue
+    // `--ready` creates one worktree at a time, each after the last task's bootstrap,
+    // so a row waiting on worktrees can outlast its threshold while nothing is wrong.
+    if (row.signal === 'worktree' && runDispatchUnderWay(dispatches, run) !== null) continue
     const c = candidateFor(run, run, row, null, now, thresholdMinutes, probeMax)
     if (c) out.push(c)
   }

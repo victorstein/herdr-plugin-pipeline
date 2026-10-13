@@ -202,17 +202,22 @@ export async function readDispatchLocks(
   return readings
 }
 
+/** A live dispatch of this run, whatever task it is on. */
+export function runDispatchUnderWay(locks: DispatchLocks, run: Run): DispatchLock | null {
+  const reading = locks.get(run.repo_key)
+  if (reading === undefined || !reading.live) return null
+  const { lock } = reading
+  return lock.session === run.session && lock.run_id === run.run_id ? lock : null
+}
+
 /**
  * The live dispatch that is this task's next move, or null. One that names the
  * task is; so is a `--ready` one for any task owed its brief, which it takes
  * before it lets go of the lock: a `dispatch --task` for it would be refused.
  */
 export function dispatchUnderWay(locks: DispatchLocks, run: Run, task: Task): DispatchLock | null {
-  const reading = locks.get(run.repo_key)
-  if (reading === undefined || !reading.live) return null
-  const { lock } = reading
-  if (lock.session !== run.session || lock.run_id !== run.run_id) return null
-  if (lock.task === task.task_id) return lock
+  const lock = runDispatchUnderWay(locks, run)
+  if (lock === null || lock.task === task.task_id) return lock
   return lock.mode === 'ready' && unbriefedWorker(run, task) !== null ? lock : null
 }
 

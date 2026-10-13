@@ -583,7 +583,7 @@ async function main(): Promise<void> {
 
       const savedRuns = runs.filter((run) => !unsaved.has(run))
       await applyStalls(
-        stallCandidates(savedRuns, Date.now(), config.STALL_MINUTES, probeMax), stallDeps,
+        stallCandidates(savedRuns, Date.now(), config.STALL_MINUTES, probeMax, dispatchesNow), stallDeps,
       )
       await applyStalls(
         taskStallCandidates(
