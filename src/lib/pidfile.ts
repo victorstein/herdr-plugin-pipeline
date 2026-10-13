@@ -56,11 +56,14 @@ export function clearPid(stateDir: string, session: SessionKey): void {
   }
 }
 
+/** Without it, a supervisor locks the paths a run's snapshot shares. */
+export const SHARED_PATHS_CAPABILITY = 'shared-paths'
+
 /**
  * The CLI reads these to say what a running supervisor will not do, without a
- * schema bump: `shared-paths`, that it locks the paths a run's snapshot shares.
+ * schema bump.
  */
-export const SUPERVISOR_CAPABILITIES: readonly string[] = ['shared-paths']
+export const SUPERVISOR_CAPABILITIES: readonly string[] = [SHARED_PATHS_CAPABILITY]
 
 /** A supervisor that predates the field has none. */
 export function supervisorCapabilities(info: SupervisorPid): string[] {

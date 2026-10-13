@@ -38,7 +38,9 @@ import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
 } from './lib/phases'
-import { drivenSchemas, supervisorCapabilities, type SupervisorState, supervisorState } from './lib/pidfile'
+import {
+  drivenSchemas, SHARED_PATHS_CAPABILITY, supervisorCapabilities, type SupervisorState, supervisorState,
+} from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
@@ -295,7 +297,7 @@ async function sharedPathsSource(repoRoot: string, plan: BatchPlan | null): Prom
 /** Only stricter: an old supervisor locks the shared paths too. */
 async function oldSupervisorLocksShared(ctx: Ctx, batch: StartBatch): Promise<string[]> {
   const supervisor = await batch.supervisor()
-  if (supervisor.state !== 'live' || supervisorCapabilities(supervisor.info).includes('shared-paths')) return []
+  if (supervisor.state !== 'live' || supervisorCapabilities(supervisor.info).includes(SHARED_PATHS_CAPABILITY)) return []
   return [`⚠ shared: the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates shared paths and ` +
     "locks them anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` action to share them"]
 }

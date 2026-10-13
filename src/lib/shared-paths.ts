@@ -31,7 +31,7 @@ export const sharedPrefixesOf = (run: Pick<Run, 'shared_paths'>): string[] => ru
 export const isSharedPath = (path: string, prefixes: readonly string[]): boolean =>
   prefixes.some((prefix) => path.startsWith(prefix))
 
-/** A shared entry is still recorded and printed, marked, because the merge and sync notes read it. */
+/** The record says what a task touches, so a shared entry is printed too, marked as one that does not lock. */
 export function describeFiles(run: Pick<Run, 'shared_paths'>, files: readonly string[]): string {
   if (files.length === 0) return 'none'
   const shared = sharedPrefixesOf(run)
