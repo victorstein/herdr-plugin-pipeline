@@ -1211,12 +1211,12 @@ test('a rewind onto branch-review reserves a run-level path under the run id', a
     runId: run.run_id, phase: 'branch-review', taskId: null,
   })
   expect(result.ok).toBe(true)
-  expect(result.text).toContain(`${run.run_id}-branch-review-0.md`)
+  const path = join(dir, 'runs', 'personal', `${run.run_id}.reviews`, `${run.run_id}-branch-review-0.md`)
+  expect(result.text).toContain(`next verdict → ${path}`)
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
   expect(saved?.verdict_seq?.['branch-review']).toBe(1)
-  expect(saved?.artifacts.verdicts['branch-review-0'])
-    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(saved?.artifacts.verdicts['branch-review-0']).toBe(path)
 })
 
 /** Adds a bootstrap script to the fixture repo created in beforeEach. */

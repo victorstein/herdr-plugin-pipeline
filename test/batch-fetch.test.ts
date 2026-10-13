@@ -203,6 +203,11 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
 
   run.batch.merged_at_ms = null
   expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
+
+  run.batch.merged_at_ms = 1
+  run.artifacts.verdicts = { 'branch-review-0': join(tempDir('hpipe-state-'), 'r1-branch-review-0.md') }
+  writeFileSync(run.artifacts.verdicts['branch-review-0']!, 'VERDICT: CLEAR\n')
+  expect(await renderRunPhasePrompt(run, ROOT)).not.toContain('branch review')
 })
 
 // Smoke run 14: a per-task run's done notice had no clean-up block at all.

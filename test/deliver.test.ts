@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   absoluteArtifactPath, adoptableArtifacts, artifactPathFor, buildDigest, deliveriesFor,
   isRetryable, mergeAddedDocsArgs, promptForRunPhase, renderRunPhasePrompt, taskSignalsFor, uncommittedPaths,
@@ -798,17 +798,28 @@ test('a worker delivery never carries the footer', () => {
   expect(out[0]?.text).toBe('worker prompt')
 })
 
-test('branch-review reserves a run-level verdict path under the run id', async () => {
+test('branch-review reserves its verdict under the plugin\'s state, out of the user\'s working copy', async () => {
+  const stateDir = tempDir('hpipe-state-')
   const run = mkRun()
   run.phase = 'branch-review'
 
-  const text = await promptForRunPhase(run, {} as Config)
+  const text = await promptForRunPhase(run, {} as Config, { stateDir })
 
+  const path = join(stateDir, 'runs', run.session, `${run.run_id}.reviews`, `${run.run_id}-branch-review-0.md`)
   expect(run.verdict_seq?.['branch-review']).toBe(1)
-  expect(run.artifacts.verdicts['branch-review-0'])
-    .toBe(`docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
-  expect(text)
-    .toContain(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
+  expect(run.artifacts.verdicts['branch-review-0']).toBe(path)
+  expect(absoluteArtifactPath(run, null)).toBe(path)
+  expect(text).toContain(`    ${path}\n`)
+  expect(text).not.toContain('/r/docs/superpowers/reviews')
+  expect(existsSync(dirname(path))).toBe(true)
+})
+
+test('a branch review a run recorded in the repo before the move still resolves there', () => {
+  const run = mkRun()
+  run.phase = 'branch-review'
+  run.verdict_seq = { 'branch-review': 1 }
+  run.artifacts.verdicts['branch-review-0'] = `docs/superpowers/reviews/${run.run_id}-branch-review-0.md`
+  expect(absoluteArtifactPath(run, null)).toBe(`/r/docs/superpowers/reviews/${run.run_id}-branch-review-0.md`)
 })
 
 test('a run phase that is not a review reserves nothing', async () => {

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import {
   batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
   suggestedPrTitle,
@@ -18,8 +18,8 @@ import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
 import { branchReviewEffort, taskTiers } from '../lib/tier-prompt'
 import {
-  artifactBase, REVIEWS_DIR, type ReserveWarn, reserveVerdict, verdictFilename, verdictFor,
-  verdictPrefix,
+  artifactBase, resolveArtifact, REVIEWS_DIR, type ReserveWarn, reserveVerdict, runReviewsDir, verdictFilename,
+  verdictFor, verdictPrefix,
 } from '../lib/verdict-path'
 import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
@@ -168,11 +168,11 @@ export function artifactPathFor(run: Run, task: Task | null): string | null {
     ?? verdictFilename(verdictPrefix(run, null), run.phase, counterFor(run, run.phase))
 }
 
-/** Task artifacts live in the worker's linked worktree; run artifacts in the main checkout. */
+/** Task artifacts live in the worker's linked worktree; a run's reviews beside its ledger. */
 export function absoluteArtifactPath(run: Run, task: Task | null): string | null {
-  const rel = artifactPathFor(run, task)
-  if (rel === null) return null
-  return join(artifactBase(run, task), rel)
+  const recorded = artifactPathFor(run, task)
+  if (recorded === null) return null
+  return resolveArtifact(artifactBase(run, task), recorded)
 }
 
 // Bun.spawn throws synchronously on a missing binary, and this runs inside the
@@ -495,7 +495,10 @@ export interface RunRenderExtras {
 }
 
 export async function promptForRunPhase(run: Run, config: Config, extras: RunRenderExtras = {}): Promise<string> {
-  if (runRow(run.phase).signal === 'verdict') reserveVerdict(run, null, run.phase, warnToTick)
+  if (runRow(run.phase).signal === 'verdict') {
+    const stateDir = extras.stateDir ?? process.env.HERDR_PLUGIN_STATE_DIR
+    reserveVerdict(run, null, run.phase, warnToTick, stateDir === undefined ? undefined : reviewsDirOf(stateDir, run))
+  }
   return renderRunPhasePrompt(run, process.env.HERDR_PLUGIN_ROOT ?? process.cwd(), {
     maxPasses: config.MAX_PASSES, ...extras,
   })
@@ -780,8 +783,9 @@ async function checkoutRemovalLines(checkout: string, repo: string): Promise<str
 /**
  * What a shipped run still leaves once the clean-up above is run: herdr's worktree
  * removal keeps each task's local branch, a ruleset keeps the batch on origin, the
- * user's default branch predates the squash merge, and the branch review sits
- * untracked in the working copy. Measured on a live run.
+ * user's default branch predates the squash merge, and a branch review recorded
+ * before reviews moved beside the ledger sits untracked in the working copy.
+ * Measured on a live run.
  */
 async function shippedLeftovers(run: Run, batch: Batch): Promise<string[]> {
   const repo = shellQuoted(run.repo_root)
@@ -855,9 +859,17 @@ async function originBatchLines(run: Run, batch: Batch, repo: string): Promise<s
     rulesetPattern(batch.branch)]
 }
 
+/** Made here, so a reviewer told to write there by a shell redirect does not meet a missing directory. */
+export function reviewsDirOf(stateDir: string, run: Run): string {
+  const dir = runReviewsDir(stateDir, run)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** Only a review recorded in the repo, before they moved beside the ledger, is left in the working copy. */
 function branchReviewLines(run: Run): string[] {
   return Object.entries(run.artifacts.verdicts)
-    .filter(([key]) => key.startsWith('branch-review-'))
+    .filter(([key, recorded]) => key.startsWith('branch-review-') && !isAbsolute(recorded))
     .map(([, rel]) => join(run.repo_root, rel))
     .filter((path) => existsSync(path))
     .map((path) => `  ${path} is this run's branch review and its record: keep it or delete it, but do not commit it`)
