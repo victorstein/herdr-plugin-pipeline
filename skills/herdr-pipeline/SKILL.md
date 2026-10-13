@@ -70,6 +70,10 @@ behaviour; this skill does.
    `--files` / `--depends-on` are comma-separated, no spaces. `--files` are path prefixes: two tasks
    whose prefixes overlap never implement at the same time (the second waits in `blocked-on-files`),
    so to keep a task off t3's files, declare prefixes overlapping t3's. Plans can widen them later.
+   A path the repo lists in `.claude/pipeline-shared-paths` never locks: declare it anyway (`task`
+   prints it `(shared)`, and `start`'s `shared:` line says what is shared and at which commit). A
+   broader prefix such as `docs/` still locks the rest of it. The list is read once, at `start`; a
+   change to it waits for the next run.
    `hpipe next`'s `now` picks can run in parallel only when their `--files` are disjoint: bv knows
    nothing about files.
    Pick a tier with `--tier light|standard|heavy` (default `standard`). **light**: one surface, a
@@ -117,6 +121,7 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | A review's process question reaches you as a decision (a shared file, a flagged departure from the spec, rebasing onto a base that moved) | Settle it from the repo, as above. A review sends work back only for a BLOCKER — a defect that would ship, or a call only the owner can make — so these never cost another review pass |
 | A decision only the owner can make (product, licence, scope) | Relay question + worker's recommendation + yours to the user, and run `hpipe escalate --task <id> --decision <d> --recommend "…"` so its bead shows blocked on them; record their reply with `--by human` |
 | "Ready to merge — PR #n" | Check for conflicts with anything merged since (rebase + re-run bootstrap if needed), then run the printed `gh pr merge`. With CI's green head recorded it carries `--match-head-commit <sha>`, so GitHub refuses a head CI never passed. Merging is yours; nothing merges automatically |
+| The merge prompt names a shared path ("This task declares the shared …") | Rebase onto the default branch and keep both sides' additions; CI runs again on the new head. If the two additions collide in meaning (the same id, number or section), don't resolve it by hand: run the printed `hpipe rewind <run> implement --task <id>`. Single-PR, a worker raises the same collision at `sync` as a decision recommending that rewind: answer it, then rewind |
 | Workers recorded out-of-scope work (`hpipe discover`) | At branch review: `hpipe discoveries` lists it, `hpipe discoveries --file` files it as beads labelled `discovered` (in order; a failure stops it, and a retry carries on without duplicates) |
 | The PR merged | Nothing to do: the supervisor closes the task's bead and moves it on |
 | A light or standard task goes from `implement` straight to `ci` (or `land-queue`), and status says `pr-review skipped` | Nothing: its change added under 150 lines outside `docs/`, its design reviews cleared first time, and it touched nothing in the repo's `.claude/pipeline-always-review` (one path prefix per line, read from the base). The merge prompt says the review was skipped; a final branch review, when the run has one, still reads it. To keep a path always reviewed, the user commits it to that file on the default branch, before `hpipe start` for a single-PR run, which reads it from its batch branch. An edit to the file is always reviewed |

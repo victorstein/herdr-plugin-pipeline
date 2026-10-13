@@ -120,6 +120,46 @@ not your local `main` has been pulled. A repo with no `origin` remote falls back
 and a failed fetch says so on that line. The merge prompt asks the orchestrator to re-run the
 bootstrap after it rebases a branch.
 
+### Paths every task may edit at once
+
+`--files` is a lock: two tasks whose path prefixes overlap never implement at the same time, and the
+second waits in `blocked-on-files` until the first finishes. A file every task appends to — a format
+reference, a registry, a changelog — would serialize the whole batch on it. List such paths in
+`.claude/pipeline-shared-paths` at the repo root, on the default branch:
+
+    # every task adds a section of its own
+    docs/file-formats.md
+    CHANGELOG.md
+
+One path prefix per line; `#` starts a comment, and a leading `./` or `/` is dropped. A prefix is a
+plain prefix, as a `--files` entry is, so `docs/file-formats` also covers `docs/file-formats-old/`. A
+line with a glob character (`*?[{`) is ignored rather than cut to its prefix, which would share far
+more than it names (`docs/*.md` would share all of `docs/`), and so is a line that would share the
+whole repo (`/`, `.`). `hpipe start` warns about each.
+
+A shared path never holds the lock. A task still declares it in `--files`, and `hpipe task` and
+`hpipe show` print it marked `(shared)`; it just locks nothing, so a task whose every entry is shared
+goes straight past `blocked-on-files`. An entry broader than a shared prefix still locks: `docs/`
+claims the rest of `docs/` even when `docs/file-formats.md` is shared.
+
+Two tasks now edit one file at once, so a conflict there is expected, and the flows that already
+exist resolve it. The implementer is asked to keep its change to a shared file self-contained — a
+section of its own, nobody else's reflowed or reordered — so a merge stays mechanical. Per-task, the
+merge prompt names the shared path and any merged task that declares it too: rebase, keep both sides'
+additions, and CI runs again on the rebased head; two additions that collide in meaning (the same id,
+number or section) go back to `implement` with the `hpipe rewind` the prompt prints, so the worker
+redoes its addition on top and it is reviewed. In a single-PR run the conflict comes at `sync`: the
+worker keeps both additions, which makes the sync dirty, so the change goes back through review; a
+collision in meaning is raised with `hpipe decide`.
+
+`hpipe start` reads the list **once**, from the commit the run is cut from — origin's default branch as
+just fetched, or a single-PR run's batch base — and prints a `shared:` line naming that commit.
+Nothing refreshes it mid-run: a list that shrank could leave two tasks past the gate on a path that
+locks again. A change to the file takes effect at the next `start`, and `hpipe status` names the
+snapshot's commit under the run header. The file is otherwise an ordinary path: not shared itself, and
+a change to it is always reviewed, since it changes how every later run locks. An unreadable file
+shares nothing, which locks every path as before; `start` warns and goes ahead.
+
 ### Permissions the orchestrator needs
 
 The orchestrator pushes, opens and merges PRs, and starts workers. Allow these in the Claude Code
@@ -171,7 +211,7 @@ instruction as each phase completes.
 
 | | |
 |---|---|
-| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, bead, surface, files, dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
+| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, bead, surface, files (a shared one marked), dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
 | `hpipe brief --task <id> [--run <run-id>]` | The worker brief, rendered bare. Read-only — registering a task is the only other place it is printed |
 | `hpipe bead show <id>` | A bead as Beads holds it now: status, labels, description, acceptance, comments |
 | `hpipe next [--limit <n>] [--label <label>]` | The unheld beads `bv` ranks claimable now (parallel only when their `--files` are disjoint), then one line per later dependency layer, each waiting on the one before; then blockers to clear and alerts. `--label` filters bv's top 10 recommendations, not every bead |
@@ -494,6 +534,12 @@ branch review, so beside an old one a new CLI still gets a batch merge command w
 `--match-head-commit` and a branch review git can see. The release adds optional fields an earlier one
 ignores: a sync submission's `merges` (an old supervisor calls any clean sync a clean sync) and an
 outbox entry's `carry-on` kind (an old supervisor delivers it but does not count it as a resume).
+
+Shared paths add two optional fields, `shared_paths` on a run and `capabilities` in the supervisor's
+pid file, and no schema change. A supervisor that predates them locks every declared path, shared or
+not, which is only stricter: `hpipe start` warns when this session's live supervisor is that old, and
+a restart lets the run share them. Runs started before the upgrade carry no list and keep locking
+everything until they finish. Rolling back to an earlier release locks shared paths again.
 
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a

@@ -1437,6 +1437,109 @@ sha `submit` printed after `not a clean merge … (at`.
 
 ---
 
+## 13. Shared paths
+
+A path listed in `.claude/pipeline-shared-paths` never holds the file lock, so two tasks that both
+declare it implement at once, and the conflict that follows is left to the rebase before a per-task
+merge, or to `sync` in a single-PR run. The unit suite and `test/shared-paths-wiring.test.ts` drive the
+gate against a bare local origin; a live supervisor's gate, GitHub's merge and a real `sync` are only
+proven here. Fresh `pipesmokeN` session, `victorstein/hpipe-smoke`. With the plugin's `config.env`
+set to `STALL_MINUTES=2` and `TASK_STALL_MINUTES=3`, a probe that should not come comes within minutes.
+
+### 13a. Start reads the list once
+
+Commit `.claude/pipeline-shared-paths` to `main` on origin, from a clone other than the
+orchestrator's checkout:
+
+```
+# every task appends to it
+docs/registry.md
+docs/*.md
+```
+
+**Assert:** `hpipe start` prints, above the intake prompt,
+
+```
+shared: docs/registry.md — from .claude/pipeline-shared-paths at <sha8> (origin/main as just fetched); never locked
+⚠ shared: ignored "docs/*.md" in .claude/pipeline-shared-paths — a glob would share more than it names: list each path
+```
+
+with `<sha8>` the commit that added the file, though the orchestrator's working tree has never
+pulled it. `hpipe status` shows `  shared: docs/registry.md (from <sha8>)` under the run's header, and
+the ledger holds it:
+
+```bash
+jq '.shared_paths' "$STATE/runs/$SMOKE/<run_id>.json"
+```
+
+If the session's supervisor is still the previous release's, `start` also prints `⚠ shared: the
+supervisor of session … predates shared paths and locks them anyway`. Restart it before going on, or
+13b holds t2 behind t1 and that is the old supervisor, not a finding.
+
+### 13b. Two tasks on one shared file, and one on a locking path
+
+Register three small tasks:
+
+- t1: `--files src/alpha/,docs/registry.md`, a change that adds `src/alpha/` code and a `## alpha`
+  section to `docs/registry.md`;
+- t2: `--files src/beta/,docs/registry.md`, the same with `beta`;
+- t3: `--files src/alpha/x.ts`.
+
+**Assert:** `hpipe task` prints `files: src/alpha/, docs/registry.md (shared)` for t1, t2's line has no
+`overlaps`, and t3's reads `— overlaps t1: whichever reaches implement second waits there until the
+other finishes`. `hpipe show --task t2` prints `files:      src/beta/, docs/registry.md (shared)`.
+
+Once all three are past their plans:
+
+- t1 and t2 are in `implement` together: whichever reaches `blocked-on-files` second passes straight
+  through to `implement` while the other is still in it (on the same tick, if they arrive together).
+  Each implement prompt's implementer's brief reads
+  ``docs/registry.md` is shared: other tasks edit it at the same time.``
+- t3 waits in `blocked-on-files`; `hpipe status` prints `⚠ t3 blocked on files held by t1 (implement)`
+  and never names t2 as a holder; t3's bead is blocked by t1's bead and by no other.
+- No probe about t3 comes while t1 moves (`TASK_STALL_MINUTES=3`: watch it for ten).
+- t3 enters `implement` once t1 is `done`, with t2 possibly still in flight.
+
+**Record:** when t1 and t2 entered `implement`, from `jq '.history'`, and when t3 did.
+
+### 13c. Per-task: the rebase at merge
+
+Let t1 merge first. **Assert:** t2's merge prompt carries, after the bootstrap paragraph,
+
+```
+This task declares the shared `docs/registry.md`, and t1 (merged) declares it too, so this PR may conflict there. …
+```
+
+and the orchestrator rebases t2 onto `main`, keeps both sections, pushes, and t2 goes back to `ci`,
+then `merge` again on the rebased head. A merge prompt that names no shared path for t2, or names a
+task that has not merged, is a **finding**.
+
+Then make the additions collide: register two more tasks, each adding a `## gamma` section with
+different text to `docs/registry.md`. Once the first merges, **assert** the orchestrator, following the
+other's merge prompt, does not hand-resolve it but runs the `hpipe rewind <run> implement --task <id>`
+it prints, and that task's worker redoes its addition on top of the merged one and is reviewed again.
+
+### 13d. Single-PR: the dirty sync
+
+In a `--single-pr` run with the same list on `main`, two tasks that each add a section to
+`docs/registry.md`. **Assert:** both implement at once; the second to land syncs, its merge of the
+batch conflicts on `docs/registry.md`, the sync prompt it received says `` `docs/registry.md` is shared,
+so a conflict there is expected: keep both sides' additions``, `submit` reports `not a clean merge`,
+and the task goes back through `pr-review` before it lands. Make the two additions collide instead,
+and the worker raises it with `hpipe decide`, recommending a rewind to `implement`.
+
+### 13e. A mid-run edit changes nothing
+
+During 13b, while t1 is still in flight, commit `src/` to the list on `main` (another clone, as in
+13a), then register another task with `--files src/alpha/y.ts`. **Assert:** its `files:` line reads
+`— overlaps t1`, the ledger's `shared_paths.commit` is still 13a's, and `hpipe status` still prints
+`shared: docs/registry.md (from <13a's sha8>)`. The next `hpipe start` reads the new list.
+
+Afterwards, delete `.claude/pipeline-shared-paths` from `main`: the sections above expect a repo
+that shares nothing.
+
+---
+
 ## What to do when a step fails
 
 The ledger is at `$STATE/runs/$SMOKE/<run_id>.json` — read it, never hand-edit it. All of these run
