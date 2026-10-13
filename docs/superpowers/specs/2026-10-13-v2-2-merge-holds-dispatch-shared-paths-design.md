@@ -136,7 +136,7 @@ interface BeforeMergeCheck {
 }
 Task.before_merge?: BeforeMergeCheck[]
 Run.before_merge?: BeforeMergeCheck[]   // single-PR only
-SupervisorPid.capabilities?: string[]   // ['before-merge', 'shared-paths']; absent reads as []
+SupervisorPid.capabilities?: string[]   // ['shared-paths', 'before-merge', 'dispatch']; absent reads as []
 ```
 
 Nothing deletes a check or a resolution, not a rewind and not an abort. A check whose work never
@@ -1053,8 +1053,10 @@ every release.
     capability).
   - `start` with a shared-paths file warns that the running supervisor will lock those paths anyway
     (the `shared-paths` capability). That is stricter, so it is safe.
-  - `dispatch --task` works, since it is CLI-only. The old supervisor's `Dispatch tN` prompt just lacks
-    the new line.
+  - The step forms of `dispatch` (`--task` without `--pane`, and `--ready`) refuse until the supervisor
+    is restarted (the `dispatch` capability): a 2.1 supervisor does not read the dispatch lock, so mid-bootstrap
+    it would tell the orchestrator to start the agent by hand. `--pane` and the printed block still work.
+    (Changed after the code review of the combined branch.)
 - **Runs started on 2.1** have no `shared_paths`, and keep locking everything until they finish.
 - **Rolling back to 2.1.**
   - The fields are ignored, not removed. A run with a check owed loses its hold: 2.1 sends the merge
