@@ -857,7 +857,7 @@ test('hpipe show on a task from before tiers reads heavy, with no log, and nothi
   run.tasks = [task]
   const text = formatTaskDetail(run, task)
   expect(text).toContain('tier:       heavy')
-  expect(text).toContain('effort:     worker xhigh, reviews xhigh')
+  expect(text).toContain('effort:     worker high, reviews high (spec-review xhigh)')
   expect(text).toContain('tier log:   none')
   expect(text).toContain('visited:    none')
 })

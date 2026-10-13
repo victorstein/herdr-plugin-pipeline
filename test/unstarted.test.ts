@@ -90,7 +90,7 @@ test('the dispatch sequence runs worktree, bootstrap, a flagged agent start, the
     "    herdr worktree create --cwd '/r' --branch feat/x --base c0ffee1",
     WHERE_CREATE_PUTS_IT,
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
-    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
+    '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
     '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
   ])
 })
@@ -119,7 +119,7 @@ test('a setup script the repo never wired in is an optional step in the new chec
       WHERE_CREATE_PUTS_IT,
       '    (cd "<.result.worktree.path>" && ./bin/bootstrap)  # optional: the repo\'s own setup, which nothing ' +
         'runs for you; run it if the worker will need what it sets up',
-      '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort xhigh',
+      '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
       '    hp dispatch --task t1 --pane <.result.root_pane.pane_id>',
     ])
 })
@@ -137,7 +137,7 @@ test('every recovery path starts the agent with the same flags as the dispatch â
     dispatchWorkerCommand(mkRun(), mkTask({ workspace_id: null, checkout_path: null }), 'hp'),
     remainingDispatchSteps(mkRun(), mkTask({}), 'hp'),
   ]) {
-    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions --effort xhigh`')
+    expect(text).toContain('--pane <root pane> -- --dangerously-skip-permissions --effort high`')
   }
 })
 
@@ -154,7 +154,7 @@ test('every path names the agent by its bead, so the line runs as printed and `h
 })
 
 test('the worker starts at its tier\'s effort on every path', () => {
-  for (const [tier, effort] of [['light', 'medium'], ['standard', 'high'], ['heavy', 'xhigh']] as const) {
+  for (const [tier, effort] of [['light', 'medium'], ['standard', 'high'], ['heavy', 'high']] as const) {
     const task = mkTask({ tier })
     for (const text of [
       dispatchSequence(mkRun(), task, FETCHED, { kind: 'none' }, 'hp'),

@@ -440,16 +440,20 @@ put the judgment on Sonnet too.
 Effort is pinned by tier, not inherited. A worker starts with `--effort` from its tier, and every
 review subagent is dispatched with an `effort:` from its task's current tier and the review it runs:
 
-| Tier | Worker | `spec-review`, `pr-review` | `plan-review` |
-|---|---|---|---|
-| `light` | `medium` | `high` | – |
-| `standard` | `high` | `high` | `medium` |
-| `heavy` | `xhigh` | `xhigh` | `xhigh` |
+| Tier | Worker | `spec-review` | `pr-review` | `plan-review` |
+|---|---|---|---|---|
+| `light` | `medium` | `high` | `high` | – |
+| `standard` | `high` | `high` | `high` | `medium` |
+| `heavy` | `high` | `xhigh` | `high` | `high` |
 
 The plan review is cheaper below heavy because it no longer dry-runs the plan: it reads it for spec
 coverage, behaviour no test would see, the `FILES:` lock and steps that would mislead the
 implementer, and leaves compile and command errors to the implementer's own red/green loop. `hpipe
 task` and `hpipe show` print the split, as `effort: worker high, reviews high (plan-review medium)`.
+
+Heavy keeps `xhigh` only for its spec review, which is where the reviews caught defects that would
+have shipped. On the 2026-10-12 berean-os run, `xhigh` for the worker and every review cost a heavy
+task about 30% more than `medium` while those reviews cleared first time.
 
 The branch review runs at the heaviest task's review effort. A worker's effort is fixed when its agent
 starts, so `hpipe tier` changes only the reviews that follow; `hpipe show` prints both. Inheriting the

@@ -58,7 +58,7 @@ and plans its own bead.{{mode_note}}
    `--tier` decides which reviews the task runs, and how hard. `light` skips `plan-review`;
    `standard` and `heavy` keep it. Every tier gets one combined PR review, except that a light or
    standard task whose change turns out small skips it (the herdr-pipeline skill's
-   `pr-review skipped` row has the rule); `heavy` never skips it, and runs its reviews at the
+   `pr-review skipped` row has the rule); `heavy` never skips it, and runs its spec review at the
    highest effort. Pick it from the brief:
 
    - **light** — one surface, a handful of files, and the brief already pins down the exact change:

@@ -15,9 +15,17 @@ export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
  * the user's default ran seven workers and every reviewer at `xhigh`, and the
  * 5-hour usage window lasted 31 minutes. Measured on the 2026-10-11 berean-os run.
  */
-export const WORKER_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'high', heavy: 'xhigh' }
+export const WORKER_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'high', heavy: 'high' }
 
-export const REVIEW_EFFORT: Record<Tier, Effort> = { light: 'high', standard: 'high', heavy: 'xhigh' }
+export const REVIEW_EFFORT: Record<Tier, Effort> = { light: 'high', standard: 'high', heavy: 'high' }
+
+/**
+ * Heavy keeps `xhigh` only where it pays: spec review caught every would-ship
+ * defect in the review research, while `xhigh` everywhere else on a heavy task
+ * cost about 30% more than `medium` and found nothing the lighter reviews missed.
+ * Measured on the 2026-10-12 berean-os run.
+ */
+export const SPEC_REVIEW_EFFORT: Record<Tier, Effort> = { light: 'high', standard: 'high', heavy: 'xhigh' }
 
 /**
  * About 59% of the plan review's BLOCKER and MAJOR findings on berean-os were
@@ -25,8 +33,9 @@ export const REVIEW_EFFORT: Record<Tier, Effort> = { light: 'high', standard: 'h
  * later, so below heavy it runs a notch lighter than the spec and PR reviews.
  * Light runs no plan review; its entry serves a rewind into one.
  */
-export const PLAN_REVIEW_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'medium', heavy: 'xhigh' }
+export const PLAN_REVIEW_EFFORT: Record<Tier, Effort> = { light: 'medium', standard: 'medium', heavy: 'high' }
 
 export function reviewEffort(tier: Tier, review: TaskPhase): Effort {
+  if (review === 'spec-review') return SPEC_REVIEW_EFFORT[tier]
   return review === 'plan-review' ? PLAN_REVIEW_EFFORT[tier] : REVIEW_EFFORT[tier]
 }

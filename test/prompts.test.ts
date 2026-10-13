@@ -158,7 +158,7 @@ test('the dispatch prompt shows the same agent start line both dispatch paths pr
   const printed = dispatchSequence(run, task, base, { kind: 'none' }, 'hp')
   const startLine = printed.split('\n').find((line) => line.includes('herdr agent start'))!.trim()
   expect(text).toContain(startLine.replace('start hp-1 ', 'start <name> ')
-    .replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort xhigh', '--effort <effort>'))
+    .replace('<.result.root_pane.pane_id>', '<root_pane_id>').replace('--effort high', '--effort <effort>'))
   // The template is the one place the name stays a placeholder, so it says what goes there.
   expect(text).toContain('`<name>` is')
 })
@@ -491,8 +491,9 @@ test('a review is dispatched at its task\'s tier effort for that review', async 
     expect(await renderPhase(phase, { tier: 'standard' }), phase).toContain('`effort: high`')
   }
   expect(await renderPhase('plan-review', { tier: 'standard' })).toContain('`effort: medium`')
-  for (const phase of ['spec-review', 'plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
-    expect(await renderPhase(phase, { tier: 'heavy' }), phase).toContain('`effort: xhigh`')
+  expect(await renderPhase('spec-review', { tier: 'heavy' })).toContain('`effort: xhigh`')
+  for (const phase of ['plan-review', 'pr-review', 'pr-review-intent', 'pr-review-quality'] as const) {
+    expect(await renderPhase(phase, { tier: 'heavy' }), phase).toContain('`effort: high`')
   }
 })
 
@@ -533,7 +534,7 @@ test('the branch review runs at the effort of the heaviest task in the run', asy
   run.tasks = [briefTask({ task_id: 't1', phase: 'done', tier: 'light' })]
   expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: high`')
   run.tasks.push(briefTask({ task_id: 't2', phase: 'done', tier: 'heavy' }))
-  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: xhigh`')
+  expect(await renderRunPhasePrompt(run, ROOT)).toContain('`effort: high`')
 })
 
 test('both reviews that judge the plan are told when no plan review ran', async () => {
