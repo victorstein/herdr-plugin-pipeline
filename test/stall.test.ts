@@ -374,15 +374,36 @@ test('an unrecognised signal falls back to naming the phase', () => {
   })
 })
 
-test('an escalating row is told its position and the bound', () => {
-  expect(ladderFor({ probes: 1, undelivered: 0, escalatable: true }, 3)).toBe(
-    'This is probe 2 of 3. After 3 unanswered probes this phase is escalated to the human ' +
-    'and stops moving on its own.')
+const FIFTEEN = 15 * 60_000
+
+test('an escalating row is told its position, its cadence, what answers it, and what holds the escalation', () => {
+  // The trial's orchestrator read "ignore this" and "after 3 unanswered probes" with nothing saying what
+  // an answer was, and busy-waited in a shell to stay `working`. Measured on a live run.
+  expect(ladderFor({ probes: 1, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3)).toBe(
+    'This is probe 2 of 3, sent every 15 minutes while this phase is open. A reply does not answer it; ' +
+    'only what this phase is waiting for does. After probe 3 the next check escalates this phase to the ' +
+    'human, and it stops moving on its own, unless your pane is busy then — mid-turn, or running a ' +
+    'subagent, shell or monitor that Claude Code lists under its prompt — which puts the escalation off ' +
+    '15 minutes at a time, up to 3 times.')
+})
+
+test('the cadence quoted is the one in force, not the default', () => {
+  expect(ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: 5 * 60_000 }, 3))
+    .toContain('sent every 5 minutes')
+})
+
+test('a probe says what background work its pane shows, which the phase waits for', () => {
+  const ladder = ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3,
+    ['general-purpose subagent'])
+  expect(ladder).toEndWith(' Your pane shows background work running now (general-purpose subagent), which this ' +
+    'phase waits for. If it is not this phase\'s work, stop it.')
 })
 
 test('an excluded row is never promised a bound it does not have', () => {
-  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).not.toContain('of 3')
-  expect(ladderFor({ probes: 8, undelivered: 0, escalatable: false }, 3)).toContain('standing nudge')
+  const ladder = ladderFor({ probes: 8, undelivered: 0, escalatable: false, thresholdMs: FIFTEEN }, 3, ['1 shell'])
+  expect(ladder).not.toContain('of 3')
+  expect(ladder).toContain('standing nudge, sent every 15 minutes')
+  expect(ladder).not.toContain('background')
 })
 
 test('a run with no orchestrator pane produces no candidate at all', () => {
@@ -664,9 +685,9 @@ test('a stall state written before #32 reads as zero undelivered', async () => {
 })
 
 test('the ladder sentence owns up to rungs that never reached the pane — #32', () => {
-  expect(ladderFor({ probes: 2, undelivered: 2, escalatable: true }, 3))
+  expect(ladderFor({ probes: 2, undelivered: 2, escalatable: true, thresholdMs: FIFTEEN }, 3))
     .toContain('2 earlier probes could not be delivered')
-  expect(ladderFor({ probes: 2, undelivered: 0, escalatable: true }, 3))
+  expect(ladderFor({ probes: 2, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3))
     .not.toContain('could not be delivered')
 })
 

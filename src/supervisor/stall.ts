@@ -520,14 +520,19 @@ function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiti
 /**
  * The ladder sentence, composed here rather than templated, because a bare
  * "probe N of M" is false for every row escalation excludes: those keep being
- * probed past the cap and are never escalated.
+ * probed past the cap and are never escalated. It names the cadence in force, which
+ * a config can shorten, and what does and does not answer a probe: the trial's
+ * orchestrator, told only "after 3 unanswered probes", busy-waited in a shell so its
+ * pane would read working while its reviewer subagent ran. Measured on a live run.
  */
 export function ladderFor(
-  c: { probes: number; undelivered: number; escalatable: boolean }, probeMax: number,
+  c: { probes: number; undelivered: number; escalatable: boolean; thresholdMs: number }, probeMax: number,
+  running: readonly string[] = [],
 ): string {
+  const every = `${Math.round(c.thresholdMs / MS_PER_MINUTE)} minutes`
   if (!c.escalatable) {
-    return 'This is a standing nudge — this phase is not escalated automatically, and clears ' +
-      'when whatever it is waiting for arrives.'
+    return `This is a standing nudge, sent every ${every} until whatever this phase is waiting for arrives; ` +
+      'this phase is not escalated automatically.'
   }
   // Numbered by rung, not by delivered probe: undelivered rungs count toward the
   // cap, so a delivered-only count would promise the agent probes it will not get.
@@ -535,8 +540,15 @@ export function ladderFor(
     ? ''
     : ` ${c.undelivered === 1 ? 'One earlier probe' : `${c.undelivered} earlier probes`} ` +
       'could not be delivered to this pane and still counted.'
-  return `This is probe ${c.probes + 1} of ${probeMax}.${missed} After ${probeMax} unanswered ` +
-    'probes this phase is escalated to the human and stops moving on its own.'
+  const background = running.length === 0
+    ? ''
+    : ` Your pane shows background work running now (${running.join(', ')}), which this phase waits for. ` +
+      "If it is not this phase's work, stop it."
+  return `This is probe ${c.probes + 1} of ${probeMax}, sent every ${every} while this phase is open.${missed} ` +
+    'A reply does not answer it; only what this phase is waiting for does. ' +
+    `After probe ${probeMax} the next check escalates this phase to the human, and it stops moving on its own, ` +
+    'unless your pane is busy then — mid-turn, or running a subagent, shell or monitor that Claude Code lists ' +
+    `under its prompt — which puts the escalation off ${every} at a time, up to ${probeMax} times.${background}`
 }
 
 /**

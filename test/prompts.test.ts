@@ -254,6 +254,12 @@ test('the stall probe asserts nothing about the shape of what it is waiting for'
   expect(text).not.toContain('will not ask again')
 })
 
+test('the stall probe counts a subagent, shell or monitor the agent waits on as work', async () => {
+  const text = (await Bun.file(join(ROOT, 'prompts', 'stall-probe.md')).text()).replace(/\s+/g, ' ')
+  expect(text).toContain('If you are still working, ignore this')
+  expect(text).toContain('waiting on a subagent, shell or monitor you started counts as working')
+})
+
 test('a rendered probe leaves no placeholder behind', async () => {
   const { renderPrompt } = await import('../src/lib/render')
   const text = await renderPrompt(ROOT, 'stall-probe', {

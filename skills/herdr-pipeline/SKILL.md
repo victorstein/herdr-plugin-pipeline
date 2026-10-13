@@ -86,8 +86,13 @@ behaviour; this skill does.
 4. After the last task: `hpipe dispatch --done`. Until then the run can never finish. Registering
    another task later reopens intake — run `dispatch --done` again afterwards.
 
-The supervisor nudges a silent task with a stall probe (workers every 45 min, the orchestrator every
-15); 3 unanswered probes escalate it. A pane Claude's usage limit has stopped is neither probed nor
+The supervisor nudges a silent task with a stall probe (by default workers every 45 min, the
+orchestrator every 15; `TASK_STALL_MINUTES` and `STALL_MINUTES` in the plugin's `config.env` change
+them, and each probe names the cadence in force). A reply does not answer a probe: only what the
+phase waits for does. After 3 probes the next check escalates the phase, unless the pane is busy then
+— mid-turn, or running a subagent, shell or monitor that Claude Code lists under its prompt — which
+puts it off one cadence at a time, up to 3 times. So end your turn while a subagent you dispatched
+works; do not busy-wait to look busy. A pane Claude's usage limit has stopped is neither probed nor
 escalated: the supervisor holds what it owes the pane and resumes it at the reset.
 
 ## While it runs

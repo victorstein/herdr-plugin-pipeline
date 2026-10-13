@@ -51,7 +51,8 @@ fenced copy is documentation, not a verdict, and is rejected. Nothing but count 
 On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle, the way the end of
 this prompt has you patch a BLOCKER: nothing later asks for them.
 
-The supervisor reads the review from disk once you are idle. Leave it uncommitted: it is the run's record, not
-part of the work, and committing it would ship a review file with the work.
+The supervisor reads the review from disk once you are idle with nothing you started still running in the
+background, so you may end your turn while the reviewer subagent works. Leave the review uncommitted: it
+is the run's record, not part of the work, and committing it would ship a review file with the work.
 
 {{blocker_note}}

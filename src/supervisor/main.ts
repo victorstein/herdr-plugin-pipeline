@@ -529,7 +529,8 @@ async function main(): Promise<void> {
               : c.run.phase,
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
-            ladder: ladderFor(c, probeMax),
+            ladder: ladderFor(c, probeMax,
+              c.escalatable && c.actorPaneId !== null ? await backgroundWork(c.actorPaneId) : []),
           })
           const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
           return { ...sent, deferred: sent.held === 'budget' || sent.held === 'usage_limit' }

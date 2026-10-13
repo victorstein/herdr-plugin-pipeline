@@ -548,8 +548,15 @@ them would cascade their dependents to `blocked-on-failure`. Their probe says so
 is waiting for: the PR to merge, the bead to be closed by the supervisor, `gh pr checks <pr>`, or the `rewind` that
 resumes an escalated task.
 
-If the actor's pane reports `working` when escalation comes due, it is deferred one interval, up to
-`STALL_PROBE_MAX` times, then escalated anyway. Nothing waits forever.
+If the actor's pane reports `working` when escalation comes due, or shows background work under its
+prompt (see §5's second finding), it is deferred one interval, up to `STALL_PROBE_MAX` times, then
+escalated anyway. Nothing waits forever.
+
+Each probe states the cadence in force — `sent every 15 minutes` at the defaults, whatever
+`config.env` sets otherwise — that a reply does not answer it, and what holds the escalation off; a
+probe whose minutes differ from the `This phase has been open N minutes` steps it arrives at is a
+finding. A probe to a pane showing background work ends `Your pane shows background work running now
+(…), which this phase waits for.`
 
 ### 4d. Delivery to a pane that cannot answer
 
