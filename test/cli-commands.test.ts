@@ -2596,6 +2596,10 @@ test('nudge refuses a task it cannot help, saying why, and sends nothing', async
     ['no sign of a limit', {}, {
       readPane: async () => ({ ...limitedReading(), line: null }), holds: async () => ({}),
     }, 'shows no usage-limit message, the supervisor holds nothing for it, and it has no uncommitted work on record'],
+    ['an unread pane', { uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } }, {
+      readPane: async () => null, holds: async () => ({}),
+    }, "t1's pane w7:p1 could not be read, so whether it is still working in the background is unknown; " +
+      'nothing was queued — run it again'],
     ['background work', { uncommitted_work: { at: 5, count: 1, sample: ['src/a.ts'] } }, {
       readPane: async () => ({ ...limitedReading(), line: null, background: ['1 shell', 'ui-dev subagent'] }),
       holds: async () => ({}),

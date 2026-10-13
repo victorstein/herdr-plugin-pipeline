@@ -1685,7 +1685,14 @@ async function nudgeTarget(
     return { why: `${task.task_id}'s agent is working; nothing to nudge`, short: 'working' }
   }
   if (reading?.line != null || holds[task.pane_id]?.code === 'usage_limit') return { by: 'limit' }
-  const background = reading?.background ?? []
+  if (reading === null) {
+    return {
+      why: `${task.task_id}'s pane ${task.pane_id} could not be read, so whether it is still working in the ` +
+        'background is unknown; nothing was queued — run it again',
+      short: 'unread pane',
+    }
+  }
+  const background = reading.background ?? []
   if (background.length > 0) {
     return {
       why: `${task.task_id}'s pane shows background work running (${background.join(', ')}); its phase waits for it, ` +
