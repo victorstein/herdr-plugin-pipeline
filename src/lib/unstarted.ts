@@ -112,6 +112,20 @@ function startAgentCommand(task: Task, paneId: string): string {
 const startAgent = (task: Task): string => `\`${startAgentCommand(task, '<root pane>')}\``
 
 const CREATED_ROOT_PANE = '<.result.root_pane.pane_id>'
+const CREATED_CHECKOUT = '<.result.worktree.path>'
+
+/**
+ * herdr picks the checkout's path, so the plugin cannot print it before the
+ * worktree exists; a repo whose setup script was never wired in still gets a step
+ * that runs it there. Left out, the trial's orchestrator dug the path out of the
+ * create JSON by hand. Measured on a live run.
+ */
+function bootstrapSteps(bootstrap: Bootstrap): string[] {
+  if (bootstrap.kind !== 'none') return [`(cd "${CREATED_CHECKOUT}" && ./${BOOTSTRAP_REL})`]
+  if (bootstrap.unwired === undefined) return []
+  return [`(cd "${CREATED_CHECKOUT}" && ./${bootstrap.unwired})  # optional: the repo's own setup, which nothing ` +
+    'runs for you; run it if the worker will need what it sets up']
+}
 
 /**
  * The whole dispatch, in order, for both paths that dispatch: `hpipe task` at
@@ -126,7 +140,9 @@ export function dispatchSequence(
   const steps = [
     `herdr worktree create --cwd ${shellQuoted(run.repo_root)} --branch ${shellWord(task.branch)} ` +
       `--base ${baseArgument(base)}`,
-    ...(bootstrap.kind === 'none' ? [] : [`(cd "<.result.worktree.path>" && ./${BOOTSTRAP_REL})`]),
+    `# its JSON gives the new checkout as ${CREATED_CHECKOUT.slice(1, -1)} and its pane as ` +
+      `${CREATED_ROOT_PANE.slice(1, -1)}; \`${hpipe} show --task ${task.task_id}\` prints the checkout too`,
+    ...bootstrapSteps(bootstrap),
     startAgentCommand(task, CREATED_ROOT_PANE),
     `${hpipe} dispatch --task ${task.task_id} --pane ${CREATED_ROOT_PANE}`,
   ]

@@ -56,8 +56,8 @@ function undeclared(repoRoot: string): Bootstrap {
 export function bootstrapLine(b: Bootstrap): string {
   if (b.kind === 'none') {
     if (b.unwired === undefined) return 'bootstrap: none'
-    return `bootstrap: none (the repo has ./${b.unwired}, which the dispatch does not run; ` +
-      `an executable ${BOOTSTRAP_REL} that calls it would run it in every new worktree)`
+    return `bootstrap: none declared; the repo has ./${b.unwired}, which the dispatch block below offers as an ` +
+      `optional step (an executable ${BOOTSTRAP_REL} that calls it would run in every new worktree)`
   }
   if (b.kind === 'not-executable') {
     return `bootstrap: ${BOOTSTRAP_REL} (NOT EXECUTABLE — chmod +x it on the base branch)`

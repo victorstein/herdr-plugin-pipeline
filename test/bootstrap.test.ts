@@ -95,8 +95,8 @@ test('a conventional bootstrap script that is not wired is pointed out, still on
   const bootstrap = repoBootstrap(root)
   expect(bootstrap).toEqual({ kind: 'none', unwired: 'bin/bootstrap' })
   const line = bootstrapLine(bootstrap)
-  expect(line).toBe('bootstrap: none (the repo has ./bin/bootstrap, which the dispatch does not run; ' +
-    `an executable ${BOOTSTRAP_REL} that calls it would run it in every new worktree)`)
+  expect(line).toBe('bootstrap: none declared; the repo has ./bin/bootstrap, which the dispatch block below offers as ' +
+    `an optional step (an executable ${BOOTSTRAP_REL} that calls it would run in every new worktree)`)
   expect(line).not.toContain('\n')
 })
 

@@ -1281,6 +1281,7 @@ test('the dispatched return keeps every header line above the one blank line', a
   expect(lines.slice(6)).toEqual([
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
+    expect.stringMatching(/^ {4}# its JSON gives the new checkout as \.result\.worktree\.path and its pane as /),
     '    (cd "<.result.worktree.path>" && ./.claude/pipeline-bootstrap)',
     '    herdr agent start hp-1 --kind claude --pane <.result.root_pane.pane_id> -- --dangerously-skip-permissions --effort high',
     expect.stringMatching(/ dispatch --task t1 --pane <\.result\.root_pane\.pane_id>$/),

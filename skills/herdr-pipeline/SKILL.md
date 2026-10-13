@@ -79,8 +79,10 @@ behaviour; this skill does.
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
    `Dispatch tN` prompt carrying the same block — run it then) or a brief with a
    **`dispatch, in order:`** block. **Run that block exactly
-   as printed**: `herdr worktree create … --base <commit>` (the fetched commit — never `--base main`),
-   bootstrap, `herdr agent start … -- --dangerously-skip-permissions`, then
+   as printed**: `herdr worktree create … --base <commit>` (the fetched commit — never `--base main`;
+   the `#` line under it says where its JSON gives the new checkout's path and pane), bootstrap (an
+   `# optional:` step when the repo's setup script is not wired in as `.claude/pipeline-bootstrap`),
+   `herdr agent start … -- --dangerously-skip-permissions`, then
    `hpipe dispatch --task <id> --pane <root pane>`, which submits the brief and confirms it landed. It claims the task's bead first; if bd refuses, nothing is sent.
    `dispatch --task` only works while the task is in `research`.
 4. After the last task: `hpipe dispatch --done`. Until then the run can never finish. Registering

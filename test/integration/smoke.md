@@ -185,8 +185,11 @@ working on it — not text sitting in the input box. `hpipe show --task t1` prin
 that merge even though nobody pulled local `main` (`git -C <worktree> merge-base --is-ancestor
 <merge sha> HEAD` exits 0), and its branch tracks nothing (`git -C <worktree> rev-parse
 --abbrev-ref @{u}` fails with `no upstream configured`). Under that line both print the same
-`dispatch, in order:` block — `worktree create … --base <that commit>`, the bootstrap when the repo
-declares one, `agent start <bead> … -- --dangerously-skip-permissions`, `dispatch --task` — so a worker
+`dispatch, in order:` block — `worktree create … --base <that commit>`, a `#` line saying the create
+JSON gives the checkout as `.result.worktree.path` and its pane as `.result.root_pane.pane_id`, the
+bootstrap when the repo declares one (an `# optional:` step running `./bin/bootstrap` or the like when
+the repo has one it never wired in), `agent start <bead> … -- --dangerously-skip-permissions`,
+`dispatch --task` — so a worker
 dispatched at registration is started with the flag too (#118). The `agent start` line names the agent
 by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr agent list` shows the
 agent under that name. A refusal of the name, or of a second start under it after a rewind, is a

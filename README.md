@@ -105,7 +105,10 @@ brief names it as the recovery if a build fails on a missing dependency. It runs
 root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
 the file; every dispatch then reports `bootstrap: none`. If the repo has a conventional setup script
 (`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no `.claude/pipeline-bootstrap`, the
-line names it: point a `.claude/pipeline-bootstrap` at it to have it run.
+line names it and the `dispatch, in order:` block carries it as an optional step in the new checkout;
+point a `.claude/pipeline-bootstrap` at it to have it run every time. herdr picks the new checkout's
+path, so the block names it by where `worktree create`'s JSON gives it, `.result.worktree.path`, and
+`hpipe show --task <id>` prints it once herdr reports the worktree.
 
 It is also where a sibling package's build step belongs. If your apps consume another package's
 built `dist` rather than its source, build it here (`pnpm install && pnpm turbo build
