@@ -176,8 +176,10 @@ repo, runs `.claude/pipeline-bootstrap` in the new checkout, starts the worker w
 step as it goes, skips any step already done, and stops at the first failure with what to do next; run
 the same command again once that is fixed. Only one dispatch runs in a repo at a time, across
 sessions, and only from a pane of the run's own herdr session. `--ready` also takes any task that
-becomes ready while it runs. A killed dispatch stops its bootstrap with it, and `hpipe status` says
-when one is under way rather than asking for an agent to be started.
+becomes ready while it runs. SIGTERM, SIGINT or SIGHUP stops a dispatch's bootstrap with it; one
+killed outright leaves its lock, and the next dispatch in the repo stops that bootstrap and takes the
+lock over. While one is under way, `hpipe status` says what it is doing rather than asking for an
+agent to be started.
 
 The manual fallback is the `dispatch, in order:` block `hpipe task` and the `Dispatch tN` prompt print,
 ending in:
