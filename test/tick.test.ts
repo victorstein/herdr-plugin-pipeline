@@ -872,6 +872,18 @@ test('a real wait in blocked-on-files is reported at once, and a pass held too l
   expect(holds.sift(stuck, [], FILES_PASS_HOLD_MS)).toHaveLength(1)
 })
 
+test('a block or a lost pane during the pass is never held, only the idle that ended the phase before', () => {
+  const holds = new FilesPassHolds()
+  const t2 = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const run = mkRun([t2])
+  const lines: WakeLine[] = [
+    { run, task: t2, event: 'agent:blocked', phaseAtEvent: 'plan-review', detail: 'Do you want to proceed?' },
+    { run, task: t2, event: 'pane exited', phaseAtEvent: 'plan-review' },
+    { run, task: t2, event: 'agent:done, background work running (1 shell)', phaseAtEvent: 'plan-review' },
+  ]
+  expect(holds.sift(run, lines, 0).map((line) => line.event)).toEqual(['agent:blocked', 'pane exited'])
+})
+
 test('lines of other runs and other tasks are not held', () => {
   const holds = new FilesPassHolds()
   const t1 = mkTask({ task_id: 't1', phase: 'implement' })

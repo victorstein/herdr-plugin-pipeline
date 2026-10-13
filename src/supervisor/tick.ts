@@ -148,6 +148,9 @@ function passesThroughFiles(run: Run, task: Task): boolean {
   return task.phase === 'blocked-on-files' && fileHolders(task, run.tasks).length === 0
 }
 
+/** Only the idle that ended the phase before: a block or a lost pane is news, and goes at once. */
+const endsAPhase = (line: WakeLine): boolean => /^agent:(done|idle)\b/.test(line.event)
+
 /**
  * Every task enters `blocked-on-files`, and one nothing holds leaves it for
  * `implement` on the next tick. Its line, rendered in between, reported a pass as an
@@ -172,7 +175,7 @@ export class FilesPassHolds {
         send.push(line)
         continue
       }
-      if (passesThroughFiles(run, task) && now - since < FILES_PASS_HOLD_MS) {
+      if (endsAPhase(line) && passesThroughFiles(run, task) && now - since < FILES_PASS_HOLD_MS) {
         this.held.push({ line, since })
         continue
       }
