@@ -351,6 +351,11 @@ test('with no check declared, batch-check still records the head, as unchecked',
   const { run } = await shippingRun(null)
   const out = await cmdBatchCheck(ctx(), { repoKey: null, runId: run.run_id })
   expect(out.ok).toBe(true)
-  expect(out.text).toContain('no .claude/pipeline-check declared')
+  // The trial's "checked batch/… at 2da97b97" with no check declared claimed a check nothing ran.
+  // Measured on a live run.
+  expect(out.text).toStartWith('recorded batch/x at ')
+  expect(out.text).toContain(': nothing checked it, since no .claude/pipeline-check is declared — run the tests and ' +
+    'the typecheck in ')
+  expect(out.text).not.toContain('checked batch')
   expect((await saved(run)).batch?.checked?.check).toBe('none')
 })

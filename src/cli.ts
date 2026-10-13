@@ -1532,9 +1532,11 @@ async function recordBatchCheck(
   if (batch === undefined) return fail(`${runId} is a per-task run: there is no batch to check`)
   batch.checked = checked
   await saveRun(ctx.stateDir, found.value)
-  return ok(`checked ${batch.branch} at ${sha8(checked.head_sha)}: ` + (checked.check === 'passed'
-    ? `${CHECK_REL} passed`
-    : `no ${CHECK_REL} declared — run the tests and the typecheck in ${batch.checkout} yourself`))
+  const head = `${batch.branch} at ${sha8(checked.head_sha)}`
+  return ok(checked.check === 'passed'
+    ? `checked ${head}: ${CHECK_REL} passed`
+    : `recorded ${head}: nothing checked it, since no ${CHECK_REL} is declared — run the tests and the typecheck ` +
+      `in ${batch.checkout} yourself`)
 }
 
 /**
