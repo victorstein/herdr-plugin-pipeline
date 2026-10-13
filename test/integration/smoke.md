@@ -1452,7 +1452,7 @@ With the previous release's supervisor still running, register t1 and run `hpipe
 step; `hpipe show --task t1` has no `before merge:` line. Restart the supervisor, then:
 
 ```bash
-jq .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["before-merge"]
+jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge"]
 ```
 
 ### 11b. Per-task, a decision answered with `--before-merge`

@@ -562,21 +562,20 @@ branch review, so beside an old one a new CLI still gets a batch merge command w
 ignores: a sync submission's `merges` (an old supervisor calls any clean sync a clean sync) and an
 outbox entry's `carry-on` kind (an old supervisor delivers it but does not count it as a resume).
 
-Shared paths add two optional fields, `shared_paths` on a run and `capabilities` in the supervisor's
-pid file, and no schema change. A supervisor that predates them locks every declared path, shared or
-not, which is only stricter: `hpipe start` warns when this session's live supervisor is that old, and
-a restart lets the run share them. Runs started before the upgrade carry no list and keep locking
-everything until they finish. Rolling back to an earlier release locks shared paths again.
-
-The before-merge release adds optional fields an earlier release ignores: `before_merge` on a task and
-on a run, and `capabilities` on the supervisor's pid file. `hold` and `answer --before-merge` refuse
-until this session's supervisor is restarted. Rolling back drops every hold: an earlier supervisor
-sends the merge command and probes as before. Confirm or waive every owed check before rolling back,
-or tell the user the hold is gone.
-
-`hpipe dispatch --task` and `--ready` are the CLI's alone, so they work beside a supervisor that
-predates them; that supervisor's `Dispatch tN` prompt just lacks its `dispatch:` line. A task's
-`bootstrapped` record is optional, and an earlier release ignores it.
+2.2.0 — shared paths, before-merge checks and one-command dispatch — adds only optional fields, and no
+schema change: `shared_paths` on a run, `before_merge` on a task and on a run, `bootstrapped` on a task,
+and `capabilities` in the supervisor's pid file, which lists what that supervisor honours so the CLI can
+tell an older one from this release's. Restart the supervisor in every session, as above. Until you do,
+the older supervisor ignores every new field, and the CLI makes up for it where it can: `hpipe start`
+warns that it locks every declared path, shared or not, which is only stricter, and a restart lets the
+run share them; `hold` and `answer --before-merge` refuse until this session's supervisor is restarted,
+since it would send the merge command whatever check is owed; `hpipe dispatch --task` and `--ready` are
+the CLI's alone, so they work beside it, and its `Dispatch tN` prompt just lacks its `dispatch:` line.
+Runs started before the upgrade carry no shared-path list and keep locking everything until they finish.
+Rolling back to 2.1 ignores the fields rather than removing them: shared paths lock again, which is
+safe, and `bootstrapped` is ignored, but every hold is dropped, so the earlier supervisor sends the
+merge command and probes as before. Confirm or waive every owed check before rolling back, or tell the
+user the hold is gone.
 
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
