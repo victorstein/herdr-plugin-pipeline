@@ -323,7 +323,7 @@ test('a failure after the merge is refused, and points at a waiver naming the fi
     '`--waive "failed on device; fixed by <task>"` so the run can finish.')
 })
 
-test('every GitHub and git read happens once, however many saves a live supervisor makes it retry', async () => {
+test('confirm lands against a live supervisor, making each GitHub and git read once, before its retried save', async () => {
   const run = await seeded(perTaskRun([heldTask({ before_merge: [checkOf('c1')] })]))
   const timer = setInterval(async () => {
     const meanwhile = await saved(run)
@@ -408,7 +408,7 @@ test('a merged task past its gate, as only an older CLI could leave one, can sti
   expect(taskOf(await saved(run)).stall).toBeUndefined()
 })
 
-test('hold and answer --before-merge ask GitHub and the supervisor once, however many saves a live supervisor forces', async () => {
+test('hold and answer --before-merge land against a live supervisor, asking GitHub and the supervisor once each', async () => {
   for (const command of ['hold', 'answer'] as const) {
     const task = command === 'hold'
       ? heldTask({ phase: 'ci' })
