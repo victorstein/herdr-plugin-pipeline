@@ -209,7 +209,8 @@ function owedLines(run: Run, owed: OwedCheck[]): string {
 
 const BUILD_INDENT = '       '
 
-function perTaskMergeable(pr: string): string {
+/** Step 1 of the hold: each `mergeStateStatus` and its move. Only behind and conflicting differ by mode. */
+function mergeableStep(pr: string, behindOrDirty: readonly string[]): string {
   return [
     'Ask GitHub where the PR stands:',
     '',
@@ -218,37 +219,25 @@ function perTaskMergeable(pr: string): string {
     '   - `UNKNOWN`: GitHub is still computing it. Ask again a few seconds later, at most three times; if it is',
     '     still `UNKNOWN`, go on as for `CLEAN`, and say so to the human.',
     '   - `CLEAN`, `UNSTABLE` or `HAS_HOOKS`: it is mergeable. Go to step 2.',
-    '   - `BEHIND` or `DIRTY`: rebase the branch onto the default branch and push, then re-run',
-    "     `./.claude/pipeline-bootstrap` in that checkout if the repo declares one. The new head sends the task",
-    '     back to `ci`, and this prompt comes again for it: do not ask the human until then.',
-    ...sharedMergeableCases(pr),
-  ].join('\n')
-}
-
-function batchMergeable(pr: string, batch: Batch): string {
-  return [
-    'Ask GitHub where the PR stands:',
-    '',
-    `${BUILD_INDENT}gh pr view ${pr} --json mergeStateStatus`,
-    '',
-    '   - `UNKNOWN`: GitHub is still computing it. Ask again a few seconds later, at most three times; if it is',
-    '     still `UNKNOWN`, go on as for `CLEAN`, and say so to the human.',
-    '   - `CLEAN`, `UNSTABLE` or `HAS_HOOKS`: it is mergeable. Go to step 2.',
-    `   - \`BEHIND\`: \`gh pr update-branch ${pr}\`. \`DIRTY\`: merge \`origin/${batch.into}\` into the batch`,
-    "     checkout, as the ship prompt's step 2 does, resolve, and push. Either moves the head, so the run goes back",
-    '     through `ship`, and the human checks the head that reaches this prompt again.',
-    ...sharedMergeableCases(pr),
-  ].join('\n')
-}
-
-function sharedMergeableCases(pr: string): string[] {
-  return [
+    ...behindOrDirty,
     '   - `BLOCKED`: a required review or a required check. Name it from',
     `     \`gh pr view ${pr} --json reviewDecision,statusCheckRollup\`. A required review can go in the same message`,
     '     to the human; a required check that never ran is fixed before you ask.',
     `   - \`DRAFT\`: \`gh pr ready ${pr}\`, which moves no head, then ask again.`,
-  ]
+  ].join('\n')
 }
+
+const TASK_BEHIND_OR_DIRTY: readonly string[] = [
+  '   - `BEHIND` or `DIRTY`: rebase the branch onto the default branch and push, then re-run',
+  "     `./.claude/pipeline-bootstrap` in that checkout if the repo declares one. The new head sends the task",
+  '     back to `ci`, and this prompt comes again for it: do not ask the human until then.',
+]
+
+const batchBehindOrDirty = (pr: string, batch: Batch): string[] => [
+  `   - \`BEHIND\`: \`gh pr update-branch ${pr}\`. \`DIRTY\`: merge \`origin/${batch.into}\` into the batch`,
+  "     checkout, as the ship prompt's step 2 does, resolve, and push. Either moves the head, so the run goes back",
+  '     through `ship`, and the human checks the head that reaches this prompt again.',
+]
 
 function batchBuild(run: Run, batch: Batch, head: string | null): string {
   const what = head === null
@@ -269,31 +258,36 @@ function failedRoute(run: Run, owed: OwedCheck[], hpipe: string): string {
     'the head, and the human checks the new head when this prompt comes again.'
 }
 
-/** The gate prompt's own bag. Its tokens are `held_`-prefixed: a task's common bag already has a `subject`. */
-export function holdPromptVars(run: Run, task: Task | null, owed: OwedCheck[], hpipe: string): Record<string, string> {
+/**
+ * The per-task gate prompt's own bag. Its tokens are `held_`-prefixed because a
+ * task's common bag already has a `subject`. A per-task failure has already sent the
+ * task back to its worker, so no failed route is offered here.
+ */
+export function taskHoldVars(run: Run, task: Task, owed: OwedCheck[]): Record<string, string> {
+  const pr = String(task.pr ?? 'unknown')
   const head = gateHead(run, task)
-  const batch = run.batch
-  if (task === null && batch !== undefined) {
-    const pr = String(batch.pr ?? 'unknown')
-    return {
-      held_title: `the batch PR #${pr}`,
-      held_line: `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`,`,
-      held_checks: owedLines(run, owed),
-      held_mergeable: batchMergeable(pr, batch),
-      held_build: batchBuild(run, batch, head),
-      held_failed_route: failedRoute(run, owed, hpipe),
-    }
-  }
-  const pr = String(task?.pr ?? 'unknown')
   return {
-    held_title: `PR #${pr} (${task?.branch ?? 'unknown'}, ${task?.bead ?? 'unknown'})`,
+    held_title: `PR #${pr} (${task.branch}, ${task.bead})`,
     held_line: `PR #${pr}`,
     held_checks: owedLines(run, owed),
-    held_mergeable: perTaskMergeable(pr),
+    held_mergeable: mergeableStep(pr, TASK_BEHIND_OR_DIRTY),
     held_build: head === null
       ? `PR #${pr} as it stands now: no CI pass is recorded on it.`
       : `PR #${pr} at ${sha8(head)}, the head CI passed on.`,
     held_failed_route: '',
+  }
+}
+
+/** The single-PR gate prompt's bag, for the batch PR. */
+export function batchHoldVars(run: Run, batch: Batch, owed: OwedCheck[], hpipe: string): Record<string, string> {
+  const pr = String(batch.pr ?? 'unknown')
+  return {
+    held_title: `the batch PR #${pr}`,
+    held_line: `PR #${pr}, \`${batch.branch}\` into \`${batch.into}\`,`,
+    held_checks: owedLines(run, owed),
+    held_mergeable: mergeableStep(pr, batchBehindOrDirty(pr, batch)),
+    held_build: batchBuild(run, batch, gateHead(run, null)),
+    held_failed_route: failedRoute(run, owed, hpipe),
   }
 }
 

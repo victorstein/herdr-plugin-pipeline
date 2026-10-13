@@ -5,7 +5,7 @@ import {
   suggestedPrTitle,
 } from '../lib/batch'
 import {
-  checkName, checksIn, checkState, holdPromptVars, isOwed, owedAt, rulingsNote, stateClause,
+  batchHoldVars, checkName, checksIn, checkState, isOwed, owedAt, rulingsNote, stateClause,
 } from '../lib/before-merge'
 import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
@@ -581,7 +581,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   if (run.phase === 'ship-merge') {
     const owed = owedAt(run, null)
     if (owed.length > 0) {
-      return renderPrompt(pluginRoot, 'before-merge', holdPromptVars(run, null, owed, hpipeCommand(pluginRoot)))
+      return renderPrompt(pluginRoot, 'before-merge', batchHoldVars(run, batch, owed, hpipeCommand(pluginRoot)))
     }
     return renderPrompt(pluginRoot, 'ship-merge', {
       ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch), before_merge: rulingsNote(run),
