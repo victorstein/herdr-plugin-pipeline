@@ -1,4 +1,5 @@
 import { sha8 } from './batch'
+import { mergedWithCheckOwed, owedAt } from './before-merge'
 import { hasLanded } from './ledger'
 import { LANDING_PHASES, modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
@@ -102,6 +103,9 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
     // passed: nothing else landed for it to have a seam with.
     case 'execute': {
       if (!run.intake_closed || !s.tasksAllTerminal) return null
+      // The refusals that keep a merged task from finishing while it owes the human a
+      // check live in the CLI; this holds against any route they miss, an older CLI's included.
+      if (mergedWithCheckOwed(run).length > 0) return null
       if (s.landedTaskCount >= 2) return enterRunPhase(run, 'branch-review', 'every task finished')
       if (s.landedTaskCount === 1) {
         return enterRunPhase(
@@ -168,11 +172,17 @@ function advanceShip(run: Run, s: RunSignals): Run | null {
       return enterRunPhase(run, 'ship', `CI failed on PR #${batch.pr ?? 'unknown'} (pass ${count})`)
     }
 
+    // A merge made while a check is owed is GitHub's fact, so it is recorded, but the run
+    // waits here until the human has ruled. Once recorded, the head rules are not read again.
     case 'ship-merge': {
-      if (pr !== null && pr.merged) {
+      if (batch.merged_at_ms === null && pr !== null && pr.merged) {
         batch.merged_at_ms = pr.mergedAtMs ?? Date.now()
         batch.merge_commit = pr.mergeCommit
-        return enterRunPhase(run, 'done', `PR #${pr.number} squash-merged as ${sha8(pr.mergeCommit ?? 'unknown')}`)
+      }
+      if (batch.merged_at_ms !== null) {
+        if (owedAt(run, null).length > 0) return null
+        return enterRunPhase(run, 'done',
+          `PR #${batch.pr ?? pr?.number ?? 'unknown'} squash-merged as ${sha8(batch.merge_commit ?? 'unknown')}`)
       }
       // A push after CI passed, as `merge` sends a task back to `ci`.
       const passedOn = batch.ci_head?.sha
@@ -548,10 +558,15 @@ export function advanceTask(run: Run, task: Task, s: TaskSignals): Task | null {
       // A level for the same reason as the run's `dispatch` row: a PR merged
       // before the task entered `merge` (merging is the human's move and races
       // the CI poll), or a rewind into `merge` after it, stranded the task here.
+      // A merge made while a check is owed is recorded, with no transition: the task
+      // waits here until the human has ruled, and its bead stays open meanwhile.
       if (s.merged && s.mergedAtMs !== undefined) {
-        task.merged_at_ms = s.mergedAtMs
-        task.merge_commit = s.mergeCommit ?? null
-        return enterTaskPhase(run, task, 'close', 'PR merged')
+        const held = owedAt(run, task).length > 0
+        if (!held || task.merged_at_ms === null) {
+          task.merged_at_ms = s.mergedAtMs
+          task.merge_commit = s.mergeCommit ?? null
+        }
+        return held ? null : enterTaskPhase(run, task, 'close', 'PR merged')
       }
       // The orchestrator pushed a hand-off commit after CI passed, and the green it
       // was shown belonged to the head before it. Measured on a live run (#16).

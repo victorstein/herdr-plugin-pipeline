@@ -134,3 +134,38 @@ test('a moved head batch-check already recorded sends ship-merge straight back t
   expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h3' }) }))?.phase).toBe('ship-ci')
   expect(run.history.at(-1)?.why).toBe('head moved to h3 after CI passed on h1')
 })
+
+const shipCheck = (resolutions: NonNullable<Run['before_merge']>[number]['resolutions'] = []) =>
+  ({ id: 'c1', check: 'the menu closes on a long press', recorded_at: 1, recorded_pane: 'w1:p1', resolutions })
+
+test('a batch PR merged while a check is owed is recorded once, with no transition, and never read for its head again', () => {
+  const run = fixture('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 }, ...checkedAt('h1') })
+  run.before_merge = [shipCheck()]
+  const merged = pr({ merged: true, mergedAtMs: 5_000, mergeCommit: 'm1' })
+  expect(advanceRun(run, signals({ batchPr: merged }))).toBeNull()
+  expect(run.phase).toBe('ship-merge')
+  expect(run.batch).toMatchObject({ merged_at_ms: 5_000, merge_commit: 'm1' })
+  const historyLength = run.history.length
+
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h9', merged: true, mergedAtMs: 6_000 }) }))).toBeNull()
+  expect(advanceRun(run, signals({ batchPr: null }))).toBeNull()
+  expect(run.history).toHaveLength(historyLength)
+  expect(run.batch?.merged_at_ms).toBe(5_000)
+
+  run.before_merge = [shipCheck([{ as: 'confirmed', at: 2, head: 'h1', pane: 'w1:p1' }])]
+  expect(advanceRun(run, signals({ batchPr: null }))?.phase).toBe('done')
+  expect(run.history.at(-1)?.why).toBe('PR #301 squash-merged as m1')
+})
+
+test('a fix landed on the batch moves the gate head, so a confirmation of the old one is owed again', () => {
+  const run = fixture('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 }, ...checkedAt('h1') })
+  run.before_merge = [shipCheck([{ as: 'confirmed', at: 2, head: 'h1', pane: 'w1:p1' }])]
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h2' }) }))?.phase).toBe('ship')
+  run.batch!.checked = { head_sha: 'h2', at: 3, check: 'passed' }
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h2' }) }))?.phase).toBe('ship-ci')
+  run.batch!.ci = 'pass'
+  run.batch!.ci_head = { sha: 'h2', seen_at: 4 }
+  expect(advanceRun(run, signals())?.phase).toBe('ship-merge')
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h2', merged: true, mergedAtMs: 9 }) }))).toBeNull()
+  expect(run.phase).toBe('ship-merge')
+})

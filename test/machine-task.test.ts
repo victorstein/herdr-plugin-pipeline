@@ -540,3 +540,38 @@ test('entering implement or any review row forgets a review skip, and nothing el
   enterTaskPhase(run, task, 'merge', 'test')
   expect(task.review_skip).toEqual(SKIP)
 })
+
+const mergeSignals = (over: Partial<Parameters<typeof advanceTask>[2]> = {}): Parameters<typeof advanceTask>[2] => ({
+  actorIdle: true, artifactFresh: false, verdict: null,
+  prNumber: 5, headSha: 'aaa', merged: false, ciBucket: 'pass', filesClear: false, maxPasses: 2, ...over,
+})
+
+const owedCheck = (resolutions: NonNullable<Task['before_merge']>[number]['resolutions'] = []) =>
+  ({ id: 'c1', check: 'no ghost after a page turn', recorded_at: 1, recorded_pane: 'w1:p1', resolutions })
+
+test('a PR merged while a check is owed is recorded once, and the task waits in merge', () => {
+  const { run, task } = fixture('merge')
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  task.before_merge = [owedCheck()]
+  const merged = mergeSignals({ merged: true, mergedAtMs: 7_000, mergeCommit: 'm1' })
+  expect(advanceTask(run, task, merged)).toBeNull()
+  expect(task).toMatchObject({ phase: 'merge', merged_at_ms: 7_000, merge_commit: 'm1' })
+  const historyLength = run.history.length
+  expect(advanceTask(run, task, { ...merged, mergedAtMs: 9_000, mergeCommit: 'm2' })).toBeNull()
+  expect(task).toMatchObject({ merged_at_ms: 7_000, merge_commit: 'm1' })
+  expect(run.history).toHaveLength(historyLength)
+
+  task.before_merge = [owedCheck([{ as: 'confirmed', at: 2, head: 'aaa', pane: 'w1:p1' }])]
+  expect(advanceTask(run, task, merged)?.phase).toBe('close')
+})
+
+test('a push after a confirmation sends merge back to ci, and the check is owed again on the new head', () => {
+  const { run, task } = fixture('merge')
+  task.ci_head = { sha: 'aaa', seen_at: 0 }
+  task.before_merge = [owedCheck([{ as: 'confirmed', at: 2, head: 'aaa', pane: 'w1:p1' }])]
+  expect(advanceTask(run, task, mergeSignals({ headSha: 'bbb' }))?.phase).toBe('ci')
+  task.ci_head = { sha: 'bbb', seen_at: 1 }
+  expect(advanceTask(run, task, mergeSignals({ headSha: 'bbb', ciBucket: 'pass' }))?.phase).toBe('merge')
+  expect(advanceTask(run, task, mergeSignals({ headSha: 'bbb', merged: true, mergedAtMs: 7_000 }))).toBeNull()
+  expect(task.phase).toBe('merge')
+})
