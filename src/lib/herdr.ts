@@ -43,7 +43,11 @@ export function liveAgentIn(listed: readonly PaneInfo[]): (paneId: string) => bo
 export interface WorkspaceInfo {
   workspace_id: string
   label: string
-  worktree?: { repo_key: string; repo_root: string; is_linked_worktree: boolean } | null
+  /**
+   * `repo_root` is the primary checkout's path even for a linked worktree; `checkout_path` is the
+   * workspace's own checkout. Measured on a live run.
+   */
+  worktree?: { repo_key: string; repo_root: string; checkout_path?: string; is_linked_worktree: boolean } | null
 }
 
 /** A checkout `herdr worktree list` names. With no workspace id, it confirms a checkout, never its workspace. */

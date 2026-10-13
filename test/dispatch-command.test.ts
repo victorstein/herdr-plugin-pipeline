@@ -65,7 +65,7 @@ function wired(
     workspaceListing: async () => ({
       ok: true,
       items: created.map((made) => ({
-        workspace_id: made.workspaceId, label: made.path, worktree: { repo_key: 'k', repo_root: made.path, is_linked_worktree: true },
+        workspace_id: made.workspaceId, label: made.path, worktree: { repo_key: 'k', repo_root: '/repo', checkout_path: made.path, is_linked_worktree: true },
       })),
     }),
     worktreeList: async () => ({

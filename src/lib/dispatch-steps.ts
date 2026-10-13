@@ -220,9 +220,14 @@ class TaskDispatch {
     if (listed.worktree?.is_linked_worktree !== true) {
       throw new Stop(step, nothingStarted(`${said}, but herdr lists ${workspaceId} as no linked worktree`))
     }
-    if (!samePath(listed.worktree.repo_root, checkout)) {
+    if (!samePath(listed.worktree.repo_root, run.repo_root)) {
+      throw new Stop(step, nothingStarted(`${said}, but herdr says ${workspaceId} is a checkout of ` +
+        `${listed.worktree.repo_root}, not of ${run.repo_root}`))
+    }
+    const listedCheckout = listed.worktree.checkout_path
+    if (listedCheckout === undefined || !samePath(listedCheckout, checkout)) {
       throw new Stop(step, nothingStarted(`${said}, but herdr says ${workspaceId} is the checkout at ` +
-        `${listed.worktree.repo_root}`))
+        `${listedCheckout ?? '(none given)'}`))
     }
     const entry = worktrees.items.find((candidate) => samePath(candidate.path, checkout))
     if (entry === undefined) {

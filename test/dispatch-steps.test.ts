@@ -187,8 +187,10 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
 const BOUND = { workspace_id: 'w5', checkout_path: '', pane_id: null }
 const LINKED = (path: string, over: Partial<WorktreeEntry> = {}): WorktreeEntry =>
   ({ path, branch: 'feat/x', is_linked_worktree: true, is_prunable: false, ...over })
-const WORKSPACE = (repoRoot: string, over: Partial<WorkspaceInfo> = {}): WorkspaceInfo =>
-  ({ workspace_id: 'w5', label: 'feat-x', worktree: { repo_key: 'k', repo_root: repoRoot, is_linked_worktree: true }, ...over })
+const WORKSPACE = (checkoutPath: string, over: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
+  workspace_id: 'w5', label: 'feat-x',
+  worktree: { repo_key: 'k', repo_root: repo, checkout_path: checkoutPath, is_linked_worktree: true }, ...over,
+})
 
 /** A task the hook has bound to w5 at the checkout, as herdr lists it. */
 function bound(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): World {
@@ -248,10 +250,16 @@ test('each cross-check of a bound workspace that fails stops before anything sta
     ['missing', { workspaces: { ok: true, items: [] } },
       `the ledger binds t1 to w5 at ${checkout}, but herdr lists no workspace w5. If it closed, \`hp forget w5\` ` +
       `and bind the kept checkout with \`herdr worktree open --cwd '${repo}' --branch feat/x\`, then run this again`],
-    ['not linked', { workspaces: { ok: true, items: [WORKSPACE(checkout, { worktree: { repo_key: 'k', repo_root: checkout, is_linked_worktree: false } })] } },
+    ['not linked', { workspaces: { ok: true, items: [WORKSPACE(checkout, { worktree: { repo_key: 'k', repo_root: repo, checkout_path: checkout, is_linked_worktree: false } })] } },
       'herdr lists w5 as no linked worktree'],
     ['another checkout', { workspaces: { ok: true, items: [WORKSPACE('/elsewhere')] } },
       'herdr says w5 is the checkout at /elsewhere'],
+    ['another repo', { workspaces: { ok: true, items: [WORKSPACE(checkout, {
+      worktree: { repo_key: 'k', repo_root: '/other-repo', checkout_path: checkout, is_linked_worktree: true } })] } },
+      `herdr says w5 is a checkout of /other-repo, not of ${repo}`],
+    ['no checkout path', { workspaces: { ok: true, items: [WORKSPACE(checkout, {
+      worktree: { repo_key: 'k', repo_root: repo, is_linked_worktree: true } })] } },
+      'herdr says w5 is the checkout at (none given)'],
     ['no entry', { worktrees: { ok: true, items: [LINKED('/elsewhere')] } },
       `herdr worktree list --cwd '${repo}' has no checkout at ${checkout}`],
     ['wrong branch', { worktrees: { ok: true, items: [LINKED(checkout, { branch: 'feat/y' })] } },
