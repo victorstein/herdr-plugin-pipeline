@@ -1,3 +1,4 @@
+import { runBounded } from './spawn'
 import type { AgentStatus } from './types'
 
 export interface CallResult<T> {
@@ -45,6 +46,29 @@ export interface WorkspaceInfo {
   worktree?: { repo_key: string; repo_root: string; is_linked_worktree: boolean } | null
 }
 
+/** One checkout `herdr worktree list` names. It carries no workspace id: it can confirm a checkout, never name its workspace. */
+export interface WorktreeEntry {
+  path: string
+  /** The short branch name; null for a detached or bare checkout. */
+  branch: string | null
+  is_linked_worktree: boolean
+  is_prunable: boolean
+}
+
+/** A list that may not have been read. Unlike `paneList`, a failed call is never an empty list. */
+export type Listing<T> = { ok: true; items: T[] } | { ok: false; reason: string }
+
+export interface CreatedWorktree { workspaceId: string; paneId: string; path: string }
+
+export interface AgentStartRequest {
+  name: string
+  kind: string
+  paneId: string
+  /** herdr's own wait for the agent to be ready, in milliseconds. */
+  timeoutMs: number
+  args: string[]
+}
+
 interface Envelope<T> {
   result?: T
   error?: { code: string; message: string }
@@ -57,6 +81,90 @@ function parseEnvelope<T>(text: string): Envelope<T> | null {
   } catch {
     return null
   }
+}
+
+// herdr 0.9.0 writes a failure's envelope to stderr, exits 1 and leaves stdout
+// empty; reading stdout alone turned every error code into `unparseable`.
+// Measured on a live run.
+function envelopeResult<T>(stdout: string, stderr: string): CallResult<T> {
+  const parsed = parseEnvelope<T>(stdout) ?? parseEnvelope<T>(stderr)
+  if (parsed === null) {
+    return { ok: false, code: 'unparseable', message: (stdout || stderr).slice(0, 200) }
+  }
+  // herdr reports some failures in the body while exiting 0.
+  if (parsed.error) return { ok: false, code: parsed.error.code, message: parsed.error.message }
+  return { ok: true, result: parsed.result }
+}
+
+type Json = Record<string, unknown>
+
+const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value)
+const stringAt = (value: unknown, key: string): string | undefined =>
+  isObject(value) && typeof value[key] === 'string' && value[key] !== '' ? value[key] as string : undefined
+
+function failedListing(res: CallResult<unknown>): { ok: false; reason: string } {
+  return { ok: false, reason: `${res.code ?? 'error'}${res.message ? ` — ${res.message}` : ''}` }
+}
+
+const UNREAD_SHAPE = 'herdr answered in a shape this plugin does not read'
+
+/**
+ * Every entry or none: a dispatch that acts on a list with one entry it could not
+ * read would act on a guess, and it creates worktrees and starts agents.
+ */
+function listingOf<T>(res: CallResult<unknown>, key: string, entry: (raw: unknown) => T | null): Listing<T> {
+  if (!res.ok) return failedListing(res)
+  const raw = isObject(res.result) ? res.result[key] : undefined
+  if (!Array.isArray(raw)) return { ok: false, reason: UNREAD_SHAPE }
+  const items: T[] = []
+  for (const item of raw) {
+    const read = entry(item)
+    if (read === null) return { ok: false, reason: UNREAD_SHAPE }
+    items.push(read)
+  }
+  return { ok: true, items }
+}
+
+function worktreeEntry(raw: unknown): WorktreeEntry | null {
+  if (!isObject(raw)) return null
+  const { path, branch, is_linked_worktree: linked, is_prunable: prunable } = raw
+  if (typeof path !== 'string' || path === '') return null
+  if (typeof linked !== 'boolean' || typeof prunable !== 'boolean') return null
+  if (branch !== null && branch !== undefined && typeof branch !== 'string') return null
+  const short = typeof branch === 'string' && branch !== '' ? branch.replace(/^refs\/heads\//, '') : null
+  return { path, branch: short, is_linked_worktree: linked, is_prunable: prunable }
+}
+
+function workspaceEntry(raw: unknown): WorkspaceInfo | null {
+  if (stringAt(raw, 'workspace_id') === undefined) return null
+  const worktree = (raw as Json).worktree
+  if (worktree !== null && worktree !== undefined && !isObject(worktree)) return null
+  return raw as unknown as WorkspaceInfo
+}
+
+const paneEntry = (raw: unknown): PaneInfo | null =>
+  stringAt(raw, 'pane_id') === undefined ? null : raw as unknown as PaneInfo
+
+/**
+ * The fields the plugin names are `.result.worktree.path` and
+ * `.result.root_pane.pane_id`; the workspace is read from `.result.workspace`,
+ * the shape `workspace create` answers with, or from the root pane. Two that
+ * disagree, or none, is unreadable: the pane guard compares against these.
+ */
+function createdWorktree(result: unknown): CreatedWorktree | string {
+  const path = stringAt(isObject(result) ? result.worktree : undefined, 'path')
+  const rootPane = isObject(result) ? result.root_pane : undefined
+  const paneId = stringAt(rootPane, 'pane_id')
+  const fromWorkspace = stringAt(isObject(result) ? result.workspace : undefined, 'workspace_id')
+  const fromPane = stringAt(rootPane, 'workspace_id')
+  if (path === undefined) return 'no .result.worktree.path'
+  if (paneId === undefined) return 'no .result.root_pane.pane_id'
+  if (fromWorkspace !== undefined && fromPane !== undefined && fromWorkspace !== fromPane) {
+    return `the workspace ${fromWorkspace} and a root pane in ${fromPane}`
+  }
+  const workspaceId = fromWorkspace ?? fromPane
+  if (workspaceId === undefined) return 'no workspace id'
+  return { workspaceId, paneId, path }
 }
 
 export interface PaneOpenOptions {
@@ -92,19 +200,7 @@ export class Herdr {
   private async call<T>(args: string[]): Promise<CallResult<T>> {
     const output = await this.spawn(args)
     if ('error' in output) return { ok: false, code: 'spawn_failed', message: String(output.error) }
-    const { stdout, stderr } = output
-
-    // herdr 0.9.0 writes a failure's envelope to stderr, exits 1 and leaves
-    // stdout empty; reading stdout alone turned every error code into
-    // `unparseable`. Measured on a live run.
-    const parsed = parseEnvelope<T>(stdout) ?? parseEnvelope<T>(stderr)
-    if (parsed === null) {
-      return { ok: false, code: 'unparseable', message: (stdout || stderr).slice(0, 200) }
-    }
-
-    // herdr reports some failures in the body while exiting 0.
-    if (parsed.error) return { ok: false, code: parsed.error.code, message: parsed.error.message }
-    return { ok: true, result: parsed.result }
+    return envelopeResult<T>(output.stdout, output.stderr)
   }
 
   async paneList(workspaceId?: string): Promise<PaneInfo[]> {
@@ -117,6 +213,58 @@ export class Herdr {
   async workspaceList(): Promise<WorkspaceInfo[]> {
     const res = await this.call<{ workspaces: WorkspaceInfo[] }>(['workspace', 'list'])
     return res.result?.workspaces ?? []
+  }
+
+  async workspaceListing(): Promise<Listing<WorkspaceInfo>> {
+    return listingOf(await this.call(['workspace', 'list']), 'workspaces', workspaceEntry)
+  }
+
+  async paneListing(workspaceId: string): Promise<Listing<PaneInfo>> {
+    return listingOf(await this.call(['pane', 'list', '--workspace', workspaceId]), 'panes', paneEntry)
+  }
+
+  /** Without `--cwd` herdr answers `not_git_worktree`: it reads the repo from the focused workspace. */
+  async worktreeList(repoRoot: string): Promise<Listing<WorktreeEntry>> {
+    return listingOf(await this.call(['worktree', 'list', '--cwd', repoRoot]), 'worktrees', worktreeEntry)
+  }
+
+  /**
+   * `--no-focus` because a dispatch runs in the background: a create that took
+   * focus would move the human's keystrokes into the new worker's pane mid-sentence.
+   */
+  async worktreeCreate(repoRoot: string, branch: string, base: string): Promise<CallResult<CreatedWorktree>> {
+    const res = await this.call(['worktree', 'create', '--cwd', repoRoot, '--branch', branch, '--base', base, '--no-focus'])
+    if (!res.ok) return { ok: false, code: res.code, message: res.message }
+    const created = createdWorktree(res.result)
+    return typeof created === 'string'
+      ? { ok: false, code: 'unreadable_response', message: `herdr's create response named ${created}` }
+      : { ok: true, result: created }
+  }
+
+  /**
+   * Bounded beyond herdr's own `--timeout`, since a hung CLI would otherwise hold
+   * the repo's dispatch lock for good. `onSpawn` hears the child's pid, which is
+   * also its process group, so an interrupted dispatch can stop it.
+   */
+  async agentStart(
+    request: AgentStartRequest, boundMs: number, onSpawn?: (pid: number) => void,
+  ): Promise<CallResult<unknown>> {
+    const argv = [
+      this.bin, 'agent', 'start', request.name, '--kind', request.kind, '--pane', request.paneId,
+      '--timeout', String(request.timeoutMs), '--', ...request.args,
+    ]
+    const ran = await runBounded(argv, { timeoutMs: boundMs, onSpawn })
+    if (ran.timedOut) {
+      return { ok: false, code: 'timeout', message: `herdr agent start did not return within ${boundMs / 1000}s` }
+    }
+    const res = envelopeResult<unknown>(ran.stdout, ran.stderr)
+    return res.code === 'unparseable' && ran.code === -1 ? { ok: false, code: 'spawn_failed', message: ran.stderr } : res
+  }
+
+  /** The pane an agent of this name runs in; null when herdr names none, for any reason. */
+  async agentPane(name: string): Promise<string | null> {
+    const res = await this.call<{ agent?: unknown }>(['agent', 'get', name])
+    return res.ok ? stringAt(res.result?.agent, 'pane_id') ?? null : null
   }
 
   async agentStatus(target: string): Promise<AgentStatus> {
