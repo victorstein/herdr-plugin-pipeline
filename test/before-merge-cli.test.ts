@@ -390,3 +390,31 @@ test('a merged task past its gate, as only an older CLI could leave one, can sti
     'merged: the supervisor moves it on at its next pass')
   expect(taskOf(await saved(run)).stall).toBeUndefined()
 })
+
+test('hold and answer --before-merge ask GitHub and the supervisor once, however many saves a live supervisor forces', async () => {
+  for (const command of ['hold', 'answer'] as const) {
+    const task = command === 'hold'
+      ? heldTask({ phase: 'ci' })
+      : heldTask({ phase: 'blocked-on-decision', decision_from: 'ci' })
+    if (command === 'answer') openDecision(task, { question: 'q', recommendation: 'r' })
+    const run = await seeded(perTaskRun([task]))
+    const timer = setInterval(async () => {
+      const meanwhile = await saved(run)
+      meanwhile.history.push({ at: Date.now(), from: 'x', to: 'x', why: 'a supervisor tick' })
+      await saveRun(dir, meanwhile).catch(() => {})
+    }, 100)
+    const slow = reads({
+      supervisor: async () => { await Bun.sleep(300); return { state: 'none' } },
+      prView: async () => { await Bun.sleep(300); return { merged: false, mergedAtMs: null, headSha: CHECKED_HEAD } },
+    })
+    const out = await (command === 'hold'
+      ? hold(run, ['no ghost'], 't1', slow)
+      : cmdAnswer(ctx(), {
+        task: 't1', decision: 'd1', answer: 'a', by: 'human', repoKey: null, runId: run.run_id,
+        beforeMerge: ['no ghost'], callerPane: ORCHESTRATOR,
+      }, slow)
+    ).finally(() => clearInterval(timer))
+    expect(out.ok, `${command}: ${out.text}`).toBe(true)
+    expect(slow.calls, command).toEqual(['supervisor', 'pr 255'])
+  }
+})
