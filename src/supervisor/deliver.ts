@@ -4,7 +4,9 @@ import {
   batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
   suggestedPrTitle,
 } from '../lib/batch'
-import { holdPromptVars, owedAt, rulingsNote } from '../lib/before-merge'
+import {
+  checkName, checksIn, checkState, holdPromptVars, isOwed, owedAt, rulingsNote, stateClause,
+} from '../lib/before-merge'
 import { CHECK_REL, repoCheck } from '../lib/check'
 import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
@@ -578,7 +580,9 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
   }
   if (run.phase === 'ship-merge') {
     const owed = owedAt(run, null)
-    if (owed.length > 0) return renderPrompt(pluginRoot, 'before-merge', holdPromptVars(run, null, owed, hpipeCommand(pluginRoot)))
+    if (owed.length > 0) {
+      return renderPrompt(pluginRoot, 'before-merge', holdPromptVars(run, null, owed, hpipeCommand(pluginRoot)))
+    }
     return renderPrompt(pluginRoot, 'ship-merge', {
       ...vars, ci_status: shipCiStatus(batch, vars.pr), ...greenHeadVars(batch), before_merge: rulingsNote(run),
     })
@@ -661,7 +665,18 @@ function runDoneNotice(run: Run): string {
   return [
     `Run ${run.run_id} is done${why === undefined ? '' : ` — ${why}`}. Nothing more is sent for it.`,
     ...run.tasks.map((t) => `- ${t.task_id} ${t.branch} (${t.bead}): ${t.phase}${mergedPrNote(t)}`),
+    ...beforeMergeOutcome(run),
   ].join('\n')
+}
+
+/** A run reaches `done` with a check owed only by a human's rewind or abort, and then says so. */
+function beforeMergeOutcome(run: Run): string[] {
+  const checks = checksIn(run)
+  if (checks.length === 0) return []
+  return [`before merge: ${checks.map((held) => {
+    const state = checkState(run, held)
+    return `${checkName(held)} ${isOwed(state) ? `still owed to the human: ${held.check.check}` : stateClause(state)}`
+  }).join(' · ')}`]
 }
 
 const mergedPrNote = (task: Task): string => (hasLanded(task) && task.pr !== null ? `, PR #${task.pr} merged` : '')

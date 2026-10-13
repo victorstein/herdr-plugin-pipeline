@@ -4,7 +4,7 @@ import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { fileHolders } from '../lib/gating'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { reviewsSkipped } from '../lib/review-skip'
-import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
+import { actionFor, ageMinutes, humanWaitLines, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
@@ -202,12 +202,15 @@ export function parkedFooter(
     .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now, holds))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
-  if (parked.length === 0) return ''
-
   const lines = parked.map((task) =>
     `- ${task.task_id} ${task.branch} (${task.bead}) ` +
     `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
-  return ['also waiting on you:', ...lines].join('\n')
+  // Shown so a held merge reads as held on purpose; the hold prompt says it is no cue to ask again.
+  const human = humanWaitLines(run, hpipe, now, covered).map((line) => `- ${line}`)
+  return [
+    ...(lines.length === 0 ? [] : ['also waiting on you:', ...lines]),
+    ...(human.length === 0 ? [] : ['waiting on the human:', ...human]),
+  ].join('\n')
 }
 
 /**
