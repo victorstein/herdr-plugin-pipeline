@@ -7,7 +7,7 @@ import {
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
 import {
-  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, nextCheckId, type OwedCheck, owedAt, owedInRun,
+  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck, owedAt, owedInRun,
 } from './lib/before-merge'
 import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
@@ -1300,7 +1300,7 @@ async function rewindSkipsAHold(
 }
 
 const owesTheHuman = (task: Task, owed: readonly OwedCheck[]): string =>
-  `${task.task_id} owes ${andList(owed.map((o) => o.check.id))} to the human`
+  `${task.task_id} owes ${idList(owed.map((o) => o.check.id))} to the human`
 
 export interface SubmitDeps {
   /** An open PR from `branch`, by number, or why gh could not say. */
@@ -2071,10 +2071,6 @@ function recordedLine(run: Run, task: Task | null, check: BeforeMergeCheck): str
   return `${check.id} recorded on ${task.task_id}: ${gateSubject(run, task)} ${waits}`
 }
 
-function andList(items: readonly string[]): string {
-  return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
-}
-
 const gateIsOpen = (run: Run, gate: Task | null): boolean =>
   (gate === null ? run.phase === 'ship-merge' : gate.phase === 'merge')
 
@@ -2121,7 +2117,7 @@ async function hold(ctx: Ctx, input: HoldInput, reads: BeforeMergeReads): Promis
   const lines = recorded.map((check) => recordedLine(run, task, check))
   if (gateIsOpen(run, gate) && owedAt(run, gate).length > 0) {
     await requeueGatePrompt(ctx, run, gate)
-    const ids = andList(recorded.map((check) => check.id))
+    const ids = idList(recorded.map((check) => check.id))
     const confirmed = `once ${ids} ${recorded.length === 1 ? 'is' : 'are'} confirmed`
     lines.push(gate === null
       ? `the run is in ship-merge now: do not run the merge commands you were given; they come again ${confirmed}`
@@ -2235,7 +2231,7 @@ async function afterRuling(ctx: Ctx, run: Run, gate: Task | null, merged: boolea
   const subject = gate === null ? gateSubject(run, null) : gate.task_id
   const stillOwed = owedAt(run, gate).map((o) => o.check.id)
   if (stillOwed.length > 0) {
-    return `; ${andList(stillOwed)} ${stillOwed.length === 1 ? 'is' : 'are'} still owed before ${subject} merges`
+    return `; ${idList(stillOwed)} ${stillOwed.length === 1 ? 'is' : 'are'} still owed before ${subject} merges`
   }
   const open = gateIsOpen(run, gate)
   // The gate drew no probe while held, so its ladder would otherwise fire on the next tick.

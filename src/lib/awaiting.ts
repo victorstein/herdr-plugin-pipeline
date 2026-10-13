@@ -1,4 +1,5 @@
 import { sha8 } from './batch'
+import { owedAt } from './before-merge'
 import { modeOf, taskRow } from './phases'
 import type { Run, Task } from './types'
 
@@ -11,7 +12,7 @@ export const UNRECORDED_PR = 'a PR number this task never recorded'
  * read as a bare "YOUR move" in status while its probe said "PR #7 to be
  * merged". Measured on a live run.
  */
-export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
+export function awaitedFor(run: Run, task: Task): string {
   const row = taskRow(task.phase)
   const batch = modeOf(run) === 'single-pr' ? run.batch : undefined
   switch (row.signal) {
@@ -30,7 +31,8 @@ export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
       if (batch !== undefined) {
         return `${task.branch} at ${task.land_sha ? sha8(task.land_sha) : '<no reviewed head>'} to land on ${batch.branch}`
       }
-      return task.pr === null ? UNRECORDED_PR : `PR #${task.pr} to be merged`
+      if (task.pr === null) return UNRECORDED_PR
+      return heldMergeWait(run, task) ?? `PR #${task.pr} to be merged`
     case 'slot':
       return 'the landing slot'
     case 'synced':
@@ -48,4 +50,14 @@ export function awaitedFor(run: Pick<Run, 'batch'>, task: Task): string {
     default:
       return `whatever clears ${task.phase}`
   }
+}
+
+/** A per-task merge held for the human waits on them, not on a merge. */
+function heldMergeWait(run: Run, task: Task): string | null {
+  const owed = owedAt(run, task)
+  if (owed.length === 0) return null
+  const checks = `the human's check ${owed.map((o) => o.check.id).join(', ')}`
+  return task.merged_at_ms === null
+    ? `${checks} before PR #${task.pr} merges`
+    : `${checks}; PR #${task.pr} merged before it was confirmed`
 }

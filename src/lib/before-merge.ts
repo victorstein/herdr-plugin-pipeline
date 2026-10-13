@@ -146,6 +146,11 @@ const headName = (head: string | null): string => (head === null ? 'no recorded 
 
 const minutesSince = (at: number, now: number): number => Math.max(0, Math.floor((now - at) / 60_000))
 
+/** `c1`, `c1 and c2`, `c1, c2 and c3`. */
+export function idList(ids: readonly string[]): string {
+  return ids.length <= 1 ? ids.join('') : `${ids.slice(0, -1).join(', ')} and ${ids.at(-1)}`
+}
+
 export const checkName = (held: HeldCheck): string =>
   (held.task === null ? held.check.id : `${held.check.id} (${held.task.task_id})`)
 
