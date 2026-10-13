@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { advanceTasks, deliverPendingAnswers, freshVerdict, promptForTaskPhase } from '../src/supervisor/tasks'
 import { answerDecision, openDecision } from '../src/lib/decisions'
-import { absoluteArtifactPath } from '../src/supervisor/deliver'
+import { absoluteArtifactPath, artifactPathFor } from '../src/supervisor/deliver'
 import { loadRun, newRun, type RunEffect, saveOrReapply, saveRun } from '../src/lib/ledger'
 import { counterFor, enterTaskPhase } from '../src/lib/machine'
 import { enqueue, settleOutbox } from '../src/lib/outbox'
@@ -927,6 +927,29 @@ test('the hold is asked only once the row\'s signal is ready, and of a verdict t
   }))
   expect(asked).toBe(1)
   expect(reviewed.tasks[0]?.phase).toBe('spec-review')
+})
+
+test('a verdict waits for the worker to commit it: until then its reviewer\'s completion notice is unhandled', async () => {
+  const clear = async () => ({ verdict: 'CLEAR' as const, blockers: 0, majors: 0 })
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  const verdict = artifactPathFor(run, run.tasks[0] as Task) as string
+  expect(verdict).toBe('docs/superpowers/reviews/hp-1-spec-review-0.md')
+
+  for (const uncommitted of [[verdict], ['docs/'], ['docs/superpowers/reviews/']]) {
+    await advanceTasks(run, deps({ verdictFor: clear, uncommittedPaths: async () => ['src/a.ts', ...uncommitted] }))
+    expect(run.tasks[0]?.phase, uncommitted.join()).toBe('spec-review')
+  }
+
+  await advanceTasks(run, deps({ verdictFor: clear, uncommittedPaths: async () => ['docs/superpowers/reviews-old/'] }))
+  expect(run.tasks[0]?.phase).toBe('plan')
+})
+
+test('an unreadable checkout does not hold a verdict', async () => {
+  const run = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  await advanceTasks(run, deps({
+    verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }), uncommittedPaths: async () => null,
+  }))
+  expect(run.tasks[0]?.phase).toBe('plan')
 })
 
 test('the orchestrator\'s background work does not hold the task rows it owns', async () => {

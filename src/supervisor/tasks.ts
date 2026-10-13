@@ -32,7 +32,7 @@ import { artifactBase, REVIEWS_DIR, reserveVerdict } from '../lib/verdict-path'
 import { dispatchSequence } from '../lib/unstarted'
 import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Batch, ReviewSkip, Run, Task, TaskPhase } from '../lib/types'
-import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
+import { absoluteArtifactPath, adoptableArtifacts, artifactPathFor, warnToTick } from './deliver'
 import type { CheckSubmission } from './courier'
 import { holdKey, notePastSubagents, type SubagentHold } from './pane-background'
 import { runTeardown, type TeardownDeps } from './teardown'
@@ -429,6 +429,24 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
   return prompts
 }
 
+/**
+ * Claude Code runs a reviewer subagent only in the background, so its verdict lands
+ * while the worker sits idle waiting for the completion notice, and the subagent can
+ * leave the panel a moment before that notice starts a turn. Taken in that moment, the
+ * next prompt would overtake the commit, the push and a CLEAR's fixes, and a BLOCKER's
+ * send-back would record a head the verdict's own push then moves. The worker commits
+ * the verdict only once it has handled the notice. Found by tracing a tick, not measured.
+ *
+ * git lists an untracked directory collapsed, `docs/`, when the verdict is the first
+ * file in it. An unreadable checkout holds nothing, as it reports nothing.
+ */
+async function verdictUncommitted(run: Run, task: Task, deps: TaskDeps): Promise<boolean> {
+  const verdict = artifactPathFor(run, task)
+  if (task.checkout_path === null || verdict === null) return false
+  const uncommitted = (await deps.uncommittedPaths(task.checkout_path)) ?? []
+  return uncommitted.some((path) => path === verdict || (path.endsWith('/') && verdict.startsWith(path)))
+}
+
 async function runsInBackground(deps: Pick<TaskDeps, 'backgroundWork'>, pane: string | null): Promise<boolean> {
   return pane !== null && ((await deps.backgroundWork?.(pane)) ?? []).length > 0
 }
@@ -597,6 +615,7 @@ async function gatherSignals(
       const verdict = await deps.verdictFor(run, task)
       const signals = { ...base, artifactFresh: verdict !== null, verdict }
       if (!actorIdle || verdict === null) return signals
+      if (await verdictUncommitted(run, task, deps)) return { ...signals, actorIdle: false }
       if (await pane.gate.held()) return { ...signals, actorIdle: false }
       if (verdict.verdict !== 'CLEAR') return withSendBackHead(signals, run, task, deps)
       return singlePr && nextPhase(routeOf(run, task), taskRow(task.phase)) === 'land-queue'
