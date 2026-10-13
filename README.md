@@ -536,8 +536,11 @@ prompt: its claude manifest counts `Waiting for N background agents to finish` a
 running` as work, and no shell or monitor. The supervisor reads Claude Code's footer for the rest —
 the pill in `⏵⏵ bypass permissions on · 1 shell, 4 monitors · ← 1 agent`, and the agents panel's
 `◯ ui-dev  Waiting on x4pro firmware build …` rows — from the screen it already reads when a pane
-goes idle, and reads a pane again once a minute while it shows work. `← 1 agent` is the hint for the
-agents view, which a fresh session shows too; it is not work. While a pane shows background work:
+goes idle, and reads a pane again once a minute while it shows work. Only the footer line is read,
+never the status line beside it. Work is a shell, a monitor, a local agent, a team, a background or
+remote workflow, a cloud session, an MCP task, or a mix of them; `dreaming`, `auto-mode scan`, a memory
+import and an Artifact comment monitor are not. `← 1 agent` is the hint for the agents view, which a
+fresh session shows too; it is not work either. While a pane shows background work:
 
 - a worker's phase does not advance on its artifact, verdict or submission, and its uncommitted
   work is not reported as a stop;

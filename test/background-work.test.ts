@@ -46,20 +46,48 @@ test('a subagent the panel lists is work even with nothing in the pill', () => {
   expect(backgroundWorkOn(screen).running).toEqual(['general-purpose subagent'])
 })
 
-test('every pill Claude Code has been seen to draw, singular and plural, in any permission mode', () => {
+test('every pill label Claude Code 2.1.296 draws: the agent\'s work counts, its own housekeeping does not', () => {
+  // The labels come from the pill function in the 2.1.296 bundle, not from guesses.
   const pills: Array<[string, string[]]> = [
-    ['  ⏵⏵ bypass permissions on · 2 shells · ← 1 agent', ['2 shells']],
-    ['  ⏵⏵ bypass permissions on · 1 monitor · ← 1 agent', ['1 monitor']],
-    ['  ⏵⏵ bypass permissions on · 3 shells, 1 monitor · ← 1 agent', ['3 shells', '1 monitor']],
-    ['  ⏵⏵ auto mode on · 1 shell, 2 monitors', ['1 shell', '2 monitors']],
-    ['  ? for shortcuts · 2 subagents', ['2 subagents']],
-    ['  1 workflow, 1 MCP task · ? for shortcuts', ['1 workflow', '1 MCP task']],
-    ['  ⏵⏵ bypass permissions on · 3 background', ['3 background']],
-    ['  ⏵⏵ bypass permissions on · 2 tasks', ['2 tasks']],
+    ['1 shell', ['1 shell']],
+    ['2 shells', ['2 shells']],
+    ['1 monitor', ['1 monitor']],
+    ['3 shells, 1 monitor', ['3 shells', '1 monitor']],
+    ['1 local agent', ['1 local agent']],
+    ['2 local agents', ['2 local agents']],
+    ['1 team', ['1 team']],
+    ['2 background dynamic workflows', ['2 background dynamic workflows']],
+    ['◇ 1 cloud session', ['◇ 1 cloud session']],
+    ['◇ 2 remote dynamic workflows', ['◇ 2 remote dynamic workflows']],
+    ['1 MCP task', ['1 MCP task']],
+    ['4 background tasks', ['4 background tasks']],
+    ['▪ 3 background', ['▪ 3 background']],
+    ['dreaming', []],
+    ['auto-mode scan', []],
+    ['memory import 2/5', []],
+    ['1 Artifact comment monitor', []],
+    ['◇ ultraplan needs your input', []],
   ]
-  for (const [footer, running] of pills) {
-    expect(backgroundWorkOn(claude([], STATUS_LINE, footer)).running, footer).toEqual(running)
+  for (const [pill, running] of pills) {
+    for (const footer of [`  ⏵⏵ bypass permissions on · ${pill} · ← 1 agent`, `  ${pill} · ? for shortcuts`, `  ${pill}`]) {
+      expect(backgroundWorkOn(claude([], STATUS_LINE, footer)).running, footer).toEqual(running)
+    }
   }
+})
+
+test('labels Claude Code never draws are not work: a bare task, agent, subagent or workflow count', () => {
+  for (const pill of ['2 tasks', '2 agents', '1 subagent', '1 workflow']) {
+    expect(backgroundWorkOn(claude([], STATUS_LINE, `  ⏵⏵ bypass permissions on · ${pill}`)).running, pill).toEqual([])
+  }
+})
+
+test('the user\'s status line is never read as the pill, above the footer or with no footer under it', () => {
+  for (const status of ['  main · 3 tasks', '  2 agents · opus', '  main · 2 shells']) {
+    expect(backgroundWorkOn(claude([], status, '  ⏵⏵ bypass permissions on (shift+tab to cycle)')).running, status)
+      .toEqual([])
+  }
+  expect(backgroundWorkOn(claude([], '  main · 3 tasks')).running).toEqual([])
+  expect(backgroundWorkOn(claude([], '  2 agents · opus')).running).toEqual([])
 })
 
 test('the footer is read through its colours and its dimmed separators', () => {
@@ -74,10 +102,6 @@ test('only what is drawn below the box counts: the transcript\'s "still running"
   expect(backgroundWorkOn(finished).running).toEqual([])
 })
 
-test('a status line that only resembles the pill is not read as one', () => {
-  const screen = claude([], '  [Opus] │ 2 shells open │ main', '  ⏵⏵ bypass permissions on (shift+tab to cycle)')
-  expect(backgroundWorkOn(screen).running).toEqual([])
-})
 
 test('a screen with no input box says nothing either way', () => {
   expect(backgroundWorkOn('Do you want to proceed?\n❯ 1. Yes\n  2. No\n  ⏵⏵ bypass permissions on · 1 shell'))
