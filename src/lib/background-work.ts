@@ -5,6 +5,8 @@ export interface BackgroundScan {
   boxSeen: boolean
   /** What Claude Code shows running behind the prompt, in its own words: `1 shell`, `ui-dev subagent`. */
   running: string[]
+  /** The part of it subagents are doing: the agents panel's rows and the pill's local agents. */
+  subagents: string[]
 }
 
 /** A glyph some labels lead with: `◇ 1 cloud session`, and the flagged pill's `▪ 3 background`. */
@@ -46,6 +48,8 @@ const segmentsOf = (line: string): string[] =>
 
 const pillItems = (segment: string): string[] => segment.split(', ')
 
+const LOCAL_AGENTS = /^\d+ local agents?$/
+
 const isPill = (segment: string): boolean =>
   pillItems(segment).every((item) => WORK.test(item) || NOT_WORK.test(item))
 
@@ -69,16 +73,19 @@ function footerLine(lines: readonly string[]): string | null {
 export function backgroundWorkOn(screen: string): BackgroundScan {
   const lines = withoutEscapes(screen).split('\n')
   const bounds = inputBoxBounds(lines)
-  if (bounds === null) return { boxSeen: false, running: [] }
+  if (bounds === null) return { boxSeen: false, running: [], subagents: [] }
   const below = lines.slice(bounds.close + 1)
   const panelAt = below.findIndex((line) => PANEL_HEAD.test(line.trim()) || AGENT_ROW.test(line.trim()))
   const footer = footerLine(panelAt === -1 ? below : below.slice(0, panelAt))
   const running = footer === null
     ? []
     : segmentsOf(footer).filter(isPill).flatMap(pillItems).filter((item) => WORK.test(item))
+  const subagents = running.filter((item) => LOCAL_AGENTS.test(item))
   for (const line of panelAt === -1 ? [] : below.slice(panelAt)) {
     const agent = AGENT_ROW.exec(line.trim())
-    if (agent !== null && agent[1] !== 'main') running.push(`${agent[1]} subagent`)
+    if (agent === null || agent[1] === 'main') continue
+    running.push(`${agent[1]} subagent`)
+    subagents.push(`${agent[1]} subagent`)
   }
-  return { boxSeen: true, running }
+  return { boxSeen: true, running, subagents }
 }

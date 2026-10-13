@@ -46,7 +46,7 @@ import { removeCheckoutWithGit, worktreeRemovalFrom } from './teardown'
 import { advanceTasks, announceDecisions, type AnswerDeps, deliverPendingAnswers, freshVerdict } from './tasks'
 import { liftLimits } from './usage-lift'
 import { checkLimits, limitedNow, UsageLimits } from './usage-limits'
-import { observedScreens, PaneBackground } from './pane-background'
+import { observedScreens, PaneBackground, SubagentHolds } from './pane-background'
 import type { AgentStatus, Run, SupervisorPid } from '../lib/types'
 
 const EXIT_DUPLICATE = 3
@@ -232,7 +232,8 @@ async function main(): Promise<void> {
   const ambiguityLog = new Set<string>()
   const background = new PaneBackground()
   const screens = observedScreens(herdr, background)
-  const backgroundWork = (pane: string) => background.running(pane, herdr)
+  const backgroundWork = async (pane: string) => (await background.work(pane, herdr)).running
+  const holdForSubagents = new SubagentHolds(async (pane) => (await background.work(pane, herdr)).subagents).check
   const paneAbsence = new PaneAbsence()
   const workspaceAbsence = new WorkspaceAbsence()
   let lastCiPollMs = 0
@@ -281,7 +282,7 @@ async function main(): Promise<void> {
         : { runs: tickRuns, wake: applied.wake }
       knownRuns = [...allRuns, ...runs]
       const wake = briefHolds.sift(appliedWake, runs, Date.now())
-      noteBackgroundWork(wake, (pane) => background.lastSeen(pane))
+      noteBackgroundWork(wake, (pane) => background.lastSeen(pane).running)
 
       for (const line of wake) {
         // Gated on the event, not on task.agent_status: that field is the badge
@@ -349,7 +350,7 @@ async function main(): Promise<void> {
 
           const runGh = ghFor(run.repo_root)
           const { nextPrompt, phaseNote } = await evaluateRun(
-            run, runGh, config, liveIdle, { stateDir }, backgroundWork,
+            run, runGh, config, liveIdle, { stateDir }, holdForSubagents,
           )
 
           const runPhaseBefore = run.phase
@@ -357,6 +358,7 @@ async function main(): Promise<void> {
             pluginRoot,
             liveIdle,
             backgroundWork,
+            holdForSubagents,
             hasLiveAgent: liveAgentIn(listed),
             maxPasses: config.MAX_PASSES,
             fileSettleMs: config.FILE_SETTLE_MS,
@@ -529,8 +531,9 @@ async function main(): Promise<void> {
               : c.run.phase,
             minutes: String(c.minutes),
             awaiting: awaiting.clause,
+            hpipe,
             ladder: ladderFor(c, probeMax,
-              c.escalatable && c.actorPaneId !== null ? await backgroundWork(c.actorPaneId) : []),
+              c.escalatable && c.actorPaneId !== null ? await background.work(c.actorPaneId, herdr) : undefined),
           })
           const sent = await sendProbe(`${c.run.run_id}:${c.task?.task_id ?? ''}`, c.paneId, text)
           return { ...sent, deferred: sent.held === 'budget' || sent.held === 'usage_limit' }

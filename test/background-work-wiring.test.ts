@@ -1,10 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadRun, newRun, saveOrReapply, saveRun } from '../src/lib/ledger'
 import type { AgentStatus, QueuedEvent, Run, Task } from '../src/lib/types'
-import { observedScreens, PaneBackground } from '../src/supervisor/pane-background'
+import { observedScreens, PaneBackground, SubagentHolds } from '../src/supervisor/pane-background'
+import { evaluateRun } from '../src/supervisor/deliver'
+import type { Config } from '../src/lib/config'
 import { applyStalls, type StallDeps, stallCandidates } from '../src/supervisor/stall'
 import { advanceTasks, type TaskDeps } from '../src/supervisor/tasks'
 import { describeWake, noteBackgroundWork, type WakeLine } from '../src/supervisor/tick'
@@ -72,7 +74,8 @@ function taskDeps(background: PaneBackground, io: ReturnType<typeof herdrFake>['
   return {
     pluginRoot: ROOT,
     liveIdle: async (pane) => (await io.agentStatus(pane)) === 'done',
-    backgroundWork: (pane) => background.running(pane, io),
+    backgroundWork: async (pane) => (await background.work(pane, io)).running,
+    holdForSubagents: new SubagentHolds(async (pane) => (await background.work(pane, io)).subagents).check,
     hasLiveAgent: () => true,
     maxPasses: 2, fileSettleMs: 0,
     prForBranch: async () => null, prView: async () => null, verdictFor: async () => null,
@@ -94,7 +97,7 @@ async function tick(
   const wake: WakeLine[] = [{ run: fresh, task, event: 'agent:done', phaseAtEvent: task.phase }]
   await advanceTasks(fresh, taskDeps(background, herdr.io))
   await saveOrReapply(dir, fresh, [])
-  noteBackgroundWork(wake, (pane) => background.lastSeen(pane))
+  noteBackgroundWork(wake, (pane) => background.lastSeen(pane).running)
   return describeWake(wake[0] as WakeLine, Date.now(), 'hpipe')
 }
 
@@ -140,7 +143,7 @@ test('the orchestrator waiting on its reviewer subagent is held at the top of th
     probeMax: 3,
     now: () => Date.now(),
     agentStatus: (pane) => herdr.io.agentStatus(pane),
-    backgroundWork: (pane) => background.running(pane, herdr.io),
+    backgroundWork: async (pane) => (await background.work(pane, herdr.io)).running,
     persist: (r, effect) => saveOrReapply(dir, r, effect ? [effect] : []),
     probe: async () => { sent.push('probe'); return { ok: true } },
     escalationText: async () => 'escalated',
@@ -164,4 +167,39 @@ test('the orchestrator waiting on its reviewer subagent is held at the top of th
   await applyStalls(stallCandidates([run], Date.now(), 15, 3), deps)
   expect(sent).toEqual(['escalate'])
   expect((await loadRun(dir, 'personal', seeded.run_id))?.phase).toBe('escalated')
+})
+
+test('an orchestrator polling `hpipe status` from a background shell does not hold the branch review it waits on', async () => {
+  // Real orchestrators have waited for `[branch-review]` to leave `hpipe status` from a background shell. Held
+  // for any background work, the phase that would end the shell never ended. Measured on live runs.
+  dir = mkdtempSync(join(tmpdir(), 'hpipe-background-'))
+  const herdr = herdrFake()
+  herdr.screens[ORCHESTRATOR] = screen('  ⏵⏵ bypass permissions on · 1 shell · ← 1 agent')
+  const background = new PaneBackground()
+  const holds = new SubagentHolds(async (pane) => (await background.work(pane, herdr.io)).subagents)
+  const run = await seedRun()
+  run.phase = 'branch-review'
+  run.phase_entered_at = Date.now() - 60_000
+  run.tasks = []
+  run.repo_root = dir
+  const review = join(dir, 'docs', 'superpowers', 'reviews', `${run.run_id}-branch-review-0.md`)
+  mkdirSync(join(dir, 'docs', 'superpowers', 'reviews'), { recursive: true })
+  writeFileSync(review, 'Sound.\n\nVERDICT: CLEAR\n')
+  await checkLimits(new UsageLimits(() => Date.now(), () => {}), observedScreens(herdr.io, background),
+    turn(ORCHESTRATOR), new Set([ORCHESTRATOR]))
+  expect(background.lastSeen(ORCHESTRATOR).running).toEqual(['1 shell'])
+
+  const gh = { prForBranch: async () => null, prView: async () => null, prChecksDetail: async () => '' }
+  const config = { MAX_PASSES: 2, FILE_SETTLE_MS: 0 } as Config
+  const result = await evaluateRun(run, gh, config, async () => true, { stateDir: dir }, holds.check)
+  expect(result.advanced).toBe(true)
+  expect(run.phase as string).toBe('done')
+
+  herdr.screens[ORCHESTRATOR] = screen('  ⏵⏵ bypass permissions on · ← 1 agent', '', '  ⏺ main',
+    '  ◯ general-purpose  Reviewing the batch                                                 3m 2s · ↓ 40.1k tokens')
+  const held = await seedRun()
+  Object.assign(held, { phase: 'branch-review', phase_entered_at: Date.now() - 60_000, tasks: [], repo_root: dir })
+  writeFileSync(join(dir, 'docs', 'superpowers', 'reviews', `${held.run_id}-branch-review-0.md`), 'VERDICT: CLEAR\n')
+  background.noteTurns(turn(ORCHESTRATOR))
+  expect((await evaluateRun(held, gh, config, async () => true, { stateDir: dir }, holds.check)).advanced).toBe(false)
 })

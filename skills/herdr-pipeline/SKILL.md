@@ -99,14 +99,16 @@ them, and each probe names the cadence in force). A reply does not answer a prob
 phase waits for does. After 3 probes the next check escalates the phase, unless the pane is busy then
 — mid-turn, or running a subagent, shell or monitor that Claude Code lists under its prompt — which
 puts it off one cadence at a time, up to 3 times. So end your turn while a subagent you dispatched
-works; do not busy-wait to look busy. A pane Claude's usage limit has stopped is neither probed nor
+works; do not busy-wait to look busy. Never wait for a phase change with a background shell or monitor
+polling `hpipe status`: a phase waits only for a subagent, and for at most 10 minutes once what it
+waits for is there, so end your turn and let the next prompt arrive on its own. A pane Claude's usage limit has stopped is neither probed nor
 escalated: the supervisor holds what it owes the pane and resumes it at the reset.
 
 ## While it runs
 
 | You see | Do |
 |---|---|
-| A digest line reads `agent:done, background work running (1 shell, ui-dev subagent)` | Nothing: the worker is still at work behind its prompt. Its phase waits for that work, and its uncommitted files are not a stop |
+| A digest line reads `agent:done, background work running (1 shell, ui-dev subagent)` | Nothing: the worker is still at work behind its prompt, and its uncommitted files are not a stop. Its phase waits for a subagent, at most 10 minutes once the phase's artifact is there; it does not wait for a shell or a monitor |
 | `YOUR move: worker idle with N uncommitted paths (…)` | `hpipe nudge --task <id>`: it tells the worker, through the supervisor, to commit, push and finish its phase. It refuses while the worker's pane shows background work |
 | Workers raise decisions with `hpipe decide`; you get a prompt naming the task and decision id (also under "waiting on you" in `hpipe status`) | — |
 | A decision you escalate to the user | Ask it on its own, never bundled with another question: the worker waits for the whole dialog |

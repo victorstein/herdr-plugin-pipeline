@@ -29,13 +29,13 @@ const T3_WAITING_ON_ITS_BUILD = claude([
 
 test('the trial run\'s t3 pane reads as busy: its shells, its monitors and its subagent', () => {
   expect(backgroundWorkOn(T3_WAITING_ON_ITS_BUILD)).toEqual({
-    boxSeen: true, running: ['1 shell', '4 monitors', 'ui-dev subagent'],
+    boxSeen: true, running: ['1 shell', '4 monitors', 'ui-dev subagent'], subagents: ['ui-dev subagent'],
   })
 })
 
 test('`← 1 agent` is the agents-view hint, which a fresh session shows too: no work', () => {
   const fresh = claude(['✻ Welcome back'], STATUS_LINE, '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent')
-  expect(backgroundWorkOn(fresh)).toEqual({ boxSeen: true, running: [] })
+  expect(backgroundWorkOn(fresh)).toEqual({ boxSeen: true, running: [], subagents: [] })
 })
 
 test('a subagent the panel lists is work even with nothing in the pill', () => {
@@ -75,6 +75,13 @@ test('every pill label Claude Code 2.1.296 draws: the agent\'s work counts, its 
   }
 })
 
+test('subagent work is the panel\'s rows and the pill\'s local agents; a shell or a monitor is not', () => {
+  expect(backgroundWorkOn(claude([], STATUS_LINE, '  ⏵⏵ bypass permissions on · 2 local agents')).subagents)
+    .toEqual(['2 local agents'])
+  expect(backgroundWorkOn(claude([], STATUS_LINE, '  ⏵⏵ bypass permissions on · 1 shell, 2 monitors')).subagents)
+    .toEqual([])
+})
+
 test('labels Claude Code never draws are not work: a bare task, agent, subagent or workflow count', () => {
   for (const pill of ['2 tasks', '2 agents', '1 subagent', '1 workflow']) {
     expect(backgroundWorkOn(claude([], STATUS_LINE, `  ⏵⏵ bypass permissions on · ${pill}`)).running, pill).toEqual([])
@@ -105,6 +112,6 @@ test('only what is drawn below the box counts: the transcript\'s "still running"
 
 test('a screen with no input box says nothing either way', () => {
   expect(backgroundWorkOn('Do you want to proceed?\n❯ 1. Yes\n  2. No\n  ⏵⏵ bypass permissions on · 1 shell'))
-    .toEqual({ boxSeen: false, running: [] })
-  expect(backgroundWorkOn('')).toEqual({ boxSeen: false, running: [] })
+    .toEqual({ boxSeen: false, running: [], subagents: [] })
+  expect(backgroundWorkOn('')).toEqual({ boxSeen: false, running: [], subagents: [] })
 })

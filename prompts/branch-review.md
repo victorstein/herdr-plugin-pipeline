@@ -51,8 +51,10 @@ fenced copy is documentation, not a verdict, and is rejected. Nothing but count 
 On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle, the way the end of
 this prompt has you patch a BLOCKER: nothing later asks for them.
 
-The supervisor reads the review from disk once you are idle with nothing you started still running in the
-background, so you may end your turn while the reviewer subagent works. The path is outside the repo on
+The supervisor reads the review from disk once you are idle and no subagent you started is still running,
+waiting for one at most 10 minutes after the review appears, so you may end your turn while the reviewer
+subagent works. Never wait for this phase to end with a background shell or monitor polling
+`{{hpipe}} status`: end your turn, and the next prompt arrives on its own. The path is outside the repo on
 purpose: the review is the run's record, not part of the work, so never copy it into the repo or commit
 it.
 

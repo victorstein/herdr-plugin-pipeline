@@ -34,4 +34,8 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
    PR on GitHub is dropped. Something worth keeping goes into that file instead, outside the override
    block, and only just before the merge: the plugin rewrites it with every ship prompt.
 
+Once the PR is open at the head `batch-check` recorded, end your turn: the next prompt arrives on its own
+when CI has run. Never wait for it with a background shell or monitor polling `{{hpipe}} status` or `gh
+pr checks`.
+
 Never force-push, rebase or squash `{{batch}}`: its history is every landing's record.{{ruleset_advice}}

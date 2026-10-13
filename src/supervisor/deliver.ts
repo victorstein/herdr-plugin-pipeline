@@ -12,7 +12,7 @@ import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/
 import { hasLanded } from '../lib/ledger'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
 import { IMPLEMENT_MODEL } from '../lib/models'
-import { modeOf, producedByActor, runRow, taskRow } from '../lib/phases'
+import { modeOf, runRow, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { resumeCommand } from '../lib/status'
@@ -25,6 +25,7 @@ import { buildBadges, badgeSource } from '../lib/badges'
 import type { Config } from '../lib/config'
 import type { Batch, Run, Task, TaskPhase } from '../lib/types'
 import { shellQuoted, shellWord } from '../lib/unstarted'
+import { holdKey, notePastSubagents, type SubagentHold } from './pane-background'
 import { FINISHED } from './teardown'
 import { isAncestor, resolveCommit } from '../lib/sync-walk'
 
@@ -372,19 +373,15 @@ const READS_THE_BATCH_PR: ReadonlySet<string> = new Set(['ship', 'ship-merge'])
  */
 export async function evaluateRun(
   run: Run, gh: RunGh, config: Config, liveIdle: (paneId: string) => Promise<boolean>,
-  extras: RunRenderExtras = {}, backgroundWork?: (paneId: string) => Promise<readonly string[]>,
+  extras: RunRenderExtras = {}, holdForSubagents?: SubagentHold,
 ): Promise<{ advanced: boolean; nextPrompt: string; phaseNote: string }> {
   const stay = { advanced: false, nextPrompt: '', phaseNote: '' }
   const pane = run.orchestrator_pane
   if (!pane) return stay
 
-  const row = runRow(run.phase)
-  const signal = row.signal
-  // A branch review the orchestrator handed to a subagent is written while it sits
-  // idle at its prompt, and on a CLEAR it fixes the findings once the subagent
-  // reports back: read before then, the ship prompt overtook both.
-  const actorIdle = await liveIdle(pane) &&
-    !(producedByActor(row) && ((await backgroundWork?.(pane)) ?? []).length > 0)
+  const signal = runRow(run.phase).signal
+  const actorIdle = await liveIdle(pane)
+  let pastSubagents: readonly string[] | null = null
 
   let artifactFresh = false
   let verdict: VerdictResult | null = null
@@ -397,6 +394,14 @@ export async function evaluateRun(
 
     if (!(await isFresh(absolute, run.phase_entered_at))) return stay
     if (!(await isSettled(absolute, config.FILE_SETTLE_MS))) return stay
+    // A branch review the orchestrator handed to a subagent is written while it sits
+    // idle at its prompt, and on a CLEAR it fixes the findings once the subagent
+    // reports back: read before then, the ship prompt overtook both.
+    if (holdForSubagents !== undefined) {
+      const call = await holdForSubagents(holdKey(run, null), pane)
+      if (call.hold) return stay
+      pastSubagents = call.past ?? null
+    }
 
     artifactFresh = true
     verdict = await parseVerdict(absolute)
@@ -413,6 +418,7 @@ export async function evaluateRun(
     ...taskSignalsFor(run), batchPr,
   })
   if (!advanced) return stay
+  notePastSubagents(run, before, pastSubagents)
 
   const nextPrompt = await promptForRunPhase(run, config, { ciDetail: (pr) => gh.prChecksDetail(pr), ...extras })
   return { advanced: true, nextPrompt, phaseNote: ` → ${run.phase} (from ${before})` }

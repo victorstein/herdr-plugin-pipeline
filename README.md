@@ -542,17 +542,20 @@ remote workflow, a cloud session, an MCP task, or a mix of them; `dreaming`, `au
 import and an Artifact comment monitor are not. `← 1 agent` is the hint for the agents view, which a
 fresh session shows too; it is not work either. While a pane shows background work:
 
-- a worker's phase does not advance on its artifact, verdict or submission, and its uncommitted
-  work is not reported as a stop;
-- the run's `branch-review` and `ship` do not advance either, so a CLEAR review written by the
-  orchestrator's subagent is not read before the orchestrator has acted on it;
+- its uncommitted work is not reported as a stop, and `hpipe nudge` refuses it;
 - the stall ladder holds the escalation as it does for a working pane, within the same cap;
 - the digest's line says so: `agent:done, background work running (1 shell, 4 monitors, ui-dev
   subagent)`.
 
-The orchestrator's background work does not hold the task rows it owns, such as `merge`: those
-clear on GitHub's or the batch's facts, and a single-PR `merge` holds the landing slot. A background
-job that never ends keeps its row where it is, and the stall probe says why.
+Only a subagent — a row in the agents panel, or the pill's `N local agents` — holds a phase back,
+because it may still be writing the artifact the phase is waiting for. Once a worker's artifact,
+verdict, submission or sync is there, or the run's branch review is, the phase waits for the subagent
+to finish, for at most 10 minutes, then advances anyway and its history says it went past it. A
+shell, a monitor or any other kind never holds a phase: an orchestrator that waits for a phase change
+with a background shell polling `hpipe status` would otherwise hold the very phase it waits for. So
+waiting for a phase change is done by ending the turn: the next prompt arrives on its own. The
+orchestrator's own work never holds the task rows it owns, such as `merge`, and `ship` is not held
+at all: those clear on GitHub's or the batch's facts.
 
 ## Getting out
 

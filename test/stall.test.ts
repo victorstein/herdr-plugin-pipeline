@@ -392,15 +392,22 @@ test('the cadence quoted is the one in force, not the default', () => {
     .toContain('sent every 5 minutes')
 })
 
-test('a probe says what background work its pane shows, which the phase waits for', () => {
-  const ladder = ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3,
-    ['general-purpose subagent'])
-  expect(ladder).toEndWith(' Your pane shows background work running now (general-purpose subagent), which this ' +
-    'phase waits for. If it is not this phase\'s work, stop it.')
+test('a probe says what its pane runs, and waits only for a subagent, and only so long', () => {
+  const ladder = (running: string[], subagents: string[]) =>
+    ladderFor({ probes: 0, undelivered: 0, escalatable: true, thresholdMs: FIFTEEN }, 3, { running, subagents })
+  expect(ladder(['general-purpose subagent'], ['general-purpose subagent'])).toEndWith(' Your pane shows ' +
+    'background work running now (general-purpose subagent). Once what this phase waits for is there, it waits up ' +
+    'to 10 minutes for general-purpose subagent to finish, and no longer.')
+  // An orchestrator's background shell polling `hpipe status` was told the phase waited for it. Measured on
+  // live runs.
+  expect(ladder(['1 shell'], [])).toEndWith(' Your pane shows background work running now (1 shell). This phase ' +
+    'does not wait for it.')
+  expect(ladder(['1 shell'], [])).not.toContain('stop it')
 })
 
 test('an excluded row is never promised a bound it does not have', () => {
-  const ladder = ladderFor({ probes: 8, undelivered: 0, escalatable: false, thresholdMs: FIFTEEN }, 3, ['1 shell'])
+  const ladder = ladderFor({ probes: 8, undelivered: 0, escalatable: false, thresholdMs: FIFTEEN }, 3,
+    { running: ['1 shell'], subagents: [] })
   expect(ladder).not.toContain('of 3')
   expect(ladder).toContain('standing nudge, sent every 15 minutes')
   expect(ladder).not.toContain('background')

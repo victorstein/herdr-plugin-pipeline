@@ -874,16 +874,59 @@ test('a worker idle at its prompt with background work running is not stopped: n
   expect(run.tasks[0]?.uncommitted_work?.count).toBe(2)
 })
 
-test('a worker\'s artifact is not taken while its background work may still be writing it', async () => {
+const researchWithItsArtifact = () => {
   const artifacts = designArtifacts()
-  const run = mkRun([mkTask({
+  return mkRun([mkTask({
     phase: 'research', phase_entered_at: 0, checkout_path: worktreeWith(artifacts.research as string), artifacts,
   })])
-  await advanceTasks(run, deps({ backgroundWork: backgroundIn({ 'w7:p1': ['general-purpose subagent'] }) }))
-  expect(run.tasks[0]?.phase).toBe('research')
+}
 
-  await advanceTasks(run, deps({ backgroundWork: backgroundIn({}) }))
+test('a worker\'s fresh artifact waits for a subagent still running, which may still be writing it', async () => {
+  const run = researchWithItsArtifact()
+  const asked: string[] = []
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w7:p1': ['general-purpose subagent'] }),
+    holdForSubagents: async (key, pane) => { asked.push(`${key} ${pane}`); return { hold: true } },
+  }))
+  expect(run.tasks[0]?.phase).toBe('research')
+  expect(asked).toEqual([`${run.run_id}:t1:0 w7:p1`])
+
+  await advanceTasks(run, deps({ holdForSubagents: async () => ({ hold: false }) }))
   expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('a shell or a monitor never holds a row: a poller waiting for the phase change would hold it for good', async () => {
+  // Orchestrators have polled `hpipe status` from a background shell for the phase to change. Measured on
+  // live runs.
+  const run = researchWithItsArtifact()
+  await advanceTasks(run, deps({
+    backgroundWork: backgroundIn({ 'w7:p1': ['1 shell', '2 monitors'] }),
+    holdForSubagents: async () => ({ hold: false }),
+  }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+})
+
+test('past the cap the row advances anyway, and its history says what it went past', async () => {
+  const run = researchWithItsArtifact()
+  await advanceTasks(run, deps({ holdForSubagents: async () => ({ hold: false, past: ['ui-dev subagent'] }) }))
+  expect(run.tasks[0]?.phase).toBe('spec')
+  expect(run.history.at(-1)?.why).toBe('actor idle + artifact fresh; advanced past background work still running ' +
+    '(ui-dev subagent) after 10m')
+})
+
+test('the hold is asked only once the row\'s signal is ready, and of a verdict too', async () => {
+  let asked = 0
+  const holdForSubagents = async () => { asked += 1; return { hold: true } as const }
+  const waiting = mkRun([mkTask({ phase: 'research', phase_entered_at: Date.now() + 60_000, checkout_path: null })])
+  await advanceTasks(waiting, deps({ holdForSubagents }))
+  expect(asked).toBe(0)
+
+  const reviewed = mkRun([mkTask({ phase: 'spec-review', artifacts: designArtifacts() })])
+  await advanceTasks(reviewed, deps({
+    holdForSubagents, verdictFor: async () => ({ verdict: 'CLEAR', blockers: 0, majors: 0 }),
+  }))
+  expect(asked).toBe(1)
+  expect(reviewed.tasks[0]?.phase).toBe('spec-review')
 })
 
 test('the orchestrator\'s background work does not hold the task rows it owns', async () => {

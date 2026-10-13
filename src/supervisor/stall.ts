@@ -13,6 +13,7 @@ import {
   startWorkerCommand, unbriefedWorker, undispatchedWorker,
 } from '../lib/unstarted'
 import { absoluteArtifactPath } from './deliver'
+import { type BackgroundWork, NO_WORK, SUBAGENT_HOLD_MAX_MS } from './pane-background'
 import type { AgentStatus, Batch, Run, StallState, Task } from '../lib/types'
 
 const MS_PER_MINUTE = 60_000
@@ -527,7 +528,7 @@ function landingClause(run: Run, task: Task, hpipe: string, now: number): Awaiti
  */
 export function ladderFor(
   c: { probes: number; undelivered: number; escalatable: boolean; thresholdMs: number }, probeMax: number,
-  running: readonly string[] = [],
+  work: BackgroundWork = NO_WORK,
 ): string {
   const every = `${Math.round(c.thresholdMs / MS_PER_MINUTE)} minutes`
   if (!c.escalatable) {
@@ -540,10 +541,14 @@ export function ladderFor(
     ? ''
     : ` ${c.undelivered === 1 ? 'One earlier probe' : `${c.undelivered} earlier probes`} ` +
       'could not be delivered to this pane and still counted.'
-  const background = running.length === 0
+  // Never "this phase waits for it" of a shell: an orchestrator's background poller
+  // waiting on `hpipe status` for the phase change was told to keep running.
+  const background = work.running.length === 0
     ? ''
-    : ` Your pane shows background work running now (${running.join(', ')}), which this phase waits for. ` +
-      "If it is not this phase's work, stop it."
+    : ` Your pane shows background work running now (${work.running.join(', ')}).` + (work.subagents.length === 0
+      ? ' This phase does not wait for it.'
+      : ` Once what this phase waits for is there, it waits up to ${SUBAGENT_HOLD_MAX_MS / MS_PER_MINUTE} minutes ` +
+        `for ${work.subagents.join(', ')} to finish, and no longer.`)
   return `This is probe ${c.probes + 1} of ${probeMax}, sent every ${every} while this phase is open.${missed} ` +
     'A reply does not answer it; only what this phase is waiting for does. ' +
     `After probe ${probeMax} the next check escalates this phase to the human, and it stops moving on its own, ` +

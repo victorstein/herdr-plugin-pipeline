@@ -775,7 +775,12 @@ background) and end its turn with an uncommitted edit. Its digest line should re
 background work running (1 shell)`, and `hpipe status` must **not** list it under `waiting on you:`.
 Kill the shell: the uncommitted-work line should appear within a minute, which is how often the
 supervisor re-reads a pane that showed work. A design row whose artifact appears while the pane
-shows work must not advance until the pane is quiet. In `branch-review`, let the orchestrator
+shows a subagent (a panel row or `N local agents`) must wait for it, and advance at the latest 10
+minutes after the artifact appeared, with `advanced past background work still running (…) after
+10m` in its history; with only a shell or a monitor running it must advance at once. Have the
+orchestrator wait for a phase change from a background shell polling `hpipe status` once: the phase
+must still advance when its signal arrives, and every probe and phase prompt says never to wait that
+way. In `branch-review`, let the orchestrator
 dispatch its reviewer subagent in the background and end its turn: once the escalation falls due,
 `hpipe show` or the ledger's `stall.holds` should climb instead of the run escalating, for as long as
 the panel lists the subagent. A pill or a panel row worded differently from these is a **finding**:

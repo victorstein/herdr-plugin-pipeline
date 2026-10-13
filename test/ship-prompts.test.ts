@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { newRun, withBatch } from '../src/lib/ledger'
 import type { BatchPr } from '../src/lib/machine'
 import type { Landing, Run, Task } from '../src/lib/types'
@@ -226,24 +226,43 @@ test('ship finds the batch PR by its branch, and clears on a checked head', asyn
   expect(run.phase).toBe('ship-ci')
 })
 
-test('ship waits while the orchestrator\'s background work runs, and still records the PR it found', async () => {
+test('ship never waits on the orchestrator\'s background work: a poller waiting for ship-ci would hold it', async () => {
   const run = shipping('ship', { checked: { head_sha: 'h1', at: 1, check: 'passed' } })
   run.orchestrator_pane = 'w1:p1'
   const { gh } = ghFake({ number: 301, headSha: 'h1', merged: false, mergedAtMs: null, mergeCommit: null })
-  const busy = async () => ['1 shell']
-  expect((await evaluateRun(run, gh, CONFIG, async () => true, {}, busy)).advanced).toBe(false)
-  expect(run.phase).toBe('ship')
-  expect(run.batch?.pr).toBe(301)
-
-  expect((await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => [])).advanced).toBe(true)
+  let asked = 0
+  const result = await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => { asked += 1; return { hold: true } })
+  expect(result.advanced).toBe(true)
   expect(run.phase).toBe('ship-ci')
+  expect(asked).toBe(0)
+})
+
+test('a branch review waits for the subagent still writing it, then past the cap goes ahead and says so', async () => {
+  const run = shipping('branch-review')
+  run.orchestrator_pane = 'w1:p1'
+  run.repo_root = dir
+  run.phase_entered_at = Date.now() - 60_000
+  const review = join(dir, 'docs', 'superpowers', 'reviews', `${run.run_id}-branch-review-0.md`)
+  mkdirSync(dirname(review), { recursive: true })
+  writeFileSync(review, 'Fine.\n\nVERDICT: CLEAR\n')
+  const { gh } = ghFake(null)
+
+  expect((await evaluateRun(run, gh, CONFIG, async () => true, { stateDir: dir }, async () => ({ hold: true })))
+    .advanced).toBe(false)
+  expect(run.phase).toBe('branch-review')
+
+  const past = await evaluateRun(run, gh, CONFIG, async () => true, { stateDir: dir },
+    async () => ({ hold: false, past: ['general-purpose subagent'] }))
+  expect(past.advanced).toBe(true)
+  expect(run.history.at(-1)?.why).toBe('review cleared; advanced past background work still running ' +
+    '(general-purpose subagent) after 10m')
 })
 
 test('ship-merge is GitHub\'s fact: the orchestrator\'s background work does not hold it', async () => {
   const run = shipping('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 } })
   run.orchestrator_pane = 'w1:p1'
   const { gh } = ghFake({ number: 301, headSha: 'h1', merged: true, mergedAtMs: 9, mergeCommit: '1a2b3c4d5e' })
-  await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => ['2 monitors'])
+  await evaluateRun(run, gh, CONFIG, async () => true, {}, async () => ({ hold: true }))
   expect(run.phase).toBe('done')
 })
 

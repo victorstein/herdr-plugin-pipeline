@@ -258,6 +258,7 @@ test('the stall probe counts a subagent, shell or monitor the agent waits on as 
   const text = (await Bun.file(join(ROOT, 'prompts', 'stall-probe.md')).text()).replace(/\s+/g, ' ')
   expect(text).toContain('If you are still working, ignore this')
   expect(text).toContain('waiting on a subagent, shell or monitor you started counts as working')
+  expect(text).toContain('Never wait for a phase change with a background shell or monitor polling `{{hpipe}} status`')
 })
 
 test('a rendered probe leaves no placeholder behind', async () => {
@@ -265,7 +266,7 @@ test('a rendered probe leaves no placeholder behind', async () => {
   const text = await renderPrompt(ROOT, 'stall-probe', {
     run_id: 'r1', phase: 'implement', minutes: '45',
     awaiting: 'This phase is waiting for a pushed PR for fix/x (hp-1).',
-    ladder: 'This is probe 1 of 3.',
+    ladder: 'This is probe 1 of 3.', hpipe: 'hp',
   })
   expect(text).not.toContain('{{')
 })

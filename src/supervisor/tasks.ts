@@ -15,7 +15,7 @@ import type { RunEffect } from '../lib/ledger'
 import type { PrView } from '../lib/gh'
 import {
   advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
-  syncOverdue,
+  syncOverdue, syncSubmitted,
 } from '../lib/machine'
 import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/phases'
@@ -34,6 +34,7 @@ import { beadPromptVars, renderWorkerPrompt } from '../lib/worker-prompt'
 import type { Batch, ReviewSkip, Run, Task, TaskPhase } from '../lib/types'
 import { absoluteArtifactPath, adoptableArtifacts, warnToTick } from './deliver'
 import type { CheckSubmission } from './courier'
+import { holdKey, notePastSubagents, type SubagentHold } from './pane-background'
 import { runTeardown, type TeardownDeps } from './teardown'
 
 export interface TaskDeps extends TeardownDeps {
@@ -49,6 +50,8 @@ export interface TaskDeps extends TeardownDeps {
    * shells, monitors. Absent reads as nothing running.
    */
   backgroundWork?: (paneId: string) => Promise<readonly string[]>
+  /** Whether a worker row whose signal is ready waits for a subagent still running; see `SubagentHolds`. */
+  holdForSubagents?: SubagentHold
   /**
    * Whether herdr lists the pane with an agent in it. A pane with none never
    * reads idle, so without this an orchestrator-owned row is never evaluated
@@ -401,14 +404,17 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // back. Measured on a live run.
     if (row.actor === 'orchestrator' && !actorIdle && pane !== null && deps.hasLiveAgent(pane)) continue
 
-    const actorDone = actorIdle && !(producedByActor(row) && await runsInBackground(deps, pane))
-    await noteUncommittedWork(run, task, actorDone, deps)
-    const signals = await gatherSignals(run, task, deps, actorDone, landingFor)
+    const worker = row.actor === 'worker' ? pane : null
+    const busy = actorIdle && await runsInBackground(deps, worker)
+    await noteUncommittedWork(run, task, actorIdle && !busy, deps)
+    const gate = subagentGate(run, task, producedByActor(row) ? worker : null, deps)
+    const signals = await gatherSignals(run, task, deps, actorIdle, landingFor, { busy, gate })
     if (!signals) continue
 
     const cameFrom = task.phase
     if (!advanceTask(run, task, signals)) continue
     if (task.phase === cameFrom) continue
+    notePastSubagents(run, `${task.task_id} ${cameFrom}`, gate.past())
 
     if (taskRow(task.phase).anyWorker === true && task.pane_id === null) {
       await queueForAFreshAgent(run, task, deps)
@@ -426,6 +432,27 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
 async function runsInBackground(deps: Pick<TaskDeps, 'backgroundWork'>, pane: string | null): Promise<boolean> {
   return pane !== null && ((await deps.backgroundWork?.(pane)) ?? []).length > 0
 }
+
+/** Asked by the row once its own signal is ready, so a hold is never paid on a phase with nothing to take. */
+interface SubagentGate {
+  held: () => Promise<boolean>
+  /** What the row advanced past at the cap, for its history. */
+  past: () => readonly string[] | null
+}
+
+function subagentGate(run: Run, task: Task, pane: string | null, deps: TaskDeps): SubagentGate {
+  let past: readonly string[] | null = null
+  return {
+    held: async () => {
+      if (pane === null || deps.holdForSubagents === undefined) return false
+      const call = await deps.holdForSubagents(holdKey(run, task), pane)
+      if (!call.hold) past = call.past ?? null
+      return call.hold
+    },
+    past: () => past,
+  }
+}
+
 
 /**
  * #37. Intake declares `--files` before any research exists, so the honest list
@@ -468,6 +495,7 @@ function logAmbiguous(run: Run, task: Task, candidates: string[], seen: Set<stri
 
 async function gatherSignals(
   run: Run, task: Task, deps: TaskDeps, actorIdle: boolean, landingFor: LandingFor,
+  pane: { busy: boolean; gate: SubagentGate },
 ) {
   const base = {
     actorIdle,
@@ -488,7 +516,10 @@ async function gatherSignals(
 
   switch (task.phase) {
     case 'implement': {
-      if (singlePr) return implementReady(run, task, base) ? withSinglePrSkip(base, run, task, deps) : base
+      if (singlePr) {
+        if (!implementReady(run, task, base)) return base
+        return (await pane.gate.held()) ? { ...base, actorIdle: false } : withSinglePrSkip(base, run, task, deps)
+      }
       // GitHub's PR head lags a push, so a send-back can record the head from
       // before the reviewer's verdict commit, and that commit then reads as the
       // worker's push. Until the prompt lands the worker has pushed nothing, so
@@ -502,6 +533,7 @@ async function gatherSignals(
       const view = await deps.prView(pr)
       const signals = { ...base, prNumber: pr, headSha: view?.headSha ?? null }
       if (!implementReady(run, task, signals)) return signals
+      if (await pane.gate.held()) return { ...signals, actorIdle: false }
       return { ...signals, ...await perTaskSkip(run, task, view?.baseRef ?? null, signals.headSha, deps) }
     }
     case 'research':
@@ -514,6 +546,7 @@ async function gatherSignals(
 
       if (await isFresh(absolute, artifactFreshAfter(task))) {
         if (!(await isSettled(absolute, deps.fileSettleMs))) return base
+        if (await pane.gate.held()) return base
         return { ...base, artifactFresh: true }
       }
 
@@ -553,6 +586,7 @@ async function gatherSignals(
       // path stored here, and writing it back is what makes adoption idempotent —
       // the next tick's canonical stat hits the adopted path directly.
       task.artifacts[slot] = adopted
+      if (await pane.gate.held()) return base
       return { ...base, artifactFresh: true }
     }
     case 'spec-review':
@@ -563,6 +597,7 @@ async function gatherSignals(
       const verdict = await deps.verdictFor(run, task)
       const signals = { ...base, artifactFresh: verdict !== null, verdict }
       if (!actorIdle || verdict === null) return signals
+      if (await pane.gate.held()) return { ...signals, actorIdle: false }
       if (verdict.verdict !== 'CLEAR') return withSendBackHead(signals, run, task, deps)
       return singlePr && nextPhase(routeOf(run, task), taskRow(task.phase)) === 'land-queue'
         ? withReviewedHead(signals, run, task, git)
@@ -580,9 +615,11 @@ async function gatherSignals(
       const landing = landed ? await landingFor(task) : undefined
       if (landing === null) return null
       const yieldAfterMs = deps.syncYieldMs ?? DEFAULT_SYNC_YIELD_MS
-      const atWork = task.pane_id !== null && !actorIdle
+      const atWork = task.pane_id !== null && (!actorIdle || pane.busy)
+      const held = actorIdle && syncSubmitted(task) !== null && await pane.gate.held()
       return {
-        ...base, landing, yieldAfterMs, yieldTo: atWork ? [] : await yieldCandidates(run, task, yieldAfterMs, landingFor),
+        ...base, actorIdle: actorIdle && !held, landing, yieldAfterMs,
+        yieldTo: atWork ? [] : await yieldCandidates(run, task, yieldAfterMs, landingFor),
       }
     }
     case 'merge': {
