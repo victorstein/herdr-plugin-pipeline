@@ -316,10 +316,19 @@ function awaitsWorktree(task: Task): boolean {
  * dispatches at registration, so the orchestrator usually registers, dispatches
  * and closes intake in the turn that gate waits out. The prompt then arrived
  * asking it to keep registering and to run `dispatch --done`, both already done,
- * and it spent a turn on it. Measured on a live run.
+ * and it spent a turn on it. Measured on a live run. A queued task is owed nothing
+ * yet: it arrives as its own `Dispatch tN` prompt, block and all, once it can start.
  */
 function owedDispatch(task: Task): boolean {
-  return task.phase === 'queued' || awaitsWorktree(task) || task.awaiting_brief === true
+  return awaitsWorktree(task) || task.awaiting_brief === true
+}
+
+function nothingToDispatch(run: Run): string {
+  const queued = run.tasks.filter((task) => task.phase === 'queued').map((task) => task.task_id)
+  if (queued.length === 0) return 'Every task registered so far has its worktree and its brief: nothing to dispatch now.'
+  return 'Every task that can start has its worktree and its brief: nothing to dispatch now. ' +
+    `${queued.join(', ')} ${queued.length === 1 ? 'is' : 'are'} queued; each arrives as its own \`Dispatch tN\` ` +
+    'prompt, carrying its dispatch block, once it can start.'
 }
 
 export function taskSignalsFor(run: Run) {
@@ -583,8 +592,13 @@ export async function renderRunPhasePrompt(
   switch (run.phase) {
     case 'intake': return renderPrompt(pluginRoot, 'intake', common)
     case 'dispatch': {
-      if (run.intake_closed && !run.tasks.some(owedDispatch)) return ''
+      const queued = run.tasks.some((task) => task.phase === 'queued')
+      if (run.intake_closed && !queued && !run.tasks.some(owedDispatch)) return ''
       const registering = run.intake_closed ? '' : await renderPrompt(pluginRoot, 'dispatch-registering', common)
+      if (!run.tasks.some(owedDispatch)) {
+        return [`# Dispatch — run ${run.run_id}`, nothingToDispatch(run), registering.trimEnd()]
+          .filter((part) => part.length > 0).join('\n\n')
+      }
       const text = await renderPrompt(pluginRoot, 'dispatch', { ...common, registering })
       return text.replace(/\n{3,}/g, '\n\n')
     }

@@ -252,9 +252,25 @@ test('a dispatch with nothing left to do sends no prompt — #152', async () => 
   expect(await renderRunPhasePrompt(run, ROOT)).toBe('')
 })
 
+test('a dispatch whose only undispatched tasks are queued says so in a line, and explains no dispatch', async () => {
+  // The trial registered and dispatched t1–t3 from `hpipe task`'s blocks; the dispatch prompt arrived after,
+  // because t4 and t5 waited on them, and read as an instruction to act. Measured on a live run.
+  const queued = (id: string) => mkTask({ task_id: id, phase: 'queued', workspace_id: null, pane_id: null })
+  const run = enteringDispatch(true, [dispatched(), queued('t4'), queued('t5')])
+  expect(await renderRunPhasePrompt(run, ROOT)).toBe(`# Dispatch — run ${run.run_id}\n\n` +
+    'Every task that can start has its worktree and its brief: nothing to dispatch now. t4, t5 are queued; ' +
+    'each arrives as its own `Dispatch tN` prompt, carrying its dispatch block, once it can start.')
+
+  const stillOpen = enteringDispatch(false, [dispatched()])
+  const open = await renderRunPhasePrompt(stillOpen, ROOT)
+  expect(open).toStartWith(`# Dispatch — run ${stillOpen.run_id}\n\nEvery task registered so far has its worktree and ` +
+    'its brief: nothing to dispatch now.')
+  expect(open).toContain('Still registering?')
+  expect(open).not.toContain('Bootstrapping')
+})
+
 test('a dispatch still owed work keeps its prompt, but stops asking for registrations once intake closed — #152', async () => {
   for (const [what, task] of [
-    ['a queued task', mkTask({ task_id: 't2', phase: 'queued', workspace_id: null, pane_id: null })],
     ['a task with no worktree', mkTask({ task_id: 't2', phase: 'research', workspace_id: null, pane_id: null })],
     ['a worker not yet briefed', mkTask({ task_id: 't2', phase: 'research', awaiting_brief: true })],
   ] as const) {

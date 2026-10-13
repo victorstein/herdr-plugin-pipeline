@@ -163,6 +163,12 @@ hpipe dispatch --done
 hpipe status      # assert: run phase is no longer [intake]
 ```
 
+Once you go idle the run moves to `dispatch`. When you have already run every printed block, its
+prompt is one line — `Every task that can start has its worktree and its brief: nothing to dispatch
+now.`, naming any task still `queued` as arriving later as its own `Dispatch tN` prompt — or nothing
+at all when no task is queued and intake is closed. The full dispatch walkthrough arriving after
+every block has run is a **finding**.
+
 **Failure looks like:** `found no run in intake, dispatch or execute for <repo> in session <session>`
 from `hpipe task` (you are in the wrong repo or session — the message names both), or `no agent
 definition at …-dev.md` (wrong `--surface`).
