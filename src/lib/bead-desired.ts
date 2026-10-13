@@ -77,7 +77,10 @@ export interface DesiredBead {
 export const isManagedLabel = (label: string, mode: RunMode): boolean =>
   PHASE_LABELS[mode].has(label) || MANAGED_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
 
-/** Keyed by a decision (`asked`, `ruling`) or by a before-merge check (`before-merge`, then `r1`, `r2`, … per ruling). */
+/**
+ * Keyed by a decision (`asked`, `ruling`), or by a before-merge check: `before-merge`,
+ * then `r1`, `r2`, … per ruling.
+ */
 export function commentMarker(
   taskId: string, recordId: string, kind: 'asked' | 'ruling' | 'before-merge' | `r${number}`,
 ): string {

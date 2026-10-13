@@ -2087,7 +2087,10 @@ function recordedLine(run: Run, task: Task | null, check: BeforeMergeCheck): str
 const gateIsOpen = (run: Run, gate: Task | null): boolean =>
   (gate === null ? run.phase === 'ship-merge' : gate.phase === 'merge')
 
-/** A decision opened in merge resumes merge, where the supervisor sends the hold; the old merge command is still out. */
+/**
+ * A decision opened in merge resumes merge, where the supervisor sends the hold; until
+ * then the merge command from the earlier entry is still out.
+ */
 function backToAHeldMerge(run: Run, task: Task | null): string[] {
   if (task === null || gateOf(run, task) === null || task.phase !== 'blocked-on-decision') return []
   if (task.decision_from !== 'merge') return []

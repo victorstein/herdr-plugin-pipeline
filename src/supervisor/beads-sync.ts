@@ -324,7 +324,9 @@ export async function syncBeads(runs: readonly Run[], deps: SyncDeps): Promise<v
           fail(task, `bead ${task.bead} is not in the Beads export`)
           continue
         }
-        if (current.status === 'closed' && waitsOnClose(run, task)) effects.push(recordBeadClosed(task.task_id, deps.now()))
+        if (current.status === 'closed' && waitsOnClose(run, task)) {
+          effects.push(recordBeadClosed(task.task_id, deps.now()))
+        }
 
         const calls = callsFor(desiredBead(task, run), current, closeReason(task, run), modeOf(run))
         if (calls.length === 0) continue
