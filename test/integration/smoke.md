@@ -1317,7 +1317,10 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
   a review note once anything in it, a submodule included, is uncommitted. Run every clean-up line it
   prints, then check nothing is left: no local task branch (`git branch`), the
   default branch at the squash commit, `git status` showing only the branch-review file the notice
-  named, and the batch branch on origin only when a ruleset kept it.
+  named, and the batch branch on origin only when a ruleset kept it. When GitHub deleted the batch
+  on merge, the notice carries `git -C <repo> fetch --prune origin  # origin no longer has batch/<…>`,
+  and after it `git branch -r` lists no `origin/batch/<…>`; a per-task run's notice does the same for
+  merged PR branches GitHub deleted.
 
 ### 9j. Abort
 

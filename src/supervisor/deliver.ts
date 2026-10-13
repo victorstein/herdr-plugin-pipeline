@@ -658,7 +658,10 @@ const mergedPrNote = (task: Task): string => (hasLanded(task) && task.pr !== nul
 async function perTaskDoneNotice(run: Run): Promise<string> {
   const merged = run.tasks.filter((t) => hasLanded(t) && t.pr !== null)
   const repo = shellQuoted(run.repo_root)
-  const leftovers = [...(await mergedBranchLines(run, merged, repo)), ...(await mergedMainlineLines(run, merged, repo))]
+  const leftovers = [
+    ...(await mergedBranchLines(run, merged, repo)), ...(await mergedMainlineLines(run, merged, repo)),
+    ...(await staleRemoteRefLines(run, repo, merged.map((t) => t.branch))),
+  ]
   return [
     runDoneNotice(run), ...(leftovers.length === 0 ? [] : ['Clean up when you are done with it:', ...leftovers]),
   ].join('\n')
@@ -787,8 +790,27 @@ async function shippedLeftovers(run: Run, batch: Batch): Promise<string[]> {
     ...(await localTaskBranchLines(run, batch, repo)),
     ...(await staleBranchLines(run, repo, batch.into, batch.merge_commit, squashMerge)),
     ...(await originBatchLines(run, batch, repo)),
+    ...(await staleRemoteRefLines(run, repo, [batch.branch, ...run.tasks.map((t) => t.branch)])),
     ...branchReviewLines(run),
   ]
+}
+
+/**
+ * GitHub can delete a merged branch itself, and the clone keeps its `origin/` ref
+ * until a fetch prunes it: the trial's batch was deleted on merge and
+ * `origin/batch/…` stayed. Measured on a live run. A branch still on origin is
+ * the other lines' to delete, which takes its ref with it.
+ */
+async function staleRemoteRefLines(run: Run, repo: string, branches: string[]): Promise<string[]> {
+  const stale: string[] = []
+  for (const branch of new Set(branches)) {
+    if (await resolveCommit(run.repo_root, `refs/remotes/origin/${branch}`) === null) continue
+    const onOrigin = await remoteBranchHeadCooled(run.repo_root, branch)
+    if (onOrigin.ok && onOrigin.sha === null) stale.push(branch)
+  }
+  if (stale.length === 0) return []
+  const refs = stale.length === 1 ? 'its stale origin/ ref' : 'their stale origin/ refs'
+  return [`  git -C ${repo} fetch --prune origin  # origin no longer has ${stale.join(', ')}; this drops ${refs}`]
 }
 
 /** Only a branch whose head is on the batch is safe to force-delete: a squash merge leaves none of them merged. */
