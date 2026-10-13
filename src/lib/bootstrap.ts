@@ -5,21 +5,23 @@ import { join } from 'node:path'
 export const BOOTSTRAP_REL = '.claude/pipeline-bootstrap'
 
 export type Bootstrap =
-  | { kind: 'none'; unwired?: string }
+  | { kind: 'none'; unwired?: string; notExecutable?: true }
   | { kind: 'ready' }
   | { kind: 'not-executable' }
 
 /** Where repos conventionally keep a setup script the pipeline does not know to run. */
 const CONVENTIONAL_BOOTSTRAPS = ['bin/bootstrap', 'script/bootstrap', 'scripts/bootstrap', 'scripts/bootstrap.sh']
 
-function conventionalBootstrap(repoRoot: string): string | undefined {
-  return CONVENTIONAL_BOOTSTRAPS.find((rel) => {
+function conventionalBootstrap(repoRoot: string): { rel: string; executable: boolean } | undefined {
+  for (const rel of CONVENTIONAL_BOOTSTRAPS) {
     try {
-      return statSync(join(repoRoot, rel)).isFile()
+      const info = statSync(join(repoRoot, rel))
+      if (info.isFile()) return { rel, executable: (info.mode & 0o111) !== 0 }
     } catch {
-      return false
+      continue
     }
-  })
+  }
+  return undefined
 }
 
 /**
@@ -46,7 +48,10 @@ export function repoBootstrap(repoRoot: string): Bootstrap {
 
 function undeclared(repoRoot: string): Bootstrap {
   const unwired = conventionalBootstrap(repoRoot)
-  return unwired === undefined ? { kind: 'none' } : { kind: 'none', unwired }
+  if (unwired === undefined) return { kind: 'none' }
+  return unwired.executable
+    ? { kind: 'none', unwired: unwired.rel }
+    : { kind: 'none', unwired: unwired.rel, notExecutable: true }
 }
 
 /**
@@ -56,8 +61,11 @@ function undeclared(repoRoot: string): Bootstrap {
 export function bootstrapLine(b: Bootstrap): string {
   if (b.kind === 'none') {
     if (b.unwired === undefined) return 'bootstrap: none'
-    return `bootstrap: none declared; the repo has ./${b.unwired}, which the dispatch block below offers as an ` +
-      `optional step (an executable ${BOOTSTRAP_REL} that calls it would run in every new worktree)`
+    const offered = b.notExecutable === true
+      ? 'which is not executable, so no dispatch block runs it'
+      : "which the task's dispatch block offers as an optional step"
+    return `bootstrap: none declared; the repo has ./${b.unwired}, ${offered} (an executable ${BOOTSTRAP_REL} ` +
+      'that calls it would run in every new worktree)'
   }
   if (b.kind === 'not-executable') {
     return `bootstrap: ${BOOTSTRAP_REL} (NOT EXECUTABLE — chmod +x it on the base branch)`

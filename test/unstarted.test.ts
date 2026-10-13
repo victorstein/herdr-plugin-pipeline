@@ -102,6 +102,13 @@ test('a repo with no bootstrap gets no bootstrap step; a failed fetch still name
   expect(text).toContain('--base c0ffee1')
 })
 
+test('a setup script that is not executable is offered as no step', () => {
+  const text = dispatchSequence(mkRun(), mkTask({}), FETCHED,
+    { kind: 'none', unwired: 'scripts/bootstrap.sh', notExecutable: true }, 'hp')
+  expect(text).not.toContain('optional')
+  expect(text).not.toContain('bootstrap.sh')
+})
+
 test('a setup script the repo never wired in is an optional step in the new checkout, not dropped', () => {
   // The trial's orchestrator dug the checkout path out of the create JSON to run ./bin/bootstrap by hand.
   // Measured on a live run.

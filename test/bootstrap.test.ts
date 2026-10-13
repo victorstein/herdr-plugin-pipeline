@@ -95,9 +95,19 @@ test('a conventional bootstrap script that is not wired is pointed out, still on
   const bootstrap = repoBootstrap(root)
   expect(bootstrap).toEqual({ kind: 'none', unwired: 'bin/bootstrap' })
   const line = bootstrapLine(bootstrap)
-  expect(line).toBe('bootstrap: none declared; the repo has ./bin/bootstrap, which the dispatch block below offers as ' +
+  expect(line).toBe('bootstrap: none declared; the repo has ./bin/bootstrap, which the task\'s dispatch block offers as ' +
     `an optional step (an executable ${BOOTSTRAP_REL} that calls it would run in every new worktree)`)
   expect(line).not.toContain('\n')
+})
+
+test('a conventional script that is not executable is named, and offered as no step', () => {
+  const root = repoRoot(null)
+  mkdirSync(join(root, 'scripts'))
+  writeFileSync(join(root, 'scripts', 'bootstrap.sh'), 'set -e\nuv sync\n')
+  const bootstrap = repoBootstrap(root)
+  expect(bootstrap).toEqual({ kind: 'none', unwired: 'scripts/bootstrap.sh', notExecutable: true })
+  expect(bootstrapLine(bootstrap)).toBe('bootstrap: none declared; the repo has ./scripts/bootstrap.sh, which is not ' +
+    `executable, so no dispatch block runs it (an executable ${BOOTSTRAP_REL} that calls it would run in every new worktree)`)
 })
 
 test('a declared bootstrap wins over a conventional script beside it', () => {

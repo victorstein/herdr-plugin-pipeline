@@ -122,7 +122,7 @@ const CREATED_CHECKOUT = '<.result.worktree.path>'
  */
 function bootstrapSteps(bootstrap: Bootstrap): string[] {
   if (bootstrap.kind !== 'none') return [`(cd "${CREATED_CHECKOUT}" && ./${BOOTSTRAP_REL})`]
-  if (bootstrap.unwired === undefined) return []
+  if (bootstrap.unwired === undefined || bootstrap.notExecutable === true) return []
   return [`(cd "${CREATED_CHECKOUT}" && ./${bootstrap.unwired})  # optional: the repo's own setup, which nothing ` +
     'runs for you; run it if the worker will need what it sets up']
 }
