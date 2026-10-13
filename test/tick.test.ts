@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, noteBackgroundWork,
-  PaneAbsence, parkedFooter, pickOneAdvance, saveEventedRuns, tickEvents, type WakeLine, WorkspaceAbsence,
-  workerStillNeeded,
+  applyEvents, BRIEF_HOLD_MS, BriefHolds, catchUpDigest, describeWake, type EventSaveDeps, FILES_PASS_HOLD_MS,
+  FilesPassHolds, noteBackgroundWork, PaneAbsence, parkedFooter, pickOneAdvance, saveEventedRuns, tickEvents,
+  type WakeLine, WorkspaceAbsence, workerStillNeeded,
 } from '../src/supervisor/tick'
 import { gateStatus } from '../src/lib/gating'
 import type { PaneInfo, WorkspaceInfo } from '../src/lib/herdr'
@@ -837,6 +837,48 @@ test('a worker reported idle or done says what it still runs in the background',
   ])
   expect(describeWake(wake[0]!, 0, 'hp')).toStartWith(
     't1 feat/x (hp-1) [implement 0m] agent:done, background work running (1 shell, 4 monitors, ui-dev subagent) — ')
+})
+
+test('a pass through blocked-on-files that nothing holds is folded into the phase after it', () => {
+  // The trial reported `[plan-review → blocked-on-files] … no task holds its files now` for a task that was
+  // in implement a tick later. Measured on a live run.
+  const holds = new FilesPassHolds()
+  const t2 = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'], phase_entered_at: 1_000 })
+  const queued = mkTask({ task_id: 't4', phase: 'queued', files: ['src/a.ts'] })
+  const run = mkRun([t2, queued])
+  const idle: WakeLine = { run, task: t2, event: 'agent:idle', phaseAtEvent: 'plan-review' }
+  expect(holds.sift(run, [idle], 1_000)).toEqual([])
+
+  const next = structuredClone(run)
+  next.tasks[0]!.phase = 'implement'
+  const sent = holds.sift(next, [], 2_000)
+  expect(sent.map((line) => describeWake(line, 2_000, 'hp'))).toEqual([
+    expect.stringMatching(/^t2 feat\/x \(hp-1\) \[plan-review → implement\] agent:idle — /),
+  ])
+  expect(holds.sift(next, [], 3_000)).toEqual([])
+})
+
+test('a real wait in blocked-on-files is reported at once, and a pass held too long is sent anyway', () => {
+  const holder = mkTask({ task_id: 't1', phase: 'implement', files: ['src/a.ts'] })
+  const waiter = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const waiting = mkRun([holder, waiter])
+  const line: WakeLine = { run: waiting, task: waiter, event: 'agent:idle', phaseAtEvent: 'plan-review' }
+  expect(new FilesPassHolds().sift(waiting, [line], 0)).toHaveLength(1)
+
+  const holds = new FilesPassHolds()
+  const free = mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/a.ts'] })
+  const stuck = mkRun([free])
+  expect(holds.sift(stuck, [{ ...line, run: stuck, task: free }], 0)).toEqual([])
+  expect(holds.sift(stuck, [], FILES_PASS_HOLD_MS)).toHaveLength(1)
+})
+
+test('lines of other runs and other tasks are not held', () => {
+  const holds = new FilesPassHolds()
+  const t1 = mkTask({ task_id: 't1', phase: 'implement' })
+  const run = mkRun([t1])
+  const other = mkRun([mkTask({ task_id: 't1', phase: 'blocked-on-files' })])
+  const line: WakeLine = { run, task: t1, event: 'agent:done', phaseAtEvent: 'implement' }
+  expect(holds.sift(run, [line, { ...line, run: other, task: other.tasks[0]! }], 0)).toEqual([line])
 })
 
 test('an unstarted worker is YOUR move in the digest, not the worker\'s — #12', () => {

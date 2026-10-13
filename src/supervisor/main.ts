@@ -37,8 +37,8 @@ import {
   taskStallCandidates, undeliveredNote,
 } from './stall'
 import {
-  applyEvents, BriefHolds, catchUpDigest, describeWake, noteBackgroundWork, PaneAbsence, parkedFooter, pickOneAdvance,
-  saveEventedRuns, tickEvents, WorkspaceAbsence,
+  applyEvents, BriefHolds, catchUpDigest, describeWake, FilesPassHolds, noteBackgroundWork, PaneAbsence, parkedFooter,
+  pickOneAdvance, saveEventedRuns, tickEvents, WorkspaceAbsence,
 } from './tick'
 import { fetchBatches } from './batch-fetch'
 import { ciTransitions } from './ci'
@@ -226,6 +226,7 @@ async function main(): Promise<void> {
   const sendProbe = boundedProbeSend(send)
   const catchUps = new CatchUps()
   const briefHolds = new BriefHolds()
+  const filesPass = new FilesPassHolds()
   let healthRevision = -1
   let healthWrittenAt = 0
   const ambiguityLog = new Set<string>()
@@ -397,8 +398,7 @@ async function main(): Promise<void> {
 
           await refreshBadges(run, herdr, pluginId)
           const covered = briefHolds.heldTasks(run)
-          const lines = wake
-            .filter((w) => w.run.run_id === run.run_id)
+          const lines = filesPass.sift(run, wake, tickNow)
             .map((w) => {
               if (w.task) covered.add(w.task.task_id)
               return `- ${describeWake(w, tickNow, hpipe, gate.holds())}`

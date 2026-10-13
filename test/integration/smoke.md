@@ -407,7 +407,9 @@ tier passes through it on the way to `implement`: a heavy or standard task enter
    tier), `ci`, `merge`, `close`, `teardown` all hold files. `t2`'s own task line, and any digest line
    about it, names the same holder: `— nothing for you — waiting for t1 (implement) to free the files
    it holds`. A digest that says no task holds its files while status still prints the ⚠ line above
-   is a finding.
+   is a finding. A task nothing holds passes through `blocked-on-files` in a tick, and its digest line
+   is held for that tick and reads `[plan-review → implement]` (or `[plan → implement]` for light);
+   a `[… → blocked-on-files] … no task holds its files now` line in a digest is a finding.
 3. `t2` is released only once `t1` reaches a **non-holding** phase. In practice that is `done`
    (after `teardown`), because every phase from `implement` through `teardown` holds. It is *not*
    released when `t1`'s PR merges — `merge` and `close` still hold.

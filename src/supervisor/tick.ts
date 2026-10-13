@@ -1,6 +1,7 @@
 import { abandonDecisions } from '../lib/decisions'
 import { isUnlandedSave, runIsDriven } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
+import { fileHolders } from '../lib/gating'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { reviewsSkipped } from '../lib/review-skip'
 import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
@@ -137,6 +138,47 @@ export class BriefHolds {
     return new Set([...this.held.values()]
       .filter(({ line }) => line.run.run_id === run.run_id && line.task !== null)
       .map(({ line }) => (line.task as Task).task_id))
+  }
+}
+
+/** How long a line about a task passing through `blocked-on-files` waits for the phase after it. */
+export const FILES_PASS_HOLD_MS = 30_000
+
+function passesThroughFiles(run: Run, task: Task): boolean {
+  return task.phase === 'blocked-on-files' && fileHolders(task, run.tasks).length === 0
+}
+
+/**
+ * Every task enters `blocked-on-files`, and one nothing holds leaves it for
+ * `implement` on the next tick. Its line, rendered in between, reported a pass as an
+ * event the orchestrator could do nothing about: the trial's digest read `[plan-review
+ * → blocked-on-files] … no task holds its files now`, and the task was implementing a
+ * tick later. Measured on a live run. Such a line is held until the task leaves, and
+ * rendered then against the fresh record, as `plan-review → implement`; a holder
+ * appearing is a real wait, and its line goes at once. In memory, like `BriefHolds`.
+ */
+export class FilesPassHolds {
+  private held: Array<{ line: WakeLine; since: number }> = []
+
+  /** This run's lines to render now, held ones included, against `run`'s current records. */
+  sift(run: Run, wake: readonly WakeLine[], now: number): WakeLine[] {
+    const mine = this.held.filter(({ line }) => line.run.run_id === run.run_id)
+    this.held = this.held.filter(({ line }) => line.run.run_id !== run.run_id)
+    const fresh = wake.filter((line) => line.run.run_id === run.run_id).map((line) => ({ line, since: now }))
+    const send: WakeLine[] = []
+    for (const { line, since } of [...mine, ...fresh]) {
+      const task = line.task === null ? undefined : run.tasks.find((t) => t.task_id === line.task?.task_id)
+      if (task === undefined) {
+        send.push(line)
+        continue
+      }
+      if (passesThroughFiles(run, task) && now - since < FILES_PASS_HOLD_MS) {
+        this.held.push({ line, since })
+        continue
+      }
+      send.push({ ...line, run, task })
+    }
+    return send
   }
 }
 
