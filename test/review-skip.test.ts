@@ -172,6 +172,9 @@ test('a change that does not skip says why: its size, the list, or what could no
     .toEqual({ reviewedBecause: `src/auth/token.ts is on ${'.claude/pipeline-always-review'}` })
   expect(reviewCall(CANDIDATE, { added: 1, paths: ['.claude/pipeline-always-review'] }, [], 5))
     .toEqual({ reviewedBecause: 'it edits .claude/pipeline-always-review' })
+  // It changes how every later run locks, so it is reviewed like the always-review list.
+  expect(reviewCall(CANDIDATE, { added: 1, paths: ['docs/x.md', '.claude/pipeline-shared-paths'] }, [], 5))
+    .toEqual({ reviewedBecause: 'it edits .claude/pipeline-shared-paths' })
   expect(reviewCall(CANDIDATE, null, [], 5)).toEqual({ reviewedBecause: 'its change could not be measured' })
   expect(reviewCall(CANDIDATE, { added: 1, paths: ['src/a.ts'] }, null, 5))
     .toEqual({ reviewedBecause: '.claude/pipeline-always-review could not be read at its base' })

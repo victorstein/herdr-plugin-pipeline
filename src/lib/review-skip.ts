@@ -1,4 +1,5 @@
 import { nextPhase, routeOf, TASK_ROWS, type TaskRoute, taskRow } from './phases'
+import { SHARED_PATHS_REL } from './shared-paths'
 import type { HistoryEntry, ReviewSkip, Run, Task, TaskPhase } from './types'
 
 /**
@@ -143,9 +144,10 @@ export type ReviewCall = { skip: ReviewSkip } | { reviewedBecause: string }
 /**
  * Reviewed on any doubt: an unmeasured change, or an unread always-review list.
  * The list is always on itself: in a single-PR run it is read from the batch
- * branch, so one skipped edit to it would decide for every later sibling. The
- * reason goes in the history, which said only what was submitted when a 167-line
- * change was reviewed. Measured on a live run.
+ * branch, so one skipped edit to it would decide for every later sibling. So is
+ * the shared-paths list, which changes how every later run locks. The reason goes
+ * in the history, which said only what was submitted when a 167-line change was
+ * reviewed. Measured on a live run.
  */
 export function reviewCall(
   candidate: SkipCandidate, size: ChangeSize | null, alwaysReview: string[] | null, at: number,
@@ -158,7 +160,8 @@ export function reviewCall(
         `(a skip needs fewer than ${PR_REVIEW_SKIP_BELOW_ADDED_LINES})`,
     }
   }
-  if (size.paths.includes(ALWAYS_REVIEW_REL)) return { reviewedBecause: `it edits ${ALWAYS_REVIEW_REL}` }
+  const pipelineList = [ALWAYS_REVIEW_REL, SHARED_PATHS_REL].find((list) => size.paths.includes(list))
+  if (pipelineList !== undefined) return { reviewedBecause: `it edits ${pipelineList}` }
   const listed = size.paths.find((path) => alwaysReview.some((prefix) => path.startsWith(prefix)))
   if (listed !== undefined) return { reviewedBecause: `${listed} is on ${ALWAYS_REVIEW_REL}` }
   return { skip: { at, skipped: candidate.skipped, added_lines: size.added, cleared: candidate.cleared } }
