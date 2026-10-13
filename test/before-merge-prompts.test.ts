@@ -40,15 +40,31 @@ test('a per-task merge owing a check renders the hold, which makes it mergeable 
   expect(text).not.toContain('{{')
 })
 
-test('a held task that declares a shared path is told to rebase it in before the human checks', async () => {
+test('a held task that declares a shared path is told, in a paragraph of its own, what to keep if it rebases', async () => {
   const task = heldTask({ files: ['src/ghost/', 'docs/registry.md'], before_merge: [checkOf('c1', [])] })
   const run = perTaskRun([task])
   run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: 'abc', ref: 'origin/main', read_at: 1 }
+  const text = await taskPrompt(run, task)
+  expect(text).toContain('- `DRAFT`: `gh pr ready 255`, which moves no head, then ask again.\n\n' +
+    '   This task declares the shared `docs/registry.md`, which other work may have changed since this branch was cut. ' +
+    "If you rebase for `BEHIND` or `DIRTY`, a conflict there is expected: keep both sides' additions. If the two " +
+    'additions collide in meaning — the same id, number or section — do not resolve it by hand: `')
+  expect(text).toMatch(/ rewind \S+ implement --task t1`, so the worker redoes its addition on top of what merged and it is reviewed\.\n2\. \*\*Then tell/)
+  expect(prose(text)).toContain('`CLEAN`, `UNSTABLE` or `HAS_HOOKS`: it is mergeable. Go to step 2.')
+  expect(text).not.toContain('Rebase onto')
+  expect(await taskPrompt(perTaskRun([heldTask({ before_merge: [checkOf('c1', [])] })]),
+    heldTask({ before_merge: [checkOf('c1', [])] }))).not.toContain('declares the shared')
+})
+
+test('a held task names the merged task that declares its shared path too', async () => {
+  const task = heldTask({ files: ['docs/registry.md'], before_merge: [checkOf('c1', [])] })
+  const merged = heldTask({ task_id: 't6', phase: 'done', merged_at_ms: 1, files: ['docs/registry.md'] })
+  const run = perTaskRun([merged, task])
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: 'abc', ref: 'origin/main', read_at: 1 }
   const text = prose(await taskPrompt(run, task))
-  expect(text).toContain('This task declares the shared `docs/registry.md`')
-  expect(text.indexOf('declares the shared')).toBeLessThan(text.indexOf('Then tell the human once'))
-  expect(prose(await taskPrompt(perTaskRun([heldTask({ before_merge: [checkOf('c1', [])] })]),
-    heldTask({ before_merge: [checkOf('c1', [])] })))).not.toContain('declares the shared')
+  expect(text).toContain('This task declares the shared `docs/registry.md`, and t6 (merged) declares it too. If you ' +
+    'rebase for `BEHIND` or `DIRTY`')
+  expect(text).toContain("so the worker redoes its addition on top of t6's and it is reviewed.")
 })
 
 test('a stale confirmation is named in the hold, and a confirmation on the gate head renders the merge again', async () => {

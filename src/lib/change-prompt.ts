@@ -135,15 +135,21 @@ export function sharedImplementNote(shared: readonly string[]): string {
     "reorder anyone else's — so a merge stays mechanical."
 }
 
+interface SharedPathRebase {
+  /** Unpunctuated: each caller ends the sentence its own way. */
+  declares: string
+  collision: string
+}
+
 /**
  * Per-task, before the merge. A conflict on a shared path is expected, not a sign
  * that `--files` was wrong: a mechanical union is the rebase's, and CI checks it,
  * but a collision in meaning is new code, so it goes back through the worker and
- * its review. Empty when the task declares no shared path.
+ * its review. Null when the task declares no shared path.
  */
-export function sharedMergeNote(run: Run, task: Task, hpipe: string): string {
+function sharedPathRebase(run: Run, task: Task, hpipe: string): SharedPathRebase | null {
   const shared = sharedFiles(run, task)
-  if (shared.length === 0) return ''
+  if (shared.length === 0) return null
   const them = shared.length === 1 ? 'it' : 'them'
   const merged = run.tasks.filter((t) =>
     t.task_id !== task.task_id && t.merged_at_ms !== null && filesOverlap(shared, t.files))
@@ -152,17 +158,28 @@ export function sharedMergeNote(run: Run, task: Task, hpipe: string): string {
     : `and ${spokenList(merged.map((t) => `${t.task_id} (merged)`))} ` +
       `${merged.length === 1 ? 'declares' : 'declare'} ${them} too`
   const onTopOf = merged.length === 1 ? `${(merged[0] as Task).task_id}'s` : 'what merged'
-  return `This task declares the shared ${pathList(shared)}, ${cause}, so this PR may conflict there. Rebase onto ` +
-    "the default branch and keep both sides' additions; CI runs again on the rebased head. If the two additions " +
-    'collide in meaning — the same id, number or section — do not resolve it by hand: ' +
-    `\`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\`, so the worker redoes its addition on top ` +
-    `of ${onTopOf} and it is reviewed.`
+  return {
+    declares: `This task declares the shared ${pathList(shared)}, ${cause}`,
+    collision: 'If the two additions collide in meaning — the same id, number or section — do not resolve it by ' +
+      `hand: \`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\`, so the worker redoes its ` +
+      `addition on top of ${onTopOf} and it is reviewed.`,
+  }
 }
 
-/** `{{held_shared_note}}` of the per-task hold: the same rebase step, ahead of asking the human. */
+export function sharedMergeNote(run: Run, task: Task, hpipe: string): string {
+  const rebase = sharedPathRebase(run, task, hpipe)
+  if (rebase === null) return ''
+  return `${rebase.declares}, so this PR may conflict there. Rebase onto the default branch and keep both sides' ` +
+    `additions; CI runs again on the rebased head. ${rebase.collision}`
+}
+
+/** `{{held_shared_note}}`: a `CLEAN` PR goes straight to the human, so only a rebase meets the note. */
 export function heldSharedNote(run: Run, task: Task, hpipe: string): { held_shared_note: string } {
-  const note = sharedMergeNote(run, task, hpipe)
-  return { held_shared_note: note === '' ? '' : ` ${note}` }
+  const rebase = sharedPathRebase(run, task, hpipe)
+  if (rebase === null) return { held_shared_note: '' }
+  const note = `${rebase.declares}. If you rebase for \`BEHIND\` or \`DIRTY\`, a conflict there is expected: keep ` +
+    `both sides' additions. ${rebase.collision}`
+  return { held_shared_note: asParagraph(note, '   ') }
 }
 
 /**
