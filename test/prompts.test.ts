@@ -413,17 +413,16 @@ async function renderPhase(
 
 // Smoke run 14: a CLEAR carried a MINOR, the worker pushed only the verdict, and the
 // MINOR shipped while the land prompt said "Review cleared".
-test('every task review tells the worker to fix a CLEAR\'s findings this turn and push them with the verdict', async () => {
+test('every task review tells the worker to fix a CLEAR\'s findings and push them with the verdict', async () => {
   const PUSHED_LATER = 'Pushed later, a fix moves the branch off the head the `CLEAR` recorded, and sends the ' +
     'change through `sync` and another review.'
   for (const phase of TASK_REVIEW_PROMPTS as TaskPhase[]) {
     for (const mode of MODES) {
       const workerPart = prose(await renderPhase(phase, { tier: 'standard' }, phase, mode))
         .split("## The reviewer's brief")[0]!
-      expect(workerPart, `${phase} ${mode}`).toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists in this ' +
-        'same turn')
-      expect(workerPart, `${phase} ${mode}`).toContain('commit and push the fixes with the verdict file before you ' +
-        'end it')
+      expect(workerPart, `${phase} ${mode}`).toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists')
+      expect(workerPart, `${phase} ${mode}`).toContain('then commit and push the fixes with the verdict file')
+      expect(workerPart, `${phase} ${mode}`).toContain('so commit the verdict last, once the review is handled')
       const landsNext = phase.startsWith('pr-review') && mode === 'single-pr'
       expect(workerPart.includes(PUSHED_LATER), `${phase} ${mode}`).toBe(landsNext)
     }
@@ -431,7 +430,24 @@ test('every task review tells the worker to fix a CLEAR\'s findings this turn an
   const run = runIn('single-pr')
   run.phase = 'branch-review'
   expect(prose(await renderRunPhasePrompt(run, ROOT)))
-    .toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle')
+    .toContain('On a `CLEAR`, fix the MAJORs and MINORs it lists yourself once the reviewer has finished, before ' +
+      'you end that turn')
+})
+
+// Smoke run 16: Claude Code ran every subagent in the background, and a worker told to wait for its
+// reviewer within the turn polled the verdict file in a foreground sleep loop.
+const DISPATCHING_PROMPTS = ['implement', 'ci-red', 'sync', 'ship', 'ship-ci-red', 'usage-resume', 'branch-review',
+  ...TASK_REVIEW_PROMPTS]
+
+test('every prompt that dispatches a subagent says to end the turn and carry on at its completion notice', async () => {
+  for (const name of DISPATCHING_PROMPTS) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', `${name}.md`)).text())
+    expect(text, name).toMatch(/end your turn and carry on when its completion notice arrives[.;] never poll/i)
+  }
+  for (const name of readdirSync(join(ROOT, 'prompts'))) {
+    const text = prose(await Bun.file(join(ROOT, 'prompts', name)).text())
+    expect(text, name).not.toMatch(/wait for it within/i)
+  }
 })
 
 test('every task reviewer brief opens its review with the task\'s tier', async () => {
@@ -541,7 +557,7 @@ test('implement and ci-red hand the coding to a sonnet subagent carrying one sco
   expect(ciRed).toContain('# CI is red')
   for (const text of [implement, ciRed]) {
     expect(text).toContain('`model: sonnet`')
-    expect(text).toContain('wait for it within this turn')
+    expect(prose(text)).toContain('end your turn and carry on when its completion notice arrives')
     expect(text).toContain('Read `.claude/agents/core-dev.md` before your first edit')
   }
   expect(implementersBrief(ciRed)).toBe(implementersBrief(implement))
@@ -743,9 +759,8 @@ test('sync tells a worker whose review was skipped that it was, not that it was 
 // merge goes back to review, and read its resolved merge as one that would land as is.
 test('sync says a resolved conflict goes through review, like any commit beyond the automatic merge', async () => {
   const text = prose(await renderPhase('sync', { tier: 'light', land_sha: 'abc' }))
-  expect(text).toContain('**Wait for it within this turn.** A merge whose conflict you resolved is not a clean ' +
-    'merge: `submit` sends the change through review before it lands, because the resolution is code no ' +
-    'reviewer has seen.')
+  expect(text).toContain('A merge whose conflict you resolved is not a clean merge: `submit` sends the change ' +
+    'through review before it lands, because the resolution is code no reviewer has seen.')
   expect(text).toContain('Only a merge git made on its own, left as git made it, lands without another review: a ' +
     'resolved conflict, an edit to the merge, or any commit after it sends this branch through review. That ' +
     'is expected, not a failure.')

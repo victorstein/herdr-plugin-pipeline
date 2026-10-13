@@ -12,5 +12,5 @@
    Never open a PR from this branch. It was cut from `{{batch}}`, so a PR into `{{into}}` would carry
    every sibling's commits with it.
 
-Push only work you have verified, and submit it before your turn ends. The supervisor watches what you
-submit, not this pane.
+Push only work you have verified, and submit it in the turn you verify it. The supervisor watches
+what you submit, not this pane.

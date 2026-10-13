@@ -647,7 +647,7 @@ when it lands; digest event lines are not kept. Sends are gated per pane: a pane
 
 **The question.** During `spec-review`, `plan-review` and `pr-review`, the worker dispatches a
 *review subagent*, and during `implement` the Sonnet
-subagent that writes the code; either way it is told to wait for it within its own turn. The
+subagent that writes the code; either way it was then told to wait for it within its own turn. The
 supervisor gates every artifact-and-verdict row, and `implement`, on the worker pane reading `idle`
 or `done` (via `herdr agent get`, double-checked after `ACTOR_SETTLE_MS`). Three adversarial rounds could not
 settle statically whether a Claude Code subagent running inside a pane perturbs that pane's
@@ -760,6 +760,12 @@ the rule stops matching and the question reopens. The await-and-do-not-end-your-
 four review prompts is therefore worth keeping as defence in depth, but it is not load-bearing today —
 and the verdict-file predicate remains an independent guard regardless.
 
+Superseded by smoke run 16: Claude Code now runs every subagent in the background, and a worker told
+to wait within its turn polled the verdict file in a foreground sleep loop. Every prompt that
+dispatches a subagent now says to end the turn and carry on when its completion notice arrives; the
+supervisor reads the agents panel (below), and holds a worker's review row until the verdict is
+committed.
+
 #### §5 again: shells, monitors and a parent that took another turn — the pane DOES read `done`
 
 Measured on the berean-os trial run of 2026-10-12. The answer above holds only while the parent's
@@ -788,6 +794,15 @@ dispatch its reviewer subagent in the background and end its turn: once the esca
 `hpipe show` or the ledger's `stall.holds` should climb instead of the run escalating, for as long as
 the panel lists the subagent. A pill or a panel row worded differently from these is a **finding**:
 record the footer verbatim.
+
+In a worker's review row the reviewer runs in the background: the worker dispatches it and ends its
+turn. A `sleep`, `perl -e 'sleep …'` or `until [ -f … ]` loop in its pane is a **finding**, in any
+row. The verdict appears while the worker sits idle with the subagent's panel row listed; the task
+must stay in its review row, `git -C <worktree> status --short` showing the verdict untracked, until
+the completion notice wakes the worker and it commits the verdict, with a `CLEAR`'s fixes. The row
+advances within a tick or two of that commit and its push. A transition out of the review row while
+the verdict is still untracked in the worktree is a **finding**; so is a review row that stays put,
+the worker idle with nothing running, after the verdict is committed and pushed.
 
 #### Environment note
 

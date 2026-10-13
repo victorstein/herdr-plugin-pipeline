@@ -8,12 +8,12 @@ You keep the judgment; one subagent writes the code. Do not write it yourself.
    for this bead under `docs/superpowers/reviews/`. Decide which findings you accept. Every BLOCKER
    and every MAJOR you accept goes to the subagent before anything else; answer the ones you reject
    in {{reply_place}} rather than silently ignoring them.
-2. **Dispatch.** Dispatch one subagent with `model: {{implement_model}}`, and
-   **wait for it within this turn**. Backgrounding it ends your turn and leaves this pane reading
-   idle while the code is still being written, and the supervisor then treats a healthy worker as a
-   stalled one. If the dispatch is rejected for its model, dispatch without `model:` and say so in
-   {{reply_place}}. Its brief is the plan path, `{{plan_path}}`; the findings you accepted, if any; and
-   the implementer's brief below, verbatim.
+2. **Dispatch.** Dispatch one subagent with `model: {{implement_model}}`. If the dispatch is rejected
+   for its model, dispatch without `model:` and say so in {{reply_place}}. Its brief is the plan path,
+   `{{plan_path}}`; the findings you accepted, if any; and the implementer's brief below, verbatim. If
+   it runs in the background, end your turn and carry on when its completion notice arrives. Never
+   poll for it or sleep while it runs: the supervisor counts this pane as busy while a subagent of
+   yours runs.
 3. **Continue.** If the subagent returns with steps unfinished, dispatch a fresh one, starting at the
    first unfinished step. If it returns a question, raise it with `{{hpipe}} decide` as your brief
    describes, and end your turn without pushing: its partial work is unverified, and the answer

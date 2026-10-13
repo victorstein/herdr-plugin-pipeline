@@ -15,8 +15,9 @@ than guessing from the check name. Then take the first route that fits:
 
 {{checkout_steps}}
 
-   then dispatch one subagent with `model: {{implement_model}}` to fix it there, and **wait for it
-   within this turn**. Verify it, commit, push, then run `{{hpipe}} batch-check`: the PR clears only on
+   then dispatch one subagent with `model: {{implement_model}}` to fix it there. If it runs in the
+   background, end your turn and carry on when its completion notice arrives; never poll for it or
+   sleep while it runs. Verify it, commit, push, then run `{{hpipe}} batch-check`: the PR clears only on
    a head that passed it.
 3. **A bigger defect, or one that is itself a user-visible change.** Register a fix task into this
    run — `{{hpipe}} task …` as at intake, which moves the run back to `execute` — then

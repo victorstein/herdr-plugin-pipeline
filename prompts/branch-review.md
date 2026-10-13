@@ -48,12 +48,13 @@ judgment only the user can make. Otherwise `CLEAR`, with MAJORs and MINORs fixed
 trailer at the **start of the line** — not indented, and not inside a code fence. An indented or
 fenced copy is documentation, not a verdict, and is rejected. Nothing but count lines may follow it.
 
-On a `CLEAR`, fix the MAJORs and MINORs it lists yourself before you go idle, the way the end of
-this prompt has you patch a BLOCKER: nothing later asks for them.
+On a `CLEAR`, fix the MAJORs and MINORs it lists yourself once the reviewer has finished, before you
+end that turn, the way the end of this prompt has you patch a BLOCKER: nothing later asks for them.
 
-The supervisor reads the review from disk once you are idle and no subagent you started is still running,
-waiting for one at most 10 minutes after the review appears, so you may end your turn while the reviewer
-subagent works. Never wait for this phase to end with a background shell or monitor polling
+If the reviewer runs in the background, end your turn and carry on when its completion notice arrives;
+never poll for the review file or sleep while it runs. The supervisor reads the review from disk once
+you are idle and no subagent you started is still running, waiting for one at most 10 minutes after the
+review appears. Never wait for this phase to end with a background shell or monitor polling
 `{{hpipe}} status`: end your turn, and the next prompt arrives on its own. Leave the review uncommitted: it
 is the run's record, not part of the work. The plugin lists it in the repo's git `info/exclude`, so
 `git status` does not show it and `git add -A` does not pick it up; never add it by name.

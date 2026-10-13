@@ -564,6 +564,15 @@ waiting for a phase change is done by ending the turn: the next prompt arrives o
 orchestrator's own work never holds the task rows it owns, such as `merge`, and `ship` is not held
 at all: those clear on GitHub's or the batch's facts.
 
+Claude Code runs subagents in the background, so no prompt asks an agent to wait for one within its
+turn: every prompt that dispatches one says to end the turn and carry on when the subagent's
+completion notice arrives, and never to poll for its output or sleep. A worker's review verdict is
+therefore written while the worker sits idle, and the subagent can leave the panel a moment before
+its notice starts the worker's next turn. So a worker's review row also waits, with no cap, until the
+worker has committed its verdict, which it does last, once it has handled the notice: a `BLOCKER`'s
+pushed before that turn ends, a `CLEAR`'s with the fixes it asked for. The next prompt cannot
+overtake either.
+
 ## Getting out
 
 | | |

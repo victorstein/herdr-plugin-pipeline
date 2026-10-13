@@ -68,20 +68,20 @@ const WORKER_REVIEW_PROMPTS = ['spec-review', 'plan-review', 'pr-review', 'pr-re
 const promptText = (name: string) =>
   Bun.file(join(import.meta.dir, '..', 'prompts', `${name}.md`)).text()
 
-test('every worker review prompt demands an awaited subagent and a pushed verdict', async () => {
+test('every worker review prompt has the verdict committed last and pushed', async () => {
   for (const name of WORKER_REVIEW_PROMPTS) {
-    const text = await promptText(name)
-    expect(text, `${name}.md must require the subagent be awaited`)
-      .toContain('wait for it within this turn')
+    const text = (await promptText(name)).replace(/\s+/g, ' ')
+    expect(text, `${name}.md must say the phase clears on a committed verdict`)
+      .toContain('This phase clears once you are idle, with the verdict file committed')
     expect(text, `${name}.md must require the verdict be pushed`)
-      .toContain('Commit and push the verdict')
+      .toContain('commit and push the verdict file before you end that turn')
   }
 })
 
-test('branch-review carries neither worker instruction — it is orchestrator-owned', async () => {
-  const text = await promptText('branch-review')
-  expect(text).not.toContain('wait for it within this turn')
-  expect(text).not.toContain('Commit and push the verdict')
+test('branch-review carries no worker verdict instruction — it is orchestrator-owned and left uncommitted', async () => {
+  const text = (await promptText('branch-review')).replace(/\s+/g, ' ')
+  expect(text).not.toContain('with the verdict file committed')
+  expect(text).not.toContain('commit and push the verdict')
 })
 
 test('no task row carries a stallWhen — taskStallCandidates never reads one', () => {

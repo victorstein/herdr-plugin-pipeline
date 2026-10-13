@@ -12,8 +12,10 @@ Every task that landed is on `{{batch}}`. It ships as one PR, and CI runs once, 
        {{hpipe}} batch-check
 
    {{check_sentence}} This phase clears only once the PR's head is the one it recorded, so run it again
-   after any push to `{{batch}}`. If it is red, dispatch a subagent with `model: {{implement_model}}` to fix it in the
-   checkout and **wait for it within this turn**; verify, commit, push, and run `batch-check` again.
+   after any push to `{{batch}}`. If it is red, dispatch a subagent with `model: {{implement_model}}` to
+   fix it in the checkout. If it runs in the background, end your turn and carry on when its completion
+   notice arrives; never poll for it or sleep while it runs. Then verify, commit, push, and run
+   `batch-check` again.
 2. **Bring `{{into}}` in only if it conflicts.** A PR that conflicts with its base gets no CI, so ask
    git, against `{{into}}` as just fetched:
 

@@ -70,7 +70,7 @@ this pane and you resume where you stopped.
 - Mirror the nearest existing example and name the file you modelled on. If neither this repo nor its
   gold standard establishes a pattern this work needs, surface a decision instead of inventing one.
 - Conventional-commit messages. Never commit to `main`.
-- Commit and push before your turn ends, every phase, unless you are ending it on a decision with
-  unverified work in the tree. Your branch starts with no upstream, so the first push is
-  `git push -u origin HEAD`.
+- Commit and push before your turn ends, every phase, unless you are ending it on a decision, or to
+  wait for a subagent's completion notice, with unverified work in the tree. Your branch starts with
+  no upstream, so the first push is `git push -u origin HEAD`.
 {{handoff_rule}}

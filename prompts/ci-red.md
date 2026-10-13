@@ -13,11 +13,11 @@ sees only the PR head: a re-run from the Actions UI or `gh run rerun` moves noth
 task waiting.
 
 If it is a defect, you keep the judgment and one subagent writes the fix. Dispatch it with
-`model: {{implement_model}}`, and **wait for it within this turn**: a backgrounded subagent leaves this
-pane reading idle while the fix is still being written. If the dispatch is rejected for its model,
-dispatch without `model:` and say so in the PR. Its brief is the failing output, what you concluded
-from the log, and the implementer's brief below, verbatim. If it returns a question, raise it with
-`{{hpipe}} decide` as your brief describes, and end your turn without pushing: its partial work is
+`model: {{implement_model}}`; if the dispatch is rejected for its model, dispatch without `model:` and
+say so in the PR. Its brief is the failing output, what you concluded from the log, and the
+implementer's brief below, verbatim. If it runs in the background, end your turn and carry on when its
+completion notice arrives; never poll for it or sleep while it runs. If it returns a question, raise it
+with `{{hpipe}} decide` as your brief describes, and end your turn without pushing: its partial work is
 unverified, and the answer resumes it.
 
 When it returns, run the tests and the typecheck yourself and read their output. If either is red,
