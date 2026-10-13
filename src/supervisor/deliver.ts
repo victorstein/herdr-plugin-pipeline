@@ -581,7 +581,8 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     })
   }
   const steps = checkoutSteps(run, existsSync(batch.checkout)).map((step) => `       ${step}`).join('\n')
-  const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci'
+  // `ship-ci` also sends a head pushed past the check back here, and that is no red to repair.
+  const cameFromRedCi = run.history.findLast((h) => h.task_id === undefined)?.from === 'ship-ci' && batch.ci === 'fail'
   if (cameFromRedCi && batch.pr !== null) {
     return renderPrompt(pluginRoot, 'ship-ci-red', {
       ...vars, checkout_steps: steps, ci_failure: (await extras.ciDetail?.(batch.pr)) ?? '',

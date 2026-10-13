@@ -267,7 +267,9 @@ with the batch PR.
 (`$HERDR_PLUGIN_STATE_DIR/checkouts/<run>`) up to date, run `hpipe batch-check` there — the one run of
 every landing together, which records the head it passed on — and open the PR with the body the
 plugin renders: one line per landing between `BEGIN_COMMIT_OVERRIDE` and `END_COMMIT_OVERRIDE`. The
-PR clears `ship` only at a head `batch-check` recorded. `ship-ci` waits for CI on its head. A red one
+PR clears `ship` only at a head `batch-check` recorded. `ship-ci` waits for CI on its head, and a head
+pushed after the check, in `ship-ci` or `ship-merge`, sends the run back to `ship` for another
+`batch-check`; a red seen on it is still the PR's red. A red one
 is the orchestrator's: an empty commit for an environmental failure, a subagent's patch in the batch
 checkout for a small defect, or a fix task — `hpipe task …` registers it into the run and moves it
 back to `execute` — for a bigger one. The batch PR gets one repair; a second red escalates the run.

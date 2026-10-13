@@ -7,9 +7,10 @@ CI failed on PR #{{pr}} (`{{batch}}` into `{{into}}`). The failing checks:
 Read the actual failure output before deciding what is wrong — `gh run view --log-failed` — rather
 than guessing from the check name. Then take the first route that fits:
 
-1. **Environmental.** Push an empty commit to `{{batch}}` from its checkout:
+1. **Environmental.** Push an empty commit to `{{batch}}` from its checkout, then run
+   `{{hpipe}} batch-check`:
    `git -C {{checkout_quoted}} commit --allow-empty -m "ci: re-run <check>" && git -C {{checkout_quoted}} push`.
-   A `gh run rerun` moves no head, and this phase waits on the head.
+   A `gh run rerun` moves no head, and this phase clears only on a new head that `batch-check` recorded.
 2. **A small defect — the default.** A few lines, in files the failure names, adding no behaviour the
    release notes would mention. Bring the checkout up to date:
 

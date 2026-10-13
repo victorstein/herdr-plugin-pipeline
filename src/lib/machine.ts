@@ -3,7 +3,7 @@ import { hasLanded } from './ledger'
 import { LANDING_PHASES, modeOf, nextPhase, nextRunPhase, type PhaseRow, routeOf, runRow, taskRow } from './phases'
 import type { VerdictResult } from './predicates'
 import { describeReviewSkip, prReviewsOn } from './review-skip'
-import type { AgentStatus, CiBucket, ReviewSkip, Run, RunPhase, Submission, Task, TaskPhase } from './types'
+import type { AgentStatus, Batch, CiBucket, ReviewSkip, Run, RunPhase, Submission, Task, TaskPhase } from './types'
 
 interface HasPasses { passes: Record<string, number | undefined> }
 
@@ -63,8 +63,11 @@ export function enterRunPhase(run: Run, phase: RunPhase, why: string): Run {
   run.history.push({ at: Date.now(), from: run.phase, to: phase, why })
   if (phase === 'escalated') run.escalated_from = run.phase
   // As a task's `ci` entry forgets its bucket: the last round's red would fail the
-  // new round before its head was ever polled.
-  if (phase === 'ship-ci' && run.batch !== undefined) run.batch.ci = null
+  // new round before its head was ever polled, and its head would read as a push.
+  if (phase === 'ship-ci' && run.batch !== undefined) {
+    run.batch.ci = null
+    delete run.batch.ci_head
+  }
   run.phase = phase
   run.phase_entered_at = Date.now()
   return run
@@ -134,6 +137,8 @@ export function advanceRun(run: Run, s: RunSignals): Run | null {
  * The single-PR run's last mile. `ship` clears like `implement`: the PR found,
  * at a head past the one CI last failed on, and that head is the one
  * `hpipe batch-check` passed, so a fix-task landing forces a new check before CI.
+ * A head pushed after that check sends `ship-ci` and `ship-merge` back to `ship`
+ * for another, as a red's repair goes back there; a red on it is still the PR's red.
  */
 function advanceShip(run: Run, s: RunSignals): Run | null {
   const batch = run.batch
@@ -150,6 +155,8 @@ function advanceShip(run: Run, s: RunSignals): Run | null {
     }
 
     case 'ship-ci': {
+      const head = batch.ci_head?.sha
+      if (batch.ci !== 'fail' && head !== undefined && pastTheCheck(batch, head)) return backToTheCheck(run, batch, head)
       if (batch.ci === 'pass') return enterRunPhase(run, 'ship-merge', `CI passed on PR #${batch.pr ?? 'unknown'}`)
       if (batch.ci !== 'fail') return null
       // The last allowed pass escalates rather than return to `ship`, so it must not wait on gh.
@@ -168,14 +175,25 @@ function advanceShip(run: Run, s: RunSignals): Run | null {
         return enterRunPhase(run, 'done', `PR #${pr.number} squash-merged as ${sha8(pr.mergeCommit ?? 'unknown')}`)
       }
       // A push after CI passed, as `merge` sends a task back to `ci`.
-      const checked = batch.ci_head?.sha
-      if (pr === null || pr.headSha === null || checked === undefined || pr.headSha === checked) return null
-      return enterRunPhase(run, 'ship-ci', `head moved to ${pr.headSha} after CI passed on ${checked}`)
+      const passedOn = batch.ci_head?.sha
+      if (pr === null || pr.headSha === null || passedOn === undefined || pr.headSha === passedOn) return null
+      if (pastTheCheck(batch, pr.headSha)) return backToTheCheck(run, batch, pr.headSha)
+      return enterRunPhase(run, 'ship-ci', `head moved to ${pr.headSha} after CI passed on ${passedOn}`)
     }
 
     default:
       return null
   }
+}
+
+/** Only a rewind reaches a ship row past `ship` with no check recorded, and there the human chose to skip it. */
+function pastTheCheck(batch: Batch, head: string): boolean {
+  return batch.checked !== undefined && head !== batch.checked.head_sha
+}
+
+function backToTheCheck(run: Run, batch: Batch, head: string): Run {
+  return enterRunPhase(run, 'ship',
+    `head moved to ${sha8(head)} past ${sha8(batch.checked?.head_sha ?? 'unknown')}, the head batch-check recorded`)
 }
 
 export function enterTaskPhase(run: Run, task: Task, phase: TaskPhase, why: string): Task {

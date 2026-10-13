@@ -1242,7 +1242,10 @@ async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Prom
     run.escalated_from = null
     // `ship` finds the PR again if it is still open; `prForBranch` lists open ones only.
     if (run.batch !== undefined && run.phase === 'ship') run.batch.pr = null
-    if (run.batch !== undefined && run.phase === 'ship-ci') run.batch.ci = null
+    if (run.batch !== undefined && run.phase === 'ship-ci') {
+      run.batch.ci = null
+      delete run.batch.ci_head
+    }
     run.history.push({ at: Date.now(), from: 'rewind', to: input.phase, why: 'manual rewind' })
     if (runRow(run.phase).signal === 'verdict') {
       reserved = await reserveRunReview(run, () => {})

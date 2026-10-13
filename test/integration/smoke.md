@@ -1320,16 +1320,24 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
   `already protected`), the ship prompt has no ruleset advice and the ledger's `.batch.ruleset_protected`
   is `true`; on a run started without one, the advice is there;
 - `ship-ci` stays pending until every workflow run on the PR head has finished;
-- **red CI, the fix-task route:** push a failing test to the batch: `ship-ci → ship`. `hpipe task …`
+- **a push after the check:** push a failing test to the batch while the run is in `ship-ci` or
+  `ship-merge`. The run goes back to `ship` (`head moved to <sha8> past <sha8>, the head batch-check
+  recorded`) with the plain ship prompt, not `CI is red`, and spends no `ship-ci` pass; `batch-check`
+  refuses the test there. Revert it, `batch-check`, `ship → ship-ci`. A run that reaches `ship-merge`,
+  or merges, at a head other than `.batch.checked.head_sha` is a **finding**;
+- **red CI, the fix-task route:** push a test that fails only in CI, such as
+  `expect(process.env.CI).toBeUndefined()` (GitHub Actions sets `CI`), and `batch-check` it, so the
+  red falls on a checked head: `ship-ci → ship` with `CI is red`. `hpipe task …`
   moves the run to `execute`, `dispatch --done`, the fix lands, the run goes
   `execute → branch-review → ship`, needs a fresh `batch-check`, then `ship-ci`, green;
-- **red CI, the patch route:** with the run in `ship-merge`, push a failing test again; the moved head
-  sends it to `ship-ci`, and the second red escalates the run. `hpipe rewind <run> ship`, patch
-  through a subagent in the batch checkout, `batch-check`: `ship → ship-ci`, green;
+- **red CI, the patch route:** push another CI-only failure and `batch-check` it; the second red
+  escalates the run. `hpipe rewind <run> ship`, patch through a subagent in the batch checkout,
+  `batch-check`: `ship → ship-ci`, green;
 - squash-merge with the two rendered commands. The merge command carries `--match-head-commit <sha>`,
   `<sha>` being the head `ship-ci` saw pass (`.batch.ci_head.sha` in the ledger), and the prompt names
   its short sha as the green head; push an empty commit to the batch before running it once, and
-  GitHub must refuse the merge. **Pass/fail:** exactly one release PR follows, whose notes list every
+  GitHub must refuse the merge. The run then goes `ship-merge → ship`, and merges only after a fresh
+  `batch-check` and green CI on the new head. **Pass/fail:** exactly one release PR follows, whose notes list every
   landed title, the fix task's included, and nothing else;
 - on a throwaway PR with no override block, check that the squash body's extra lines alone give one
   entry each (Verify 2 of the design), and whether GitHub appends ` (#n)` to `--subject` (Verify 3);

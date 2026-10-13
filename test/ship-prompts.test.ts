@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { newRun, withBatch } from '../src/lib/ledger'
 import type { BatchPr } from '../src/lib/machine'
 import type { Landing, Run, Task } from '../src/lib/types'
+import { CI_SETTLE_MS, ciTransitions } from '../src/supervisor/ci'
 import { evaluateRun, renderRunPhasePrompt, taskOutcomesFor } from '../src/supervisor/deliver'
 import { batchFixture } from './helpers/batch'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -102,7 +103,7 @@ test('ship with a PR already open updates its body instead, and once the checkou
 })
 
 test('re-entered from a red ship-ci, ship carries the failing checks and the three routes', async () => {
-  const run = shipping('ship', { pr: 301 })
+  const run = shipping('ship', { pr: 301, ci: 'fail' })
   run.passes['ship-ci'] = 1
   run.history.push({ at: 1, from: 'ship-ci', to: 'ship', why: 'CI failed' })
   const text = await renderRunPhasePrompt(run, ROOT, { stateDir: dir, ciDetail: async (pr) => `- build (fail) for #${pr}` })
@@ -114,7 +115,7 @@ test('re-entered from a red ship-ci, ship carries the failing checks and the thr
 })
 
 test('the red-CI patch route brings the checkout up to date the way ship does, bootstrap included', async () => {
-  const run = shipping('ship', { pr: 301 })
+  const run = shipping('ship', { pr: 301, ci: 'fail' })
   run.repo_root = join(dir, 'repo')
   mkdirSync(join(run.repo_root, '.claude'), { recursive: true })
   writeFileSync(join(run.repo_root, '.claude', 'pipeline-bootstrap'), '#!/bin/sh\nbun install\n')
@@ -127,6 +128,18 @@ test('the red-CI patch route brings the checkout up to date the way ship does, b
   expect(text).toContain(`       git -C '${checkout}' pull --ff-only\n` +
     `       (cd '${checkout}' && ./.claude/pipeline-bootstrap)  # if the pull changed what it builds\n`)
   expect(text).not.toContain('{{')
+})
+
+test('ship-merge and the red-CI empty commit both say a push is checked again before CI', async () => {
+  const merge = (await renderRunPhasePrompt(shipping('ship-merge', { pr: 301 }), ROOT, { stateDir: dir }))
+    .replace(/\s+/g, ' ')
+  expect(merge).toContain('If anything is pushed to `batch/x` now, the run goes back to `ship`, to run')
+  expect(merge).not.toContain('back to `ship-ci`')
+  const run = shipping('ship', { pr: 301, ci: 'fail' })
+  run.history.push({ at: 1, from: 'ship-ci', to: 'ship', why: 'CI failed' })
+  const red = (await renderRunPhasePrompt(run, ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  expect(red).toContain('Push an empty commit to `batch/x` from its checkout, then run')
+  expect(red).toContain('this phase clears only on a new head that `batch-check` recorded')
 })
 
 test('ship-merge renders both commands with every title shell-quoted, and writes the squash body', async () => {
@@ -256,6 +269,34 @@ test('a branch review waits for the subagent still writing it, then past the cap
   expect(past.advanced).toBe(true)
   expect(run.history.at(-1)?.why).toBe('review cleared; advanced past background work still running ' +
     '(general-purpose subagent) after 10m')
+})
+
+test('a head pushed past the checked one sends ship-merge back to ship, whose prompt has the batch checked again', async () => {
+  const run = shipping('ship-merge', {
+    pr: 301, ci: 'pass', ci_head: { sha: 'd6e5c6e0', seen_at: 0 }, checked: { head_sha: 'd6e5c6e0', at: 1, check: 'passed' },
+  })
+  run.orchestrator_pane = 'w1:p1'
+  const { gh } = ghFake({ number: 301, headSha: 'd63fe8e0', merged: false, mergedAtMs: null, mergeCommit: null })
+  const result = await evaluateRun(run, gh, CONFIG, async () => true, { stateDir: dir })
+  expect(run.phase).toBe('ship')
+  expect(run.history.at(-1)?.why).toBe('head moved to d63fe8e0 past d6e5c6e0, the head batch-check recorded')
+  expect(result.nextPrompt).toContain('# Ship — run r1')
+  expect(result.nextPrompt).toContain('batch-check')
+  expect(result.nextPrompt).not.toContain('CI is red')
+})
+
+test('a head CI was read on past the checked one sends ship-ci back to ship before it can reach the merge', async () => {
+  const run = shipping('ship-ci', { pr: 301, checked: { head_sha: 'd6e5c6e0', at: 1, check: 'passed' } })
+  run.orchestrator_pane = 'w1:p1'
+  await ciTransitions([run], async () => ({ bucket: 'pass', headSha: 'd63fe8e0' }), 0)
+  await ciTransitions([run], async () => ({ bucket: 'pass', headSha: 'd63fe8e0' }), CI_SETTLE_MS)
+  expect(run.batch?.ci).toBe('pass')
+  const { gh, asked } = ghFake(null)
+  const result = await evaluateRun(run, gh, CONFIG, async () => true, { stateDir: dir })
+  expect(run.phase).toBe('ship')
+  expect(asked).toEqual([])
+  expect(result.nextPrompt).toContain('# Ship — run r1')
+  expect(result.nextPrompt).not.toContain('CI is red')
 })
 
 test('ship-merge is GitHub\'s fact: the orchestrator\'s background work does not hold it', async () => {

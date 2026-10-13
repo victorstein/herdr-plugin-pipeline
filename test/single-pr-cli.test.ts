@@ -250,15 +250,17 @@ test('a rewind and a fix task while the run ships land against a live supervisor
   }
 })
 
-test('a run rewound to ship forgets the PR it found; to ship-ci, the bucket it read', async () => {
+test('a run rewound to ship forgets the PR it found; to ship-ci, the bucket it read and its head', async () => {
   const run = singlePrRun([{ phase: 'done' }])
   run.phase = 'escalated'
   run.batch!.pr = 301
   run.batch!.ci = 'fail'
+  run.batch!.ci_head = { sha: 'h0', seen_at: 0 }
   run.passes['ship-ci'] = 2
   await saveRun(dir, run)
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'ship-ci', taskId: null })).ok).toBe(true)
   expect((await saved(run)).batch?.ci).toBeNull()
+  expect((await saved(run)).batch?.ci_head).toBeUndefined()
   expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'ship', taskId: null })).ok).toBe(true)
   const after = await saved(run)
   expect(after.batch?.pr).toBeNull()

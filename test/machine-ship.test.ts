@@ -53,10 +53,39 @@ test('ship waits for a check of the PR\'s own head, and for a head past the one 
   expect(advanceRun(unmoved, signals({ batchPr: pr() }))).toBeNull()
 })
 
-test('entering ship-ci forgets the last bucket', () => {
-  const run = fixture('ship', { ci: 'fail', checked: { head_sha: 'h1', at: 1, check: 'passed' } })
-  advanceRun(run, signals({ batchPr: pr() }))
+test('entering ship-ci forgets the last bucket, and the head it was read on', () => {
+  const run = fixture('ship', {
+    ci: 'fail', ci_head: { sha: 'h0', seen_at: 0 }, head_sha_at_entry: 'h0',
+    checked: { head_sha: 'h1', at: 1, check: 'passed' },
+  })
+  expect(advanceRun(run, signals({ batchPr: pr() }))?.phase).toBe('ship-ci')
   expect(run.batch?.ci).toBeNull()
+  expect(run.batch?.ci_head).toBeUndefined()
+  expect(advanceRun(run, signals())).toBeNull()
+})
+
+const checkedAt = (head_sha: string) => ({ checked: { head_sha, at: 1, check: 'passed' as const } })
+
+// Smoke run 16: an empty commit pushed during ship-merge went ship-ci → ship-merge and merged at a head
+// batch-check never recorded, though ship.md says the PR clears only on the head it recorded.
+test('a head CI was read on past the one batch-check recorded sends ship-ci back to ship, green or not', () => {
+  for (const ci of ['pending', 'pass'] as const) {
+    const run = fixture('ship-ci', { pr: 301, ...checkedAt('h1') })
+    run.batch!.ci = ci
+    run.batch!.ci_head = { sha: 'h2', seen_at: 0 }
+    expect(advanceRun(run, signals({ actorIdle: false }))?.phase, ci).toBe('ship')
+    expect(run.history.at(-1)?.why).toBe('head moved to h2 past h1, the head batch-check recorded')
+    expect(counterFor(run, 'ship-ci')).toBe(0)
+  }
+})
+
+test('a red on a moved head is still the PR\'s red: it spends the repair, from the head it failed on', () => {
+  const run = fixture('ship-ci', { pr: 301, ...checkedAt('h1') })
+  run.batch!.ci = 'fail'
+  run.batch!.ci_head = { sha: 'h2', seen_at: 0 }
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h2' }) }))?.phase).toBe('ship')
+  expect(counterFor(run, 'ship-ci')).toBe(1)
+  expect(run.batch?.head_sha_at_entry).toBe('h2')
 })
 
 test('ship-ci passes to ship-merge, and a red one goes back to ship once, from the head it failed on', () => {
@@ -88,9 +117,20 @@ test('ship-merge records the merge and ends the run', () => {
   expect(run.history.at(-1)?.why).toBe('PR #301 squash-merged as m1')
 })
 
-test('a head that moves after CI passed sends ship-merge back to ship-ci', () => {
-  const run = fixture('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 } })
+test('a head that moves after CI passed sends ship-merge back to ship, to be checked before CI', () => {
+  const run = fixture('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 }, ...checkedAt('h1') })
   expect(advanceRun(run, signals({ batchPr: pr() }))).toBeNull()
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h3' }) }))?.phase).toBe('ship')
+  expect(run.history.at(-1)?.why).toBe('head moved to h3 past h1, the head batch-check recorded')
+
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h3' }) }))).toBeNull()
+  run.batch!.checked = { head_sha: 'h3', at: 2, check: 'passed' }
+  expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h3' }) }))?.phase).toBe('ship-ci')
+  expect(counterFor(run, 'ship-ci')).toBe(0)
+})
+
+test('a moved head batch-check already recorded sends ship-merge straight back to ship-ci', () => {
+  const run = fixture('ship-merge', { pr: 301, ci_head: { sha: 'h1', seen_at: 0 }, ...checkedAt('h3') })
   expect(advanceRun(run, signals({ batchPr: pr({ headSha: 'h3' }) }))?.phase).toBe('ship-ci')
   expect(run.history.at(-1)?.why).toBe('head moved to h3 after CI passed on h1')
 })

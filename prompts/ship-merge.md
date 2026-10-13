@@ -16,11 +16,12 @@
   its body holds the rest, one per line. So the release reads the same lines even if release-please
   never finds the PR body.
 - **Green is for {{green_head}}.**{{pinned}} If anything is pushed to `{{batch}}` now, the run goes
-  back to `ship-ci` and you are told again once the new head is green.
+  back to `ship`, to run `{{hpipe}} batch-check` on the new head before CI, and you are told again once
+  that head is green.
 
 This is the last point at which a check a decision ruled "before merge" can still be done.
 
 If GitHub refuses the merge: a required review means getting one, and "branches must be up to date"
-means `gh pr update-branch {{pr}}`, which moves the head back through `ship-ci`. Until PR #{{pr}}
+means `gh pr update-branch {{pr}}`, which moves the head, so the run goes back through `ship`. Until PR #{{pr}}
 merges this run holds the repo, and no other `{{hpipe}} start` can begin here. Merging is yours, not
 the plugin's; nothing merges automatically.
