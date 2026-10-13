@@ -3,8 +3,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { join } from 'node:path'
 import { dispatchLockPath, type DispatchLock, groupExists, stopGroup, takeDispatchLock } from '../src/lib/dispatch-lock'
 import {
-  DispatchInterrupt, dispatchGit, noChildren, runTrackedBootstrap, trapDispatchSignals,
+  DispatchInterrupt, dispatchGit, dispatchHerdr, noChildren, runTrackedBootstrap, trapDispatchSignals,
 } from '../src/lib/dispatch-process'
+import { HERDR_CALL_BOUND_MS } from '../src/lib/dispatch-steps'
+import { Herdr } from '../src/lib/herdr'
 import { newRun, saveRun } from '../src/lib/ledger'
 import { processStartedAtMs } from '../src/lib/pidfile'
 import { repoContext } from '../src/lib/repo'
@@ -72,7 +74,7 @@ test('a signal stops the bootstrap\'s group, SIGKILL included, removes the lock 
   groups.push(proc.pid)
   await Bun.sleep(100)
   const { lock } = await heldLock()
-  const children = { bootstrapPgid: proc.pid, agentStartPgid: null }
+  const children = { ...noChildren(), bootstrapPgid: proc.pid }
   const said: string[] = []
   let exited = null as number | null
   const interrupt = new DispatchInterrupt()
@@ -96,6 +98,55 @@ test('a signal stops the bootstrap\'s group, SIGKILL included, removes the lock 
   void interrupt.gate().then(() => { gated = true })
   await Bun.sleep(20)
   expect(gated).toBe(false)
+})
+
+test('a signal stops a herdr call still in flight, as it stops the bootstrap', async () => {
+  const proc = Bun.spawn(['sleep', '30'], { detached: true, stdout: 'ignore', stderr: 'ignore' })
+  groups.push(proc.pid)
+  const { lock } = await heldLock()
+  const children = noChildren()
+  children.herdrCallPgids.add(proc.pid)
+  let exited = null as number | null
+  const untrap = trapDispatchSignals({
+    lock, children, interrupt: new DispatchInterrupt(), say: () => {},
+    stop: (pgid) => stopGroup(pgid, 300), exit: (code) => { exited = code },
+  })
+  try {
+    process.emit('SIGINT' as NodeJS.Signals)
+    for (let i = 0; i < 40 && exited === null; i++) await Bun.sleep(50)
+  } finally {
+    untrap()
+  }
+  expect(exited).toBe(130)
+  expect(await proc.exited).not.toBe(0)
+  expect(groupExists(proc.pid)).toBe(false)
+})
+
+test('every herdr call a dispatch makes but agent start has a bound, past which the call is killed and fails', async () => {
+  expect(HERDR_CALL_BOUND_MS).toBe(30_000)
+  const bin = tempDir('silent-herdr-')
+  const pids = join(bin, 'pids')
+  writeFileSync(join(bin, 'herdr'), `#!/bin/sh\necho $$ >> '${pids}'\nexec sleep 30\n`)
+  chmodSync(join(bin, 'herdr'), 0o755)
+  const children = noChildren()
+  const herdr = dispatchHerdr(new Herdr(join(bin, 'herdr')), children, 200)
+  const calls: Array<[string, () => Promise<unknown>]> = [
+    ['herdr workspace list', () => herdr.workspaceListing()],
+    ['herdr worktree list', () => herdr.worktreeList('/r')],
+    ['herdr worktree create', () => herdr.worktreeCreate('/r', 'feat/x', 'c0ffee1')],
+    ['herdr pane list', () => herdr.paneListing('w5')],
+    ['herdr agent get', () => herdr.agentPane('hp-1')],
+    ['herdr agent get', () => herdr.agentStatus('w5:p1')],
+    ['herdr pane read', () => herdr.paneReadStyled('w5:p1', 40)],
+  ]
+  for (const [call, make] of calls) {
+    await expect(make(), call).rejects.toThrow(`${call} did not answer within 0.2s and was stopped`)
+  }
+  // A shell killed before its first line records nothing, so only the ones that did are counted.
+  const spawned = readFileSync(pids, 'utf8').trim().split('\n').map(Number)
+  expect(spawned.length).toBeGreaterThan(0)
+  for (const pid of spawned) expect(groupExists(pid)).toBe(false)
+  expect(children.herdrCallPgids.size).toBe(0)
 })
 
 const mkTask = (over: Partial<Task>): Task => ({

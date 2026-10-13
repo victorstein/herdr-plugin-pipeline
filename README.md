@@ -218,9 +218,10 @@ the same command again once that is fixed. Only one dispatch runs in a repo at a
 sessions, and only from a pane of the run's own herdr session. `--ready` also takes any task that
 becomes ready while it runs. SIGTERM, SIGINT or SIGHUP stops a dispatch's bootstrap with it; one
 killed outright leaves its lock, and the next dispatch in the repo stops that bootstrap and takes the
-lock over. While one is under way, `hpipe status` says what it is doing rather than asking for an
-agent to be started. Beside a supervisor that predates it, `--task` and `--ready` refuse, naming its
-pid: restart it (see **Upgrading**), or use the manual fallback.
+lock over. A herdr call that hangs past 30 seconds (90 for `agent start`) is stopped, and the dispatch
+stops at that step and lets go of the lock. While a dispatch is under way, `hpipe status` says what it
+is doing rather than asking for an agent to be started. Beside a supervisor that predates it, `--task`
+and `--ready` refuse, naming its pid: restart it (see **Upgrading**), or use the manual fallback.
 
 The manual fallback is the `dispatch, in order:` block `hpipe task` and the `Dispatch tN` prompt print,
 ending in:

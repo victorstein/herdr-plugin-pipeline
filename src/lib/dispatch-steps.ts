@@ -6,8 +6,8 @@ import type { CheckRun } from './check'
 import { type DispatchBase, describeBase } from './dispatch-base'
 import type { DispatchStep } from './dispatch-lock'
 import {
-  type AgentStartRequest, type CallResult, type CreatedWorktree, type Listing, type PaneInfo, paneHasNoAgent,
-  type WorkspaceInfo, type WorktreeEntry,
+  type AgentStartRequest, type CallResult, type CreatedWorktree, HerdrTimeout, type Listing, type PaneInfo,
+  paneHasNoAgent, type WorkspaceInfo, type WorktreeEntry,
 } from './herdr'
 import { taskPhaseIsTerminal } from './ledger'
 import { isAgentReady } from './machine'
@@ -22,6 +22,8 @@ export const BOOTSTRAP_DEADLINE_MS = 20 * 60_000
 export const AGENT_START_TIMEOUT_MS = 80_000
 /** Past herdr's own timeout, for a CLI that never returns. */
 export const AGENT_START_BOUND_MS = 90_000
+/** Every other herdr call: each answers in well under a second unless herdr is wedged. */
+export const HERDR_CALL_BOUND_MS = 30_000
 /** The supervisor binds a new worktree within a tick. */
 const BINDING_WAIT_MS = 15_000
 const READY_WAIT_MS = 30_000
@@ -98,11 +100,24 @@ interface Placed {
 
 const nothingStarted = (why: string): string => `${why}; nothing was started`
 
+/** A herdr call that timed out stops whichever step made it. */
+function asStop(error: unknown, step: DispatchStep): Stop | null {
+  if (error instanceof Stop) return error
+  if (error instanceof HerdrTimeout) return new Stop(step, `${error.message}; run this again once herdr answers`)
+  return null
+}
+
 class TaskDispatch {
   private readonly id: string
+  private step: DispatchStep = 'base'
 
   constructor(private run: Run, private task: Task, private readonly deps: DispatchDeps) {
     this.id = task.task_id
+  }
+
+  private async enter(step: DispatchStep): Promise<void> {
+    this.step = step
+    await this.deps.at(this.id, step)
   }
 
   private line(step: DispatchStep, text: string): void {
@@ -125,8 +140,9 @@ class TaskDispatch {
       const startedHere = await this.agent(placed, pane.paneId)
       await this.brief(pane.paneId, startedHere)
     } catch (error) {
-      if (!(error instanceof Stop)) throw error
-      deps.say(`stopped ${this.id} at ${error.step}: ${error.why}`)
+      const stop = asStop(error, this.step)
+      if (stop === null) throw error
+      deps.say(`stopped ${this.id} at ${stop.step}: ${stop.why}`)
       return false
     }
     deps.say(`dispatched ${this.id}`)
@@ -134,7 +150,7 @@ class TaskDispatch {
   }
 
   private async base(): Promise<string> {
-    await this.deps.at(this.id, 'base')
+    await this.enter('base')
     const base = await this.deps.base(this.run, this.task)
     if (base.fetchError !== null) {
       throw new Stop('base', `the fetch failed (${base.fetchError}), and a stale base would cut the worktree without ` +
@@ -146,7 +162,7 @@ class TaskDispatch {
   }
 
   private async worktree(base: string): Promise<Placed> {
-    await this.deps.at(this.id, 'worktree')
+    await this.enter('worktree')
     if (this.task.workspace_id !== null) return this.boundWorktree()
 
     const worktrees = await this.deps.herdr.worktreeList(this.run.repo_root)
@@ -184,9 +200,9 @@ class TaskDispatch {
   /** Both of herdr's lists must agree with the ledger's binding. */
   private async confirm(step: DispatchStep, workspaceId: string, checkout: string): Promise<void> {
     const { task, run } = this
-    const [workspaces, worktrees] = await Promise.all([
-      this.deps.herdr.workspaceListing(), this.deps.herdr.worktreeList(run.repo_root),
-    ])
+    // One at a time: a call still running when the other timed out would outlive the dispatch.
+    const workspaces = await this.deps.herdr.workspaceListing()
+    const worktrees = await this.deps.herdr.worktreeList(run.repo_root)
     if (!workspaces.ok) {
       throw new Stop(step, nothingStarted(`herdr workspace list could not be read (${workspaces.reason})`))
     }
@@ -285,7 +301,7 @@ class TaskDispatch {
   }
 
   private async pane(placed: Placed): Promise<{ paneId: string; agentAlready: boolean }> {
-    await this.deps.at(this.id, 'pane')
+    await this.enter('pane')
     const { created } = placed
     if (created !== null) {
       this.line('worktree', `created ${created.workspaceId} at ${created.path}, pane ${created.paneId}`)
@@ -354,7 +370,7 @@ class TaskDispatch {
   }
 
   private async bootstrap(placed: Placed, paneId: string, agentAlready: boolean): Promise<void> {
-    await this.deps.at(this.id, 'bootstrap')
+    await this.enter('bootstrap')
     if (agentAlready) {
       this.line('bootstrap', `skipped: an agent already runs in ${paneId}, so the checkout was set up before it ` +
         'started')
@@ -406,7 +422,7 @@ class TaskDispatch {
 
   /** Whether this run started the agent: only then does `working` prove nothing about a brief. */
   private async agent(placed: Placed, paneId: string): Promise<boolean> {
-    await this.deps.at(this.id, 'agent')
+    await this.enter('agent')
     const panes = await this.deps.herdr.paneListing(placed.workspaceId)
     if (!panes.ok) {
       throw new Stop('agent', nothingStarted(`herdr pane list --workspace ${placed.workspaceId} could not be read ` +
@@ -470,7 +486,7 @@ class TaskDispatch {
    * brief twice, and no worker finishes research in the seconds since a send.
    */
   private async brief(paneId: string, startedHere: boolean): Promise<void> {
-    await this.deps.at(this.id, 'brief')
+    await this.enter('brief')
     if (!(await this.reread())) throw new Stop('brief', `${this.id} is gone from the ledger; nothing was sent`)
     // The supervisor clears the flag on `working`, which an agent this run just
     // started can read before any brief has reached it.

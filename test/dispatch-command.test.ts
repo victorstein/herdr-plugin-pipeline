@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cmdDispatchSteps, cmdStatus, type DispatchWiring, recordWorkerPane } from '../src/cli'
 import { dispatchLockPath, type DispatchLock, readDispatchLocks, takeDispatchLock } from '../src/lib/dispatch-lock'
+import { dispatchHerdr, noChildren } from '../src/lib/dispatch-process'
 import type { DispatchHerdr } from '../src/lib/dispatch-steps'
-import type { CallResult, CreatedWorktree } from '../src/lib/herdr'
+import { type CallResult, type CreatedWorktree, Herdr } from '../src/lib/herdr'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
 import {
   BEFORE_MERGE_CAPABILITY, processStartedAtMs, SHARED_PATHS_CAPABILITY, SUPERVISOR_CAPABILITIES, type SupervisorState,
@@ -386,4 +387,18 @@ test('after a signal, a killed child\'s answer is not judged: the dispatch waits
   expect(w.calls).toContain('start hp-1')
   expect(settled).toBe(false)
   expect(w.said.some((line) => line.startsWith('stopped t1'))).toBe(false)
+})
+
+test('a herdr that never answers stops the dispatch at its step, with the lock let go', async () => {
+  const run = await seed([owed('t1')])
+  const silent = join(dir, 'silent-herdr')
+  writeFileSync(silent, '#!/bin/sh\nexec sleep 30\n')
+  chmodSync(silent, 0o755)
+  const w = wired({ herdr: dispatchHerdr(new Herdr(silent), noChildren(), 200) })
+  const result = await cmdDispatchSteps(ctx(), input('t1'), w.wiring)
+  expect(result.ok).toBe(false)
+  expect(w.said.at(-1)).toBe('stopped t1 at worktree: herdr worktree list did not answer within 0.2s and was stopped; ' +
+    'run this again once herdr answers')
+  expect(existsSync(dispatchLockPath(dir, run.repo_key))).toBe(false)
+  expect(w.traps).toEqual(['on', 'off'])
 })

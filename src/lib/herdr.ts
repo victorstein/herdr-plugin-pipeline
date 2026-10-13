@@ -177,12 +177,39 @@ export interface PluginPaneOpened {
   plugin_pane?: { pane?: { pane_id?: string } }
 }
 
-export class Herdr {
-  constructor(private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr') {}
+/** Thrown by a bounded `Herdr` once a call outlives its bound and its process group is killed. */
+export class HerdrTimeout extends Error {
+  constructor(readonly call: string, readonly boundMs: number) {
+    super(`${call} did not answer within ${boundMs / 1000}s and was stopped`)
+    this.name = 'HerdrTimeout'
+  }
+}
 
-  private async spawn(
-    args: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number } | { error: unknown }> {
+type Spawned = { stdout: string; stderr: string; exitCode: number } | { error: unknown }
+
+interface CallBound {
+  ms: number
+  /** The process group of each call in flight, so a caller interrupted mid-call can stop it. */
+  running: Set<number>
+}
+
+export class Herdr {
+  constructor(
+    private readonly bin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+    private readonly bound: CallBound | null = null,
+  ) {}
+
+  /**
+   * Every call but `agentStart`, which takes its own bound, killed past `ms`. A
+   * timed-out call throws `HerdrTimeout` where the unbounded one would never
+   * return: answered as a failure, it would pass for "no agent" or an empty screen.
+   */
+  bounded(ms: number, running: Set<number> = new Set()): Herdr {
+    return new Herdr(this.bin, { ms, running })
+  }
+
+  private async spawn(args: string[]): Promise<Spawned> {
+    if (this.bound !== null) return this.spawnBounded(args, this.bound)
     // Bun.spawn throws synchronously on a missing binary. Callers rely on these
     // methods never throwing, so a bad HERDR_BIN_PATH must degrade to a failed
     // CallResult rather than crash the supervisor loop.
@@ -194,6 +221,25 @@ export class Herdr {
       return { stdout, stderr, exitCode: await proc.exited }
     } catch (error) {
       return { error }
+    }
+  }
+
+  private async spawnBounded(args: string[], bound: CallBound): Promise<Spawned> {
+    let pgid: number | null = null
+    try {
+      const ran = await runBounded([this.bin, ...args], {
+        timeoutMs: bound.ms,
+        onSpawn: (pid) => {
+          pgid = pid
+          bound.running.add(pid)
+        },
+      })
+      if (ran.timedOut) throw new HerdrTimeout(`herdr ${args.slice(0, 2).join(' ')}`, bound.ms)
+      // runBounded's code for a binary it could not spawn: a real exit is 0–255.
+      if (ran.code === -1) return { error: ran.stderr }
+      return { stdout: ran.stdout, stderr: ran.stderr, exitCode: ran.code }
+    } finally {
+      if (pgid !== null) bound.running.delete(pgid)
     }
   }
 

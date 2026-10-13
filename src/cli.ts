@@ -37,7 +37,7 @@ import {
   dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
 } from './lib/dispatch-process'
 import {
-  type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask,
+  type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask, HERDR_CALL_BOUND_MS,
 } from './lib/dispatch-steps'
 import {
   allOrchestratorPanes, BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun,
@@ -1143,16 +1143,18 @@ function realDispatchWiring(ctx: Ctx): DispatchWiring {
   const children = noChildren()
   const interrupt = new DispatchInterrupt()
   const say = (line: string): void => { console.log(line) }
+  const boundedReads = herdr.bounded(HERDR_CALL_BOUND_MS, children.herdrCallPgids)
   return {
     herdr: dispatchHerdr(herdr, children),
     git: dispatchGit,
     base: freshDispatchBase,
     runBootstrap: (checkout, logPath, lock) => runTrackedBootstrap(checkout, logPath, lock, children),
     handOver: {
+      // Unbounded here: herdr's own --timeout ends it, and a send cut short may still have landed.
       send: (paneId, text) => herdr.agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS),
       recordPane: recordWorkerPane,
       claim: cliClaimBead(ctx.stateDir),
-      readPaneLimit: cliReadPaneLimit,
+      readPaneLimit: (paneId) => readLimit(boundedReads, paneId),
     },
     say,
     now: Date.now,

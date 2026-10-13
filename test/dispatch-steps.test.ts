@@ -7,7 +7,10 @@ import type { DispatchBase } from '../src/lib/dispatch-base'
 import {
   AGENT_START_TIMEOUT_MS, type DispatchDeps, dispatchTask, type DispatchHerdr,
 } from '../src/lib/dispatch-steps'
-import type { AgentStartRequest, CallResult, CreatedWorktree, Listing, PaneInfo, WorkspaceInfo, WorktreeEntry } from '../src/lib/herdr'
+import {
+  type AgentStartRequest, type CallResult, type CreatedWorktree, HerdrTimeout, type Listing, type PaneInfo,
+  type WorkspaceInfo, type WorktreeEntry,
+} from '../src/lib/herdr'
 import { newRun } from '../src/lib/ledger'
 import type { AgentStatus, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
@@ -624,4 +627,21 @@ test('the pane guard names --pane as the way to give the task its own pane', asy
   const w = bound({}, { orchestratorPanes: ['w5:p1'] })
   expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
   expect(w.said.at(-1)).toContain("start t1's agent in its own pane by hand and `hp dispatch --task t1 --pane <pane>`")
+})
+
+test('a herdr call that outlived its bound stops the step it was in, and nothing after it runs', async () => {
+  const wedged = (call: string) => async (): Promise<never> => { throw new HerdrTimeout(call, 30_000) }
+  const listing = world()
+  listing.deps.herdr = { ...listing.deps.herdr, worktreeList: wedged('herdr worktree list') }
+  expect(await dispatchTask(listing.run, listing.task, listing.deps)).toBe(false)
+  expect(listing.said.at(-1)).toBe('stopped t1 at worktree: herdr worktree list did not answer within 30s and was ' +
+    'stopped; run this again once herdr answers')
+  expect(listing.calls.some((c) => c.startsWith('worktree create'))).toBe(false)
+
+  const status = world()
+  status.deps.herdr = { ...status.deps.herdr, agentStatus: wedged('herdr agent get') }
+  expect(await dispatchTask(status.run, status.task, status.deps)).toBe(false)
+  expect(status.said.at(-1)).toBe('stopped t1 at brief: herdr agent get did not answer within 30s and was stopped; ' +
+    'run this again once herdr answers')
+  expect(status.calls.some((c) => c.startsWith('brief'))).toBe(false)
 })

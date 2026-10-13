@@ -1,7 +1,9 @@
 import { BOOTSTRAP_REL } from './bootstrap'
 import { type CheckRun, runLogged } from './check'
 import { type HeldDispatchLock, stopGroup } from './dispatch-lock'
-import { AGENT_START_BOUND_MS, BOOTSTRAP_DEADLINE_MS, type DispatchGit, type DispatchHerdr } from './dispatch-steps'
+import {
+  AGENT_START_BOUND_MS, BOOTSTRAP_DEADLINE_MS, type DispatchGit, type DispatchHerdr, HERDR_CALL_BOUND_MS,
+} from './dispatch-steps'
 import type { Herdr } from './herdr'
 import { processStartedAtMs } from './pidfile'
 import { isAncestor } from './sync-walk'
@@ -10,19 +12,28 @@ import { isAncestor } from './sync-walk'
 export interface DispatchChildren {
   bootstrapPgid: number | null
   agentStartPgid: number | null
+  herdrCallPgids: Set<number>
 }
 
-export const noChildren = (): DispatchChildren => ({ bootstrapPgid: null, agentStartPgid: null })
+export const noChildren = (): DispatchChildren =>
+  ({ bootstrapPgid: null, agentStartPgid: null, herdrCallPgids: new Set() })
 
-export function dispatchHerdr(herdr: Herdr, children: DispatchChildren): DispatchHerdr {
+/**
+ * Each call is bounded because the repo's dispatch lock is held, and the task's
+ * probes suppressed, for as long as one hangs.
+ */
+export function dispatchHerdr(
+  herdr: Herdr, children: DispatchChildren, callBoundMs: number = HERDR_CALL_BOUND_MS,
+): DispatchHerdr {
+  const bounded = herdr.bounded(callBoundMs, children.herdrCallPgids)
   return {
-    workspaceListing: () => herdr.workspaceListing(),
-    worktreeList: (repoRoot) => herdr.worktreeList(repoRoot),
-    worktreeCreate: (repoRoot, branch, base) => herdr.worktreeCreate(repoRoot, branch, base),
-    paneListing: (workspaceId) => herdr.paneListing(workspaceId),
-    agentPane: (name) => herdr.agentPane(name),
-    agentStatus: (paneId) => herdr.agentStatus(paneId),
-    paneReadStyled: (paneId, lines) => herdr.paneReadStyled(paneId, lines),
+    workspaceListing: () => bounded.workspaceListing(),
+    worktreeList: (repoRoot) => bounded.worktreeList(repoRoot),
+    worktreeCreate: (repoRoot, branch, base) => bounded.worktreeCreate(repoRoot, branch, base),
+    paneListing: (workspaceId) => bounded.paneListing(workspaceId),
+    agentPane: (name) => bounded.agentPane(name),
+    agentStatus: (paneId) => bounded.agentStatus(paneId),
+    paneReadStyled: (paneId, lines) => bounded.paneReadStyled(paneId, lines),
     agentStart: async (request) => {
       try {
         return await herdr.agentStart(request, AGENT_START_BOUND_MS, (pid) => { children.agentStartPgid = pid })
@@ -117,17 +128,18 @@ export interface Trap {
 }
 
 /**
- * SIGTERM, SIGINT and SIGHUP stop the bootstrap's group and a running `agent
- * start`, remove the lock, and exit 128+n. Nobody watches a background shell, so
- * a dispatch that died quietly would leave both running. An `agent start` herdr
- * finishes anyway is found in the pane by the next run.
+ * SIGTERM, SIGINT and SIGHUP stop the bootstrap's group, a running `agent start`
+ * and any other herdr call in flight, remove the lock, and exit 128+n. Each runs
+ * in a group of its own, and nobody watches a background shell, so a dispatch
+ * that died quietly would leave them running. An `agent start` herdr finishes
+ * anyway is found in the pane by the next run.
  */
 export function trapDispatchSignals(trap: Trap): () => void {
   const stop = trap.stop ?? ((pgid: number) => stopGroup(pgid))
   const exit = trap.exit ?? ((code: number) => process.exit(code))
   const handle = async (signal: string): Promise<void> => {
     if (!trap.interrupt.request()) return
-    const running = [trap.children.bootstrapPgid, trap.children.agentStartPgid]
+    const running = [trap.children.bootstrapPgid, trap.children.agentStartPgid, ...trap.children.herdrCallPgids]
       .filter((pgid): pgid is number => pgid !== null)
     await Promise.all(running.map(stop))
     const { task, step } = trap.lock.record

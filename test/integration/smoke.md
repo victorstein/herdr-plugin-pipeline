@@ -1583,6 +1583,8 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
   worker is working on it`; the last line is `dispatched t1, t2, t3`;
 - one pane per new workspace, each worker working on its brief (`herdr pane read`), and
   `hpipe show --task tN` names the workspace and pane within a tick;
+- no line says `did not answer within 30s`: every herdr call but `agent start` runs bounded, in a
+  process group of its own, and a healthy herdr answers well inside the bound;
 - `$STATE/dispatch/` is empty once it ends.
 
 ### 12d. Stops, and re-runs that skip what is done

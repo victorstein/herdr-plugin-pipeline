@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
-import { Herdr, liveAgentIn } from '../src/lib/herdr'
+import { Herdr, HerdrTimeout, liveAgentIn } from '../src/lib/herdr'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'herdr-')) })
@@ -304,4 +304,52 @@ test('agentPane names the pane an agent of that name runs in, and nothing when h
   const herdr = new Herdr(bin)
   expect(await herdr.agentPane('hp-1')).toBe('w3:p1')
   expect(await herdr.agentPane('hp-2')).toBeNull()
+})
+
+/** A herdr that never answers, and leaves the pid of each call in `pids`. */
+function silentHerdr(pids: string): string {
+  const path = join(dir, 'silent-bin')
+  writeFileSync(path, `#!/bin/sh\necho $$ >> '${pids}'\nexec sleep 30\n`)
+  chmodSync(path, 0o755)
+  return path
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('a bounded herdr kills a call that outlives its bound, and throws rather than pass it off as an answer', async () => {
+  const pids = join(dir, 'pids')
+  const running = new Set<number>()
+  const herdr = new Herdr(silentHerdr(pids)).bounded(300, running)
+  const started = Date.now()
+  const call = herdr.agentPane('hp-1')
+  await Bun.sleep(100)
+  expect(running.size).toBe(1)
+  await expect(call).rejects.toThrow(new HerdrTimeout('herdr agent get', 300))
+  await expect(herdr.agentPane('hp-1')).rejects.toThrow('herdr agent get did not answer within 0.3s and was stopped')
+  expect(Date.now() - started).toBeLessThan(5_000)
+  const spawned = readFileSync(pids, 'utf8').trim().split('\n').map(Number)
+  expect(spawned.length).toBeGreaterThan(0)
+  for (const pid of spawned) expect(alive(pid)).toBe(false)
+  expect(running.size).toBe(0)
+})
+
+test('a bounded herdr answers within its bound as the unbounded one does, and a missing binary still fails softly', async () => {
+  const bin = await makeFakeBin(dir, {
+    'agent get hp-1': { result: { agent: { name: 'hp-1', pane_id: 'w3:p1', agent_status: 'idle' } } },
+    'agent get hp-2': { error: { code: 'agent_not_found', message: 'none' } },
+    'pane read': 'screen text',
+  })
+  const herdr = new Herdr(bin).bounded(10_000)
+  expect(await herdr.agentPane('hp-1')).toBe('w3:p1')
+  expect(await herdr.agentPane('hp-2')).toBeNull()
+  expect(await herdr.paneReadStyled('w3:p1', 40)).toBe('screen text')
+  expect(await new Herdr(join(dir, 'no-such-binary')).bounded(10_000).agentPrompt('w1:p1', 'hello'))
+    .toMatchObject({ ok: false, code: 'spawn_failed' })
 })
