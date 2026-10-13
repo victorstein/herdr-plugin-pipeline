@@ -1326,7 +1326,7 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
   default branch at the squash commit, `git status` clean (the branch review was written to
   `$STATE/runs/$SMOKE/<run>.reviews/`, never into the repo), and the batch branch on origin only when
   a ruleset kept it. When GitHub deleted the batch
-  on merge, the notice carries `git -C <repo> fetch --prune origin  # origin no longer has batch/<…>`,
+  on merge, the notice carries `git -C <repo> branch -dr origin/batch/<…>  # origin no longer has it`,
   and after it `git branch -r` lists no `origin/batch/<…>`; a per-task run's notice does the same for
   merged PR branches GitHub deleted.
 

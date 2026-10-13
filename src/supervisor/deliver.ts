@@ -835,8 +835,8 @@ async function staleRemoteRefLines(run: Run, repo: string, branches: string[]): 
     if (onOrigin.ok && onOrigin.sha === null) stale.push(branch)
   }
   if (stale.length === 0) return []
-  const refs = stale.length === 1 ? 'its stale origin/ ref' : 'their stale origin/ refs'
-  return [`  git -C ${repo} fetch --prune origin  # origin no longer has ${stale.join(', ')}; this drops ${refs}`]
+  const refs = stale.map((branch) => shellWord(`origin/${branch}`)).join(' ')
+  return [`  git -C ${repo} branch -dr ${refs}  # origin no longer has ${stale.length === 1 ? 'it' : 'them'}`]
 }
 
 /** Only a branch whose head is on the batch is safe to force-delete: a squash merge leaves none of them merged. */

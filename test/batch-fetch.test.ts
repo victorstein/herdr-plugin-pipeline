@@ -205,8 +205,7 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
   expect(later).not.toContain('pull --ff-only')
   expect(later).not.toContain('origin keeps')
   // The trial's batch was deleted by GitHub on merge, and its origin/ ref stayed. Measured on a live run.
-  expect(later).toContain(`  git -C '${clone}' fetch --prune origin  # origin no longer has batch/x; this drops ` +
-    'its stale origin/ ref')
+  expect(later).toContain(`  git -C '${clone}' branch -dr origin/batch/x  # origin no longer has it`)
   run.batch.merge_commit = 'f00dfeed00000000000000000000000000000000'
   expect(await renderRunPhasePrompt(run, ROOT)).toContain(`  git -C '${clone}' fetch origin main:main  # main predates`)
 
@@ -260,10 +259,9 @@ test('a per-task run\'s done notice cleans up the branches of merged PRs and the
   const pruneOnly = await renderRunPhasePrompt(run, join(import.meta.dir, '..'))
   expect(pruneOnly.slice(pruneOnly.indexOf('Clean up when you are done with it:'))).toBe([
     'Clean up when you are done with it:',
-    `  git -C '${clone}' fetch --prune origin  # origin no longer has t1-branch, t3-branch; this drops their ` +
-      'stale origin/ refs',
+    `  git -C '${clone}' branch -dr origin/t1-branch origin/t3-branch  # origin no longer has them`,
   ].join('\n'))
 
-  git(['fetch', '-q', '--prune', 'origin'], clone)
+  git(['branch', '-dr', 'origin/t1-branch', 'origin/t3-branch'], clone)
   expect(await renderRunPhasePrompt(run, join(import.meta.dir, '..'))).not.toContain('Clean up')
 })
