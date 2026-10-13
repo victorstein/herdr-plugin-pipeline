@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
-import { processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
+import { honours, processStartedAtMs, readPid, writePid } from '../src/lib/pidfile'
 import { CURRENT_SCHEMAS } from '../src/lib/ledger'
 import { claimSupervisor, eachIsolated, sharedRead, supervisorSelf } from '../src/supervisor/main'
 import type { SupervisorPid } from '../src/lib/types'
@@ -141,4 +141,12 @@ test('a claiming supervisor records every schema it drives, so start can refuse 
   expect(me.schemas).toEqual([...CURRENT_SCHEMAS])
   expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
   expect((await readPid(dir, 'personal'))?.schemas).toEqual([3, 4])
+})
+
+test('a claiming supervisor records that it honours before-merge checks, so hold can refuse beside an old one', async () => {
+  const me = supervisorSelf({ pid: 4243, panePid: 223, startedAtMs: 1, session: 'personal', socketPath: '/s', paneId: '' })
+  expect(await claimSupervisor(dir, new Herdr('/nonexistent'), me, () => {})).toBe(true)
+  const recorded = (await readPid(dir, 'personal'))!
+  expect(honours(recorded, 'before-merge')).toBe(true)
+  expect(honours({ ...recorded, capabilities: undefined }, 'before-merge')).toBe(false)
 })

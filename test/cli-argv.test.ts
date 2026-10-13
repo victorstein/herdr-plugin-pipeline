@@ -223,7 +223,7 @@ test('a command that resolves a run is assumed to need the caller repo', () => {
 const SUBCOMMANDS = [
   'start', 'task', 'brief', 'show', 'dispatch', 'status', 'drain', 'rewind', 'release',
   'decide', 'answer', 'escalate', 'tier', 'resume', 'abort', 'forget', 'close', 'bead', 'next',
-  'discover', 'discoveries',
+  'discover', 'discoveries', 'hold', 'confirm',
 ]
 
 test('--help and -h print that subcommand\'s usage before any side effect, from anywhere', () => {
@@ -512,4 +512,26 @@ test('start --single-pr --batch-branch takes the flags out of the title and reco
   expect(run.batch.branch).toBe('batch/argv')
 
   expect(hpipe(['start', 'x', '--single-pr', '--batch-branch'], fixture()).out).toContain('--batch-branch needs a value')
+})
+
+test('each --before-merge is one whole check, commas and a help flag included', () => {
+  const f = started()
+  expect(hpipe([...TASK], f).code).toBe(0)
+  const env = { ...f.env, HERDR_PANE_ID: 'w1:p1' }
+  const proc = Bun.spawnSync(['bun', 'run', CLI, 'hold', '--task', 't1', '--before-merge', 'the menu, still, closes',
+    '--before-merge', '-h'], { cwd: f.repo, env, stdout: 'pipe', stderr: 'pipe' })
+  const out = proc.stdout.toString() + proc.stderr.toString()
+  expect(proc.exitCode, out).toBe(0)
+  expect(out).toContain("c1 recorded on t1: t1's PR does not merge until the human confirms: the menu, still, closes")
+  expect(out).toContain("c2 recorded on t1: t1's PR does not merge until the human confirms: -h")
+  expect(out).not.toContain('usage:')
+})
+
+test('a --waive or --failed with no text is refused, not read as a confirmation', () => {
+  const f = started()
+  for (const ruling of ['--waive', '--failed']) {
+    const r = hpipe(['confirm', '--check', 'c1', '--by', 'human', ruling], f)
+    expect(r.code, ruling).toBe(1)
+    expect(r.out, ruling).toContain(`${ruling} needs`)
+  }
 })

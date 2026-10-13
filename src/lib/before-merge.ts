@@ -120,6 +120,12 @@ export function heldForTheHuman(run: Run, task: Task): boolean {
   return modeOf(run) === 'per-task' && task.phase === 'merge' && runIsDriven(run) && owedAt(run, task).length > 0
 }
 
+/** Every check the run still owes the human, at whichever gate it holds. */
+export function owedInRun(run: Run): OwedCheck[] {
+  if (modeOf(run) === 'single-pr') return owedAt(run, null)
+  return run.tasks.flatMap((task) => owedAt(run, task))
+}
+
 /** What keeps a per-task run's `execute` from finishing, whatever route took a merged task past its gate. */
 export function mergedWithCheckOwed(run: Run): Task[] {
   if (modeOf(run) !== 'per-task') return []
@@ -140,10 +146,12 @@ const headName = (head: string | null): string => (head === null ? 'no recorded 
 
 const minutesSince = (at: number, now: number): number => Math.max(0, Math.floor((now - at) / 60_000))
 
-/** `c1 (t1)` for a single-PR task check, whose gate is the run's; `c1` otherwise. */
-export function checkLabel(run: Run, held: HeldCheck): string {
-  return held.task !== null && modeOf(run) === 'single-pr' ? `${held.check.id} (${held.task.task_id})` : held.check.id
-}
+export const checkName = (held: HeldCheck): string =>
+  (held.task === null ? held.check.id : `${held.check.id} (${held.task.task_id})`)
+
+/** `c1 (t1)` for a single-PR task check, whose gate is the run's; a per-task gate holds one task's checks only. */
+const gateLabel = (run: Run, held: HeldCheck): string =>
+  (modeOf(run) === 'single-pr' ? checkName(held) : held.check.id)
 
 export const fromDecision = (check: BeforeMergeCheck): string =>
   (check.decision === undefined ? '' : ` (from ${check.decision})`)
@@ -186,7 +194,7 @@ function sinceLastRuling(state: OwedState): string {
 }
 
 function owedLines(run: Run, owed: OwedCheck[]): string {
-  return owed.map((o) => `- ${checkLabel(run, o)}: ${o.check.check}${fromDecision(o.check)}${sinceLastRuling(o.state)}`)
+  return owed.map((o) => `- ${gateLabel(run, o)}: ${o.check.check}${fromDecision(o.check)}${sinceLastRuling(o.state)}`)
     .join('\n')
 }
 
@@ -243,7 +251,7 @@ function batchBuild(run: Run, batch: Batch, head: string | null): string {
 
 function failedRoute(run: Run, owed: OwedCheck[], hpipe: string): string {
   const failed = owed.flatMap((o) => (o.state.kind === 'waiting-on-a-fix'
-    ? [`${checkLabel(run, o)} failed on ${headName(o.state.ruling.head)}`]
+    ? [`${gateLabel(run, o)} failed on ${headName(o.state.ruling.head)}`]
     : []))
   if (failed.length === 0) return ''
   return `\n\n${failed.join(' and ')}, so this hold also waits on a fix, and the fix is yours, before step 2: ` +
@@ -282,7 +290,7 @@ export function holdPromptVars(run: Run, task: Task | null, owed: OwedCheck[], h
 
 /** `{{before_merge}}` of ship-merge.md: what the human ruled, once nothing is owed. */
 export function rulingsNote(run: Run): string {
-  const rulings = checksIn(run).map((held) => `${checkLabel(run, held)} ${stateClause(checkState(run, held))}`)
+  const rulings = checksIn(run).map((held) => `${checkName(held)} ${stateClause(checkState(run, held))}`)
   return rulings.length === 0 ? '' : `\n\nBefore merge: ${rulings.join('; ')}.`
 }
 

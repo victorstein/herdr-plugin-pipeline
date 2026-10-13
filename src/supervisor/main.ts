@@ -7,7 +7,7 @@ import { Gh } from '../lib/gh'
 import { beadClaimants } from '../lib/held'
 import { Herdr, liveAgentIn } from '../lib/herdr'
 import {
-  claimPid, clearPid, clearStalePid, processStartedAtMs, supervisorState,
+  claimPid, clearPid, clearStalePid, processStartedAtMs, SUPERVISOR_CAPABILITIES, supervisorState,
 } from '../lib/pidfile'
 import { drain } from '../lib/queue'
 import {
@@ -155,6 +155,7 @@ export function supervisorSelf(input: {
   return {
     pid: input.pid, pane_pid: input.panePid, started_at_ms: input.startedAtMs, session: input.session,
     socket_path: input.socketPath, pane_id: input.paneId, schemas: [...CURRENT_SCHEMAS],
+    capabilities: [...SUPERVISOR_CAPABILITIES],
   }
 }
 

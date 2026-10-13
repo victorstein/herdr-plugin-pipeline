@@ -61,6 +61,17 @@ export function drivenSchemas(info: SupervisorPid): number[] {
   return info.schemas ?? [3]
 }
 
+/**
+ * What this release's supervisor honours, so a newer CLI can refuse what an older
+ * supervisor would undo: one that predates before-merge checks hands out the merge
+ * command whatever is owed.
+ */
+export const SUPERVISOR_CAPABILITIES: readonly string[] = ['before-merge']
+
+export function honours(info: SupervisorPid, capability: string): boolean {
+  return (info.capabilities ?? []).includes(capability)
+}
+
 export async function supervisorState(
   stateDir: string, session: SessionKey,
 ): Promise<SupervisorState> {
