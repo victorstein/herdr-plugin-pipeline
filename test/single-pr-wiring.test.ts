@@ -118,7 +118,7 @@ async function startedRun(taskIds: string[]) {
   writeFileSync(join(clone, '.claude', 'pipeline-check'), '#!/bin/sh\ntest ! -e broken.txt\n')
   chmodSync(join(clone, '.claude', 'pipeline-check'), 0o755)
   git(['add', '-A'], clone)
-  git(['commit', '-qm', 'chore: declare the check'], clone)
+  git(['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-qm', 'chore: declare the check'], clone)
   git(['push', '-q', 'origin', 'HEAD:main'], clone)
 
   const started = await cmdStart(ctx(), {
