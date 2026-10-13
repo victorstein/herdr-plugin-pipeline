@@ -355,6 +355,23 @@ test('a merged task that owes a check cannot be rewound past its merge, nor clos
   expect(taskOf(await saved(run)).phase).toBe('merge')
 })
 
+test('a merged task that owes a check cannot be rewound to a phase that forgets its merge, only back to merge', async () => {
+  for (const phase of ['implement', 'research', 'pr-review', 'ci']) {
+    const run = await seeded(perTaskRun([heldTask({ merged_at_ms: 5, before_merge: [checkOf('c1')] })]))
+    const out = await cmdRewind(ctx(), { runId: run.run_id, phase, taskId: 't1' })
+    expect(out.ok, phase).toBe(false)
+    expect(out.text, phase).toContain(`a rewind to ${phase} would forget that merge`)
+    expect(taskOf(await saved(run))).toMatchObject({ phase: 'merge', merged_at_ms: 5, pr: 255 })
+  }
+  const run = await seeded(perTaskRun([heldTask({ merged_at_ms: 5, before_merge: [checkOf('c1')] })]))
+  expect((await cmdRewind(ctx(), { runId: run.run_id, phase: 'merge', taskId: 't1' })).ok).toBe(true)
+  expect(taskOf(await saved(run)).pr).toBe(255)
+
+  const unmerged = await seeded(perTaskRun([heldTask({ before_merge: [checkOf('c1')] })]))
+  expect((await cmdRewind(ctx(), { runId: unmerged.run_id, phase: 'implement', taskId: 't1' }, async () => false)).ok)
+    .toBe(true)
+})
+
 test('a rewind asks GitHub whether an unrecorded merge happened, and refuses on one', async () => {
   const run = await seeded(perTaskRun([heldTask({ before_merge: [checkOf('c1')] })]))
   const merged = await cmdRewind(ctx(), { runId: run.run_id, phase: 'done', taskId: 't1' }, async () => true)

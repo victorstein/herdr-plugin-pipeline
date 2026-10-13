@@ -1282,14 +1282,19 @@ export async function cmdRewind(
 }
 
 /**
- * Why rewinding `task` to `phase` would finish it past a merge the human has not
- * ruled on, or null. An unmerged task may still be rewound to `done` or `failed`,
- * which leaves its check not needed; GitHub is asked, since the ledger lags it.
+ * Why rewinding `task` to `phase` would get it past a merge the human has not ruled
+ * on, or null: by finishing it, or by clearing the merge record, after which nothing
+ * remembers the PR merged and the check reads as not needed. Only `merge` keeps the
+ * PR, and its row records the merge again. An unmerged task may still be rewound
+ * anywhere, a terminal phase leaving its check not needed; GitHub is asked, since
+ * the ledger lags it.
  */
 async function rewindSkipsAHold(
   ctx: Ctx, run: Run, task: Task, phase: string, merged: BatchShipped,
 ): Promise<string | null> {
-  if (phase !== 'close' && phase !== 'teardown' && !taskPhaseIsTerminal(phase)) return null
+  const finishes = phase === 'close' || phase === 'teardown' || taskPhaseIsTerminal(phase)
+  const forgetsTheMerge = PHASES_BEFORE_A_MERGE.has(phase) && phase !== 'merge'
+  if (!finishes && !forgetsTheMerge) return null
   const owed = owedAt(run, task)
   if (owed.length === 0) return null
   if (task.merged_at_ms === null) {
@@ -1298,8 +1303,11 @@ async function rewindSkipsAHold(
     if (onGitHub === null) return `could not ask GitHub whether PR #${task.pr} has merged; run it again`
     if (!onGitHub) return null
   }
-  return `${owesTheHuman(task, owed)}: confirm or \`--waive\` it first — ` +
-    `\`${hpipeCommand(ctx.pluginRoot)} confirm --check ${owed[0]?.check.id} --by human\``
+  const confirm = `\`${hpipeCommand(ctx.pluginRoot)} confirm --check ${owed[0]?.check.id} --by human\``
+  return finishes
+    ? `${owesTheHuman(task, owed)}: confirm or \`--waive\` it first — ${confirm}`
+    : `${owesTheHuman(task, owed)}, and its PR has merged: a rewind to ${phase} would forget that merge. Confirm ` +
+      `or \`--waive\` it first — ${confirm} — and register any rework as a new task`
 }
 
 const owesTheHuman = (task: Task, owed: readonly OwedCheck[]): string =>
