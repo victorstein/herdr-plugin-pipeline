@@ -1435,6 +1435,71 @@ sha `submit` printed after `not a clean merge … (at`.
 **Record:** each task's change size, whether it skipped, and the wall-clock time from `implement` to
 `ci` (or `land-queue`) for a skipping task against a reviewed one.
 
+## 11. Before-merge checks
+
+A check only the human can make holds the merge it guards: no merge command and no stall probe until
+the human rules. This touches gating (the gate rows hold a merge they would have recorded and moved
+past), delivery (the hold prompt in place of the merge prompt, and the CLI replacing a queued one) and
+the stall ladder. The wiring test drives it against a real ledger, but GitHub's merge state, Beads and
+live agents are only proven here. Fresh `pipesmokeN` session against `victorstein/hpipe-smoke`, with
+`STALL_MINUTES=2` and `TASK_STALL_MINUTES=3` in the plugin's `config.env`, so a probe that should not
+come would come within minutes.
+
+### 11a. A supervisor that predates it
+
+With the previous release's supervisor still running, register t1 and run `hpipe hold --task t1
+--before-merge "x"` from the new CLI. **Assert:** refused, naming that supervisor's pid and the restart
+step; `hpipe show --task t1` has no `before merge:` line. Restart the supervisor, then:
+
+```bash
+jq .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["before-merge"]
+```
+
+### 11b. Per-task, a decision answered with `--before-merge`
+
+Register t1 with `--tier heavy`, so its PR review runs. Have its worker raise a decision, and answer it
+with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
+
+- The worker's answer prompt says `Before this merges, the human will check:` and names the check.
+- `hpipe confirm --check c1 --by human` while t1 is in `pr-review` is refused: `confirm it once t1
+  reaches ci`.
+- At `merge`, the orchestrator's prompt is **Hold — PR #<n> (…) waits on the human before it merges**.
+  It leads with `gh pr view <n> --json mergeStateStatus` and has no `gh pr merge`.
+- `hpipe status`: t1's line ends `— waiting on the human (c1)`, the run header has a `before merge:`
+  line, and `waiting on the human:` lists c1, not `waiting on you:`. The bead is `blocked` +
+  `hpipe:awaiting-human`, with a `[hpipe t1/c1/before-merge]` comment.
+- No probe comes for 10 minutes.
+- `hpipe confirm --check c1 --by human` brings the merge prompt within a tick, and the first probe
+  comes no sooner than one `TASK_STALL_MINUTES` after the confirm.
+- Push an empty commit to t1's branch after confirming. t1 goes `merge → ci`, and comes back held, its
+  hold line reading `confirmed on <old>; the head is now <new>`.
+- `hpipe confirm --check c1 --by human --failed "<what>"` in `merge`: t1 goes to `implement`, and its
+  worker gets **The human's check failed**. The fix goes through review and CI, and the hold comes
+  again for the new head.
+- Merge the PR by hand while held. Before the supervisor's next idle tick, `hpipe hold --task t1
+  --before-merge "y"` is refused as merged: GitHub was asked. t1 stays in `merge` with the `⚠ t1: PR
+  #<n> merged before the human confirmed c1` line, and its bead stays open. `hpipe rewind <run> done
+  --task t1` and `hpipe close --task t1` are refused. `hpipe confirm --check c1 --by human --waive
+  "<why>"` → `close → done`, and the waiver comment (`[hpipe t1/c1/r<n>]`) is on the bead before it
+  closes.
+
+### 11c. Single-PR
+
+- `hpipe hold --before-merge "<check>"` at intake. When the run reaches `ship-merge`, it is held with
+  the hold prompt, and no probe comes.
+- Confirming during `ship-ci` holds once CI passes on that head: the merge prompt comes, with
+  `Before merge: c1 confirmed by the human on <sha8>.`
+- A `BEHIND` batch PR: the hold prompt has `gh pr update-branch` run first, the run goes back through
+  `ship`, and the human is asked about the new head.
+- `hpipe confirm --check c1 --by human --failed "<what>"` in `ship-merge` keeps the run there, and the
+  next probe names the two routes to a fix.
+- `hpipe abort` on a held throwaway run lists `still owed to the human: c1 … — the batch PR is not
+  merged`.
+
+**Record**, verbatim: the `mergeStateStatus` GitHub gave for a PR behind its base, a conflicting PR,
+one blocked on a review, and a draft. The hold prompt names a move for each; a value it does not name
+is a **finding**.
+
 ---
 
 ## What to do when a step fails

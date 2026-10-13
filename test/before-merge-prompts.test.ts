@@ -144,3 +144,21 @@ test('decision, intake and ship teach the orchestrator to record a check only th
   }
   expect(await read('intake')).toContain('`{{hpipe}} hold --task <id> --before-merge "<check>"`')
 })
+
+test('the README, the skill and the runbook teach hold, confirm and what a hold does', async () => {
+  const readme = prose(await Bun.file(join(ROOT, 'README.md')).text())
+  for (const needle of [
+    '## Before-merge checks', 'hpipe hold --task <id> --before-merge "<check>"', 'hpipe hold --before-merge "<check>"',
+    'hpipe confirm --check <id> --by human --waive "<why>"', 'never a task\'s landing', 'No stall probe comes for it',
+    '`hold` and `answer --before-merge` refuse until this session\'s supervisor is restarted',
+  ]) expect(readme, needle).toContain(needle)
+
+  const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
+  for (const needle of ['answer, hold, confirm', '`--before-merge "<what they check>"`', '"Hold — … waits on the human ' +
+    'before it merges"', 'hpipe confirm --check <id> --by human', '`waiting on the human:` in status or a digest']) {
+    expect(skill, needle).toContain(needle)
+  }
+
+  const runbook = await Bun.file(join(ROOT, 'test', 'integration', 'smoke.md')).text()
+  expect(runbook).toContain('## 11. Before-merge checks')
+})
