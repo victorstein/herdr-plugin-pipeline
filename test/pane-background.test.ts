@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { QueuedEvent } from '../src/lib/types'
 import {
-  BACKGROUND_RECHECK_MS, PaneBackground, SUBAGENT_HOLD_MAX_MS, SubagentHolds,
+  BACKGROUND_RECHECK_MS, PANEL_RECHECK_MS, PaneBackground, SUBAGENT_HOLD_MAX_MS, SubagentHolds,
 } from '../src/supervisor/pane-background'
 
 const RULE = '─'.repeat(40)
@@ -107,4 +107,20 @@ test('a subagent holds a row from its first hold until the cap, then lets it adv
   subagents = ['ui-dev subagent']
   clock.now += SUBAGENT_HOLD_MAX_MS
   expect(await holds.check('r1:t3:9', 'w5:p1')).toEqual({ hold: true })
+})
+
+test('work seen only in the agents panel is read again once a finished subagent would have left it', async () => {
+  const clock = { now: 0 }
+  const background = new PaneBackground(() => clock.now)
+  const lingering = ['⏺ Done.', '', RULE, '❯ ', RULE, '  ⏵⏵ bypass permissions on · ← 1 agent', '', '  ⏺ main',
+    '  ◯ general-purpose  Reviewed the plan                                       41s · ↓ 20.3k tokens'].join('\n')
+  const screens: Record<string, string> = { 'w3:p1': lingering }
+  const { io, reads } = reader(screens)
+  background.observe('w3:p1', lingering)
+  screens['w3:p1'] = QUIET
+  clock.now = PANEL_RECHECK_MS - 1
+  expect((await background.work('w3:p1', io)).subagents).toEqual(['general-purpose subagent'])
+  clock.now = PANEL_RECHECK_MS
+  expect((await background.work('w3:p1', io)).running).toEqual([])
+  expect(reads).toEqual(['w3:p1'])
 })

@@ -30,12 +30,13 @@ const T3_WAITING_ON_ITS_BUILD = claude([
 test('the trial run\'s t3 pane reads as busy: its shells, its monitors and its subagent', () => {
   expect(backgroundWorkOn(T3_WAITING_ON_ITS_BUILD)).toEqual({
     boxSeen: true, running: ['1 shell', '4 monitors', 'ui-dev subagent'], subagents: ['ui-dev subagent'],
+    panelOnly: false,
   })
 })
 
 test('`← 1 agent` is the agents-view hint, which a fresh session shows too: no work', () => {
   const fresh = claude(['✻ Welcome back'], STATUS_LINE, '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent')
-  expect(backgroundWorkOn(fresh)).toEqual({ boxSeen: true, running: [], subagents: [] })
+  expect(backgroundWorkOn(fresh)).toEqual({ boxSeen: true, running: [], subagents: [], panelOnly: false })
 })
 
 test('a subagent the panel lists is work even with nothing in the pill', () => {
@@ -44,6 +45,7 @@ test('a subagent the panel lists is work even with nothing in the pill', () => {
     '  ⏺ main',
     '  ◯ general-purpose  Grepping issue 31–33 specs and plans                                      9m 52s · ↓ 53.0k tokens')
   expect(backgroundWorkOn(screen).running).toEqual(['general-purpose subagent'])
+  expect(backgroundWorkOn(screen).panelOnly).toBe(true)
 })
 
 test('every pill label Claude Code 2.1.296 draws: the agent\'s work counts, its own housekeeping does not', () => {
@@ -112,6 +114,6 @@ test('only what is drawn below the box counts: the transcript\'s "still running"
 
 test('a screen with no input box says nothing either way', () => {
   expect(backgroundWorkOn('Do you want to proceed?\n❯ 1. Yes\n  2. No\n  ⏵⏵ bypass permissions on · 1 shell'))
-    .toEqual({ boxSeen: false, running: [], subagents: [] })
-  expect(backgroundWorkOn('')).toEqual({ boxSeen: false, running: [], subagents: [] })
+    .toEqual({ boxSeen: false, running: [], subagents: [], panelOnly: false })
+  expect(backgroundWorkOn('')).toEqual({ boxSeen: false, running: [], subagents: [], panelOnly: false })
 })

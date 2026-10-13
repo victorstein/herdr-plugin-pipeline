@@ -7,6 +7,11 @@ export interface BackgroundScan {
   running: string[]
   /** The part of it subagents are doing: the agents panel's rows and the pill's local agents. */
   subagents: string[]
+  /**
+   * Everything found is the panel's rows. Claude Code keeps a finished foreground
+   * subagent there, drawn the same, for 30 s after it ends (`evictAfter` in 2.1.296).
+   */
+  panelOnly: boolean
 }
 
 /** A glyph some labels lead with: `◇ 1 cloud session`, and the flagged pill's `▪ 3 background`. */
@@ -73,7 +78,7 @@ function footerLine(lines: readonly string[]): string | null {
 export function backgroundWorkOn(screen: string): BackgroundScan {
   const lines = withoutEscapes(screen).split('\n')
   const bounds = inputBoxBounds(lines)
-  if (bounds === null) return { boxSeen: false, running: [], subagents: [] }
+  if (bounds === null) return { boxSeen: false, running: [], subagents: [], panelOnly: false }
   const below = lines.slice(bounds.close + 1)
   const panelAt = below.findIndex((line) => PANEL_HEAD.test(line.trim()) || AGENT_ROW.test(line.trim()))
   const footer = footerLine(panelAt === -1 ? below : below.slice(0, panelAt))
@@ -81,11 +86,12 @@ export function backgroundWorkOn(screen: string): BackgroundScan {
     ? []
     : segmentsOf(footer).filter(isPill).flatMap(pillItems).filter((item) => WORK.test(item))
   const subagents = running.filter((item) => LOCAL_AGENTS.test(item))
+  const fromThePill = running.length
   for (const line of panelAt === -1 ? [] : below.slice(panelAt)) {
     const agent = AGENT_ROW.exec(line.trim())
     if (agent === null || agent[1] === 'main') continue
     running.push(`${agent[1]} subagent`)
     subagents.push(`${agent[1]} subagent`)
   }
-  return { boxSeen: true, running, subagents }
+  return { boxSeen: true, running, subagents, panelOnly: fromThePill === 0 && running.length > 0 }
 }

@@ -6,6 +6,9 @@ import type { LimitIO } from './usage-limits'
 /** How long a reading that showed work, or showed no input box, answers before the pane is read again. */
 export const BACKGROUND_RECHECK_MS = 60_000
 
+/** Past the 30 s a finished foreground subagent stays in the panel, for a reading that found nothing else. */
+export const PANEL_RECHECK_MS = 35_000
+
 export interface ScreenReader {
   paneReadStyled(target: string, lines: number): Promise<string>
 }
@@ -21,6 +24,7 @@ export const NO_WORK: BackgroundWork = { running: [], subagents: [] }
 interface Reading {
   /** The last reading that found the input box; null until one has. */
   seen: BackgroundWork | null
+  panelOnly: boolean
   readAt: number
 }
 
@@ -41,9 +45,10 @@ export class PaneBackground {
   /** Returns the screen, so a reader can pass every screen it reads through here. */
   observe(pane: string, screen: string): string {
     const scan = backgroundWorkOn(screen)
-    const previous = this.readings.get(pane)?.seen ?? null
-    const seen = scan.boxSeen ? { running: scan.running, subagents: scan.subagents } : previous
-    this.readings.set(pane, { seen, readAt: this.now() })
+    const previous = this.readings.get(pane)
+    const seen = scan.boxSeen ? { running: scan.running, subagents: scan.subagents } : previous?.seen ?? null
+    const panelOnly = scan.boxSeen ? scan.panelOnly : previous?.panelOnly ?? false
+    this.readings.set(pane, { seen, panelOnly, readAt: this.now() })
     return screen
   }
 
@@ -70,7 +75,7 @@ export class PaneBackground {
     const reading = this.readings.get(pane)
     if (reading === undefined) return true
     if (reading.seen !== null && reading.seen.running.length === 0) return false
-    return this.now() - reading.readAt >= BACKGROUND_RECHECK_MS
+    return this.now() - reading.readAt >= (reading.panelOnly ? PANEL_RECHECK_MS : BACKGROUND_RECHECK_MS)
   }
 
   /** An empty list is a failed `pane list`, not a session with no panes. */
