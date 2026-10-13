@@ -434,6 +434,11 @@ test('every task review tells the worker to fix a CLEAR\'s findings and push the
       'you end that turn')
 })
 
+test('an answer says a verdict written before the question counts once it is committed', async () => {
+  const text = prose(await Bun.file(join(ROOT, 'prompts', 'answer.md')).text())
+  expect(text).toContain('a review verdict once you have committed and pushed it')
+})
+
 // Smoke run 16: Claude Code ran every subagent in the background, and a worker told to wait for its
 // reviewer within the turn polled the verdict file in a foreground sleep loop.
 const DISPATCHING_PROMPTS = ['implement', 'ci-red', 'sync', 'ship', 'ship-ci-red', 'usage-resume', 'branch-review',

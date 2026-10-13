@@ -10,8 +10,9 @@ Resume {{phase}} applying this. It is settled — do not reopen it, and do not r
 turns out to be impossible as stated, surface a new decision saying why rather than quietly choosing
 something else.
 
-If you had already written this phase's artifact or review verdict before asking, it still counts once
-you go idle: rewrite it if this answer changes it, and leave it as it is if it does not.
+If you had already written this phase's artifact or review verdict before asking, it still counts:
+rewrite it if this answer changes it, and leave it as it is if it does not. An artifact counts once you
+go idle; a review verdict once you have committed and pushed it, as its review prompt says.
 
 If the phase you are resuming is `implement`, the coding still goes to an implement subagent as the
 implement or CI-red prompt you received describes — dispatch a fresh one with this answer in its
