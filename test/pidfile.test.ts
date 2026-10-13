@@ -83,5 +83,5 @@ test('a pid file written before capabilities existed reads as a supervisor that 
 })
 
 test('the capabilities a pid file names are fixed strings, since a supervisor of another release reads them', () => {
-  expect(SUPERVISOR_CAPABILITIES).toEqual(['shared-paths', 'before-merge'])
+  expect(SUPERVISOR_CAPABILITIES).toEqual(['shared-paths', 'before-merge', 'dispatch'])
 })

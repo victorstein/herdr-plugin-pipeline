@@ -63,10 +63,19 @@ export const SHARED_PATHS_CAPABILITY = 'shared-paths'
 export const BEFORE_MERGE_CAPABILITY = 'before-merge'
 
 /**
+ * Without it, a supervisor reads no dispatch lock, so it probes a task mid-bootstrap
+ * as though its agent were never started, and its binding of a new worktree keeps a
+ * `bootstrapped` record that checkout never had.
+ */
+export const DISPATCH_CAPABILITY = 'dispatch'
+
+/**
  * What this release's supervisor honours, so a newer CLI can warn about or refuse
  * what an older one would undo, without a schema bump.
  */
-export const SUPERVISOR_CAPABILITIES: readonly string[] = [SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY]
+export const SUPERVISOR_CAPABILITIES: readonly string[] = [
+  SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY,
+]
 
 /** A supervisor that predates the field drove only the per-task schema. */
 export function drivenSchemas(info: SupervisorPid): number[] {

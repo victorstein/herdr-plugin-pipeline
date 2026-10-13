@@ -53,7 +53,8 @@ import {
   taskRow, tierOf,
 } from './lib/phases'
 import {
-  BEFORE_MERGE_CAPABILITY, drivenSchemas, honours, SHARED_PATHS_CAPABILITY, type SupervisorState, supervisorState,
+  BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY, drivenSchemas, honours, SHARED_PATHS_CAPABILITY, type SupervisorState,
+  supervisorState,
 } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
@@ -1134,6 +1135,7 @@ export interface DispatchWiring {
   trap: (lock: HeldDispatchLock) => () => void
   /** Never settles while a signal is being handled, so nothing outruns the handler. */
   gate: () => Promise<void>
+  supervisor: () => Promise<SupervisorState>
 }
 
 function realDispatchWiring(ctx: Ctx): DispatchWiring {
@@ -1157,6 +1159,7 @@ function realDispatchWiring(ctx: Ctx): DispatchWiring {
     sleep: (ms) => Bun.sleep(ms),
     trap: (lock) => trapDispatchSignals({ lock, children, interrupt, say }),
     gate: () => interrupt.gate(),
+    supervisor: () => supervisorState(ctx.stateDir, ctx.session),
   }
 }
 
@@ -1218,6 +1221,16 @@ function notOwedItsBrief(run: Run, task: Task, hpipe: string): string | null {
 }
 
 const byTaskId = (a: Task, b: Task): number => a.task_id.localeCompare(b.task_id, undefined, { numeric: true })
+
+/** The `--pane` form is not refused: it only hands over a brief, as a supervisor that predates the rest expects. */
+function predatingSupervisorRefusal(ctx: Ctx, supervisor: SupervisorState): string | null {
+  if (supervisor.state !== 'live' || honours(supervisor.info, DISPATCH_CAPABILITY)) return null
+  return `the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates \`hpipe dispatch\`: it reads ` +
+    'no dispatch lock, so it would probe a task mid-bootstrap and ask you to `herdr agent start` it, and its binding ' +
+    'would keep a bootstrap record a new checkout never had. Restart it: close its `Pipeline supervisor` pane, then ' +
+    '`herdr plugin action invoke supervisor --plugin stein.pipeline`, and run this again; or dispatch by hand with ' +
+    'the `dispatch, in order:` block that `hpipe task` or its `Dispatch tN` prompt printed. Nothing was started'
+}
 
 /**
  * Takes every task owed its brief, in task id order, and scans again before it
@@ -1292,6 +1305,8 @@ export async function cmdDispatchSteps(
     const refusal = notOwedItsBrief(run, task, hpipe)
     if (refusal !== null) return fail(refusal)
   }
+  const predating = predatingSupervisorRefusal(ctx, await wiring.supervisor())
+  if (predating !== null) return fail(predating)
 
   const lockDeps = wiring.lock ?? REAL_LOCK_DEPS
   const mode = task === null ? 'ready' : 'task'

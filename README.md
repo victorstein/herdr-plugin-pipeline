@@ -219,7 +219,8 @@ sessions, and only from a pane of the run's own herdr session. `--ready` also ta
 becomes ready while it runs. SIGTERM, SIGINT or SIGHUP stops a dispatch's bootstrap with it; one
 killed outright leaves its lock, and the next dispatch in the repo stops that bootstrap and takes the
 lock over. While one is under way, `hpipe status` says what it is doing rather than asking for an
-agent to be started.
+agent to be started. Beside a supervisor that predates it, `--task` and `--ready` refuse, naming its
+pid: restart it (see **Upgrading**), or use the manual fallback.
 
 The manual fallback is the `dispatch, in order:` block `hpipe task` and the `Dispatch tN` prompt print,
 ending in:
@@ -569,13 +570,14 @@ tell an older one from this release's. Restart the supervisor in every session, 
 the older supervisor ignores every new field, and the CLI makes up for it where it can: `hpipe start`
 warns that it locks every declared path, shared or not, which is only stricter, and a restart lets the
 run share them; `hold` and `answer --before-merge` refuse until this session's supervisor is restarted,
-since it would send the merge command whatever check is owed; `hpipe dispatch --task` and `--ready` are
-the CLI's alone, so they work beside it, and its `Dispatch tN` prompt just lacks its `dispatch:` line.
-Runs started before the upgrade carry no shared-path list and keep locking everything until they finish.
-Rolling back to 2.1 ignores the fields rather than removing them: shared paths lock again, which is
-safe, and `bootstrapped` is ignored, but every hold is dropped, so the earlier supervisor sends the
-merge command and probes as before. Confirm or waive every owed check before rolling back, or tell the
-user the hold is gone.
+since it would send the merge command whatever check is owed; and `hpipe dispatch --task` and `--ready`
+refuse as well, since it reads no dispatch lock and would probe a task mid-bootstrap. The manual
+fallback, the `dispatch, in order:` block ending in `hpipe dispatch --task <id> --pane <pane-id>`, still
+works beside it. Runs started before the upgrade carry no shared-path list and keep locking everything
+until they finish. Rolling back to 2.1 ignores the fields rather than removing them: shared paths lock
+again, which is safe, and `bootstrapped` is ignored, but every hold is dropped, so the earlier
+supervisor sends the merge command and probes as before. Confirm or waive every owed check before
+rolling back, or tell the user the hold is gone.
 
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a

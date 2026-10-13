@@ -1452,7 +1452,7 @@ With the previous release's supervisor still running, register t1 and run `hpipe
 step; `hpipe show --task t1` has no `before merge:` line. Restart the supervisor, then:
 
 ```bash
-jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge"]
+jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge","dispatch"]
 ```
 
 ### 11b. Per-task, a decision answered with `--before-merge`
@@ -1524,16 +1524,29 @@ exit 0
 
 The `sleep 2` keeps a passing bootstrap slower than herdr's `worktree.created` hook. A record of a
 bootstrap that finished before the hook fired is cleared by the binding, by design, and the next
-re-run would bootstrap once more, which 12c would misread.
+re-run would bootstrap once more, which 12d would misread.
 
 Every dispatch below is run by the orchestrator with the Bash tool's `run_in_background`, and it ends
 its turn. Each one prints a line per step (`base`, `worktree`, `bootstrap`, `agent`, `brief`) and ends
 `dispatched tN` or `stopped tN at <step>: <why>`.
 
-### 12a. The tool facts the code rests on — record each verbatim
+### 12a. A supervisor that predates it
 
-- **The create response (Verify 1).** Register one throwaway task and dispatch it **by hand** with
-  its printed block, and save `herdr worktree create`'s JSON. **Assert** it carries
+With the previous release's supervisor still running, register 12b's throwaway task, then run
+`hpipe dispatch --task <its id>` and `hpipe dispatch --ready`. **Assert:** both refused, naming that
+supervisor's pid, the restart step and the `dispatch, in order:` block; no worktree created and
+`$STATE/dispatch/` empty. Restart the supervisor, then:
+
+```bash
+jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge","dispatch"]
+```
+
+12b dispatches that task by hand.
+
+### 12b. The tool facts the code rests on — record each verbatim
+
+- **The create response (Verify 1).** Dispatch 12a's throwaway task **by hand** with its printed
+  block, and save `herdr worktree create`'s JSON. **Assert** it carries
   `.result.worktree.path`, `.result.root_pane.pane_id`, and the workspace id at
   `.result.workspace.workspace_id` or `.result.root_pane.workspace_id`. If the id is in neither, every
   one-command dispatch stops at `worktree` with `herdr may have created the worktree, but herdr's
@@ -1548,18 +1561,18 @@ its turn. Each one prints a line per step (`base`, `worktree`, `bootstrap`, `age
   **Assert** `.result.worktrees[]` entries carry `path`, `branch`, `is_linked_worktree` and
   `is_prunable`. Any other shape makes every dispatch stop at `worktree` with `could not be read`.
 - **`agent start` (Verify 3).** The dispatch passes `--timeout 80000`. **Record** herdr's error code
-  and message for a name already in use (12c) and for an agent blocked by a dialog at start, if one
+  and message for a name already in use (12d) and for an agent blocked by a dialog at start, if one
   shows up.
 - **Focus.** The dispatch passes `--no-focus` to `worktree create`. **Assert** focus stays on the
   orchestrator pane while a background dispatch creates worktrees.
 - **Background Bash (Verify 4).** **Record** that the dispatch outlives Claude Code's 10-minute
-  foreground limit (12d's slow bootstrap), that its completion notice carries the step lines, and
+  foreground limit (12e's slow bootstrap), that its completion notice carries the step lines, and
   which signal reaches it if the orchestrator's session ends while it runs (`hpipe status` and the
   lock show what was left).
 - **Auto mode.** With auto mode on, **record** that `hpipe dispatch` needed no separate approval for
   the `herdr agent start` inside it.
 
-### 12b. Three tasks, one command
+### 12c. Three tasks, one command
 
 Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispatch --ready`.
 **Assert:**
@@ -1572,7 +1585,7 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
   `hpipe show --task tN` names the workspace and pane within a tick;
 - `$STATE/dispatch/` is empty once it ends.
 
-### 12c. Stops, and re-runs that skip what is done
+### 12d. Stops, and re-runs that skip what is done
 
 - **Bootstrap.** `touch "$STATE/smoke-boot-fail"`, register t4, `hpipe dispatch --task t4`. It
   stops `at bootstrap: ./.claude/pipeline-bootstrap failed (exit 1)` with `marker says fail` in the
@@ -1599,7 +1612,7 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
   `hpipe dispatch --task t8 --run <run_id>` is refused: `hpipe dispatch drives herdr itself: run it
   from a pane of session <smoke session>`.
 
-### 12d. The lock while a bootstrap runs
+### 12e. The lock while a bootstrap runs
 
 `touch "$STATE/smoke-boot-slow"`, register t9 and t10, and `hpipe dispatch --task t9`. While its
 bootstrap sleeps:
@@ -1625,7 +1638,7 @@ A dispatch killed with `kill -KILL` leaves its lock: `hpipe status` then says `�
 this repo is left by pid <pid>, which is gone`, and the next dispatch stops the dead one's bootstrap
 group (when its leader is provably the one recorded) and takes the lock over. Record what you see.
 
-### 12e. `--ready` takes what becomes ready while it runs
+### 12f. `--ready` takes what becomes ready while it runs
 
 Slow marker on. Register t11, start `hpipe dispatch --ready`, and while t11 bootstraps register t12.
 Remove the marker. **Assert** the same run dispatches t12 before it ends (`dispatched t11, t12`), and

@@ -7,7 +7,9 @@ import { dispatchLockPath, type DispatchLock, readDispatchLocks, takeDispatchLoc
 import type { DispatchHerdr } from '../src/lib/dispatch-steps'
 import type { CallResult, CreatedWorktree } from '../src/lib/herdr'
 import { listRuns, newRun, saveRun } from '../src/lib/ledger'
-import { processStartedAtMs } from '../src/lib/pidfile'
+import {
+  BEFORE_MERGE_CAPABILITY, processStartedAtMs, SHARED_PATHS_CAPABILITY, SUPERVISOR_CAPABILITIES, type SupervisorState,
+} from '../src/lib/pidfile'
 import { hpipeCommand } from '../src/lib/render'
 import { taskStallCandidates } from '../src/supervisor/stall'
 import type { Run, Task } from '../src/lib/types'
@@ -109,6 +111,7 @@ function wired(
     sleep: async () => {},
     trap: () => { traps.push('on'); return () => { traps.push('off') } },
     gate: async () => {},
+    supervisor: async () => ({ state: 'none' }),
     ...over,
   }
   return { wiring, said, calls, traps }
@@ -135,6 +138,41 @@ test('dispatch --task runs every step, says each line, and lets go of the lock a
   const [saved] = await listRuns(dir, 's')
   expect(saved?.tasks[0]).toMatchObject({ pane_id: 'w2:p1' })
   expect(saved?.tasks[0]?.awaiting_brief).toBeUndefined()
+})
+
+const supervisorOf = (capabilities: string[], state: 'live' | 'stale' = 'live'): SupervisorState => ({
+  state, info: { pid: 4242, pane_pid: 1, started_at_ms: 1, session: 's', socket_path: SOCKET, pane_id: 'w0:p1', capabilities },
+})
+
+test('the step forms refuse beside a live supervisor that predates them, naming it, the restart and the block', async () => {
+  const run = await seed([owed('t1')])
+  const predating = supervisorOf([SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY])
+  for (const taskId of ['t1', null]) {
+    const w = wired({ supervisor: async () => predating })
+    const result = await cmdDispatchSteps(ctx(), input(taskId), w.wiring)
+    expect(result.ok, String(taskId)).toBe(false)
+    expect(result.text).toContain('the supervisor of session s (pid 4242) predates `hpipe dispatch`: it reads no ' +
+      'dispatch lock, so it would probe a task mid-bootstrap and ask you to `herdr agent start` it')
+    expect(result.text).toContain('close its `Pipeline supervisor` pane, then ' +
+      '`herdr plugin action invoke supervisor --plugin stein.pipeline`, and run this again')
+    expect(result.text).toContain('or dispatch by hand with the `dispatch, in order:` block')
+    expect(w.calls).toEqual([])
+    expect(w.traps).toEqual([])
+    expect(existsSync(dispatchLockPath(dir, run.repo_key))).toBe(false)
+  }
+})
+
+test('the step forms go ahead beside this release\'s supervisor, a dead one, or none', async () => {
+  await seed([owed('t1'), owed('t2'), owed('t3')])
+  const old = [SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY]
+  const cases: Array<[string, SupervisorState]> = [
+    ['t1', supervisorOf([...SUPERVISOR_CAPABILITIES])], ['t2', supervisorOf(old, 'stale')], ['t3', { state: 'none' }],
+  ]
+  const { wiring, said } = wired()
+  for (const [taskId, supervisor] of cases) {
+    const result = await cmdDispatchSteps(ctx(), input(taskId), { ...wiring, supervisor: async () => supervisor })
+    expect(result.ok, `${taskId}: ${said.join('\n')}`).toBe(true)
+  }
 })
 
 test('dispatch refuses outside the run\'s own herdr session', async () => {
