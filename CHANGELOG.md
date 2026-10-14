@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.1.1...v2.2.0) (2026-10-14)
+
+
+### Features
+
+* hold a merge until the human rules on a before-merge check (hpipe answer --before-merge, hpipe hold, hpipe confirm) ([b5d5c88](https://github.com/victorstein/herdr-plugin-pipeline/commit/b5d5c88a33ad2288f9d18574504f9264d54de78c))
+* let paths in .claude/pipeline-shared-paths be edited by every task at once, never holding the file lock ([b5d5c88](https://github.com/victorstein/herdr-plugin-pipeline/commit/b5d5c88a33ad2288f9d18574504f9264d54de78c))
+* run the whole dispatch block with one command (hpipe dispatch --task, hpipe dispatch --ready) ([b5d5c88](https://github.com/victorstein/herdr-plugin-pipeline/commit/b5d5c88a33ad2288f9d18574504f9264d54de78c))
+
+
+### Documentation
+
+* design before-merge checks, one-command dispatch and shared paths ([b5d5c88](https://github.com/victorstein/herdr-plugin-pipeline/commit/b5d5c88a33ad2288f9d18574504f9264d54de78c))
+
 ## [2.1.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.1.0...v2.1.1) (2026-10-13)
 
 
