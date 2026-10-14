@@ -580,8 +580,9 @@ again, which is safe, and `bootstrapped` is ignored, but every hold is dropped, 
 supervisor sends the merge command and probes as before. Confirm or waive every owed check before
 rolling back, or tell the user the hold is gone.
 
-2.2.2 adds the outbox kinds `abort` and `run-resumed`, a run's optional `aborted_escalation_from`, and the
-supervisor capability `abort-notice`.
+2.2.2 adds the outbox kinds `abort` and `run-resumed`, an outbox entry's optional `brief_chars`, a run's optional
+`aborted_escalation_from`, and the supervisor capability `abort-notice`. An older supervisor drops a brief whose phase
+prompt went stale before an agent took it, as before.
 An older supervisor drops a finished run's task prompts, so it never delivers `hpipe abort`'s stop
 notices: the abort says so and names the restart, and the notices wait in the outbox for a supervisor
 that delivers them. `hpipe resume` withdraws any still unsent.

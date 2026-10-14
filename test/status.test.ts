@@ -700,6 +700,17 @@ test('an aborted run lists each stop notice not yet delivered, and why it is hel
   expect(text).toContain("  ⚠ t3's stop notice has not reached w5:p1 (agent_pane_busy)")
 })
 
+test('an aborted run names a task whose agent went while it was aborted', () => {
+  const run = mkRun()
+  run.history.push({ at: 0, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'spec', pane_id: null, last_pane_id: 'w3:p1', branch: 'feat/a' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
+    `  ℹ t1 [spec] feat/a — \`${HP} show --task t1 --run ${run.run_id}\`; no agent: w3:p1 went while the run was ` +
+    'aborted, and a resume queues its brief and phase prompt for the next one')
+})
+
 test('a queued notice that the run was resumed is named as such, not as a usage-limit resume', () => {
   const run = mkRun()
   run.tasks = [mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w3:p1', agent_status: 'idle' })]

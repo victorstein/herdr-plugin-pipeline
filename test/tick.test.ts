@@ -1027,7 +1027,8 @@ test('a catch-up names every task\'s phase, age and whose move it is, from the l
   run.phase_entered_at = 0
   const text = catchUpDigest(run, now, 'hp')
   expect(text.split('\n')).toEqual([
-    'catch-up: digests for this run did not reach you, so here is where it stands now (run in execute 10m):',
+    'catch-up: at least one digest for this run did not reach you, and digests are not replayed, so here is where ' +
+      'it stands now (run in execute 10m):',
     `- t1 feat/x (hp-1) [spec 3m] — ${actionFor(run, run.tasks[1] as Task, 'hp', now)}`,
     `- t2 b/two (hp-2) [merge 10m] — ${actionFor(run, run.tasks[0] as Task, 'hp', now)}`,
   ])

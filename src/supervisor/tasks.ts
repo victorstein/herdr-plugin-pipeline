@@ -18,7 +18,7 @@ import {
   advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
   syncOverdue, syncSubmitted,
 } from '../lib/machine'
-import { enqueue, queuedWorkerPrompt } from '../lib/outbox'
+import { briefAndPrompt, enqueue, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -356,7 +356,7 @@ async function queueForAFreshAgent(run: Run, task: Task, deps: TaskDeps): Promis
   if (queuedWorkerPrompt(run, task) !== null) return
   const phasePrompt = await renderTaskPhasePrompt(run, task, deps, task.phase)
   const brief = await renderWorkerPrompt(deps.pluginRoot, run, task)
-  enqueue(run, { to: 'worker', taskId: task.task_id, text: `${brief}\n\n---\n\n${phasePrompt}` }, Date.now())
+  enqueue(run, { to: 'worker', taskId: task.task_id, ...briefAndPrompt(brief, phasePrompt) }, Date.now())
 }
 
 /**

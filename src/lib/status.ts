@@ -632,8 +632,13 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
     return [`  ℹ ${task.task_id} ${how} but left its worktree ${where} — nothing un${how} is in it`]
   }
   const pr = task.pr === null ? '' : ` PR #${task.pr}`
+  // Only `show` said so, and a resume needs it: it hands such a task to the next agent started for it.
+  const lost = wasAborted(run) && task.pane_id === null && task.last_pane_id !== undefined &&
+    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker'
   return [`  ℹ ${task.task_id} [${task.phase}] ${task.branch}${pr} — ` +
-    `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\``]
+    `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\`` +
+    (lost ? `; no agent: ${task.last_pane_id} went while the run was aborted, and a resume queues its brief and ` +
+      'phase prompt for the next one' : '')]
 }
 
 /**

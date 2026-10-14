@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import {
-  deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume, queuedWorkerPrompt,
-  recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
+  BRIEF_SEPARATOR, briefAndPrompt, deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume,
+  queuedWorkerPrompt, recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
+import { outboxPending } from '../src/supervisor/courier'
 import type { Decision, Run, Task } from '../src/lib/types'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -47,6 +48,47 @@ test('an entry is stamped with its record\'s phase entry and goes stale when the
   task.phase = 'spec-review'
   task.phase_entered_at = 9000
   expect(pruneOutbox(run).map((e) => e.id)).toEqual([entry.id])
+  expect(run.outbox).toEqual([])
+})
+
+test('a brief queued for a fresh agent outlives its phase prompt, and the next prompt follows it', () => {
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  task.pane_id = null
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the spec') }, 5000)
+
+  // The old worker pushed the spec before the new agent was bound, so the task moved on.
+  task.phase = 'spec-review'
+  task.phase_entered_at = 9000
+  expect(pruneOutbox(run)).toEqual([])
+  expect(run.outbox?.map((e) => [e.text, e.entered_at])).toEqual([['THE BRIEF', 9000]])
+  // Not the phase's prompt: the supervisor still queues that one.
+  expect(queuedWorkerPrompt(run, task)).toBeNull()
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'review the spec' }, 9500)
+
+  task.pane_id = 'w8:p1'
+  expect(outboxPending(run).map((p) => [p.paneId, p.text])).toEqual([['w8:p1', 'THE BRIEF'], ['w8:p1', 'review the spec']])
+})
+
+test('a brief queued again with a prompt replaces one kept on its own', () => {
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  task.pane_id = null
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the spec') }, 5000)
+  task.phase = 'plan'
+  task.phase_entered_at = 9000
+  pruneOutbox(run)
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the plan') }, 9500)
+  expect(run.outbox?.map((e) => e.text)).toEqual([`THE BRIEF${BRIEF_SEPARATOR}write the plan`])
+})
+
+test('a brief kept for a task that has finished is dropped with the rest', () => {
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the spec') }, 5000)
+  task.phase = 'failed'
+  task.phase_entered_at = 9000
+  expect(pruneOutbox(run)).toHaveLength(1)
   expect(run.outbox).toEqual([])
 })
 

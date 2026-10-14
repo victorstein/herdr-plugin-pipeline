@@ -131,6 +131,12 @@ export interface OutboxEntry {
    * have answered.
    */
   kind?: 'resume' | 'carry-on' | 'abort' | 'run-resumed'
+  /**
+   * How many leading characters are the worker's brief, queued ahead of the phase
+   * prompt for an agent that has not had it. The brief outlives the phase: when
+   * the task moves on before an agent takes the entry, the brief stays queued.
+   */
+  brief_chars?: number
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number

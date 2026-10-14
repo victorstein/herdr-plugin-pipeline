@@ -234,8 +234,10 @@ export function catchUpDigest(
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
     .map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
   return [
-    `catch-up: digests for this run did not reach you, so here is where it stands now ` +
-    `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
+    // One undelivered digest is enough to owe this, and "digests … did not reach you"
+    // read as an outage. Measured on a live run.
+    `catch-up: at least one digest for this run did not reach you, and digests are not replayed, so here is where ` +
+    `it stands now (run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
     ...(lines.length === 0 ? ['- no tasks yet'] : lines),
   ].join('\n')
 }

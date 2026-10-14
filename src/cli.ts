@@ -48,7 +48,7 @@ import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
 import { queueStops, withdrawStops, workersToCarryOn, workersToStop } from './lib/abort-notice'
-import { enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
+import { briefAndPrompt, enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
@@ -1465,10 +1465,10 @@ async function owePhasePrompt(
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
   // brief — task id, agent file, `decide`, never main — already arrived. One entry,
   // so the courier hands it both in order the moment the agent is detected.
-  const text = worker && task.pane_id === null
-    ? `${await renderWorkerPrompt(ctx.pluginRoot, run, task)}\n\n---\n\n${phasePrompt}`
-    : phasePrompt
-  enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, text }, Date.now())
+  const queued = worker && task.pane_id === null
+    ? briefAndPrompt(await renderWorkerPrompt(ctx.pluginRoot, run, task), phasePrompt)
+    : { text: phasePrompt }
+  enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, ...queued }, Date.now())
   if (!worker) return '; its prompt is queued for the orchestrator'
   return task.pane_id === null
     ? `; its prompt is queued for ${task.task_id}'s worker, which is not bound yet — ${setUpWorker(task)}`
