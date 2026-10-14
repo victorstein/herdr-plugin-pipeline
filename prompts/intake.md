@@ -5,20 +5,26 @@ with one bead, and register them. You do **not** write specs or plans — each w
 and plans its own bead.{{mode_note}}
 
 0. **Before anything else, make sure the run can do its work.** It needs Claude Code to let this pane
-   run `git push`, `gh pr create`, `gh pr merge`, `git pull`, `herdr worktree create`,
-   `herdr agent start` and `{{hpipe}}`. If your permission mode or Claude Code's auto-mode classifier
+   run `git push`, `gh pr create`, `gh pr merge`, `git pull` and `{{hpipe}}`, which runs
+   `herdr worktree create` and `herdr agent start` itself; those two are needed on their own only to
+   dispatch by hand. If your permission mode or Claude Code's auto-mode classifier
    could refuse any of them, ask the user now to allow them (for example `Bash(gh pr merge:*)` under
    `permissions.allow` in `.claude/settings.local.json`), not halfway through the run. A denial is
    Claude Code's own check, not GitHub or herdr refusing; when one comes, stop and ask on the spot.
    Name the command, why the run needs it, and the allow rule that would cover it. Don't carry on
    with other steps first: the run stalls on whatever you skipped. Measured on a live run.
 
+   If the user wants to check the work themselves before it merges, record it as soon as you know:
+   `{{hpipe}} hold --before-merge "<check>"` (single-PR), or
+   `{{hpipe}} hold --task <id> --before-merge "<check>"` once that task is registered. The merge waits
+   for their ruling, and nothing nags anyone while it does.
+
 1. **Understand the problem first.** If the user handed you a report, verify it against the code
    before you decompose: the files that actually own the behaviour, what already exists, what is
    really broken. A task cut from an unverified report sends a worker down a path nobody checked.
 
    Land whatever the briefs depend on before you register anything: a docs PR they cite, a
-   baseline, a setup branch. Every task's `base:` commit is fixed when it is registered, so a
+   baseline, a setup branch. Every task's `base:` commit is fixed when it is dispatched, so a
    prerequisite merged later is missing from every worktree, and a brief that sends workers to a
    local branch sends them somewhere their checkout cannot see. Measured on a live run.
 
@@ -78,12 +84,21 @@ and plans its own bead.{{mode_note}}
    filed one, then a `files:` line echoing exactly what it recorded (or `files: none`) — check `tier:`
    and `files:` say what you meant — then a `bootstrap:` line, and then either the
    worker brief to dispatch or `queued: waiting on …`, which is correct, and you will be told when
-   that task is ready. A brief to dispatch comes with a `base: <commit> (…)` line: cut that task's
-   worktree from that commit (`herdr worktree create … --base <commit>`), never from your local
-   `main`, which is only as new as your last pull. Under it, `dispatch, in order:` lists the whole
-   dispatch with that commit already filled in — worktree, bootstrap,
-   `agent start … -- --dangerously-skip-permissions`, `dispatch --task` — so run it as printed,
-   filling in the pane and path the create response returns.
+   that task is ready. A brief to dispatch comes with a `base: <commit> (…)` line, the commit the
+   task's worktree is cut from (`herdr worktree create … --base <commit>`), never your local `main`,
+   which is only as new as your last pull; then a `dispatch:` line; then `dispatch, in order:`, the
+   whole dispatch as a block — worktree, bootstrap, `agent start … -- --dangerously-skip-permissions`,
+   `dispatch --task … --pane …`.
+
+   Register every task first, then dispatch them all with one command, run with the Bash tool's
+   `run_in_background`:
+
+       {{hpipe}} dispatch --ready
+
+   It fetches each task's base again, creates its worktree, runs the bootstrap in it, starts its
+   worker and hands it the brief. End your turn, and read its lines when its completion notice
+   arrives: on `stopped tN at <step>`, fix what it names and run it again. The block is the manual
+   fallback, to run as printed only when the command cannot do it.
 
 5. **When the last task is registered, close intake:**
 
@@ -92,4 +107,5 @@ and plans its own bead.{{mode_note}}
    Nothing infers that you are finished. Until you run it the run cannot complete, and the supervisor
    keeps a finished batch open waiting for a task you were never going to add.
 
-Register every task, close intake, then stop.
+Register every task, start `{{hpipe}} dispatch --ready` in the background, close intake, then end
+your turn.

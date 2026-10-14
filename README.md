@@ -100,14 +100,20 @@ executable `.claude/pipeline-bootstrap` at the repo root:
     git submodule update --init
     uv sync
 
-The orchestrator is told to run it in each new checkout before starting the worker, and the worker's
+`hpipe dispatch` runs it in each new checkout, from that checkout's own copy, before it starts the
+worker, and the worker's
 brief names it as the recovery if a build fails on a missing dependency. It runs from the worktree
-root and **must be idempotent** — it can run more than once. A repo that needs nothing simply omits
-the file; every dispatch then reports `bootstrap: none`. If the repo has a conventional setup script
-(`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no `.claude/pipeline-bootstrap`, the
-line names it and the `dispatch, in order:` block carries it as an optional step in the new checkout;
-point a `.claude/pipeline-bootstrap` at it to have it run every time. herdr picks the new checkout's
-path, so the block names it by where `worktree create`'s JSON gives it, `.result.worktree.path`, and
+root and **must be idempotent** — it can run more than once. Its output goes to
+`$HERDR_PLUGIN_STATE_DIR/runs/<session>/<run>.dispatch/<task>-bootstrap.log`, and a run that fails
+prints the last 40 lines. A bootstrap that passed is recorded for that checkout, so a dispatch run
+again after a later step failed does not repeat it. One still running after 20 minutes is stopped with
+everything it started; a bootstrap that really needs longer is run by hand, as the message says. A
+repo that needs nothing simply omits the file; every dispatch then reports `bootstrap: none`. If the
+repo has a conventional setup script (`bin/bootstrap`, `script/bootstrap`, `scripts/bootstrap`) but no
+`.claude/pipeline-bootstrap`, the line names it and `hpipe dispatch` does not run it; the
+`dispatch, in order:` block carries it as an optional step in the new checkout. Point a
+`.claude/pipeline-bootstrap` at it to have it run every time. herdr picks the new checkout's path, so
+the block names it by where `worktree create`'s JSON gives it, `.result.worktree.path`, and
 `hpipe show --task <id>` prints it once herdr reports the worktree.
 
 It is also where a sibling package's build step belongs. If your apps consume another package's
@@ -120,18 +126,62 @@ not your local `main` has been pulled. A repo with no `origin` remote falls back
 and a failed fetch says so on that line. The merge prompt asks the orchestrator to re-run the
 bootstrap after it rebases a branch.
 
+### Paths every task may edit at once
+
+`--files` is a lock: two tasks whose path prefixes overlap never implement at the same time, and the
+second waits in `blocked-on-files` until the first finishes. A file every task appends to — a format
+reference, a registry, a changelog — would serialize the whole batch on it. List such paths in
+`.claude/pipeline-shared-paths` at the repo root, on the default branch:
+
+    # every task adds a section of its own
+    docs/file-formats.md
+    CHANGELOG.md
+
+One path prefix per line; `#` starts a comment, and a leading `./` or `/` is dropped. A prefix is a
+plain prefix, as a `--files` entry is, so `docs/file-formats` also covers `docs/file-formats-old/`. A
+line with a glob character (`*?[{`) is ignored rather than cut to its prefix, which would share far
+more than it names (`docs/*.md` would share all of `docs/`), and so is a line that would share the
+whole repo (`/`, `.`). `hpipe start` warns about each.
+
+A shared path never holds the lock. A task still declares it in `--files`, and `hpipe task` and
+`hpipe show` print it marked `(shared)`; it just locks nothing, so a task whose every entry is shared
+goes straight past `blocked-on-files`. An entry broader than a shared prefix still locks: `docs/`
+claims the rest of `docs/` even when `docs/file-formats.md` is shared.
+
+Two tasks now edit one file at once, so a conflict there is expected, and the flows that already
+exist resolve it. The implementer is asked to keep its change to a shared file self-contained — a
+section of its own, nobody else's reflowed or reordered — so a merge stays mechanical. Per-task, the
+merge prompt names the shared path and any merged task that declares it too: rebase, keep both sides'
+additions, and CI runs again on the rebased head; two additions that collide in meaning (the same id,
+number or section) go back to `implement` with the `hpipe rewind` the prompt prints, so the worker
+redoes its addition on top and it is reviewed. In a single-PR run the conflict comes at `sync`: the
+worker keeps both additions, which makes the sync dirty, so the change goes back through review; a
+collision in meaning is raised with `hpipe decide`.
+
+`hpipe start` reads the list **once**, from the commit the run is cut from — origin's default branch as
+just fetched, or a single-PR run's batch base — and prints a `shared:` line naming that commit.
+Nothing refreshes it mid-run: a list that shrank could leave two tasks past the gate on a path that
+locks again. A change to the file takes effect at the next `start`, and `hpipe status` names the
+snapshot's commit under the run header. The file is otherwise an ordinary path: not shared itself, and
+a change to it is always reviewed, since it changes how every later run locks. An unreadable file
+shares nothing, which locks every path as before; `start` warns and goes ahead.
+
 ### Permissions the orchestrator needs
 
 The orchestrator pushes, opens and merges PRs, and starts workers. Allow these in the Claude Code
 session it runs in before you start a run, or the permission check (and auto mode's classifier) will
 stop it partway through, once per command:
 
-    git push · git pull · gh pr create · gh pr merge
-    herdr worktree create · herdr agent start · hpipe
+    git push · git pull · gh pr create · gh pr merge · hpipe
 
 For example, `Bash(gh pr merge:*)` under `permissions.allow` in the repo's
 `.claude/settings.local.json`. Workers run with `--dangerously-skip-permissions` in their own
 worktrees and need nothing.
+
+`hpipe dispatch` runs `herdr worktree create` and `herdr agent start … --dangerously-skip-permissions`
+itself, so allowing `hpipe` allows starting workers that skip permissions, and auto mode's classifier
+sees only `hpipe dispatch --task t1`, never the `agent start` inside it. `herdr worktree create` and
+`herdr agent start` are needed only for the manual fallback.
 
 ## Use
 
@@ -155,23 +205,41 @@ other check has passed, and registers the task under its id. Adopting with `--be
 that is closed, assigned, held by a live task in any session, blocked by an open bead, or the parent
 of open child beads — each would trip one of bd's close guards at merge.
 
-When a task is ready the orchestrator creates its worktree, starts a bare agent in the root pane, and
-hands it the brief with:
+When tasks are ready the orchestrator dispatches them with one command, run in the background:
+
+    hpipe dispatch --ready [--run <run-id>]        # every task waiting for its brief
+    hpipe dispatch --task <id> [--run <run-id>]    # one task
+
+For each task it fetches the base, creates the task's worktree from it with `--cwd` pinned to the
+repo, runs `.claude/pipeline-bootstrap` in the new checkout, starts the worker with
+`--dangerously-skip-permissions` at its tier's effort, and hands it the brief. It prints one line per
+step as it goes, skips any step already done, and stops at the first failure with what to do next; run
+the same command again once that is fixed. Only one dispatch runs in a repo at a time, across
+sessions, and only from a pane of the run's own herdr session. `--ready` also takes any task that
+becomes ready while it runs. SIGTERM, SIGINT or SIGHUP stops a dispatch's bootstrap with it; one
+killed outright leaves its lock, and the next dispatch in the repo stops that bootstrap and takes the
+lock over. A herdr call that hangs past 30 seconds (90 for `agent start`) is stopped, and the dispatch
+stops at that step and lets go of the lock. While a dispatch is under way, `hpipe status` says what it
+is doing rather than asking for an agent to be started. Beside a supervisor that predates it, `--task`
+and `--ready` refuse, naming its pid: restart it (see **Upgrading**), or use the manual fallback.
+
+The manual fallback is the `dispatch, in order:` block `hpipe task` and the `Dispatch tN` prompt print,
+ending in:
 
     hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]
 
-which submits the rendered brief over `herdr agent prompt` and exits non-zero unless herdr sees the
-worker start on it. The brief cannot ride on `herdr agent start` itself: herdr refuses to pass an
-argument containing its fences and backticks. When the batch is complete the orchestrator closes
-intake with `hpipe dispatch --done`. `dispatch --task` claims the task's bead first; if bd refuses the
-claim, nothing is sent. Everything after that is injected: each worker gets its next
-instruction as each phase completes.
+which submits the rendered brief to an agent you started over `herdr agent prompt`, and exits
+non-zero unless herdr sees the worker start on it. The brief cannot ride on `herdr agent start`
+itself: herdr refuses to pass an argument containing its fences and backticks. Both forms claim the
+task's bead first; if bd refuses the claim, nothing is sent. When the batch is complete the
+orchestrator closes intake with `hpipe dispatch --done`. Everything after that is injected: each
+worker gets its next instruction as each phase completes.
 
 `hpipe status` shows the fleet, every open decision, and anything waiting on you. For one task:
 
 | | |
 |---|---|
-| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, bead, surface, files, dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
+| `hpipe show --task <id> [--run <run-id>]` | What the run recorded: branch, bead, surface, files (a shared one marked), dependencies, phase and its age, artifact and verdict paths, PR, CI, open decision |
 | `hpipe brief --task <id> [--run <run-id>]` | The worker brief, rendered bare. Read-only — registering a task is the only other place it is printed |
 | `hpipe bead show <id>` | A bead as Beads holds it now: status, labels, description, acceptance, comments |
 | `hpipe next [--limit <n>] [--label <label>]` | The unheld beads `bv` ranks claimable now (parallel only when their `--files` are disjoint), then one line per later dependency layer, each waiting on the one before; then blockers to clear and alerts. `--label` filters bv's top 10 recommendations, not every bead |
@@ -184,7 +252,8 @@ it already filed; a retry carries on from there and files nothing twice.
 
 When a decision needs you, the orchestrator runs `hpipe escalate --task <id> --decision <id>
 --recommend "<its recommendation>"`: the task's bead turns `blocked`, gains `hpipe:awaiting-human`,
-and carries the question as a comment until you answer.
+and carries the question as a comment until you answer. A check only you can make before a merge, a
+device test say, holds that merge until you rule on it (**Before-merge checks**).
 
 Every subcommand takes `--help` (or `-h`), and does nothing else when given it.
 
@@ -495,6 +564,22 @@ branch review, so beside an old one a new CLI still gets a batch merge command w
 ignores: a sync submission's `merges` (an old supervisor calls any clean sync a clean sync) and an
 outbox entry's `carry-on` kind (an old supervisor delivers it but does not count it as a resume).
 
+2.2.0 — shared paths, before-merge checks and one-command dispatch — adds only optional fields, and no
+schema change: `shared_paths` on a run, `before_merge` on a task and on a run, `bootstrapped` on a task,
+and `capabilities` in the supervisor's pid file, which lists what that supervisor honours so the CLI can
+tell an older one from this release's. Restart the supervisor in every session, as above. Until you do,
+the older supervisor ignores every new field, and the CLI makes up for it where it can: `hpipe start`
+warns that it locks every declared path, shared or not, which is only stricter, and a restart lets the
+run share them; `hold` and `answer --before-merge` refuse until this session's supervisor is restarted,
+since it would send the merge command whatever check is owed; and `hpipe dispatch --task` and `--ready`
+refuse as well, since it reads no dispatch lock and would probe a task mid-bootstrap. The manual
+fallback, the `dispatch, in order:` block ending in `hpipe dispatch --task <id> --pane <pane-id>`, still
+works beside it. Runs started before the upgrade carry no shared-path list and keep locking everything
+until they finish. Rolling back to 2.1 ignores the fields rather than removing them: shared paths lock
+again, which is safe, and `bootstrapped` is ignored, but every hold is dropped, so the earlier
+supervisor sends the merge command and probes as before. Confirm or waive every owed check before
+rolling back, or tell the user the hold is gone.
+
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
 smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,
@@ -502,11 +587,66 @@ a copy or a link into another checkout, with the **Install the hpipe shorthand**
 
 ## Answering a decision
 
-    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human [--run <run-id>]
+    hpipe answer --task <id> --decision <id> --answer "…" --by orchestrator|human \
+                 [--before-merge "<check>"]... [--run <run-id>]
 
 The answer is recorded immediately but the worker resumes **only once the answer has actually been
 delivered** to its pane — a worker that is busy stays blocked, and `status` reports
-"answered but undelivered" rather than pretending the decision was applied.
+"answered but undelivered" rather than pretending the decision was applied. `--before-merge` records
+a check only the user can make, in the same save; see **Before-merge checks**.
+
+## Before-merge checks
+
+Some checks only the user can make: a test on a device, a look at the UI. Record one, and the merge it
+guards waits for the user's ruling:
+
+    hpipe answer … --before-merge "<what they check>"      # carried by a decision's answer
+    hpipe hold --task <id> --before-merge "<check>"         # one task's merge, with no decision behind it
+    hpipe hold --before-merge "<check>"                     # single-PR: the batch PR
+
+`--before-merge` may be repeated: each one is a check, numbered `c1`, `c2`, … across the run, and a
+comma is part of its text. Per-task, a check holds its task's merge. Single-PR, every check, on a task
+or on the run, holds the batch PR, never a task's landing: one task lands at a time, so a landing held
+for the user would hold every landing behind it, and the batch PR's head is what ships.
+
+While a check is owed:
+
+- The merge command is never sent. The orchestrator gets **Hold — … waits on the human before it
+  merges** instead, which has it make the PR mergeable first (by `gh pr view --json
+  mergeStateStatus`: a rebase, `gh pr update-branch`, `gh pr ready`), since a rebase replaces the head
+  the user would check; then tell the user once, in a message of its own, what to check and on which
+  build; then end its turn.
+- No stall probe comes for it, however long the user takes.
+- `hpipe status` lists it under **waiting on the human:**, and the run header gets a `before merge:`
+  line. `hpipe show --task <id>` prints one `before merge:` line per check. Per-task, the task's bead
+  is `blocked` + `hpipe:awaiting-human`, with the check and each ruling as comments.
+
+The user's ruling is recorded with:
+
+    hpipe confirm --check <id> --by human                    # they checked it, and it holds
+    hpipe confirm --check <id> --by human --waive "<why>"    # they chose to skip it
+    hpipe confirm --check <id> --by human --failed "<what they saw>"
+
+- **What a confirmation covers.** The head CI ran on, read live from origin. It holds only while
+  that is the head that merges: a push after it makes the check owed again, on the new head. A waiver
+  covers any head.
+- **When.** Only near the gate: per-task while the task is in `ci` or `merge`, or once its PR has
+  merged; single-PR while the run is in `ship-ci` or `ship-merge`. Only `--by human` is taken, and
+  never from a worker's pane.
+- **What it does.** The last ruling at the gate queues the merge prompt and restarts the stall ladder.
+  A per-task `--failed` sends the task back to `implement`, and its worker is told what the user saw.
+  A single-PR one keeps the run in `ship-merge` until a patch on the batch or a fix task moves the
+  head, which the user then checks again. After the merge `--failed` is refused: record `--waive
+  "failed on device; fixed by <task>"`, and register the fix as a new task.
+
+A PR merged by hand while a check is owed is recorded, since it is GitHub's fact, but the task waits in
+`merge` (single-PR, the run in `ship-merge`) until the user rules. Its bead stays open, it can be
+rewound only back to `merge` (any other phase would finish it or forget the merge), `hpipe close` is
+refused, and a per-task run cannot reach `done`. `hpipe abort` lists
+what is still owed, and the done notice says what was ruled.
+
+`hold` and `answer --before-merge` refuse beside a supervisor that predates before-merge checks, which
+would send the merge command anyway: restart it first (see **Upgrading**).
 
 ## Claude's usage limit
 

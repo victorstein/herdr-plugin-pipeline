@@ -4,7 +4,8 @@ import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { fileHolders } from '../lib/gating'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
 import { reviewsSkipped } from '../lib/review-skip'
-import { actionFor, ageMinutes, type PaneHolds, waitsOnYou } from '../lib/status'
+import { type DispatchLocks, NO_DISPATCHES } from '../lib/dispatch-lock'
+import { actionFor, ageMinutes, humanWaitLines, type PaneHolds, waitsOnYou } from '../lib/status'
 import { bindWorkerPane, releaseWorkerPane, unbriefedWorker } from '../lib/unstarted'
 import type { PaneInfo, WorkspaceInfo } from '../lib/herdr'
 import type { QueuedEvent, Run, SessionKey, Task, TaskPhase } from '../lib/types'
@@ -56,7 +57,7 @@ function skippedOnTheWay(task: Task, phaseAtEvent: string): string {
  * Measured on a live run.
  */
 export function describeWake(
-  line: WakeLine, now: number, hpipe: string, holds: PaneHolds = {},
+  line: WakeLine, now: number, hpipe: string, holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
   const { run, task } = line
   if (task === null) {
@@ -67,7 +68,7 @@ export function describeWake(
   const skipped = skippedOnTheWay(task, line.phaseAtEvent)
   const box = phaseBox(line.phaseAtEvent, task.phase, task.phase_entered_at, now, skipped)
   const head = `${task.task_id} ${task.branch} (${task.bead}) [${box}] ` +
-    `${line.event} — ${actionFor(run, task, hpipe, now, holds)}`
+    `${line.event} — ${actionFor(run, task, hpipe, now, holds, dispatches)}`
   if (line.detail === undefined || line.detail.length === 0) return head
 
   const indented = line.detail.split('\n').map((l) => `    ${l}`).join('\n')
@@ -145,7 +146,7 @@ export class BriefHolds {
 export const FILES_PASS_HOLD_MS = 30_000
 
 function passesThroughFiles(run: Run, task: Task): boolean {
-  return task.phase === 'blocked-on-files' && fileHolders(task, run.tasks).length === 0
+  return task.phase === 'blocked-on-files' && fileHolders(run, task).length === 0
 }
 
 /** Only the idle that ended the phase before: a block or a lost pane is news, and goes at once. */
@@ -194,20 +195,30 @@ export class FilesPassHolds {
  */
 export function parkedFooter(
   run: Run, covered: ReadonlySet<string>, now: number, hpipe: string, holds: PaneHolds = {},
+  dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
   const parked = run.tasks
     .filter((task) => !covered.has(task.task_id))
     // Dead ends are left to `hpipe status`: they never move again, so the footer
     // would repeat them on every digest for the rest of the run.
-    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now, holds))
+    .filter((task) => taskRow(task.phase).terminal !== true && waitsOnYou(run, task, now, holds, dispatches))
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
 
-  if (parked.length === 0) return ''
+  const lines = parked.map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
+  // Shown so a held merge reads as held on purpose; the hold prompt says it is no cue to ask again.
+  const human = humanWaitLines(run, hpipe, now, covered).map((line) => `- ${line}`)
+  return [
+    ...(lines.length === 0 ? [] : ['also waiting on you:', ...lines]),
+    ...(human.length === 0 ? [] : ['waiting on the human:', ...human]),
+  ].join('\n')
+}
 
-  const lines = parked.map((task) =>
-    `- ${task.task_id} ${task.branch} (${task.bead}) ` +
-    `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
-  return ['also waiting on you:', ...lines].join('\n')
+function digestLine(
+  run: Run, task: Task, now: number, hpipe: string, holds: PaneHolds, dispatches: DispatchLocks,
+): string {
+  const age = ageMinutes(task.phase_entered_at, now)
+  const move = actionFor(run, task, hpipe, now, holds, dispatches)
+  return `- ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move}`
 }
 
 /**
@@ -216,12 +227,12 @@ export function parkedFooter(
  * task's phase, age and whose move it is, the lines `hpipe status` would give. An
  * orchestrator restarted after the window has no context but this.
  */
-export function catchUpDigest(run: Run, now: number, hpipe: string, holds: PaneHolds = {}): string {
+export function catchUpDigest(
+  run: Run, now: number, hpipe: string, holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
+): string {
   const lines = [...run.tasks]
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
-    .map((task) =>
-      `- ${task.task_id} ${task.branch} (${task.bead}) ` +
-      `[${task.phase} ${ageMinutes(task.phase_entered_at, now)}m] — ${actionFor(run, task, hpipe, now, holds)}`)
+    .map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
   return [
     `catch-up: digests for this run did not reach you, so here is where it stands now ` +
     `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
@@ -434,6 +445,12 @@ export function applyEvents(
         found.task.workspace_id = event.workspace_id
         found.task.checkout_path = event.checkout_path ?? found.task.checkout_path
         found.task.adopted_at = Date.now()
+        // herdr reuses workspace ids and a re-created worktree can sit at the same
+        // path, so only a bootstrap recorded after herdr made this worktree is proof
+        // for it. A bootstrap recorded before the hook ran is cleared too, which costs
+        // one bootstrap more on a re-run.
+        const bootstrapped = found.task.bootstrapped
+        if (bootstrapped !== undefined && bootstrapped.at <= event.at) delete found.task.bootstrapped
         changed = true
       }
       continue

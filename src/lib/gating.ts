@@ -1,7 +1,8 @@
 import { dirname, join } from 'node:path'
 import { taskRow } from './phases'
+import { isSharedPath, sharedPrefixesOf } from './shared-paths'
 import { ARTIFACT_ROOT, REVIEWS_DIR, taskVerdictPrefix } from './verdict-path'
-import type { Task, TaskPhase } from './types'
+import type { Run, Task, TaskPhase } from './types'
 
 /** Dependency satisfaction: a dependent may never start behind one of these. */
 export const TERMINAL_OK: ReadonlySet<TaskPhase> = new Set<TaskPhase>(['done'])
@@ -152,14 +153,34 @@ export function gateStatus(task: Task, all: Task[]): GateState {
   return { state: 'ready' }
 }
 
-export function fileHolders(task: Task, all: Task[]): Task[] {
-  return all.filter(
-    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(task.files, t.files),
+/** Every overlap test reads the run, so the gate and the texts that describe it cannot disagree. */
+export type FileGateRun = Pick<Run, 'tasks' | 'shared_paths'>
+
+/**
+ * A shared path never locks: two tasks may edit it at once, and a conflict there is
+ * left to the rebase before a merge, or to `sync`. An entry broader than a shared
+ * prefix still locks, so `docs/` claims the rest of `docs/`.
+ */
+export function lockingFiles(run: FileGateRun, task: Task): string[] {
+  const shared = sharedPrefixesOf(run)
+  return task.files.filter((path) => !isSharedPath(path, shared))
+}
+
+/** Still recorded on the task: the merge and sync notes name them. */
+export function sharedFiles(run: FileGateRun, task: Task): string[] {
+  const shared = sharedPrefixesOf(run)
+  return task.files.filter((path) => isSharedPath(path, shared))
+}
+
+export function fileHolders(run: FileGateRun, task: Task): Task[] {
+  const locking = lockingFiles(run, task)
+  return run.tasks.filter(
+    (t) => t.task_id !== task.task_id && isInFlight(t) && filesOverlap(locking, lockingFiles(run, t)),
   )
 }
 
-export function filesClearFor(task: Task, all: Task[]): boolean {
-  return fileHolders(task, all).length === 0
+export function filesClearFor(run: FileGateRun, task: Task): boolean {
+  return fileHolders(run, task).length === 0
 }
 
 /**
@@ -167,14 +188,14 @@ export function filesClearFor(task: Task, all: Task[]): boolean {
  * the running set, two tasks freed by the same teardown both read "nothing
  * overlaps" on the same tick and both enter `implement`.
  */
-export function releasableFromFiles(all: Task[]): Task[] {
-  const waiting = all
+export function releasableFromFiles(run: FileGateRun): Task[] {
+  const waiting = run.tasks
     .filter((t) => t.phase === 'blocked-on-files')
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
   const released: Task[] = []
   for (const t of waiting) {
-    if (!filesClearFor(t, all)) continue
-    if (released.some((r) => filesOverlap(r.files, t.files))) continue
+    if (!filesClearFor(run, t)) continue
+    if (released.some((r) => filesOverlap(lockingFiles(run, r), lockingFiles(run, t)))) continue
     released.push(t)
   }
   return released

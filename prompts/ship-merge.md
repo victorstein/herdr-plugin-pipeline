@@ -17,9 +17,7 @@
   never finds the PR body.
 - **Green is for {{green_head}}.**{{pinned}} If anything is pushed to `{{batch}}` now, the run goes
   back to `ship`, to run `{{hpipe}} batch-check` on the new head before CI, and you are told again once
-  that head is green.
-
-This is the last point at which a check a decision ruled "before merge" can still be done.
+  that head is green.{{before_merge}}
 
 If GitHub refuses the merge: a required review means getting one, and "branches must be up to date"
 means `gh pr update-branch {{pr}}`, which moves the head, so the run goes back through `ship`. Until PR #{{pr}}

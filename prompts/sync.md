@@ -14,7 +14,7 @@ asked of you here.
    with `model: {{implement_model}}` writes the resolution. If it runs in the background, end your
    turn and carry on when its completion notice arrives; never poll for it or sleep while it runs. A
    merge whose conflict you resolved is not a clean merge: `submit` sends the change through review
-   before it lands, because the resolution is code no reviewer has seen.
+   before it lands, because the resolution is code no reviewer has seen.{{shared_note}}
 3. **If the merge changed what this repo's bootstrap builds**, re-run `./.claude/pipeline-bootstrap`
    here before you check anything.
 4. **Push, then submit:**

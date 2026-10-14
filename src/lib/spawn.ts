@@ -9,6 +9,8 @@ export interface BoundedOptions {
   cwd?: string
   env?: Record<string, string | undefined>
   timeoutMs: number
+  /** Hears the child's pid, which is also its process group: a caller interrupted mid-call can stop it. */
+  onSpawn?: (pid: number) => void
 }
 
 /** How long the pipes may stay open after the child exits before reading stops. */
@@ -65,6 +67,7 @@ export async function runBounded(argv: string[], options: BoundedOptions): Promi
   } catch (error) {
     return { code: -1, stdout: '', stderr: String(error), timedOut: false }
   }
+  options.onSpawn?.(proc.pid)
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true

@@ -6,6 +6,10 @@ import {
   Bd, BD_ACTOR, CLI_LOCK_WAIT_MS, isBdFailure, type BdFailure, type BeadCreateInput, type BeadDetail, type CreatedBead, type Done,
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
+import {
+  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck, owedAt,
+  owedInRun,
+} from './lib/before-merge'
 import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
 import { beadsSlug, readBeadsProject } from './lib/beads-project'
@@ -18,31 +22,45 @@ import { bvTriage } from './lib/bv'
 import { observePanes, type PaneHold, readPaneHolds } from './lib/delivery-health'
 import { abandonDecisions, answerDecision, openDecision, openDecisionFor } from './lib/decisions'
 import {
-  baseLine, branchNameRefusal, dependencyMerges, type DispatchBase, fetchDefaultBranch, fetchFromOrigin,
-  freshDispatchBase, pushToOrigin, remoteBranchHead, trackingRefspec,
+  baseArgument, baseLine, branchNameRefusal, dependencyMerges, describeBase, type DispatchBase, fetchDefaultBranch,
+  fetchFromOrigin, freshDispatchBase, pushToOrigin, type RemoteHead, remoteBranchHead, trackingRefspec,
 } from './lib/dispatch-base'
-import { Gh } from './lib/gh'
-import { detectCycle, filesOverlap, gateStatus } from './lib/gating'
+import { Gh, type PrView } from './lib/gh'
+import { detectCycle, filesOverlap, gateStatus, lockingFiles } from './lib/gating'
 import { type BeadClaimant, beadClaimants, beadHolds, heldBy, holdsBead, phaseHoldsBead } from './lib/held'
 import { Herdr, type CallResult } from './lib/herdr'
 import {
-  BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun, retryOnStaleRun, runById, runForRepo,
-  runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal, unlandedSaveMessage,
-  wasAborted, withBatch, writeOrchestrator,
+  type DispatchLock, type DispatchMode, type HeldDispatchLock, holderLine, type LockDeps, type LockTaken,
+  readDispatchLocks, REAL_LOCK_DEPS, takeDispatchLock,
+} from './lib/dispatch-lock'
+import {
+  dispatchGit, dispatchHerdr, DispatchInterrupt, noChildren, runTrackedBootstrap, trapDispatchSignals,
+} from './lib/dispatch-process'
+import {
+  type DispatchDeps, type DispatchGit, type DispatchHerdr, type DispatchLedger, dispatchTask, HERDR_CALL_BOUND_MS,
+} from './lib/dispatch-steps'
+import {
+  allOrchestratorPanes, BATCH_SCHEMA_VERSION, isUnlandedSave, listRuns, newRun, resolveCurrentSchemaRun,
+  retryOnStaleRun, runById, runForRepo, runForWorkspace, runIsDriven, runPhaseState, saveRun, taskPhaseIsTerminal,
+  unlandedSaveMessage, wasAborted, withBatch, writeOrchestrator,
 } from './lib/ledger'
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
-import { enqueue, queuedResume, queuedWorkerPrompt } from './lib/outbox'
+import { enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
 } from './lib/phases'
-import { drivenSchemas, type SupervisorState, supervisorState } from './lib/pidfile'
+import {
+  BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY, drivenSchemas, honours, SHARED_PATHS_CAPABILITY, type SupervisorState,
+  supervisorState,
+} from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
 import { hpipeCommand, renderPrompt } from './lib/render'
 import { repoContext } from './lib/repo'
 import { sessionKey } from './lib/session'
+import { describeFiles, readSharedPaths, type SharedPathsSource, startSharedLines } from './lib/shared-paths'
 import { currentUncommittedWork, formatStatus, formatTaskDetail, resumeCommand, uncommittedSummary } from './lib/status'
 import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
@@ -59,7 +77,8 @@ import { renderTaskPhasePrompt } from './supervisor/tasks'
 import { checkReleaseTitle, releaseSections } from './lib/release-title'
 import { headOf, isAncestor, nothingToLand, resolveCommit, syncWalk, type SyncWalk } from './lib/sync-walk'
 import type {
-  Batch, BeadBrief, CheckOutcome, Run, RunPhase, Submission, Task, TaskPhase, UncommittedWork,
+  Batch, BeadBrief, BeforeMergeCheck, CheckOutcome, Resolution, Run, RunPhase, Submission, Task, TaskPhase,
+  UncommittedWork,
 } from './lib/types'
 import { isAgentReady } from './lib/machine'
 import { type LimitReading, readingFrom, readLimit, resetText } from './supervisor/usage-limits'
@@ -215,8 +234,9 @@ export interface StartBeads {
 const REAL_START_BEADS: StartBeads = { tools: checkTools, setup: (input) => setupBeads(input) }
 
 /**
- * What `start --single-pr` asks outside git: whether the supervisor can drive a
- * batch, whether GitHub can squash, and whether a ruleset already guards the branch.
+ * What `start` asks outside git: whether the supervisor can drive a batch and
+ * honour shared paths, whether GitHub can squash, and whether a ruleset already
+ * guards the batch branch.
  */
 export interface StartBatch {
   supervisor: () => Promise<SupervisorState>
@@ -277,6 +297,27 @@ async function planBatch(
   return { ok: true, plan: { branch, into: fetched.branch, commit: fetched.commit, adopted: onOrigin.sha !== null } }
 }
 
+/**
+ * The commit the run is cut from: the batch's base, or for a per-task run the
+ * default branch as a dispatch would fetch it. The working tree may be on any branch.
+ */
+async function sharedPathsSource(repoRoot: string, plan: BatchPlan | null): Promise<SharedPathsSource> {
+  if (plan !== null) {
+    const ref = `origin/${plan.into}`
+    return { at: plan.commit, commit: plan.commit, ref, described: `${ref} as just fetched` }
+  }
+  const base = await freshDispatchBase(repoRoot, [], null)
+  return { at: baseArgument(base), commit: base.commit, ref: base.ref, described: describeBase(base) }
+}
+
+/** Only stricter: an old supervisor locks the shared paths too. */
+async function oldSupervisorLocksShared(ctx: Ctx, batch: StartBatch): Promise<string[]> {
+  const supervisor = await batch.supervisor()
+  if (supervisor.state !== 'live' || honours(supervisor.info, SHARED_PATHS_CAPABILITY)) return []
+  return [`⚠ shared: the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates shared paths and ` +
+    "locks them anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` action to share them"]
+}
+
 function batchLines(plan: BatchPlan, repoRoot: string, protectedAlready: boolean): string[] {
   const adopted = plan.adopted ? '; already on origin at that commit, so it is adopted' : ''
   return [
@@ -327,6 +368,13 @@ export async function cmdStart(ctx: Ctx, input: {
   if (!setup.ok) return fail(setup.error)
   const bvBroken = bvProblem(tools.bv)
 
+  const sharedFrom = await sharedPathsSource(input.repoRoot, plan)
+  run.shared_paths = await readSharedPaths(input.repoRoot, sharedFrom)
+  const sharedLines = [
+    ...startSharedLines(run.shared_paths, sharedFrom.described),
+    ...(run.shared_paths.prefixes.length === 0 ? [] : await oldSupervisorLocksShared(ctx, batch)),
+  ]
+
   // After the Beads setup, so a Beads failure leaves no branch behind.
   if (plan !== null && !plan.adopted) {
     const refused = await pushToOrigin(input.repoRoot, plan.commit, plan.branch)
@@ -355,6 +403,7 @@ export async function cmdStart(ctx: Ctx, input: {
     ...setupLines(setup, ctx.stateDir),
     ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
     ...(plan === null ? [] : batchLines(plan, input.repoRoot, protectedAlready)),
+    ...sharedLines,
   ]
   return ok(`${preface.join('\n')}\n\n${intake}`, JSON.stringify({ run_id: run.run_id }))
 }
@@ -374,7 +423,7 @@ const PHASES_BEFORE_A_MERGE: ReadonlySet<string> = new Set<string>([
   ...PHASES_BEFORE_A_PR, 'pr-review', 'pr-review-intent', 'pr-review-quality', 'ci', 'land-queue', 'sync', 'merge',
 ])
 
-/** Whether the batch PR has merged: null when GitHub could not say. */
+/** Whether a PR has merged, the batch PR or a task's: null when GitHub could not say. */
 export type BatchShipped = (repoRoot: string, pr: number) => Promise<boolean | null>
 
 const ghBatchShipped: BatchShipped = async (repoRoot, pr) => {
@@ -742,7 +791,7 @@ async function registerTask(
   // the only other place task.files reaches a human is the blocked-on-files
   // warning in status.ts, which speaks only once overlap has already fired — so a
   // declaration that matches nothing is silent by construction.
-  const filesLine = `files: ${task.files.length > 0 ? task.files.join(', ') : 'none'}${overlapNote(task, run.tasks)}`
+  const filesLine = `files: ${describeFiles(run, task.files)}${overlapNote(run, task)}`
 
   // The same line the supervisor's dispatch prompt prints, on the path that
   // actually dispatches: 17 of the last 20 tasks left `queued` here, not in the
@@ -772,9 +821,10 @@ async function registerTask(
  * Said at registration, where the overlap is chosen: the lock only bites at
  * `implement`, so nothing else mentions it until the task is already waiting.
  */
-function overlapNote(task: Task, all: readonly Task[]): string {
-  const sharers = all.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
-    taskRow(t.phase).terminal !== true && filesOverlap(task.files, t.files))
+function overlapNote(run: Run, task: Task): string {
+  const locking = lockingFiles(run, task)
+  const sharers = run.tasks.filter((t) => t.task_id !== task.task_id && t.phase !== 'done' &&
+    taskRow(t.phase).terminal !== true && filesOverlap(locking, lockingFiles(run, t)))
   if (sharers.length === 0) return ''
   return ` — overlaps ${sharers.map((t) => t.task_id).join(', ')}: whichever reaches implement second ` +
     'waits there until the other finishes'
@@ -893,10 +943,100 @@ export type ReadPaneLimit = (paneId: string) => Promise<LimitReading | null>
 
 const cliReadPaneLimit: ReadPaneLimit = (paneId) => readLimit(new Herdr(), paneId)
 
+/** What hands a brief to a pane, on both the manual `--pane` form and the one-command dispatch. */
+export interface HandOver {
+  send: SendBrief
+  recordPane: typeof recordWorkerPane
+  claim: ClaimBead
+  readPaneLimit: ReadPaneLimit
+}
+
+type HandedOver = { ok: true; unrecorded: string | null } | { ok: false; text: string }
+
+async function handOverBrief(ctx: Ctx, run: Run, task: Task, paneId: string, deps: HandOver): Promise<HandedOver> {
+  // A brief typed into a pane Claude's usage limit has stopped is rejected on
+  // arrival, yet herdr confirms it, and the task would wait on a worker that never
+  // read it.
+  const limit = await deps.readPaneLimit(paneId)
+  if (limit?.line != null && isAgentReady(limit.status)) {
+    const reset = resetText(limit.line)
+    return {
+      ok: false,
+      text: `the agent in ${paneId} is stopped by Claude's usage limit` +
+        `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`,
+    }
+  }
+
+  // Before the send: a brief cannot be recalled, and a bead someone else holds
+  // must refuse the dispatch rather than surface later as a reconciler failure.
+  // Until `recordPane` clears `awaiting_brief` the desired bead is still open and
+  // unassigned, so a reconciler pass in between un-assigns this claim once and the
+  // next pass re-assigns it: harmless, and not worth a ledger write before the send.
+  const claimed = await deps.claim(run.repo_key, task.bead)
+  if (isBdFailure(claimed)) {
+    return {
+      ok: false, text: `bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`,
+    }
+  }
+
+  const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
+  const sent = await deps.send(paneId, brief)
+  if (!sent.ok) {
+    const reason = `brief for ${task.task_id} not confirmed in ${paneId}: ` +
+      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
+    // Only these two come back after herdr accepted the text; every other code
+    // is a rejection before anything reached the pane.
+    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
+    return {
+      ok: false,
+      text: mayHaveLanded
+        ? `${reason}\n  → herdr pane read ${paneId} before retrying: the brief was ` +
+          'submitted and may already be in the pane, and a retry would send it twice; if it ' +
+          `sits unsubmitted in the input box, \`herdr agent send-keys ${paneId} ctrl+c\` ` +
+          'empties it while the worker is idle'
+        : `${reason}\n  → nothing was sent; fix the cause and run it again`,
+    }
+  }
+
+  const unrecorded = await deps.recordPane(ctx, {
+    runId: run.run_id, taskId: task.task_id, paneId, briefedPhase: taskRow('queued').onClear as TaskPhase,
+  })
+  return { ok: true, unrecorded }
+}
+
+/**
+ * Null when `ps` cannot say when this process started. A guess would not match the
+ * time later readers get, and the live lock would read as stale and be taken over.
+ */
+async function dispatchHolder(
+  ctx: Ctx, run: Run, mode: DispatchMode, task: string | null, now: number, lockDeps: LockDeps,
+): Promise<DispatchLock | null> {
+  const startedAt = await lockDeps.startedAt(process.pid)
+  if (startedAt === null) return null
+  return {
+    session: ctx.session, run_id: run.run_id, mode, task, step: null, since: now,
+    pid: process.pid, started_at_ms: startedAt, bootstrap: null,
+  }
+}
+
+const UNKNOWN_START = "could not read this process's start time with `ps`, which the dispatch lock needs to tell " +
+  'a live dispatch from a dead one; nothing was started'
+
+function lockRefusal(ctx: Ctx, run: Run, taken: Exclude<LockTaken, { ok: true }>, wanted: string | null): string {
+  if ('refusal' in taken) return taken.refusal
+  const holder = taken.holder
+  const takesIt = holder.mode === 'ready' && holder.session === ctx.session && holder.run_id === run.run_id
+    ? `; it takes every task that becomes ready before it ends${wanted === null ? '' : `, ${wanted} included`}`
+    : ''
+  return `${holderLine(holder, Date.now())}: one dispatch runs per repo at a time${takesIt}. Run this again once it ` +
+    'ends'
+}
+
 export async function cmdDispatchTask(ctx: Ctx, input: {
   taskId: string; paneId: string; repoKey: string | null; runId: string | null
 }, send: SendBrief, recordPane: typeof recordWorkerPane = recordWorkerPane,
   claim: ClaimBead = cliClaimBead(ctx.stateDir), readPaneLimit: ReadPaneLimit = cliReadPaneLimit,
+  lockDeps: LockDeps = REAL_LOCK_DEPS,
 ): Promise<CmdResult> {
   // Not `driven`, unlike decide: this command delivers the brief itself, and the
   // worker's artifacts are stat'ed on the first tick after the rewind. Refusing
@@ -944,52 +1084,283 @@ export async function cmdDispatchTask(ctx: Ctx, input: {
       'root pane, from `herdr pane list --workspace <its workspace>`')
   }
 
-  // A brief typed into a pane Claude's usage limit has stopped is rejected on
-  // arrival, yet herdr confirms it, and the task would wait on a worker that never
-  // read it.
-  const limit = await readPaneLimit(input.paneId)
-  if (limit?.line != null && isAgentReady(limit.status)) {
-    const reset = resetText(limit.line)
-    return fail(`the agent in ${input.paneId} is stopped by Claude's usage limit` +
-      `${reset === null ? '' : ` (resets ${reset})`}; nothing was sent — run this again after the reset`)
+  // Re-checking `awaiting_brief` just before the send cannot close the window in
+  // which a one-command dispatch sends the same brief; only exclusion can.
+  const holding = await dispatchHolder(ctx, run, 'pane', task.task_id, Date.now(), lockDeps)
+  if (holding === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, { ...holding, step: 'brief' }, lockDeps)
+  if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task.task_id))
+  const untrap = trapDispatchSignals({
+    lock: taken.lock, children: noChildren(), interrupt: new DispatchInterrupt(), say: (line) => { console.log(line) },
+  })
+  let handed: HandedOver
+  try {
+    // Read again under the lock: a dispatch that held it may have handed this pane its brief.
+    const fresh = await runById(ctx.stateDir, ctx.session, run.run_id)
+    const current = fresh?.tasks.find((t) => t.task_id === task.task_id)
+    if (!fresh || !current) return fail(`${task.task_id} is gone from the ledger; nothing was sent`)
+    if (current.phase !== briefedPhase) return fail(`${task.task_id} is now in ${current.phase}; nothing was sent`)
+    if (current.pane_id === input.paneId && current.awaiting_brief !== true) {
+      return fail(`${task.task_id}'s worker in ${input.paneId} already has the brief; ` +
+        `\`${hpipeCommand(ctx.pluginRoot)} brief --task ${task.task_id}\` prints it to reread`)
+    }
+    handed = await handOverBrief(ctx, fresh, current, input.paneId, { send, recordPane, claim, readPaneLimit })
+  } finally {
+    taken.lock.release()
+    untrap()
   }
-
-  // Before the send: a brief cannot be recalled, and a bead someone else holds
-  // must refuse the dispatch rather than surface later as a reconciler failure.
-  // Until `recordPane` clears `awaiting_brief` the desired bead is still open and
-  // unassigned, so a reconciler pass in between un-assigns this claim once and the
-  // next pass re-assigns it: harmless, and not worth a ledger write before the send.
-  const claimed = await claim(run.repo_key, task.bead)
-  if (isBdFailure(claimed)) {
-    return fail(`bd would not let ${task.task_id} claim ${task.bead}; nothing was sent:\n  ${claimed.error}`)
-  }
-
-  const brief = await renderWorkerPrompt(ctx.pluginRoot, run, task)
-  const sent = await send(input.paneId, brief)
-  if (!sent.ok) {
-    const reason = `brief for ${task.task_id} not confirmed in ${input.paneId}: ` +
-      `${sent.code ?? 'error'}${sent.message ? ` — ${sent.message}` : ''}`
-    // Only these two come back after herdr accepted the text; every other code
-    // is a rejection before anything reached the pane.
-    const mayHaveLanded = sent.code === 'agent_prompt_stalled' || sent.code === 'timeout'
-    return fail(mayHaveLanded
-      ? `${reason}\n  → herdr pane read ${input.paneId} before retrying: the brief was ` +
-        'submitted and may already be in the pane, and a retry would send it twice; if it ' +
-        `sits unsubmitted in the input box, \`herdr agent send-keys ${input.paneId} ctrl+c\` ` +
-        'empties it while the worker is idle'
-      : `${reason}\n  → nothing was sent; fix the cause and run it again`)
-  }
+  if (!handed.ok) return fail(handed.text)
 
   const delivered = `brief for ${task.task_id} delivered to ${input.paneId}; the worker has picked it up`
-  const unrecorded = await recordPane(ctx, {
-    runId: run.run_id, taskId: task.task_id, paneId: input.paneId, briefedPhase,
-  })
-  if (unrecorded === null) return ok(delivered)
+  if (handed.unrecorded === null) return ok(delivered)
   // Still `ok`, and never "run it again": the brief has landed, and a re-run is
   // let through by the briefed-phase guard and would hand the worker a second one.
-  return ok(`${delivered}\n  ⚠ but its pane was not recorded (${unrecorded}). Do not run ` +
+  return ok(`${delivered}\n  ⚠ but its pane was not recorded (${handed.unrecorded}). Do not run ` +
     '`dispatch --task` again — that would brief the worker twice. The pane binds on its own ' +
     'once herdr reports the agent.')
+}
+
+/** Everything `cmdDispatchSteps` drives outside the ledger, so a test can stand in for herdr, git and the process. */
+export interface DispatchWiring {
+  herdr: DispatchHerdr
+  git: DispatchGit
+  base: DispatchBaseFor
+  runBootstrap: (checkout: string, logPath: string, lock: HeldDispatchLock) => Promise<CheckRun>
+  handOver: HandOver
+  lock?: LockDeps
+  say: (line: string) => void
+  now: () => number
+  sleep: (ms: number) => Promise<void>
+  /** Installs the signal traps for the life of the dispatch, and returns their removal. */
+  trap: (lock: HeldDispatchLock) => () => void
+  /** Never settles while a signal is being handled, so nothing outruns the handler. */
+  gate: () => Promise<void>
+  supervisor: () => Promise<SupervisorState>
+}
+
+function realDispatchWiring(ctx: Ctx): DispatchWiring {
+  const herdr = new Herdr()
+  const children = noChildren()
+  const interrupt = new DispatchInterrupt()
+  const say = (line: string): void => { console.log(line) }
+  const boundedReads = herdr.bounded(HERDR_CALL_BOUND_MS, children.herdrCallPgids)
+  return {
+    herdr: dispatchHerdr(herdr, children),
+    git: dispatchGit,
+    base: freshDispatchBase,
+    runBootstrap: (checkout, logPath, lock) => runTrackedBootstrap(checkout, logPath, lock, children),
+    handOver: {
+      // Unbounded here: herdr's own --timeout ends it, and a send cut short may still have landed.
+      send: (paneId, text) => herdr.agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS),
+      recordPane: recordWorkerPane,
+      claim: cliClaimBead(ctx.stateDir),
+      readPaneLimit: (paneId) => readLimit(boundedReads, paneId),
+    },
+    say,
+    now: Date.now,
+    sleep: (ms) => Bun.sleep(ms),
+    trap: (lock) => trapDispatchSignals({ lock, children, interrupt, say }),
+    gate: () => interrupt.gate(),
+    supervisor: () => supervisorState(ctx.stateDir, ctx.session),
+  }
+}
+
+function dispatchLedger(ctx: Ctx): DispatchLedger {
+  const briefedPhase = taskRow('queued').onClear as TaskPhase
+  // Best effort: a lost record costs one bootstrap more, or a skip the hook's binding undoes first.
+  const setBootstrapped: DispatchLedger['setBootstrapped'] = async (runId, taskId, record) => {
+    try {
+      await retryOnStaleRun(async () => {
+        const run = await runById(ctx.stateDir, ctx.session, runId)
+        const task = run?.tasks.find((t) => t.task_id === taskId)
+        if (!run || !task) return
+        if (record === null) {
+          if (task.bootstrapped === undefined) return
+          delete task.bootstrapped
+        } else {
+          task.bootstrapped = record
+        }
+        await saveRun(ctx.stateDir, run)
+      })
+    } catch (error) {
+      if (!isUnlandedSave(error)) throw error
+    }
+  }
+  return {
+    reread: async (runId, taskId) => {
+      const run = await runById(ctx.stateDir, ctx.session, runId)
+      const task = run?.tasks.find((t) => t.task_id === taskId)
+      return run && task ? { run, task } : null
+    },
+    setBootstrapped,
+    recordPane: (runId, taskId, paneId) => recordWorkerPane(ctx, { runId, taskId, paneId, briefedPhase }),
+    sessionRuns: () => listRuns(ctx.stateDir, ctx.session),
+    orchestratorPanes: () => allOrchestratorPanes(ctx.stateDir, ctx.session),
+  }
+}
+
+/** Why `hpipe dispatch --task` will not take this task, or null when it is owed its brief. */
+function notOwedItsBrief(run: Run, task: Task, hpipe: string): string | null {
+  if (unbriefedWorker(run, task) !== null) return null
+  const id = task.task_id
+  if (runRow(run.phase).releasesPane === true) return `run ${run.run_id} is in ${run.phase}: it drives no task`
+  if (task.phase === 'queued') {
+    const gate = gateStatus(task, run.tasks)
+    const waitingOn = gate.state === 'ready' ? '' : `: waiting on ${gate.on.join(', ')}`
+    return `${id} is still queued${waitingOn} — you will be told when it is ready`
+  }
+  if (taskPhaseIsTerminal(task.phase)) return `${id} is finished (phase: ${task.phase}) — there is no worker to brief`
+  const briefedPhase = taskRow('queued').onClear
+  const reread = `\`${hpipe} brief --task ${id}\` prints it to reread`
+  if (task.phase === briefedPhase) return `${id}'s worker has the brief; ${reread}`
+  if (taskRow(task.phase).actor === 'worker' && task.pane_id === null) {
+    const setUp = task.workspace_id === null
+      ? dispatchWorkerCommand(run, task, hpipe)
+      : startWorkerCommand(run, task, task.workspace_id, hpipe)
+    return `${id} is in ${task.phase}, past ${briefedPhase}, with no worker: ${setUp}`
+  }
+  return `${id} is already in ${task.phase}, past ${briefedPhase} — its worker has the brief; ${reread}`
+}
+
+const byTaskId = (a: Task, b: Task): number => a.task_id.localeCompare(b.task_id, undefined, { numeric: true })
+
+/** The `--pane` form is not refused: it only hands over a brief, as a supervisor that predates the rest expects. */
+function predatingSupervisorRefusal(ctx: Ctx, supervisor: SupervisorState): string | null {
+  if (supervisor.state !== 'live' || honours(supervisor.info, DISPATCH_CAPABILITY)) return null
+  return `the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates \`hpipe dispatch\`: it reads ` +
+    'no dispatch lock, so it would probe a task mid-bootstrap and ask you to `herdr agent start` it, and its binding ' +
+    'would keep a bootstrap record a new checkout never had. Restart it: close its `Pipeline supervisor` pane, then ' +
+    '`herdr plugin action invoke supervisor --plugin stein.pipeline`, and run this again; or dispatch by hand with ' +
+    'the `dispatch, in order:` block that `hpipe task` or its `Dispatch tN` prompt printed. Nothing was started'
+}
+
+/**
+ * Takes every task owed its brief, in task id order, and scans again before it
+ * lets go of the lock: a \`Dispatch tN\` prompt for a task that became ready
+ * meanwhile would send the orchestrator to a command the lock refuses.
+ */
+async function dispatchReady(ctx: Ctx, runId: string, deps: DispatchDeps): Promise<CmdResult> {
+  const attempted = new Set<string>()
+  const dispatched: string[] = []
+  for (;;) {
+    const run = await runById(ctx.stateDir, ctx.session, runId)
+    if (!run) return fail(`run ${runId} is gone from the ledger`)
+    const owed = run.tasks
+      .filter((task) => unbriefedWorker(run, task) !== null && !attempted.has(task.task_id))
+      .sort(byTaskId)
+    const [next, ...behind] = owed
+    if (next === undefined) break
+    attempted.add(next.task_id)
+    if (!(await dispatchTask(run, next, deps))) {
+      return fail([
+        dispatched.length === 0 ? 'dispatched nothing' : `dispatched ${dispatched.join(', ')}`,
+        `stopped at ${next.task_id}`,
+        ...(behind.length === 0 ? [] : [`not started: ${behind.map((task) => task.task_id).join(', ')}`]),
+      ].join('; '))
+    }
+    dispatched.push(next.task_id)
+  }
+  return ok(dispatched.length === 0
+    ? 'nothing to dispatch: no task in this run is waiting for its brief'
+    : `dispatched ${dispatched.join(', ')}`)
+}
+
+export interface DispatchStepsInput {
+  /** Null dispatches every task owed its brief. */
+  taskId: string | null
+  repoKey: string | null
+  runId: string | null
+  socketPath: string
+}
+
+/**
+ * The whole dispatch block, run by the CLI and never by the supervisor: its tick
+ * is serial, a bootstrap takes minutes, and a failure there has nobody to read it.
+ * The orchestrator runs it in the background, so there is no foreground timeout
+ * to fit under.
+ */
+export async function cmdDispatchSteps(
+  ctx: Ctx, input: DispatchStepsInput, wiring: DispatchWiring = realDispatchWiring(ctx),
+): Promise<CmdResult> {
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  let run: Run
+  let task: Task | null = null
+  if (input.taskId === null) {
+    const found = await resolveFor(ctx, {
+      runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'unfinished',
+    }, null)
+    if (!found.ok) return found.result
+    run = found.value
+  } else {
+    const found = await resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'unfinished', escape: null,
+    })
+    if (!found.ok) return found.result
+    ;({ run, task } = found.value)
+  }
+
+  // Outside the run's own session, herdr and the ledger would both be the wrong ones.
+  if (input.socketPath === '' || input.socketPath !== run.socket_path) {
+    return fail(`hpipe dispatch drives herdr itself: run it from a pane of session ${run.session}`)
+  }
+  if (task !== null) {
+    const refusal = notOwedItsBrief(run, task, hpipe)
+    if (refusal !== null) return fail(refusal)
+  }
+  const predating = predatingSupervisorRefusal(ctx, await wiring.supervisor())
+  if (predating !== null) return fail(predating)
+
+  const lockDeps = wiring.lock ?? REAL_LOCK_DEPS
+  const mode = task === null ? 'ready' : 'task'
+  const wanted = await dispatchHolder(ctx, run, mode, task?.task_id ?? null, wiring.now(), lockDeps)
+  if (wanted === null) return fail(UNKNOWN_START)
+  const taken = await takeDispatchLock(ctx.stateDir, run.repo_key, wanted, lockDeps)
+  if (!taken.ok) return fail(lockRefusal(ctx, run, taken, task?.task_id ?? null))
+  const lock = taken.lock
+  const untrap = wiring.trap(lock)
+  // A child a signal stopped answers with a failure, and the handler, not that answer, says what happened.
+  const afterGate = async <T>(answer: T): Promise<T> => {
+    await wiring.gate()
+    return answer
+  }
+  const deps: DispatchDeps = {
+    herdr: { ...wiring.herdr, agentStart: async (request) => afterGate(await wiring.herdr.agentStart(request)) },
+    git: wiring.git,
+    ledger: dispatchLedger(ctx),
+    base: (r, t) => wiring.base(r.repo_root, dependencyMerges(t, r.tasks), r.batch?.branch ?? null),
+    runBootstrap: async (checkout, logPath) => afterGate(await wiring.runBootstrap(checkout, logPath, lock)),
+    bootstrapLog: (t) =>
+      join(ctx.stateDir, 'runs', ctx.session, `${run.run_id}.dispatch`, `${t.task_id}-bootstrap.log`),
+    brief: async (r, t, paneId) => {
+      const handed = await afterGate(await handOverBrief(ctx, r, t, paneId, wiring.handOver))
+      if (!handed.ok) return handed
+      const delivered = `claimed ${t.bead}; delivered to ${paneId}, and the worker is working on it`
+      if (handed.unrecorded === null) return { ok: true, text: delivered }
+      return {
+        ok: true,
+        text: `${delivered}, but its pane was not recorded (${handed.unrecorded}); it binds on its own once herdr ` +
+          `reports the agent — do not dispatch ${t.task_id} again`,
+      }
+    },
+    at: async (taskId, step) => {
+      await wiring.gate()
+      await lock.at(taskId, step, wiring.now())
+    },
+    say: wiring.say,
+    now: wiring.now,
+    sleep: wiring.sleep,
+    hpipe,
+  }
+  try {
+    const result = task === null
+      ? await dispatchReady(ctx, run.run_id, deps)
+      : (await dispatchTask(run, task, deps) ? ok('') : fail(''))
+    await wiring.gate()
+    return result
+  } finally {
+    lock.release()
+    untrap()
+  }
 }
 
 /**
@@ -1057,7 +1428,9 @@ export const cmdDispatchDone = retryingOnStale(closeIntake)
  *
  * Returns what the operator is told about it, or '' when nothing is owed.
  */
-async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<string> {
+async function owePhasePrompt(
+  ctx: Ctx, run: Run, task: Task | null, cameFrom: TaskPhase | undefined = task?.phase,
+): Promise<string> {
   const row = task ? taskRow(task.phase) : runRow(run.phase)
   if (row.actor !== 'worker' && row.actor !== 'orchestrator') return ''
   const worker = task !== null && row.actor === 'worker'
@@ -1070,9 +1443,11 @@ async function owePhasePrompt(ctx: Ctx, run: Run, task: Task | null): Promise<st
     return `; no worker is bound, so nothing is sent — ${setUpWorker(task)}`
   }
 
-  // `cameFrom` is the phase itself: the standing prompt, not a CI failure the rewind never read.
+  // A rewind's `cameFrom` is the phase itself: the standing prompt, not a CI failure it never read.
   const phasePrompt = task
-    ? await renderTaskPhasePrompt(run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, task.phase)
+    ? await renderTaskPhasePrompt(
+      run, task, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, cameFrom ?? task.phase,
+    )
     : await renderRunPhasePrompt(run, ctx.pluginRoot, { stateDir: ctx.stateDir })
   if (phasePrompt.length === 0) return ''
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
@@ -1140,6 +1515,8 @@ async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Prom
     const task = run.tasks.find((t) => t.task_id === input.taskId)
     if (!task) return fail(`no such task: ${input.taskId}`)
     rewoundTask = task
+    const skipped = await rewindSkipsAHold(ctx, run, task, input.phase, shipped)
+    if (skipped !== null) return fail(skipped)
 
     // A landing reads the reviewed head, never the branch, so a task cannot land
     // again without one: the last landing's is the head that is already on the batch.
@@ -1265,8 +1642,42 @@ export async function cmdRewind(
   const askShipped = askedOnce(shipped)
   const before = await runById(ctx.stateDir, ctx.session, input.runId)
   if (before && rewindReopensShipping(before, input)) await shippedRefusal(before, askShipped)
+  const rewound = before?.tasks.find((t) => t.task_id === input.taskId)
+  if (before && rewound) await rewindSkipsAHold(ctx, before, rewound, input.phase, askShipped)
   return retryingOnStale(rewind)(ctx, input, askShipped)
 }
+
+/**
+ * Why rewinding `task` to `phase` would get it past a merge the human has not ruled
+ * on, or null: by finishing it, or by clearing the merge record, after which nothing
+ * remembers the PR merged and the check reads as not needed. Only `merge` keeps the
+ * PR, and its row records the merge again. An unmerged task may still be rewound
+ * anywhere, a terminal phase leaving its check not needed; GitHub is asked, since
+ * the ledger lags it.
+ */
+async function rewindSkipsAHold(
+  ctx: Ctx, run: Run, task: Task, phase: string, merged: BatchShipped,
+): Promise<string | null> {
+  const finishes = phase === 'close' || phase === 'teardown' || taskPhaseIsTerminal(phase)
+  const forgetsTheMerge = PHASES_BEFORE_A_MERGE.has(phase) && phase !== 'merge'
+  if (!finishes && !forgetsTheMerge) return null
+  const owed = owedAt(run, task)
+  if (owed.length === 0) return null
+  if (task.merged_at_ms === null) {
+    if (task.pr === null) return null
+    const onGitHub = await merged(run.repo_root, task.pr)
+    if (onGitHub === null) return `could not ask GitHub whether PR #${task.pr} has merged; run it again`
+    if (!onGitHub) return null
+  }
+  const confirm = `\`${hpipeCommand(ctx.pluginRoot)} confirm --check ${owed[0]?.check.id} --by human\``
+  return finishes
+    ? `${owesTheHuman(task, owed)}: confirm or \`--waive\` it first — ${confirm}`
+    : `${owesTheHuman(task, owed)}, and its PR has merged: a rewind to ${phase} would forget that merge. Confirm ` +
+      `or \`--waive\` it first — ${confirm} — and register any rework as a new task`
+}
+
+const owesTheHuman = (task: Task, owed: readonly OwedCheck[]): string =>
+  `${task.task_id} owes ${idList(owed.map((o) => o.check.id))} to the human`
 
 export interface SubmitDeps {
   /** An open PR from `branch`, by number, or why gh could not say. */
@@ -1292,8 +1703,8 @@ function submittedLine(task: Task, sub: Submission, batch: Batch): string {
   if (sub.merge === 'clean' && sub.merges === 0) return `${head} — nothing on ${batch.branch} to merge: it lands next`
   return sub.merge === 'clean'
     ? `${head} — a clean merge of ${batch.branch}: it lands next`
-    : `${head} — not a clean merge of ${batch.branch} (at ${sha8(sub.dirty_at ?? sub.head_sha)}): it goes back ` +
-      'through review before it lands'
+    : `${head} — not a clean merge of ${batch.branch}: ${sha8(sub.dirty_at ?? sub.head_sha)} on this branch is ` +
+      "not git's own merge, so it goes back through review before it lands"
 }
 
 /** Everything `submit` verified, kept for the one quick save that records it. */
@@ -1585,6 +1996,10 @@ export async function cmdClose(ctx: Ctx, input: {
     return fail(`no merge is recorded for ${task.task_id}, so its bead must not close yet — ` +
       `\`${hpipeCommand(ctx.pluginRoot)} rewind ${run.run_id} merge --task ${task.task_id}\` records it`)
   }
+  if (heldForTheHuman(run, task)) {
+    return fail(`${owesTheHuman(task, owedAt(run, task))}, so its bead stays open until they rule: confirm or ` +
+      '`--waive` it first')
+  }
   const closed = await close(run.repo_key, task.bead, closeReason(task, run), input.force)
   if (isBdFailure(closed)) {
     return fail(`bd would not close ${task.bead}:\n  ${closed.error}` + (input.force
@@ -1829,15 +2244,22 @@ async function decide(ctx: Ctx, input: {
 }
 export const cmdDecide = retryingOnStale(decide)
 
-async function answer(ctx: Ctx, input: {
+interface AnswerInput {
   task: string; decision: string; answer: string; by: 'orchestrator' | 'human'
   repoKey: string | null; runId: string | null
-}): Promise<CmdResult> {
-  const found = await resolveTask(ctx, {
-    taskId: input.task, repoKey: input.repoKey, runId: input.runId,
-    reach: 'finished-if-named',
-    escape: '--run <run-id> records an answer on it anyway',
-  })
+  /** Checks only the human can make, which the merge waits on. */
+  beforeMerge?: string[]
+  callerPane?: string | null
+}
+
+const answerTarget = (ctx: Ctx, input: AnswerInput) => resolveTask(ctx, {
+  taskId: input.task, repoKey: input.repoKey, runId: input.runId,
+  reach: 'finished-if-named',
+  escape: '--run <run-id> records an answer on it anyway',
+})
+
+async function answer(ctx: Ctx, input: AnswerInput, reads: BeforeMergeReads): Promise<CmdResult> {
+  const found = await answerTarget(ctx, input)
   if (!found.ok) return found.result
   const { run, task } = found.value
 
@@ -1847,6 +2269,15 @@ async function answer(ctx: Ctx, input: {
 
   if (task.phase !== 'blocked-on-decision') {
     return fail(`task ${input.task} is not blocked on a decision (phase: ${task.phase})`)
+  }
+
+  // Who settled the decision and who checks the merge are separate questions, so an
+  // orchestrator's answer may carry a check too.
+  const checks = input.beforeMerge ?? []
+  const callerPane = input.callerPane ?? null
+  if (checks.length > 0) {
+    const refusal = checkTextRefusal(checks) ?? await holdRefusal(ctx, run, task, callerPane, reads)
+    if (refusal !== null) return fail(refusal)
   }
 
   let decision
@@ -1861,10 +2292,450 @@ async function answer(ctx: Ctx, input: {
   task.pending_answer = decision.id
   task.delivery_attempts = 0
   delete task.answer_sent_at
+  const recorded = recordChecks(run, task, checks, callerPane ?? '', decision.id)
   await saveRun(ctx.stateDir, run)
-  return ok(`recorded answer to ${decision.id} on ${input.task}; pending delivery`)
+  return ok([
+    `recorded answer to ${decision.id} on ${input.task}; pending delivery`,
+    ...recorded.map((check) => recordedLine(run, task, check)),
+    ...(recorded.length > 0 ? backToAHeldMerge(run, task) : []),
+  ].join('\n'))
 }
-export const cmdAnswer = retryingOnStale(answer)
+
+export async function cmdAnswer(
+  ctx: Ctx, input: AnswerInput, reads: BeforeMergeReads = cliBeforeMergeReads(ctx),
+): Promise<CmdResult> {
+  const once = readsOnce(reads)
+  if ((input.beforeMerge ?? []).length > 0) {
+    const found = await answerTarget(ctx, input)
+    if (found.ok) await askBeforeTheSave(found.value.run, gateOf(found.value.run, found.value.task), once)
+  }
+  return retryingOnStale(answer)(ctx, input, once)
+}
+
+/**
+ * What a before-merge command asks outside the ledger. Each read is made once per
+ * command, before its retried save, for the reason `askedOnce` gives.
+ */
+export interface BeforeMergeReads {
+  supervisor: () => Promise<SupervisorState>
+  /** Null when gh could not answer. */
+  prView: (repoRoot: string, pr: number) => Promise<PrView | null>
+  branchHead: (repoRoot: string, branch: string) => Promise<RemoteHead>
+}
+
+const cliBeforeMergeReads = (ctx: Ctx): BeforeMergeReads => ({
+  supervisor: () => supervisorState(ctx.stateDir, ctx.session),
+  prView: (repoRoot, pr) => new Gh(process.env.GH_BIN ?? 'gh', repoRoot).prView(pr),
+  branchHead: remoteBranchHead,
+})
+
+function readsOnce(reads: BeforeMergeReads): BeforeMergeReads {
+  const asked = new Map<string, Promise<unknown>>()
+  const once = <T>(key: string, read: () => Promise<T>): Promise<T> => {
+    let answer = asked.get(key) as Promise<T> | undefined
+    if (answer === undefined) {
+      answer = read()
+      asked.set(key, answer)
+    }
+    return answer
+  }
+  return {
+    supervisor: () => once('supervisor', reads.supervisor),
+    prView: (repoRoot, pr) => once(`pr\0${repoRoot}\0${pr}`, () => reads.prView(repoRoot, pr)),
+    branchHead: (repoRoot, branch) => once(`head\0${repoRoot}\0${branch}`, () => reads.branchHead(repoRoot, branch)),
+  }
+}
+
+/** The record whose merge a check on `task` holds: the task's own per-task, the batch (null) single-PR. */
+const gateOf = (run: Run, task: Task | null): Task | null => (modeOf(run) === 'single-pr' ? null : task)
+
+const gateSubject = (run: Run, gate: Task | null): string => {
+  const pr = gate === null ? run.batch?.pr ?? null : gate.pr
+  if (pr !== null) return `PR #${pr}`
+  return gate === null ? 'the batch PR' : `${gate.task_id}'s PR`
+}
+
+type GateMerge = { ok: true; merged: boolean; prHead: string | null } | { ok: false; why: string }
+
+/**
+ * The supervisor records a merge only while the orchestrator is idle, so the ledger
+ * lags GitHub; a merge GitHub reports counts. A gh failure refuses rather than guess.
+ */
+async function gateMerge(run: Run, gate: Task | null, reads: BeforeMergeReads): Promise<GateMerge> {
+  const recorded = gate === null ? run.batch?.merged_at_ms ?? null : gate.merged_at_ms
+  if (recorded !== null) return { ok: true, merged: true, prHead: null }
+  const pr = gate === null ? run.batch?.pr ?? null : gate.pr
+  if (pr === null) return { ok: true, merged: false, prHead: null }
+  const view = await reads.prView(run.repo_root, pr)
+  if (view === null) return { ok: false, why: `could not ask GitHub whether PR #${pr} has merged; run it again` }
+  return { ok: true, merged: view.merged, prHead: view.headSha }
+}
+
+async function askBeforeTheSave(run: Run, gate: Task | null, reads: BeforeMergeReads): Promise<void> {
+  await reads.supervisor()
+  await gateMerge(run, gate, reads)
+}
+
+/**
+ * Why `pane` may not record or rule on a check, or null. A finished task and a run
+ * nothing drives keep their `pane_id`, and herdr reuses workspace ids, so such a
+ * record may now name the orchestrator's pane or the human's.
+ */
+async function paneRefusal(ctx: Ctx, pane: string | null, why: string): Promise<string | null> {
+  if (pane === null) return 'run it from a pane of this herdr session: HERDR_PANE_ID is unset'
+  for (const run of await listRuns(ctx.stateDir, ctx.session)) {
+    if (!runIsDriven(run)) continue
+    const worker = run.tasks.find((t) => t.pane_id === pane && !taskPhaseIsTerminal(t.phase))
+    if (worker) return `${pane} is ${worker.task_id}'s worker pane in ${run.run_id}: ${why}`
+  }
+  return null
+}
+
+function checkTextRefusal(checks: readonly string[]): string | null {
+  if (checks.length === 0) return '--before-merge is required: what the human checks before the merge'
+  for (const check of checks) {
+    if (check.trim().length === 0) return '--before-merge cannot be empty: say what the human checks'
+    if (check.startsWith('--')) {
+      return `--before-merge got a flag where the check belongs: "${check}" — the value after --before-merge is ` +
+        'missing'
+    }
+  }
+  return null
+}
+
+/** Why a check cannot be recorded on `task` (or on the run, when null), or null. */
+async function holdRefusal(
+  ctx: Ctx, run: Run, task: Task | null, callerPane: string | null, reads: BeforeMergeReads,
+): Promise<string | null> {
+  const fromPane = await paneRefusal(ctx, callerPane, 'a worker raises a decision; the orchestrator records the check')
+  if (fromPane !== null) return fromPane
+  if (task === null && modeOf(run) === 'per-task') {
+    return 'a per-task run has no merge of its own: hold one task\'s merge with `--task <id>`'
+  }
+  if (task !== null && run.batch !== undefined && (task.landed ?? []).length > 0) {
+    return `${task.task_id} has landed on \`${run.batch.branch}\`: a check of what ships is the batch's — ` +
+      `\`${hpipeCommand(ctx.pluginRoot)} hold --before-merge "<check>"\``
+  }
+  if (task !== null && taskPhaseIsTerminal(task.phase)) {
+    return `${task.task_id} is finished (phase: ${task.phase}) — there is no merge left to hold`
+  }
+  const supervisor = await reads.supervisor()
+  if (supervisor.state === 'live' && !honours(supervisor.info, BEFORE_MERGE_CAPABILITY)) {
+    return `the supervisor of session ${ctx.session} (pid ${supervisor.info.pid}) predates before-merge checks and ` +
+      "would send the merge command anyway: close its `Pipeline supervisor` pane and run the plugin's `supervisor` " +
+      'action, then run this again'
+  }
+  const gate = gateOf(run, task)
+  const merge = await gateMerge(run, gate, reads)
+  if (!merge.ok) return merge.why
+  return merge.merged ? `${gateSubject(run, gate)} has merged: there is no merge left to hold` : null
+}
+
+function recordChecks(
+  run: Run, task: Task | null, texts: readonly string[], pane: string, decision?: string,
+): BeforeMergeCheck[] {
+  return texts.map((text) => {
+    const check: BeforeMergeCheck = {
+      id: nextCheckId(run), check: text.trim(), recorded_at: Date.now(), recorded_pane: pane, resolutions: [],
+      ...(decision === undefined ? {} : { decision }),
+    }
+    if (task === null) run.before_merge = [...(run.before_merge ?? []), check]
+    else task.before_merge = [...(task.before_merge ?? []), check]
+    return check
+  })
+}
+
+function recordedLine(run: Run, task: Task | null, check: BeforeMergeCheck): string {
+  const waits = `does not merge until the human confirms: ${check.check}`
+  if (task === null) return `${check.id} recorded: the batch PR ${waits}`
+  if (run.batch !== undefined) {
+    return `${check.id} recorded on ${task.task_id}: the batch PR ${waits}; ${task.task_id} still lands on ` +
+      `${run.batch.branch} as usual`
+  }
+  return `${check.id} recorded on ${task.task_id}: ${gateSubject(run, task)} ${waits}`
+}
+
+const gateIsOpen = (run: Run, gate: Task | null): boolean =>
+  (gate === null ? run.phase === 'ship-merge' : gate.phase === 'merge')
+
+/**
+ * A decision opened in merge resumes merge, where the supervisor sends the hold; until
+ * then the merge command from the earlier entry is still out.
+ */
+function backToAHeldMerge(run: Run, task: Task | null): string[] {
+  if (task === null || gateOf(run, task) === null || task.phase !== 'blocked-on-decision') return []
+  if (task.decision_from !== 'merge') return []
+  return [`${task.task_id} goes back to merge once its answer is delivered, and the hold comes then: do not run the ` +
+    'merge command you were given']
+}
+
+/**
+ * The gate row's prompt as it stands now, the hold or the merge, in place of any
+ * still queued for the gate's current entry: the gate's prompt went out on entry, so
+ * a ruling that changes it must replace it, or the wrong move stays one paste away.
+ */
+async function requeueGatePrompt(ctx: Ctx, run: Run, gate: Task | null): Promise<void> {
+  const text = gate === null
+    ? await renderRunPhasePrompt(run, ctx.pluginRoot, { stateDir: ctx.stateDir })
+    : await renderTaskPhasePrompt(run, gate, { pluginRoot: ctx.pluginRoot, ciDetail: async () => '' }, 'merge')
+  const taskId = gate?.task_id ?? null
+  run.outbox = (run.outbox ?? []).filter((entry) =>
+    !(entry.to === 'orchestrator' && entry.task_id === taskId && isCurrent(run, entry)))
+  enqueue(run, { to: 'orchestrator', taskId, text }, Date.now())
+}
+
+interface HoldInput {
+  checks: string[]; taskId: string | null; repoKey: string | null; runId: string | null; callerPane: string | null
+}
+
+async function holdTarget(ctx: Ctx, input: HoldInput): Promise<Resolved<{ run: Run; task: Task | null }>> {
+  if (input.taskId !== null) {
+    return resolveTask(ctx, {
+      taskId: input.taskId, repoKey: input.repoKey, runId: input.runId, reach: 'unfinished', escape: null,
+    })
+  }
+  const found = await resolveFor(ctx, {
+    runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'unfinished',
+  }, null)
+  return found.ok ? { ok: true, value: { run: found.value, task: null } } : found
+}
+
+async function hold(ctx: Ctx, input: HoldInput, reads: BeforeMergeReads): Promise<CmdResult> {
+  const badText = checkTextRefusal(input.checks)
+  if (badText !== null) return fail(badText)
+  const found = await holdTarget(ctx, input)
+  if (!found.ok) return found.result
+  const { run, task } = found.value
+  const refusal = await holdRefusal(ctx, run, task, input.callerPane, reads)
+  if (refusal !== null) return fail(refusal)
+
+  const recorded = recordChecks(run, task, input.checks, input.callerPane ?? '')
+  const gate = gateOf(run, task)
+  const lines = recorded.map((check) => recordedLine(run, task, check))
+  if (gateIsOpen(run, gate) && owedAt(run, gate).length > 0) {
+    await requeueGatePrompt(ctx, run, gate)
+    const ids = idList(recorded.map((check) => check.id))
+    const confirmed = `once ${ids} ${recorded.length === 1 ? 'is' : 'are'} confirmed`
+    lines.push(gate === null
+      ? `the run is in ship-merge now: do not run the merge commands you were given; they come again ${confirmed}`
+      : `${gate.task_id} is in merge now: do not run the merge command you were given; it comes again ${confirmed}`)
+  }
+  lines.push(...backToAHeldMerge(run, task))
+  await saveRun(ctx.stateDir, run)
+  return ok(lines.join('\n'))
+}
+
+/** Records a check only the human can make; the merge it holds gets no merge command until they rule. */
+export async function cmdHold(
+  ctx: Ctx, input: HoldInput, reads: BeforeMergeReads = cliBeforeMergeReads(ctx),
+): Promise<CmdResult> {
+  const once = readsOnce(reads)
+  const found = await holdTarget(ctx, input)
+  if (found.ok) await askBeforeTheSave(found.value.run, gateOf(found.value.run, found.value.task), once)
+  return retryingOnStale(hold)(ctx, input, once)
+}
+
+interface ConfirmInput {
+  checkId: string; by: string; waive: string | null; failed: string | null
+  repoKey: string | null; runId: string | null; callerPane: string | null
+}
+
+const rulingOf = (input: ConfirmInput): Resolution['as'] =>
+  (input.waive !== null ? 'waived' : input.failed !== null ? 'failed' : 'confirmed')
+
+function confirmInputRefusal(input: ConfirmInput): string | null {
+  if (input.by !== 'human') {
+    return 'only the human confirms a before-merge check: `--by human` once they have made it, or ' +
+      '`--by human --waive "<why>"` if they choose to skip it'
+  }
+  if (input.checkId.trim().length === 0) return '--check is required: the id the hold prompt and `hpipe status` name'
+  if (input.waive !== null && input.failed !== null) return '--waive and --failed are two rulings: give one'
+  const texts: Array<[string, string | null, string]> = [
+    ['--waive', input.waive, 'why the human chose to skip the check'], ['--failed', input.failed, 'what the human saw'],
+  ]
+  for (const [name, value, what] of texts) {
+    if (value === null) continue
+    if (value.trim().length === 0) return `${name} needs ${what}`
+    if (value.startsWith('--')) {
+      return `${name} got a flag where its text belongs: "${value}" — the value after ${name} is missing`
+    }
+  }
+  return null
+}
+
+/**
+ * A ruling far from the gate covers a head that will not merge, so it is taken only
+ * near it. A failure needs an unmerged PR: per-task it sends the task back to its
+ * worker, and single-PR the run waits for a fix to move the head.
+ */
+function windowRefusal(run: Run, held: HeldCheck, ruling: Resolution['as'], merged: boolean): string | null {
+  const id = held.check.id
+  if (modeOf(run) === 'single-pr') {
+    if (run.phase === 'ship-ci' || run.phase === 'ship-merge') return null
+    return `${id} is ruled on at the merge it holds: the run is in ${run.phase}; confirm it once the run reaches ` +
+      'ship-ci'
+  }
+  const task = held.task
+  if (task === null) return `${id} holds no task's merge in a per-task run, so there is nothing to rule on`
+  const nearTheGate = task.phase === 'ci' || task.phase === 'merge'
+  if (nearTheGate || (merged && ruling !== 'failed')) return null
+  return `${id} is ruled on at the merge it holds: ${task.task_id} is in ${task.phase}; confirm it once ` +
+    `${task.task_id} reaches ci`
+}
+
+type RuledHead = { ok: true; sha: string | null } | { ok: false; why: string }
+
+/** The branch whose head a ruling judges: the batch's single-PR, the task's per-task. */
+const judgedBranch = (run: Run, held: HeldCheck): string => run.batch?.branch ?? held.task?.branch ?? ''
+
+/** Whether a ruling of this kind reads the branch's head live: a waiver reads none, a per-task failure the PR's. */
+const readsTheBranch = (run: Run, ruling: Resolution['as']): boolean =>
+  ruling === 'confirmed' || (ruling === 'failed' && run.batch !== undefined)
+
+/**
+ * A confirmation names the head it covers, which must be the branch's head right now:
+ * a check of one head says nothing about the next. After the merge the judged head is
+ * what merged, and GitHub may already have deleted the branch. A per-task failure
+ * records the PR head, as a send-back does, so the worker must push past it. At an
+ * open gate with no head CI read, which only a manual rewind past CI leaves, nothing
+ * will ever read one, so the ruling is taken as given, as `checkState` takes it.
+ */
+async function ruledHead(
+  run: Run, held: HeldCheck, ruling: Resolution['as'], merge: { merged: boolean; prHead: string | null },
+  reads: BeforeMergeReads,
+): Promise<RuledHead> {
+  if (ruling === 'waived') return { ok: true, sha: null }
+  const judged = gateHead(run, held.task)
+  if (merge.merged) return { ok: true, sha: judged }
+  const batch = run.batch
+  if (ruling === 'failed' && batch === undefined) {
+    return merge.prHead === null
+      ? { ok: false, why: `could not read ${gateSubject(run, held.task)}'s head from GitHub; run it again` }
+      : { ok: true, sha: merge.prHead }
+  }
+  if (judged === null) {
+    if (gateIsOpen(run, gateOf(run, held.task))) return { ok: true, sha: null }
+    const whose = batch === undefined ? held.task?.task_id ?? 'its' : 'the batch PR'
+    return { ok: false, why: `CI has not read ${whose}'s head yet: run it again after the next poll` }
+  }
+  const branch = judgedBranch(run, held)
+  const live = await reads.branchHead(run.repo_root, branch)
+  if (!live.ok) return { ok: false, why: `could not ask origin where \`${branch}\` is (${live.reason}); run it again` }
+  if (live.sha !== judged) {
+    return {
+      ok: false,
+      why: `\`${branch}\` is at ${live.sha === null ? 'nothing' : sha8(live.sha)}, not ${sha8(judged)}, the head ` +
+        `CI ran on: a check of ${sha8(judged)} does not cover it; wait for the next prompt`,
+    }
+  }
+  return { ok: true, sha: judged }
+}
+
+function ruledLine(id: string, ruling: Resolution): string {
+  if (ruling.as === 'waived') return `${id} waived by the human: ${ruling.note ?? ''}`
+  const on = ruling.head === null ? '' : ` on ${sha8(ruling.head)}`
+  return ruling.as === 'confirmed' ? `${id} confirmed by the human${on}` : `${id} failed${on}`
+}
+
+/** What a confirmation or a waiver does to the gate it holds. */
+async function afterRuling(ctx: Ctx, run: Run, gate: Task | null, merged: boolean, now: number): Promise<string> {
+  const subject = gate === null ? gateSubject(run, null) : gate.task_id
+  const stillOwed = owedAt(run, gate).map((o) => o.check.id)
+  if (stillOwed.length > 0) {
+    return `; ${idList(stillOwed)} ${stillOwed.length === 1 ? 'is' : 'are'} still owed before ${subject} merges`
+  }
+  const open = gateIsOpen(run, gate)
+  // The gate drew no probe while held, so its ladder would otherwise fire on the next tick.
+  if (open) {
+    const record: Run | Task = gate ?? run
+    record.stall = freshLadder(run, record, now)
+  }
+  if (merged) return `; nothing more is owed, and ${subject} has merged: the supervisor moves it on at its next pass`
+  if (!open) {
+    return gate === null
+      ? '; nothing is queued: the merge prompt comes when the run reaches ship-merge'
+      : `; nothing is queued: ${gate.task_id}'s merge prompt comes when it reaches merge`
+  }
+  await requeueGatePrompt(ctx, run, gate)
+  return `; nothing more is owed before ${subject} merges: its merge prompt is queued for you`
+}
+
+async function afterFailure(ctx: Ctx, run: Run, held: HeldCheck, ruling: Resolution): Promise<string> {
+  const task = held.task
+  const batch = run.batch
+  if (batch !== undefined || task === null) {
+    const hpipe = hpipeCommand(ctx.pluginRoot)
+    return `: the run stays in ${run.phase} until a fix moves the head. Fix it on ${batch?.branch ?? 'the batch'} by ` +
+      `either route: a subagent's patch in the batch checkout, then \`${hpipe} batch-check\`, or a fix task through ` +
+      `\`${hpipe} task …\`; the human then checks the new head`
+  }
+  enterTaskPhase(run, task, 'implement', `the human's before-merge check ${held.check.id} failed: ${ruling.note ?? ''}`)
+  task.head_sha_at_entry = ruling.head
+  return `: ${task.task_id} goes back to implement${await owePhasePrompt(ctx, run, task, 'merge')}`
+}
+
+async function confirm(ctx: Ctx, input: ConfirmInput, reads: BeforeMergeReads): Promise<CmdResult> {
+  const badInput = confirmInputRefusal(input)
+  if (badInput !== null) return fail(badInput)
+  const found = await confirmTarget(ctx, input)
+  if (!found.ok) return found.result
+  const { run, held } = found.value
+  const fromPane = await paneRefusal(ctx, input.callerPane,
+    "a worker does not rule on a check; the orchestrator records the human's ruling")
+  if (fromPane !== null) return fail(fromPane)
+
+  const gate = gateOf(run, held.task)
+  const merge = await gateMerge(run, gate, reads)
+  if (!merge.ok) return fail(merge.why)
+  const as = rulingOf(input)
+  if (as === 'failed' && merge.merged) {
+    return fail(`${gateSubject(run, gate)} has merged: the fix is a new task. Record this ruling with ` +
+      '`--waive "failed on device; fixed by <task>"` so the run can finish.')
+  }
+  const outside = windowRefusal(run, held, as, merge.merged)
+  if (outside !== null) return fail(outside)
+  const head = await ruledHead(run, held, as, merge, reads)
+  if (!head.ok) return fail(head.why)
+
+  const now = Date.now()
+  const note = input.waive ?? input.failed
+  const ruling: Resolution = {
+    as, at: now, head: head.sha, pane: input.callerPane ?? '', ...(note === null ? {} : { note }),
+  }
+  held.check.resolutions.push(ruling)
+  const outcome = as === 'failed'
+    ? await afterFailure(ctx, run, held, ruling)
+    : await afterRuling(ctx, run, gate, merge.merged, now)
+  await saveRun(ctx.stateDir, run)
+  return ok(`${ruledLine(held.check.id, ruling)}${outcome}`)
+}
+
+async function confirmTarget(ctx: Ctx, input: ConfirmInput): Promise<Resolved<{ run: Run; held: HeldCheck }>> {
+  const found = await resolveFor(ctx, {
+    runId: input.runId, repoKey: input.repoKey, phases: null, taskId: null, reach: 'unfinished',
+  }, null)
+  if (!found.ok) return found
+  const held = findCheck(found.value, input.checkId.trim())
+  if (held === null) return { ok: false, result: fail(`no such check in ${found.value.run_id}: ${input.checkId}`) }
+  return { ok: true, value: { run: found.value, held } }
+}
+
+/** Records the human's ruling on a before-merge check; the last ruling at an open gate lets its merge through. */
+export async function cmdConfirm(
+  ctx: Ctx, input: ConfirmInput, reads: BeforeMergeReads = cliBeforeMergeReads(ctx),
+): Promise<CmdResult> {
+  const once = readsOnce(reads)
+  const found = confirmInputRefusal(input) === null ? await confirmTarget(ctx, input) : null
+  if (found?.ok === true) {
+    const { run, held } = found.value
+    const merge = await gateMerge(run, gateOf(run, held.task), once)
+    // Whatever the window says now: the supervisor may open it before the retried attempt.
+    if (merge.ok && !merge.merged && readsTheBranch(run, rulingOf(input))) {
+      await once.branchHead(run.repo_root, judgedBranch(run, held))
+    }
+  }
+  return retryingOnStale(confirm)(ctx, input, once)
+}
 
 async function escalate(ctx: Ctx, input: {
   taskId: string; decisionId: string; recommendation: string
@@ -2114,6 +2985,7 @@ export async function cmdStatus(ctx: Ctx, tools: () => Promise<Tools> = checkToo
     Date.now(),
     panes,
     toolsLine(await tools()),
+    await readDispatchLocks(ctx.stateDir, runs.map((run) => run.repo_key)),
   ))
 }
 
@@ -2133,11 +3005,24 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   await saveRun(ctx.stateDir, run)
   const undo = `Undo: hpipe resume ${run.run_id}`
   if (run.batch === undefined) {
-    return ok(`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
-      `supervisor's next tick. ${undo}`)
+    return ok([`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
+      `supervisor's next tick. ${undo}`, ...stillOwedLines(run)].join('\n'))
   }
-  return ok([`aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`, ...(await cleanupLines(run, run.batch))]
-    .join('\n'))
+  return ok([
+    `aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`, ...stillOwedLines(run),
+    ...(await cleanupLines(run, run.batch)),
+  ].join('\n'))
+}
+
+/** Not a refusal: an abort ends the run's drive, and its record keeps what the human still owes. */
+function stillOwedLines(run: Run): string[] {
+  return owedInRun(run).map((o) => {
+    const gate = gateOf(run, o.task)
+    const merged = (gate === null ? run.batch?.merged_at_ms ?? null : gate.merged_at_ms) !== null
+    const subject = gate === null ? 'the batch PR' : gateSubject(run, gate)
+    return `still owed to the human: ${checkName(o)} ${o.check.check} — ${subject} ` +
+      (merged ? 'merged before it was confirmed' : 'is not merged')
+  })
 }
 
 /** A landed task's bead stays closed through an abort: its commits are on the batch branch, which nothing deletes. */
@@ -2208,6 +3093,22 @@ export function listFlag(argv: string[], name: string): string[] {
   return entries
 }
 
+/**
+ * Every occurrence's value, whole: a check is free text, so a comma is part of it.
+ * A flag with no value reads as empty, which the command refuses.
+ */
+export function repeatedFlag(argv: string[], name: string): string[] {
+  const values: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === `--${name}`) values.push(argv[i + 1] ?? '')
+  }
+  return values
+}
+
+/** A free-text flag that is present with no value must not read as absent: `--waive` alone is not a confirmation. */
+const presentFlag = (argv: string[], name: string): string | null =>
+  (argv.includes(`--${name}`) ? flag(argv, name) ?? '' : null)
+
 function withoutFlag(argv: string[], name: string): string[] {
   const i = argv.indexOf(`--${name}`)
   return i === -1 ? argv : [...argv.slice(0, i), ...argv.slice(i + 2)]
@@ -2233,7 +3134,9 @@ const USAGE: Record<string, string[]> = {
   bead: ['hpipe bead show <id>'],
   next: ['hpipe next [--limit <n>] [--label <label>]   (--label filters bv\'s top 10 recommendations, not every bead)'],
   dispatch: [
-    'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]',
+    'hpipe dispatch --task <id> [--run <run-id>]                    (every step: worktree, bootstrap, agent, brief)',
+    'hpipe dispatch --task <id> --pane <pane-id> [--run <run-id>]   (the brief only, to an agent you started)',
+    'hpipe dispatch --ready [--run <run-id>]                         (every task waiting for its brief)',
     'hpipe dispatch --done [--run <run-id>]',
   ],
   status: ['hpipe status'],
@@ -2245,7 +3148,10 @@ const USAGE: Record<string, string[]> = {
   escalate: ['hpipe escalate --task <id> --decision <id> --recommend <text> [--run <run-id>]'],
   discover: ['hpipe discover --task <id> --title <title> --body-file <path> [--run <run-id>]'],
   discoveries: ['hpipe discoveries [--file] [--run <run-id>]'],
-  answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human [--run <run-id>]'],
+  answer: ['hpipe answer --task <id> --decision <id> --answer <text> --by orchestrator|human ' +
+    '[--before-merge "<check>"]... [--run <run-id>]'],
+  hold: ['hpipe hold --before-merge "<check>"... [--task <id>] [--run <run-id>]'],
+  confirm: ['hpipe confirm --check <id> --by human [--waive "<why>" | --failed "<what they saw>"] [--run <run-id>]'],
   tier: ['hpipe tier --task <id> <light|standard|heavy> --why <text> [--run <run-id>]'],
   resume: ['hpipe resume <run-id>'],
   abort: ['hpipe abort <run-id>'],
@@ -2262,10 +3168,14 @@ const fullUsage = (): string =>
   Object.values(USAGE).flat().map((form) => `  ${form}`).join('\n')
 
 const HELP_FLAGS = new Set(['--help', '-h'])
-const VALUELESS_FLAGS = new Set(['--done', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS])
+const VALUELESS_FLAGS = new Set([
+  '--done', '--ready', '--keep-worktree', '--force', '--file', '--all', '--single-pr', ...HELP_FLAGS,
+])
 // Prose can legitimately be `-h`. An identifier never can: taking one as a value
 // registered a task on branch `-h`.
-const FREE_TEXT_FLAGS = new Set(['--question', '--recommend', '--answer', '--notes', '--title', '--why'])
+const FREE_TEXT_FLAGS = new Set([
+  '--question', '--recommend', '--answer', '--notes', '--title', '--why', '--before-merge', '--waive', '--failed',
+])
 // cmdTask names this one's argv accident more precisely than a usage line can.
 const SELF_VALIDATING_FLAGS = new Set(['--files'])
 
@@ -2312,9 +3222,12 @@ async function dispatch(argv: string[]): Promise<number> {
     console.log(commandUsage(usage))
     return 0
   }
-  if (command === 'dispatch' && rest.includes('--done') === (flag(rest, 'task') !== null)) {
-    console.error(commandUsage(usage))
-    return 1
+  if (command === 'dispatch') {
+    const forms = ['--done', '--task', '--ready'].filter((form) => rest.includes(form))
+    if (forms.length !== 1 || (rest.includes('--pane') && !rest.includes('--task'))) {
+      console.error(commandUsage(usage))
+      return 1
+    }
   }
   const valueless = command === 'start' ? null : identifierWithoutValue(rest)
   if (valueless !== null) {
@@ -2410,12 +3323,21 @@ async function dispatch(argv: string[]): Promise<number> {
         })
         break
       }
-      out = await cmdDispatchTask(ctx, {
-        taskId: flag(rest, 'task')!,
-        paneId: flag(rest, 'pane') ?? '',
+      if (rest.includes('--pane')) {
+        out = await cmdDispatchTask(ctx, {
+          taskId: flag(rest, 'task')!,
+          paneId: flag(rest, 'pane') ?? '',
+          repoKey: repo?.repoKey ?? null,
+          runId: flag(rest, 'run'),
+        }, (paneId, text) => new Herdr().agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS))
+        break
+      }
+      out = await cmdDispatchSteps(ctx, {
+        taskId: rest.includes('--ready') ? null : flag(rest, 'task')!,
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
-      }, (paneId, text) => new Herdr().agentPromptConfirmed(paneId, text, DISPATCH_CONFIRM_TIMEOUT_MS))
+        socketPath: process.env.HERDR_SOCKET_PATH ?? '',
+      })
       break
 
     case 'rewind':
@@ -2459,6 +3381,30 @@ async function dispatch(argv: string[]): Promise<number> {
         by: (flag(rest, 'by') ?? '') as 'orchestrator' | 'human',
         repoKey: repo?.repoKey ?? null,
         runId: flag(rest, 'run'),
+        beforeMerge: repeatedFlag(rest, 'before-merge'),
+        callerPane: process.env.HERDR_PANE_ID || null,
+      })
+      break
+
+    case 'hold':
+      out = await cmdHold(ctx, {
+        checks: repeatedFlag(rest, 'before-merge'),
+        taskId: flag(rest, 'task'),
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+        callerPane: process.env.HERDR_PANE_ID || null,
+      })
+      break
+
+    case 'confirm':
+      out = await cmdConfirm(ctx, {
+        checkId: flag(rest, 'check') ?? '',
+        by: flag(rest, 'by') ?? '',
+        waive: presentFlag(rest, 'waive'),
+        failed: presentFlag(rest, 'failed'),
+        repoKey: repo?.repoKey ?? null,
+        runId: flag(rest, 'run'),
+        callerPane: process.env.HERDR_PANE_ID || null,
       })
       break
 
@@ -2550,7 +3496,8 @@ async function dispatch(argv: string[]): Promise<number> {
       return 1
   }
 
-  console.log(out.text)
+  // A step-running dispatch has said its lines as it went.
+  if (out.text !== '') console.log(out.text)
   return out.ok ? 0 : 1
 }
 

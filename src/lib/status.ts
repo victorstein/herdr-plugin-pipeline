@@ -1,9 +1,16 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
+import {
+  checkName, checksIn, checkState, fromDecision, gateHead, idList, mergedWithCheckOwed, type OwedCheck, owedAt,
+  owedInRun, stateClause,
+} from './before-merge'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
 import { landCommand, landsCleanSync, landsUnmergedSync, sha8 } from './batch'
 import { CHECK_REL, repoCheck } from './check'
+import {
+  dispatchUnderWay, type DispatchLocks, NO_DISPATCHES, staleDispatchLock, underWayClause,
+} from './dispatch-lock'
 import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
 import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
@@ -11,13 +18,14 @@ import type { PaneHold } from './delivery-health'
 import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
+import { describeFiles, sharedStatusLine } from './shared-paths'
 import { effortSummary } from './tier-prompt'
 import type {
   Batch, MissingArtifact, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
 } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
-  remainingDispatchSteps, startWorkerCommand, unbriefedWorker,
+  remainingDispatchSteps, startWorkerCommand, unbriefedWorker, undispatchedWorker, unstartedWorker,
 } from './unstarted'
 
 export interface StatusSupervisor {
@@ -28,7 +36,7 @@ export interface StatusSupervisor {
 }
 
 const MS_PER_MINUTE = 60_000
-const DISPATCH_UNDER_WAY = 'dispatch under way'
+const NOT_DISPATCHED_YET = 'not dispatched yet'
 
 /** Clamped: a future stamp from clock skew must not print "-1m" at an operator. */
 export function ageMinutes(sinceMs: number, now: number): number {
@@ -177,7 +185,21 @@ export function abandonParagraph(hpipe: string, run: Run, task: Task | null): st
     'stay queued; abandoning it moves them to `blocked-on-failure`.'
 }
 
-function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds = {}): Move {
+/**
+ * A dispatch under way for this task is not the orchestrator's lapse, and the
+ * advice it would otherwise get — start an agent, hand it the brief — is a step
+ * that dispatch is taking now.
+ */
+function dispatchingNow(run: Run, task: Task, hpipe: string, now: number, dispatches: DispatchLocks): Move | null {
+  const owesADispatch = unstartedWorker(run, task) !== null || undispatchedWorker(run, task) !== null ||
+    unbriefedWorker(run, task) !== null
+  const lock = owesADispatch ? dispatchUnderWay(dispatches, run, task) : null
+  return lock === null ? null : { waitsOnYou: false, clause: underWayClause(lock, task, hpipe, now) }
+}
+
+function moveFor(
+  run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
+): Move {
   const row = taskRow(task.phase)
   const yours = (clause: string): Move => ({ waitsOnYou: true, clause })
   const notYours = (clause: string): Move => ({ waitsOnYou: false, clause })
@@ -204,12 +226,16 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       return yours(`YOUR move: \`${landCommand(run, task.land_sha ?? '<land sha>')}\` — waiting for ` +
         awaitedFor(run, task))
     }
+    const held = task.phase === 'merge' ? owedAt(run, task) : []
+    if (held.length > 0) return heldMergeMove(run, task, held, hpipe)
     // A recorded answer is the supervisor's to deliver; the orchestrator has done its part.
     return task.pending_answer === null
       ? yours(`YOUR move: waiting for ${awaitedFor(run, task)}`)
       : notYours(`nothing for you — waiting for ${awaitedFor(run, task)}`)
   }
   if (row.actor === 'worker') {
+    const underWay = dispatchingNow(run, task, hpipe, now, dispatches)
+    if (underWay) return underWay
     const unstarted = overdueUnstartedWorker(run, task, now)
     if (unstarted) {
       return yours('YOUR move: no agent detected in its worktree — ' +
@@ -226,7 +252,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
       // above claim every other case — and a dispatch still being carried out is
       // not yet the orchestrator's lapse. Measured on a live run.
       if (unbriefed.paneId === null) {
-        return notYours(`${DISPATCH_UNDER_WAY} — ${remainingDispatchSteps(run, task, hpipe)}`)
+        return notYours(`${NOT_DISPATCHED_YET} — ${remainingDispatchSteps(run, task, hpipe)}`)
       }
       return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
         briefCommand(task, unbriefed.paneId, hpipe))
@@ -254,7 +280,7 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     // A failed holder keeps its files until a human releases them. An escalated one
     // is not released: it is resumed or abandoned, and the skill says so — a release
     // would let this task implement over files the holder is still changing.
-    const holders = fileHolders(task, run.tasks)
+    const holders = fileHolders(run, task)
     const failed = holders.filter((t) => taskRow(t.phase).terminal === true)
     if (failed.length > 0) {
       return yours(`YOUR move: ${failed.map((t) => `\`${hpipe} release --task ${t.task_id}\``).join(', ')}`)
@@ -277,6 +303,19 @@ function moveFor(run: Run, task: Task, hpipe: string, now: number, holds: PaneHo
     return notYours(`nothing for you — waiting for ${named} to free the files ${hold}`)
   }
   return notYours('nothing for you — the supervisor is driving')
+}
+
+/** Nobody's move but the human's, unless a check failed on the head that would merge: a fix is the orchestrator's. */
+function heldMergeMove(run: Run, task: Task, held: OwedCheck[], hpipe: string): Move {
+  const failed = held.find((o) => o.state.kind === 'waiting-on-a-fix')
+  if (failed === undefined) {
+    return { waitsOnYou: false, clause: `waiting on the human (${idList(held.map((o) => o.check.id))})` }
+  }
+  return {
+    waitsOnYou: true,
+    clause: `YOUR move: ${failed.check.id} failed on the head that would merge — ` +
+      `\`${hpipe} rewind ${run.run_id} implement --task ${task.task_id}\` sends it back to its worker`,
+  }
 }
 
 /** "t5, t6 wait on this sync; ": the tasks a slow holder is keeping from landing. */
@@ -322,9 +361,9 @@ function landQueueMove(run: Run, task: Task, batch: Batch, hpipe: string): Move 
  * one, and the footer renders its clause through `actionFor` separately.
  */
 export function waitsOnYou(
-  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {},
+  run: Run, task: Task, now: number = Date.now(), holds: PaneHolds = {}, dispatches: DispatchLocks = NO_DISPATCHES,
 ): boolean {
-  return moveFor(run, task, '', now, holds).waitsOnYou
+  return moveFor(run, task, '', now, holds, dispatches).waitsOnYou
 }
 
 /**
@@ -335,21 +374,26 @@ export function waitsOnYou(
  */
 export function actionFor(
   run: Run, task: Task, hpipe: string, now: number = Date.now(), holds: PaneHolds = {},
+  dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
-  return moveFor(run, task, hpipe, now, holds).clause
+  return moveFor(run, task, hpipe, now, holds, dispatches).clause
 }
 
 /**
  * A move waiting on you is listed under `waiting on you:`; any other clause
- * printed nowhere, so the grace's "dispatch under way" never showed. Measured on
- * a live run. The grace's full recipe is left to `show`: on a line where nothing
+ * printed nowhere, so the grace's clause never showed. Measured on a live run.
+ * The grace says "not dispatched yet", not "under way": a dispatch that runs is
+ * known from its lock, and one that stopped left no lock behind. Measured on a
+ * live run. The grace's full recipe is left to `show`: on a line where nothing
  * is owed yet it only buried the task.
  */
-function taskLineMove(run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds): string {
-  const move = moveFor(run, task, hpipe, now, holds)
+function taskLineMove(
+  run: Run, task: Task, hpipe: string, now: number, holds: PaneHolds, dispatches: DispatchLocks,
+): string {
+  const move = moveFor(run, task, hpipe, now, holds, dispatches)
   if (move.waitsOnYou) return ''
-  if (move.clause.startsWith(DISPATCH_UNDER_WAY)) {
-    return ` — ${DISPATCH_UNDER_WAY} — see \`${hpipe} show --task ${task.task_id}\``
+  if (move.clause.startsWith(NOT_DISPATCHED_YET)) {
+    return ` — ${NOT_DISPATCHED_YET} — see \`${hpipe} show --task ${task.task_id}\``
   }
   return ` — ${move.clause}`
 }
@@ -369,17 +413,77 @@ function runMove(run: Run): string | null {
   return 'YOUR move: the whole-branch review — the branch-review prompt names its verdict path'
 }
 
-function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds): string[] {
+function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds, dispatches: DispatchLocks): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const own = runMove(run)
   const runLine = own === null ? [] : [`    run [${run.phase} ${ageMinutes(run.phase_entered_at, now)}m] — ${own}`]
   const lines = [...runLine, ...byId.flatMap((task) => {
-    const move = moveFor(run, task, hpipe, now, holds)
+    const move = moveFor(run, task, hpipe, now, holds, dispatches)
     if (!move.waitsOnYou) return []
     const age = ageMinutes(task.phase_entered_at, now)
     return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
   })]
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
+}
+
+/**
+ * The checks the human owes at a gate, or past one: a per-task task in `merge`, or
+ * merged; a single-PR run in `ship-merge`. Elsewhere nothing waits on them yet, since
+ * a ruling is taken only near the gate.
+ */
+function humanOwesAtTheGate(run: Run): OwedCheck[] {
+  const waiting = (owed: OwedCheck[]) => owed.filter((o) => o.state.kind === 'waiting-on-the-human')
+  if (run.batch !== undefined) return run.phase === 'ship-merge' ? waiting(owedAt(run, null)) : []
+  return run.tasks
+    .filter((task) => task.phase === 'merge' || task.merged_at_ms !== null)
+    .flatMap((task) => waiting(owedAt(run, task)))
+}
+
+/**
+ * One line per check the human owes: status's "waiting on the human" block and the
+ * digest footer share it. A per-task task whose own hold prompt rides in the digest
+ * (`covered`) is not repeated under it.
+ */
+export function humanWaitLines(
+  run: Run, hpipe: string, now: number, covered: ReadonlySet<string> = new Set(),
+): string[] {
+  return humanOwesAtTheGate(run)
+    .filter((o) => o.task === null || run.batch !== undefined || !covered.has(o.task.task_id))
+    .map((o) => {
+      const where = o.task === null || run.batch !== undefined
+        ? `${o.task?.task_id ?? 'run'} [${run.phase} ${ageMinutes(run.phase_entered_at, now)}m]`
+        : `${o.task.task_id} [${o.task.phase} ${ageMinutes(o.task.phase_entered_at, now)}m]`
+      const pr = run.batch === undefined ? o.task?.pr ?? null : run.batch.pr
+      const head = gateHead(run, o.task)
+      const build = `${pr === null ? 'its PR' : `PR #${pr}`}${head === null ? '' : ` at ${sha8(head)}`}`
+      const last = o.state.kind === 'waiting-on-the-human' ? o.state.last : null
+      const since = last === null ? ''
+        : ` (${last.as === 'confirmed' ? 'confirmed' : 'failed'} on ${sha8(last.head ?? 'unknown')}; the head is now ` +
+          `${sha8(head ?? 'unknown')})`
+      return `${o.check.id} ${where} — ${o.check.check}${fromDecision(o.check)}, on ${build}${since} — once they ` +
+        `answer: \`${hpipe} confirm --check ${o.check.id} --by human\` (or --waive / --failed)`
+    })
+}
+
+/** A run that only a ruling can let finish, because a merged task got past its gate with a check owed. */
+function backstopLines(run: Run, now: number): string[] {
+  if (run.phase !== 'execute') return []
+  return mergedWithCheckOwed(run).filter((task) => task.phase !== 'merge').map((task) =>
+    `run [execute ${ageMinutes(run.phase_entered_at, now)}m] — ${task.task_id} merged with ` +
+    `${idList(owedAt(run, task).map((o) => o.check.id))} owed: confirm or waive it to let the run finish`)
+}
+
+function waitingOnTheHuman(run: Run, hpipe: string, now: number): string[] {
+  const lines = [...backstopLines(run, now), ...humanWaitLines(run, hpipe, now)]
+  return lines.length === 0 ? [] : ['  waiting on the human:', ...lines.map((line) => `    ${line}`)]
+}
+
+/** Every check the run has, in either mode, and where each stands. */
+function beforeMergeHeader(run: Run): string[] {
+  const checks = checksIn(run)
+  if (checks.length === 0) return []
+  return [`  before merge: ${checks.map((held) =>
+    `${checkName(held)} ${held.check.check} — ${stateClause(checkState(run, held))}`).join(' · ')}`]
 }
 
 /**
@@ -413,8 +517,15 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
       }
     }
 
+    const heldAfterMerge = task.phase === 'merge' && task.merged_at_ms !== null ? owedAt(run, task) : []
+    if (heldAfterMerge.length > 0) {
+      const ids = idList(heldAfterMerge.map((o) => o.check.id))
+      lines.push(`  ⚠ ${task.task_id}: PR #${task.pr ?? 'unknown'} merged before the human confirmed ${ids} — it ` +
+        `waits in merge until ${ids} ${heldAfterMerge.length === 1 ? 'is' : 'are'} confirmed or waived`)
+    }
+
     if (task.phase === 'blocked-on-files') {
-      for (const holder of fileHolders(task, run.tasks)) {
+      for (const holder of fileHolders(run, task)) {
         lines.push(
           `  ⚠ ${task.task_id} blocked on files held by ${holder.task_id} (${holder.phase}) — ` +
           (holder.phase === 'escalated'
@@ -428,6 +539,13 @@ function taskWarnings(run: Run, hpipe: string, now: number): string[] {
   }
 
   return lines
+}
+
+/** A stale lock changes no advice; it is named so the leftover file is not a mystery. */
+function staleDispatchWarning(run: Run, hpipe: string, dispatches: DispatchLocks): string[] {
+  const stale = staleDispatchLock(dispatches, run)
+  return stale === null ? [] : [`  ⚠ a dispatch lock for this repo is left by pid ${stale.pid}, which is gone; the ` +
+    `next \`${hpipe} dispatch\` cleans it up`]
 }
 
 function intakeWarning(run: Run, hpipe: string): string[] {
@@ -467,7 +585,8 @@ function finishedRunSummary(run: Run, hpipe: string): string[] {
     : outcomes === '' ? [] : [`  ended: ${outcomes}`]
   const shipping = run.batch === undefined ? [] : [shippedLine(run, run.batch)]
 
-  return [...head, ...shipping, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+  const owed = owedInRun(run).map((o) => `  ⚠ ended with ${checkName(o)} still owed to the human: ${o.check.check}`)
+  return [...head, ...shipping, ...owed, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
 }
 
 /** A landed task's code reaches the default branch only with the batch PR, so a run that stopped short says so. */
@@ -507,7 +626,7 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
 export function formatStatus(
   runs: Run[], supervisor: StatusSupervisor, session: SessionKey, hpipe: string,
   livePanes: ReadonlySet<string> = new Set(), now: number = Date.now(),
-  panes: PaneObservations = {}, tools: string | null = null,
+  panes: PaneObservations = {}, tools: string | null = null, dispatches: DispatchLocks = NO_DISPATCHES,
 ): string {
   const holds = panes.holds ?? {}
   const lines: string[] = []
@@ -566,7 +685,10 @@ export function formatStatus(
       lines.push(...finishedRunSummary(run, hpipe))
       continue
     }
-    if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now))
+    if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now, hpipe))
+    const shared = sharedStatusLine(run)
+    if (shared !== null) lines.push(`  ${shared}`)
+    lines.push(...beforeMergeHeader(run))
 
     for (const task of run.tasks) {
       const bits = [
@@ -580,11 +702,13 @@ export function formatStatus(
       ]
       if (task.pr !== null) bits.push(`PR #${task.pr}`)
       if (task.ci !== null) bits.push(`ci:${task.ci}`)
-      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds))
+      lines.push(bits.join(' ') + taskLineMove(run, task, hpipe, now, holds, dispatches))
     }
 
     lines.push(...intakeWarning(run, hpipe))
-    lines.push(...waitingOnYou(run, hpipe, now, holds))
+    lines.push(...staleDispatchWarning(run, hpipe, dispatches))
+    lines.push(...waitingOnYou(run, hpipe, now, holds, dispatches))
+    lines.push(...waitingOnTheHuman(run, hpipe, now))
     lines.push(...taskWarnings(run, hpipe, now))
     lines.push(...deliveryWarnings(run, livePanes, now, panes))
   }
@@ -597,7 +721,7 @@ export function formatStatus(
   return lines.join('\n')
 }
 
-function shipLines(run: Run, batch: Batch): string[] {
+function shipLines(run: Run, batch: Batch, hpipe: string): string[] {
   const ci = batch.ci === null ? '' : ` ci:${batch.ci}${batch.ci_head ? ` (on ${sha8(batch.ci_head.sha)})` : ''}`
   const pr = batch.pr === null
     ? '  · final PR: none seen yet — the supervisor records it on its first tick after GitHub lists it'
@@ -606,10 +730,22 @@ function shipLines(run: Run, batch: Batch): string[] {
     return [pr, '  YOUR move: check the batch and open its PR (the ship prompt has the commands)']
   }
   if (run.phase === 'ship-ci') return [pr]
-  if (run.phase === 'ship-merge') {
-    return [pr, `  YOUR move: squash-merge PR #${batch.pr ?? 'unknown'} (the ship-merge prompt has the commands)`]
-  }
+  if (run.phase === 'ship-merge') return [pr, shipMergeMove(run, batch, hpipe)]
   return []
+}
+
+function shipMergeMove(run: Run, batch: Batch, hpipe: string): string {
+  const pr = `PR #${batch.pr ?? 'unknown'}`
+  const owed = owedAt(run, null)
+  if (owed.length === 0) return `  YOUR move: squash-merge ${pr} (the ship-merge prompt has the commands)`
+  const failed = owed.find((o) => o.state.kind === 'waiting-on-a-fix')
+  if (failed?.state.kind === 'waiting-on-a-fix') {
+    const ruling = failed.state.ruling
+    return `  YOUR move: ${checkName(failed)} failed on ${sha8(ruling.head ?? 'unknown')} (${ruling.note ?? ''}) — ` +
+      `fix it on ${batch.branch}: a subagent's patch in the batch checkout, then \`${hpipe} batch-check\`, or a fix ` +
+      `task through \`${hpipe} task …\``
+  }
+  return `  nothing for you — ${pr} waits on the human for ${idList(owed.map((o) => o.check.id))}`
 }
 
 /**
@@ -640,7 +776,7 @@ function landedCount(run: Run): string {
   return `${landed.length} of ${run.tasks.length} landed${still}`
 }
 
-function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number): string[] {
+function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: number, hpipe: string): string[] {
   const holder = landingSlotHolder(run.tasks)
   const next = landingQueue(run.tasks).map((t) => t.task_id)
   const header = [
@@ -661,7 +797,7 @@ function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: 
     warnings.push(`  ⚠ the running supervisor (pid ${supervisor.pid ?? 'unknown'}) predates single-PR runs and ignores ` +
       "this run: close its Pipeline supervisor pane and run the plugin's supervisor action")
   }
-  return [header, ...warnings, ...shipLines(run, batch)]
+  return [header, ...warnings, ...shipLines(run, batch, hpipe)]
 }
 
 /**
@@ -708,7 +844,7 @@ function submittedLine(sub: Submission, batch: Batch, now: number): string {
   const at = `at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago`
   if (sub.kind !== 'sync') return `${sub.title} (${sub.kind}, ${at}; ${checked})`
   const merge = sub.merge !== 'clean'
-    ? `not a clean merge of ${batch.branch}, at ${sha8(sub.dirty_at ?? sub.head_sha)}`
+    ? `not a clean merge of ${batch.branch}: ${sha8(sub.dirty_at ?? sub.head_sha)} is not git's own merge`
     : sub.merges === 0 ? `nothing on ${batch.branch} to merge` : `a clean merge of ${batch.branch}`
   return `sync ${at} (${merge}; ${checked})`
 }
@@ -750,7 +886,7 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
     `branch:     ${task.branch}`,
     `bead:       ${task.bead}`,
     `surface:    ${task.surface}`,
-    `files:      ${listOrNone(task.files)}`,
+    `files:      ${describeFiles(run, task.files)}`,
     `depends on: ${listOrNone(task.depends_on)}`,
     `phase:      ${task.phase} (${ageMinutes(task.phase_entered_at, now)}m)`,
     `tier:       ${tierOf(task)}`,
@@ -775,6 +911,17 @@ export function formatTaskDetail(run: Run, task: Task, now: number = Date.now())
       `ci:         ${orNone(task.ci)}${task.ci !== null && task.ci_head ? ` (on ${sha8(task.ci_head.sha)})` : ''}`,
     ] : landingDetail(task, run.batch, now)),
     `decision:   ${open === null ? 'none' : `${open.id} — ${open.question}`}`,
+    ...beforeMergeDetail(run, task, now),
     `notes:      ${orNone(task.notes)}`,
   ].join('\n')
+}
+
+const BEFORE_MERGE_LABEL = 'before merge: '
+
+function beforeMergeDetail(run: Run, task: Task, now: number): string[] {
+  return (task.before_merge ?? []).map((check, i) => {
+    const state = checkState(run, { check, task })
+    const label = i === 0 ? BEFORE_MERGE_LABEL : ' '.repeat(BEFORE_MERGE_LABEL.length)
+    return `${label}${check.id} ${check.check}${fromDecision(check)} — ${stateClause(state, now)}`
+  })
 }

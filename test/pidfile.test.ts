@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  claimPid, clearStalePid, drivenSchemas, processStartedAtMs, readPid, supervisorState, writePid,
+  BEFORE_MERGE_CAPABILITY, claimPid, clearStalePid, drivenSchemas, honours, processStartedAtMs, readPid,
+  SHARED_PATHS_CAPABILITY, SUPERVISOR_CAPABILITIES, supervisorState, writePid,
 } from '../src/lib/pidfile'
 
 let dir: string
@@ -71,4 +72,16 @@ test('a pid file written before schemas existed reads as a supervisor that drive
   const info = { pid: 1, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2' }
   expect(drivenSchemas(info)).toEqual([3])
   expect(drivenSchemas({ ...info, schemas: [3, 4] })).toEqual([3, 4])
+})
+
+test('a pid file written before capabilities existed reads as a supervisor that honours none', () => {
+  const info = { pid: 1, pane_pid: 1, started_at_ms: 1, session: 'personal', socket_path: '/s', pane_id: 'w1:p2' }
+  expect(honours(info, SHARED_PATHS_CAPABILITY)).toBe(false)
+  const sharing = { ...info, capabilities: [SHARED_PATHS_CAPABILITY] }
+  expect(honours(sharing, SHARED_PATHS_CAPABILITY)).toBe(true)
+  expect(honours(sharing, BEFORE_MERGE_CAPABILITY)).toBe(false)
+})
+
+test('the capabilities a pid file names are fixed strings, since a supervisor of another release reads them', () => {
+  expect(SUPERVISOR_CAPABILITIES).toEqual(['shared-paths', 'before-merge', 'dispatch'])
 })

@@ -144,12 +144,12 @@ test('release unblocks a sibling that was waiting on the same files', async () =
     { task_id: 't2', phase: 'blocked-on-files', files: ['a/'] },
   ])
   await saveRun(dir, run)
-  expect(filesClearFor(run.tasks[1]!, run.tasks)).toBe(false)
+  expect(filesClearFor(run, run.tasks[1]!)).toBe(false)
 
   await cmdRelease(ctx(), { taskId: 't1', repoKey: 'k', runId: null })
 
   const saved = (await listRuns(dir, 'personal')).find((r) => r.run_id === run.run_id)
-  expect(filesClearFor(saved!.tasks[1]!, saved!.tasks)).toBe(true)
+  expect(filesClearFor(saved!, saved!.tasks[1]!)).toBe(true)
 })
 
 test('task registration records the bead and its brief, and seeds artifact paths from the bead id', async () => {
@@ -1255,6 +1255,23 @@ test('registration says which live task a --files declaration overlaps, and what
   expect((await register('feat/three', 'hp-3', ['docs/'])).text).toContain('files: docs/\n')
 })
 
+test('registration names only an overlap on a path that locks', async () => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: 'k', repoRoot: repoDir, title: 'a' })
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  await saveRun(dir, run)
+  const register = (branch: string, bead: string, files: string[]) => cmdTask(ctx(), {
+    branch, bead, surface: 'core', notes: '', dependsOn: [], files, keepWorktree: false, repoKey: 'k', runId: null,
+  })
+
+  await register('feat/one', 'hp-1', ['src/a/', 'docs/registry.md'])
+  const second = (await register('feat/two', 'hp-2', ['src/b/', 'docs/registry.md'])).text
+  expect(second).toContain('files: src/b/, docs/registry.md (shared)\n')
+  expect(second).not.toContain('overlaps')
+  expect((await register('feat/three', 'hp-3', ['src/a/x.ts', 'docs/registry.md'])).text)
+    .toContain('files: src/a/x.ts, docs/registry.md (shared) — overlaps t1: whichever reaches implement second ' +
+      'waits there until the other finishes')
+})
+
 const fetchedBase = async () => ({ commit: '1fb8a43', ref: 'origin/main', fetchError: null })
 
 test('the dispatched return keeps every header line above the one blank line', async () => {
@@ -1279,6 +1296,7 @@ test('the dispatched return keeps every header line above the one blank line', a
   ])
   // #118: the registration path prints the whole dispatch, `agent start` flag included.
   expect(lines.slice(6)).toEqual([
+    expect.stringMatching(/^dispatch: .* dispatch --task t1 \(run it in the background\) — runs the steps below and stops at /),
     'dispatch, in order:',
     `    herdr worktree create --cwd '${repoDir}' --branch feat/boot --base 1fb8a43`,
     expect.stringMatching(/^ {4}# its JSON gives the new checkout as \.result\.worktree\.path and its pane as /),
@@ -1789,8 +1807,10 @@ test('a rewind into research with no worker owes nothing: the dispatched brief c
   await saveRun(dir, run)
 
   const result = await cmdRewind(ctx(), { runId: run.run_id, phase: 'research', taskId: 't1' })
-  // The F10 shape: no workspace either, so the first step is a worktree, not a dispatch.
-  expect(result.text).toContain("no worker is bound, so nothing is sent — `herdr worktree create --cwd '/r' --branch b")
+  // The F10 shape: no workspace either, so the first manual step is a worktree, not a dispatch.
+  expect(result.text).toContain('no worker is bound, so nothing is sent — `' +
+    `${hpipeCommand(ctx().pluginRoot)} dispatch --task t1\` (run it in the background) runs every step; by hand, ` +
+    "`herdr worktree create --cwd '/r' --branch b")
   expect(result.text.indexOf('herdr agent start')).toBeLessThan(result.text.indexOf('dispatch --task t1 --pane <root pane>'))
   expect((await savedRun(run.run_id)).outbox ?? []).toEqual([])
 })

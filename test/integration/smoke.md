@@ -201,7 +201,7 @@ by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr 
 agent under that name. A refusal of the name, or of a second start under it after a rewind, is a
 finding. Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
-in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
+in `hpipe status` ends ``… unknown — not dispatched yet — see `hpipe show --task <id>` ``, and nothing
 is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
 dispatch in full, starting at `worktree create` while the task has no worktree. Every task line that is
 not waiting on you ends with its move clause the same way (`— worker's move: waiting for …`,
@@ -1430,10 +1430,326 @@ run cannot time a push into the one tick between `submit` and the skip.
 If such a task must sync and the merge conflicts, `submit` reports `not a clean merge` and the task goes
 to `pr-review`, its first. **Assert** that review's prompt says `No reviewed head is recorded, so this
 is the change's first review: read the whole diff` and names `git show --remerge-diff <sha>` at the
-sha `submit` printed after `not a clean merge … (at`.
+sha `submit` printed after `not a clean merge of …:`.
 
 **Record:** each task's change size, whether it skipped, and the wall-clock time from `implement` to
 `ci` (or `land-queue`) for a skipping task against a reviewed one.
+
+## 11. Before-merge checks
+
+A check only the human can make holds the merge it guards: no merge command and no stall probe until
+the human rules. This touches gating (the gate rows hold a merge they would have recorded and moved
+past), delivery (the hold prompt in place of the merge prompt, and the CLI replacing a queued one) and
+the stall ladder. The wiring test drives it against a real ledger, but GitHub's merge state, Beads and
+live agents are only proven here. Fresh `pipesmokeN` session against `victorstein/hpipe-smoke`, with
+`STALL_MINUTES=2` and `TASK_STALL_MINUTES=3` in the plugin's `config.env`, so a probe that should not
+come would come within minutes.
+
+### 11a. A supervisor that predates it
+
+With the previous release's supervisor still running, register t1 and run `hpipe hold --task t1
+--before-merge "x"` from the new CLI. **Assert:** refused, naming that supervisor's pid and the restart
+step; `hpipe show --task t1` has no `before merge:` line. Restart the supervisor, then:
+
+```bash
+jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge","dispatch"]
+```
+
+### 11b. Per-task, a decision answered with `--before-merge`
+
+Register t1 with `--tier heavy`, so its PR review runs. Have its worker raise a decision, and answer it
+with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
+
+- The worker's answer prompt says `Before this merges, the human will check:` and names the check.
+- `hpipe confirm --check c1 --by human` while t1 is in `pr-review` is refused: `confirm it once t1
+  reaches ci`.
+- At `merge`, the orchestrator's prompt is **Hold — PR #<n> (…) waits on the human before it merges**.
+  It leads with `gh pr view <n> --json mergeStateStatus` and has no `gh pr merge`.
+- `hpipe status`: t1's line ends `— waiting on the human (c1)`, the run header has a `before merge:`
+  line, and `waiting on the human:` lists c1, not `waiting on you:`. The bead is `blocked` +
+  `hpipe:awaiting-human`, with a `[hpipe t1/c1/before-merge]` comment.
+- No probe comes for 10 minutes.
+- `hpipe confirm --check c1 --by human` brings the merge prompt within a tick, and the first probe
+  comes no sooner than one `TASK_STALL_MINUTES` after the confirm.
+- Push an empty commit to t1's branch after confirming. t1 goes `merge → ci`, and comes back held, its
+  hold line reading `confirmed on <old>; the head is now <new>`.
+- `hpipe confirm --check c1 --by human --failed "<what>"` in `merge`: t1 goes to `implement`, and its
+  worker gets **The human's check failed**. The fix goes through review and CI, and the hold comes
+  again for the new head.
+- Merge the PR by hand while held. Before the supervisor's next idle tick, `hpipe hold --task t1
+  --before-merge "y"` is refused as merged: GitHub was asked. t1 stays in `merge` with the `⚠ t1: PR
+  #<n> merged before the human confirmed c1` line, and its bead stays open. `hpipe rewind <run> done
+  --task t1`, `hpipe rewind <run> implement --task t1` and `hpipe close --task t1` are refused. `hpipe confirm --check c1 --by human --waive
+  "<why>"` → `close → done`, and the waiver comment (`[hpipe t1/c1/r<n>]`) is on the bead before it
+  closes.
+
+### 11c. Single-PR
+
+- `hpipe hold --before-merge "<check>"` at intake. When the run reaches `ship-merge`, it is held with
+  the hold prompt, and no probe comes.
+- Confirming during `ship-ci` holds once CI passes on that head: the merge prompt comes, with
+  `Before merge: c1 confirmed by the human on <sha8>.`
+- A `BEHIND` batch PR: the hold prompt has `gh pr update-branch` run first, the run goes back through
+  `ship`, and the human is asked about the new head.
+- `hpipe confirm --check c1 --by human --failed "<what>"` in `ship-merge` keeps the run there, and the
+  next probe names the two routes to a fix.
+- `hpipe abort` on a held throwaway run lists `still owed to the human: c1 … — the batch PR is not
+  merged`.
+
+**Record**, verbatim: the `mergeStateStatus` GitHub gave for a PR behind its base, a conflicting PR,
+one blocked on a review, and a draft. The hold prompt names a move for each; a value it does not name
+is a **finding**.
+
+---
+
+## 12. One-command dispatch
+
+`hpipe dispatch --task <id>` and `hpipe dispatch --ready` drive herdr from the CLI: `worktree
+create`, the repo's bootstrap, `agent start` and the brief. The unit and process tests stand in for
+herdr, so only this run proves herdr answers the way they assume. Fresh `pipesmokeN` session,
+`victorstein/hpipe-smoke`. Set `STALL_MINUTES=2` and `TASK_STALL_MINUTES=3` in the plugin's
+`config.env` first, so a probe that should not come would come within minutes.
+
+Commit a bootstrap on `main` whose behaviour a marker file in the state dir picks:
+
+```sh
+#!/bin/sh
+# .claude/pipeline-bootstrap — chmod +x before committing
+echo "bootstrap in $PWD"
+[ -f "$HOME/.local/state/herdr/plugins/stein.pipeline/smoke-boot-fail" ] && { echo "marker says fail"; exit 1; }
+[ -f "$HOME/.local/state/herdr/plugins/stein.pipeline/smoke-boot-slow" ] && sleep 600
+sleep 2
+exit 0
+```
+
+The `sleep 2` keeps a passing bootstrap slower than herdr's `worktree.created` hook. A record of a
+bootstrap that finished before the hook fired is cleared by the binding, by design, and the next
+re-run would bootstrap once more, which 12d would misread.
+
+Every dispatch below is run by the orchestrator with the Bash tool's `run_in_background`, and it ends
+its turn. Each one prints a line per step (`base`, `worktree`, `bootstrap`, `agent`, `brief`) and ends
+`dispatched tN` or `stopped tN at <step>: <why>`.
+
+### 12a. A supervisor that predates it
+
+With the previous release's supervisor still running, register 12b's throwaway task, then run
+`hpipe dispatch --task <its id>` and `hpipe dispatch --ready`. **Assert:** both refused, naming that
+supervisor's pid, the restart step and the `dispatch, in order:` block; no worktree created and
+`$STATE/dispatch/` empty. Restart the supervisor, then:
+
+```bash
+jq -c .capabilities "$STATE/supervisor.$SMOKE.pid"    # assert: ["shared-paths","before-merge","dispatch"]
+```
+
+12b dispatches that task by hand.
+
+### 12b. The tool facts the code rests on — record each verbatim
+
+- **The create response (Verify 1).** Dispatch 12a's throwaway task **by hand** with its printed
+  block, and save `herdr worktree create`'s JSON. **Assert** it carries
+  `.result.worktree.path`, `.result.root_pane.pane_id`, and the workspace id at
+  `.result.workspace.workspace_id` or `.result.root_pane.workspace_id`. If the id is in neither, every
+  one-command dispatch stops at `worktree` with `herdr may have created the worktree, but herdr's
+  create response named no workspace id`: a **finding** — record where the id actually is.
+- **The workspace list entry (Verify 2, settled on smoke run 17).** `herdr --session "$SMOKE"
+  workspace list` for that task's workspace. **Assert** `worktree.is_linked_worktree` is `true`,
+  `worktree.repo_root` is the run's repo (herdr gives the primary checkout there, even for a linked
+  worktree) and `worktree.checkout_path` is the task's own checkout. A dispatch that stops at `agent`
+  with `herdr says wN is the checkout at …` or `is a checkout of …` is a **finding**.
+- **`worktree list` (Verify, pass 2).** `herdr --session "$SMOKE" worktree list --cwd <repo>`.
+  **Assert** `.result.worktrees[]` entries carry `path`, `branch`, `is_linked_worktree` and
+  `is_prunable`. Any other shape makes every dispatch stop at `worktree` with `could not be read`.
+- **`agent start` (Verify 3).** The dispatch passes `--timeout 80000`. **Record** herdr's error code
+  and message for a name already in use (12d) and for an agent blocked by a dialog at start, if one
+  shows up.
+- **Focus.** The dispatch passes `--no-focus` to `worktree create`. **Assert** focus stays on the
+  orchestrator pane while a background dispatch creates worktrees.
+- **Background Bash (Verify 4).** **Record** that the dispatch outlives Claude Code's 10-minute
+  foreground limit (12e's slow bootstrap), that its completion notice carries the step lines, and
+  which signal reaches it if the orchestrator's session ends while it runs (`hpipe status` and the
+  lock show what was left).
+- **Auto mode.** With auto mode on, **record** that `hpipe dispatch` needed no separate approval for
+  the `herdr agent start` inside it.
+
+### 12c. Three tasks, one command
+
+Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispatch --ready`.
+**Assert:**
+
+- the step lines name each task in task id order, each `worktree   created wN at <path>, pane
+  wN:p1`, `bootstrap  ./.claude/pipeline-bootstrap passed in <n>s (log: …)`, `agent      started
+  <bead> in wN:p1 (--effort <tier's>)`, and `brief      claimed <bead>; delivered to wN:p1, and the
+  worker is working on it`; the last line is `dispatched t1, t2, t3`;
+- one pane per new workspace, each worker working on its brief (`herdr pane read`), and
+  `hpipe show --task tN` names the workspace and pane within a tick;
+- no line says `did not answer within 30s`: every herdr call but `agent start` runs bounded, in a
+  process group of its own, and a healthy herdr answers well inside the bound;
+- `$STATE/dispatch/` is empty once it ends.
+
+### 12d. Stops, and re-runs that skip what is done
+
+- **Bootstrap.** `touch "$STATE/smoke-boot-fail"`, register t4, `hpipe dispatch --task t4`. It
+  stops `at bootstrap: ./.claude/pipeline-bootstrap failed (exit 1)` with `marker says fail` in the
+  tail. Remove the marker and run it again: `worktree   wN at <path> exists (pane wN:p1) — skipped`,
+  then the bootstrap runs and the rest follows.
+- **Straight after a create.** Repeat with t5, but re-run within a second or two of the failure,
+  before the supervisor's tick binds the worktree. **Assert** it waits for the binding (up to 15 s)
+  and carries on, rather than stopping on `no workspace is bound`.
+- **A name in use.** Register t6. Before dispatching it, start an agent named after t6's bead in
+  some other shell pane (`herdr agent start <bead> --kind claude --pane <other>`). With the fail
+  marker absent, `hpipe dispatch --task t6` stops `at agent: an agent named <bead> already runs in
+  <other>`, without retrying. Close that agent, run it again: `bootstrap  passed in this checkout
+  before — skipped`, and the agent starts.
+- **A workspace closed after a failed bootstrap.** Fail t7's bootstrap as above, then
+  `herdr --session "$SMOKE" workspace close <its workspace>`. Remove the marker and re-run: it stops
+  `at worktree` naming the kept checkout and the `herdr worktree open --cwd '<repo>' --branch <b>`
+  step. Run that step, wait for `hpipe show --task t7` to name the new workspace, re-run: the
+  bootstrap runs again (the binding cleared the record). **Assert** at no point did an agent start
+  in a pane outside t7's workspace.
+- **A branch that is not the task's.** `git branch smoke/stale <a commit before main's tip>` and push
+  nothing; register t8 on `smoke/stale` and dispatch it: refused `` at worktree: `smoke/stale`
+  already exists at <sha8> and does not contain the base <sha8> ``, nothing created.
+- **Another session.** From a pane of a different herdr session, cd'd into the repo,
+  `hpipe dispatch --task t8 --run <run_id>` is refused: `hpipe dispatch drives herdr itself: run it
+  from a pane of session <smoke session>`.
+
+### 12e. The lock while a bootstrap runs
+
+`touch "$STATE/smoke-boot-slow"`, register t9 and t10, and `hpipe dispatch --task t9`. While its
+bootstrap sleeps:
+
+- `hpipe dispatch --task t10` is refused: `t9 is being dispatched by pid <pid> (bootstrap, <n>m), in
+  session <s> (run <id>): one dispatch runs per repo at a time`. So is `hpipe dispatch --task t10
+  --pane <any>`.
+- `hpipe status`'s t9 line reads ``nothing for you — `<hpipe> dispatch` (pid <pid>) is at bootstrap
+  for t9, started <n>m ago``, and nothing anywhere says `YOUR move: … herdr agent start` for t9. Wait
+  five minutes, past both shortened thresholds: **assert** no stall probe about t9 reaches the
+  orchestrator, and the digest's footer does not list it.
+- `cat "$STATE"/dispatch/*.lock` names `t9`, `bootstrap`, the pid and `bootstrap.pgid`.
+- `kill -TERM <pid>`. **Assert** within 10 s: `ps -g <pgid>` lists nothing, the lock file is gone,
+  and the dispatch's output ends `stopped t9 at bootstrap: interrupted` (exit 143).
+- Remove the slow marker. `hpipe dispatch --task t9` carries on from the worktree.
+- Slow marker on again, register t13 and `hpipe dispatch --task t13`. While its bootstrap sleeps,
+  `herdr --session "$SMOKE" workspace close <t13's workspace>`, then remove the marker. **Assert** the
+  dispatch stops `at agent` (herdr lists no workspace, or the ledger no longer binds it) and that no
+  agent started anywhere: the workspace, the ledger and the pane are all checked again just before
+  `agent start`, since a bootstrap can take twenty minutes.
+
+A dispatch killed with `kill -KILL` leaves its lock: `hpipe status` then says `⚠ a dispatch lock for
+this repo is left by pid <pid>, which is gone`, and the next dispatch stops the dead one's bootstrap
+group (when its leader is provably the one recorded) and takes the lock over. Record what you see.
+
+### 12f. `--ready` takes what becomes ready while it runs
+
+Slow marker on. Register t11, start `hpipe dispatch --ready`, and while t11 bootstraps register t12.
+Remove the marker. **Assert** the same run dispatches t12 before it ends (`dispatched t11, t12`), and
+that a `Dispatch t12` prompt arriving meanwhile, if any, is answered by waiting for the notice: a
+`dispatch --task t12` then would be refused with `it takes every task that becomes ready before it
+ends, t12 included`.
+
+**Record:** each dispatch's wall-clock time from command to `dispatched`, against the manual block's
+in §1.
+
+## 13. Shared paths
+
+A path listed in `.claude/pipeline-shared-paths` never holds the file lock, so two tasks that both
+declare it implement at once, and the conflict that follows is left to the rebase before a per-task
+merge, or to `sync` in a single-PR run. The unit suite and `test/shared-paths-wiring.test.ts` drive the
+gate against a bare local origin; a live supervisor's gate, GitHub's merge and a real `sync` are only
+proven here. Fresh `pipesmokeN` session, `victorstein/hpipe-smoke`. With the plugin's `config.env`
+set to `STALL_MINUTES=2` and `TASK_STALL_MINUTES=3`, a probe that should not come comes within minutes.
+
+### 13a. Start reads the list once
+
+Commit `.claude/pipeline-shared-paths` to `main` on origin, from a clone other than the
+orchestrator's checkout:
+
+```
+# every task appends to it
+docs/registry.md
+docs/*.md
+```
+
+**Assert:** `hpipe start` prints, above the intake prompt,
+
+```
+shared: docs/registry.md — from .claude/pipeline-shared-paths at <sha8> (origin/main as just fetched); never locked
+⚠ shared: ignored "docs/*.md" in .claude/pipeline-shared-paths — a glob would share more than it names: list each path
+```
+
+with `<sha8>` the commit that added the file, though the orchestrator's working tree has never
+pulled it. `hpipe status` shows `  shared: docs/registry.md (from <sha8>)` under the run's header, and
+the ledger holds it:
+
+```bash
+jq '.shared_paths' "$STATE/runs/$SMOKE/<run_id>.json"
+```
+
+If the session's supervisor is still the previous release's, `start` also prints `⚠ shared: the
+supervisor of session … predates shared paths and locks them anyway`. Restart it before going on, or
+13b holds t2 behind t1 and that is the old supervisor, not a finding.
+
+### 13b. Two tasks on one shared file, and one on a locking path
+
+Register three small tasks:
+
+- t1: `--files src/alpha/,docs/registry.md`, a change that adds `src/alpha/` code and a `## alpha`
+  section to `docs/registry.md`;
+- t2: `--files src/beta/,docs/registry.md`, the same with `beta`;
+- t3: `--files src/alpha/x.ts`.
+
+**Assert:** `hpipe task` prints `files: src/alpha/, docs/registry.md (shared)` for t1, t2's line has no
+`overlaps`, and t3's reads `— overlaps t1: whichever reaches implement second waits there until the
+other finishes`. `hpipe show --task t2` prints `files:      src/beta/, docs/registry.md (shared)`.
+
+Once all three are past their plans:
+
+- t1 and t2 are in `implement` together: whichever reaches `blocked-on-files` second passes straight
+  through to `implement` while the other is still in it (on the same tick, if they arrive together).
+  Each implement prompt's implementer's brief reads
+  ``docs/registry.md` is shared: other tasks edit it at the same time.``
+- t3 waits in `blocked-on-files`; `hpipe status` prints `⚠ t3 blocked on files held by t1 (implement)`
+  and never names t2 as a holder; t3's bead is blocked by t1's bead and by no other.
+- No probe about t3 comes while t1 moves (`TASK_STALL_MINUTES=3`: watch it for ten).
+- t3 enters `implement` once t1 is `done`, with t2 possibly still in flight.
+
+**Record:** when t1 and t2 entered `implement`, from `jq '.history'`, and when t3 did.
+
+### 13c. Per-task: the rebase at merge
+
+Let t1 merge first. **Assert:** t2's merge prompt carries, after the bootstrap paragraph,
+
+```
+This task declares the shared `docs/registry.md`, and t1 (merged) declares it too, so this PR may conflict there. …
+```
+
+and the orchestrator rebases t2 onto `main`, keeps both sections, pushes, and t2 goes back to `ci`,
+then `merge` again on the rebased head. A merge prompt that names no shared path for t2, or names a
+task that has not merged, is a **finding**.
+
+Then make the additions collide: register two more tasks, each adding a `## gamma` section with
+different text to `docs/registry.md`. Once the first merges, **assert** the orchestrator, following the
+other's merge prompt, does not hand-resolve it but runs the `hpipe rewind <run> implement --task <id>`
+it prints, and that task's worker redoes its addition on top of the merged one and is reviewed again.
+
+### 13d. Single-PR: the dirty sync
+
+In a `--single-pr` run with the same list on `main`, two tasks that each add a section to
+`docs/registry.md`. **Assert:** both implement at once; the second to land syncs, its merge of the
+batch conflicts on `docs/registry.md`, the sync prompt it received says `` `docs/registry.md` is shared,
+so a conflict there is expected: keep both sides' additions``, `submit` reports `not a clean merge`,
+and the task goes back through `pr-review` before it lands. Make the two additions collide instead,
+and the worker raises it with `hpipe decide`, recommending a rewind to `implement`.
+
+### 13e. A mid-run edit changes nothing
+
+During 13b, while t1 is still in flight, commit `src/` to the list on `main` (another clone, as in
+13a), then register another task with `--files src/alpha/y.ts`. **Assert:** its `files:` line reads
+`— overlaps t1`, the ledger's `shared_paths.commit` is still 13a's, and `hpipe status` still prints
+`shared: docs/registry.md (from <13a's sha8>)`. The next `hpipe start` reads the new list.
+
+Afterwards, delete `.claude/pipeline-shared-paths` from `main`: the sections above expect a repo
+that shares nothing.
 
 ---
 

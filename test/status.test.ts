@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { actionFor, formatStatus, formatTaskDetail, visitedPhases, waitsOnYou } from '../src/lib/status'
+import type { DispatchLock, DispatchLocks } from '../src/lib/dispatch-lock'
 import { enqueue } from '../src/lib/outbox'
 import { newRun } from '../src/lib/ledger'
 import { FILES_FREE_ON_ARRIVAL } from '../src/lib/machine'
@@ -219,6 +220,45 @@ test('a healthy holder is reported as finishing, not as needing release', () => 
   expect(text).not.toContain('release --task t1')
 })
 
+test('a sibling sharing only a listed path is no holder, in the warnings or the task line', () => {
+  const run = mkRun()
+  run.shared_paths = { prefixes: ['docs/registry.md'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement', files: ['src/a/', 'docs/registry.md'] }),
+    mkTask({ task_id: 't2', phase: 'blocked-on-files', files: ['src/b/', 'docs/registry.md'] }),
+  ]
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).not.toContain('blocked on files held by')
+  expect(text).toContain('no task holds its files now')
+})
+
+test('a run sharing paths names them and the commit they were read at under its header', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ files: ['src/reader/', 'docs/file-formats.md'] })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('shared:')
+
+  run.shared_paths = { prefixes: [], ignored: ['docs/*.md'], commit: '1fb8a43c99', ref: 'origin/main', read_at: 0 }
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).not.toContain('shared:')
+
+  run.shared_paths.prefixes = ['docs/file-formats.md', 'CHANGELOG.md']
+  const lines = formatStatus([run], { state: 'live' }, 'personal', HP).split('\n')
+  const header = lines.findIndex((line) => line.startsWith(run.run_id))
+  expect(lines).toContain('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)')
+  expect(lines.indexOf('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)')).toBeGreaterThan(header)
+  expect(lines.indexOf('  shared: docs/file-formats.md, CHANGELOG.md (from 1fb8a43c)'))
+    .toBeLessThan(lines.findIndex((line) => line.startsWith('  t1 ')))
+})
+
+test('show marks each declared entry a shared path covers', () => {
+  const run = mkRun()
+  const task = mkTask({ files: ['src/reader/', 'docs/file-formats.md'] })
+  run.tasks = [task]
+  expect(formatTaskDetail(run, task)).toContain('files:      src/reader/, docs/file-formats.md\n')
+  run.shared_paths = { prefixes: ['docs/file-formats'], ignored: [], commit: '1fb8a43c', ref: 'origin/main', read_at: 0 }
+  expect(formatTaskDetail(run, task)).toContain('files:      src/reader/, docs/file-formats.md (shared)\n')
+  expect(formatTaskDetail(run, mkTask({ files: [] }))).toContain('files:      none\n')
+})
+
 test('a stuck holder is still reported as needing release', () => {
   const run = mkRun()
   run.tasks = [
@@ -314,6 +354,7 @@ test('a started worker that has not been briefed names dispatch, not a missing a
   const section = out.slice(out.indexOf('waiting on you:'))
   expect(section).toContain(
     't1 feat/x (hp-1) [research 9m] — YOUR move: its agent in w7:p1 has not been handed the brief — ' +
+    `\`${HP} dispatch --task t1\` (run it in the background) hands it over, or by hand ` +
     `\`${HP} dispatch --task t1 --pane w7:p1\``,
   )
   expect(out).not.toContain('with nothing at')
@@ -551,7 +592,7 @@ test('a rewound task awaiting its brief with no worktree is flagged at once, not
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain('waiting on you:')
   expect(text).toContain('YOUR move: no worktree and no agent')
-  expect(text).not.toContain('dispatch under way')
+  expect(text).not.toContain('not dispatched yet')
 })
 
 test('a task the gate just opened is not flagged while its dispatch is under way — #94', () => {
@@ -575,7 +616,8 @@ test('a task dispatched at registration is not flagged before its grace, and sta
   expect(inGrace).not.toContain('waiting on you:')
   expect(inGrace).not.toContain('no agent has been started')
   expect(formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now + 5 * 60_000))
-    .toContain("YOUR move: no worktree and no agent — `herdr worktree create --cwd '/r' --branch feat/x")
+    .toContain(`YOUR move: no worktree and no agent — \`${HP} dispatch --task t1\` (run it in the background) runs ` +
+      "every step; by hand, `herdr worktree create --cwd '/r' --branch feat/x")
 })
 
 test('hpipe show names the pane a failed worker last ran in — #12', () => {
@@ -653,7 +695,7 @@ test('a dispatch inside its grace reads as under way on its task line — #135',
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
-  expect(taskLine).toEndWith(`[research 0m] heavy agent:unknown — dispatch under way — see \`${HP} show --task t1\``)
+  expect(taskLine).toEndWith(`[research 0m] heavy agent:unknown — not dispatched yet — see \`${HP} show --task t1\``)
   expect(text).not.toContain('waiting on you:')
 })
 
@@ -929,4 +971,69 @@ test('hpipe show says which review was skipped and why, right after the phases v
   expect(lines[visitedAt + 1]).toBe('skipped:    pr-review (42 lines added outside docs/, spec-review cleared first pass)')
   run.tasks = [mkTask({ phase: 'ci' })]
   expect(formatTaskDetail(run, run.tasks[0]!)).not.toContain('skipped:')
+})
+
+const NOW_DISPATCHING = 10_000_000
+
+function dispatching(run: Run, over: Partial<DispatchLock> = {}, live = true): DispatchLocks {
+  return new Map([[run.repo_key, { live, lock: {
+    session: run.session, run_id: run.run_id, mode: 'task', task: 't1', step: 'bootstrap',
+    since: NOW_DISPATCHING - 3 * 60_000, pid: 4242, started_at_ms: 0, bootstrap: null, ...over,
+  } }]])
+}
+
+/** Each state the dispatch advice covers, every one already overdue and so waiting on you. */
+function owingADispatch(): Array<[string, Run]> {
+  const states: Array<[string, Partial<Task>]> = [
+    ['undispatched', { workspace_id: null, pane_id: null, awaiting_brief: true }],
+    ['unstarted', { workspace_id: 'w23', pane_id: null, awaiting_brief: true, adopted_at: 0 }],
+    ['unbriefed', { workspace_id: 'w23', pane_id: 'w23:p1', awaiting_brief: true }],
+  ]
+  return states.map(([name, over]) => {
+    const run = mkRun()
+    run.phase = 'execute'
+    run.tasks = [mkTask({ phase: 'research', agent_status: 'idle', phase_entered_at: 0, ...over })]
+    run.history.push({ at: 0, task_id: 't1', from: 'rewind', to: 'research', why: 'manual rewind' })
+    return [name, run]
+  })
+}
+
+test('a live dispatch naming the task stands in for its dispatch advice, and nothing waits on you', () => {
+  for (const [name, run] of owingADispatch()) {
+    expect(waitsOnYou(run, run.tasks[0]!, NOW_DISPATCHING), name).toBe(true)
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run))
+    expect(text, name).toContain(`— nothing for you — \`${HP} dispatch\` (pid 4242) is at bootstrap for t1, started 3m ago`)
+    expect(text, name).not.toContain('waiting on you:')
+    expect(text, name).not.toContain('herdr agent start')
+    expect(waitsOnYou(run, run.tasks[0]!, NOW_DISPATCHING, {}, dispatching(run)), name).toBe(false)
+    expect(actionFor(run, run.tasks[0]!, HP, NOW_DISPATCHING, {}, dispatching(run)), name)
+      .toStartWith('nothing for you — ')
+  }
+})
+
+test('a stale dispatch lock leaves the advice as it was, and status names it', () => {
+  for (const [name, run] of owingADispatch()) {
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run, {}, false))
+    expect(text, name).toContain('waiting on you:')
+    expect(text, name).toContain(`⚠ a dispatch lock for this repo is left by pid 4242, which is gone; the next ` +
+      `\`${HP} dispatch\` cleans it up`)
+  }
+})
+
+test('a live dispatch of another task, run or session changes nothing', () => {
+  for (const over of [{ task: 't2' }, { run_id: 'r-other' }, { session: 'other' }]) {
+    const [, run] = owingADispatch()[0]!
+    const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), NOW_DISPATCHING, {}, null,
+      dispatching(run, over))
+    expect(text, JSON.stringify(over)).toContain('waiting on you:')
+    expect(text, JSON.stringify(over)).not.toContain('a dispatch lock for this repo')
+  }
+})
+
+test('the digest footer leaves out a task whose dispatch is under way', () => {
+  const [, run] = owingADispatch()[0]!
+  expect(parkedFooter(run, new Set(), NOW_DISPATCHING, HP)).toContain('t1 feat/x')
+  expect(parkedFooter(run, new Set(), NOW_DISPATCHING, HP, {}, dispatching(run))).toBe('')
 })

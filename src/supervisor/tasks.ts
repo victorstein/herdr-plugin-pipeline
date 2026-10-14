@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { answerCheckNote, checkFailedVars, lastFailure, owedAt, taskHoldVars, taskRulingsNote } from '../lib/before-merge'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { DEFAULT_STALL_MINUTES } from '../lib/config'
 import {
@@ -22,7 +23,8 @@ import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/pha
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
 import { abandonParagraph, resumeCommand } from '../lib/status'
-import { changePromptVars, landingPromptVars, mergePromptVars, syncPromptVars } from '../lib/change-prompt'
+import { changePromptVars, heldSharedNote, landingPromptVars, mergePromptVars, syncPromptVars } from '../lib/change-prompt'
+import { isSharedPath, sharedPrefixesOf } from '../lib/shared-paths'
 import {
   ALWAYS_REVIEW_REL, alwaysReviewPrefixes, changeSize, type ReviewCall, reviewCall, type SkipCandidate, skipCandidacy,
 } from '../lib/review-skip'
@@ -164,9 +166,10 @@ export async function promptForTaskPhase(
 export async function renderTaskPhasePrompt(
   run: Run, task: Task, deps: Pick<TaskDeps, 'pluginRoot' | 'ciDetail'>, cameFrom: TaskPhase,
 ): Promise<string> {
+  const hpipe = hpipeCommand(deps.pluginRoot)
   const common = {
     ...tierPromptVars(run, task),
-    ...(await changePromptVars(deps.pluginRoot, hpipeCommand(deps.pluginRoot), run, task)),
+    ...(await changePromptVars(deps.pluginRoot, hpipe, run, task)),
     run_id: run.run_id,
     branch: task.branch,
     ...beadPromptVars(task),
@@ -192,21 +195,33 @@ export async function renderTaskPhasePrompt(
       return renderPrompt(deps.pluginRoot, 'pr-review-intent', common)
     case 'pr-review-quality':
       return renderPrompt(deps.pluginRoot, 'pr-review-quality', common)
-    case 'merge':
-      return modeOf(run) === 'single-pr'
-        ? renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
-        : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(task) })
+    case 'merge': {
+      if (modeOf(run) === 'single-pr') {
+        return renderPrompt(deps.pluginRoot, 'merge-batch', { ...common, ...landingPromptVars(run, task) })
+      }
+      // While a check is owed the merge command is never rendered: a prompt that shows it
+      // while saying "don't" puts the wrong move one paste away.
+      const owed = owedAt(run, task)
+      return owed.length > 0
+        ? renderPrompt(deps.pluginRoot, 'before-merge', { ...taskHoldVars(run, task, owed), ...heldSharedNote(run, task, hpipe) })
+        : renderPrompt(deps.pluginRoot, 'merge', {
+          ...common, ...mergePromptVars(run, task, hpipe), before_merge: taskRulingsNote(run, task),
+        })
+    }
     case 'sync':
-      return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task) })
-    case 'implement':
-      // Re-entry from a red CI needs the failing checks inlined; every other
-      // entry gets the standing brief, which points a returning worker at the
-      // review file that sent it back.
-      return cameFrom === 'ci'
-        ? renderPrompt(deps.pluginRoot, 'ci-red', {
-            ...common, ci_failure: await deps.ciDetail(task.pr),
-          })
-        : renderPrompt(deps.pluginRoot, 'implement', common)
+      return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task, hpipe) })
+    case 'implement': {
+      // Re-entry from a red CI needs the failing checks inlined, and one from a check
+      // the human failed needs what they saw; every other entry gets the standing
+      // brief, which points a returning worker at the review file that sent it back.
+      if (cameFrom === 'ci') {
+        return renderPrompt(deps.pluginRoot, 'ci-red', { ...common, ci_failure: await deps.ciDetail(task.pr) })
+      }
+      const failure = cameFrom === 'merge' ? lastFailure(task) : null
+      return failure === null
+        ? renderPrompt(deps.pluginRoot, 'implement', common)
+        : renderPrompt(deps.pluginRoot, 'check-failed', { ...common, ...checkFailedVars(failure) })
+    }
     case 'escalated': {
       const from = task.escalated_from ?? cameFrom
       return renderPrompt(deps.pluginRoot, 'escalate', {
@@ -494,9 +509,12 @@ async function widenFromPlan(run: Run, task: Task): Promise<void> {
   if (added.length === 0) return
   task.files = [...task.files, ...added]
   const ignoredNote = ignored.length === 0 ? '' : ` (ignored pipeline artifacts: ${ignored.join(', ')})`
+  const shared = sharedPrefixesOf(run)
+  const described = (path: string): string =>
+    path === '' ? '(whole repo)' : isSharedPath(path, shared) ? `${path} (shared, not locking)` : path
   console.error(
     `[pipeline] ${task.task_id} (${task.branch}): plan widened files by ` +
-    added.map((path) => (path === '' ? '(whole repo)' : path)).join(', ') + ignoredNote,
+    added.map(described).join(', ') + ignoredNote,
   )
 }
 
@@ -664,7 +682,7 @@ async function gatherSignals(
     // files now in flight.
     case 'blocked-on-files': {
       await widenFromPlan(run, task)
-      const filesClear = releasableFromFiles(run.tasks).some((t) => t.task_id === task.task_id)
+      const filesClear = releasableFromFiles(run).some((t) => t.task_id === task.task_id)
       if (!filesClear) task.files_waited_at = task.phase_entered_at
       return { ...base, filesClear }
     }
@@ -892,6 +910,7 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       answer: decision.answer ?? '',
       answered_by: decision.answered_by ?? 'orchestrator',
       phase: resumeTo,
+      before_merge: answerCheckNote(run, task, decision.id),
     })
 
     const taskId = task.task_id
@@ -908,6 +927,11 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
       const seenWorking = check.working === true
       markAnswerDelivered(run, taskId, decisionId, resumeTo, seenWorking)
       deps.effects?.push((fresh) => markAnswerDelivered(fresh, taskId, decisionId, resumeTo, seenWorking))
+      const hold = await holdOnResume(run, task, deps.pluginRoot)
+      if (hold !== null) {
+        queueHold(run, taskId, hold)
+        deps.effects?.push((fresh) => queueHold(fresh, taskId, hold))
+      }
       continue
     }
 
@@ -925,6 +949,24 @@ export async function deliverPendingAnswers(run: Run, deps: AnswerDeps): Promise
     markAnswerSent(run, taskId, decisionId, at)
     deps.effects?.push((fresh) => markAnswerSent(fresh, taskId, decisionId, at))
   }
+}
+
+/**
+ * A resume renders no prompt of its own, since `answer.md` has gone out, so a merge
+ * that came to owe a check during the decision would leave the orchestrator holding
+ * the merge command it was given on the earlier entry. The hold replaces it.
+ */
+async function holdOnResume(run: Run, task: Task, pluginRoot: string): Promise<string | null> {
+  if (task.phase !== 'merge' || owedAt(run, task).length === 0) return null
+  return renderTaskPhasePrompt(run, task, { pluginRoot, ciDetail: async () => '' }, 'merge')
+}
+
+function queueHold(run: Run, taskId: string, text: string): void {
+  const task = run.tasks.find((t) => t.task_id === taskId)
+  if (task?.phase !== 'merge') return
+  const queued = (run.outbox ?? []).some((entry) =>
+    entry.to === 'orchestrator' && entry.task_id === taskId && entry.entered_at === task.phase_entered_at)
+  if (!queued) enqueue(run, { to: 'orchestrator', taskId, text }, Date.now())
 }
 
 /**
