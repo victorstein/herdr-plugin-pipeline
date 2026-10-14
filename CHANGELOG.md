@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.2.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.2...v2.2.3) (2026-10-14)
+
+
+### Bug Fixes
+
+* add the PR number to the batch PR's squash subject ([ac6b8e0](https://github.com/victorstein/herdr-plugin-pipeline/commit/ac6b8e06265647dffd0febf80385ebf8b56b7721))
+* record a single-PR landing while the orchestrator is still mid-turn, and read a pushed one as done in status ([ac6b8e0](https://github.com/victorstein/herdr-plugin-pipeline/commit/ac6b8e06265647dffd0febf80385ebf8b56b7721))
+* set out a lost worker's setup steps on their own line after a resume ([ac6b8e0](https://github.com/victorstein/herdr-plugin-pipeline/commit/ac6b8e06265647dffd0febf80385ebf8b56b7721))
+
 ## [2.2.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.1...v2.2.2) (2026-10-14)
 
 
