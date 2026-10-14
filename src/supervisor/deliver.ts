@@ -12,6 +12,7 @@ import type { Gh } from '../lib/gh'
 import type { Herdr } from '../lib/herdr'
 import { ciCheckFirst, runChangeVars } from '../lib/change-prompt'
 import { mainlineBranch, remoteBranchHeadCooled, trackingRefspec } from '../lib/dispatch-base'
+import { dispatchRunningLine, type DispatchLocks, NO_DISPATCHES, runDispatchUnderWay } from '../lib/dispatch-lock'
 import { hasLanded } from '../lib/ledger'
 import { excludeFromGit } from '../lib/repo'
 import { advanceRun, type BatchPr, counterFor } from '../lib/machine'
@@ -502,6 +503,7 @@ export interface RunRenderExtras {
   stateDir?: string
   ciDetail?: (pr: number) => Promise<string>
   maxPasses?: number
+  dispatches?: DispatchLocks
 }
 
 export async function promptForRunPhase(run: Run, config: Config, extras: RunRenderExtras = {}): Promise<string> {
@@ -632,7 +634,11 @@ export async function renderRunPhasePrompt(
         return [`# Dispatch — run ${run.run_id}`, nothingToDispatch(run), registering.trimEnd()]
           .filter((part) => part.length > 0).join('\n\n')
       }
-      const text = await renderPrompt(pluginRoot, 'dispatch', { ...common, registering })
+      const running = runDispatchUnderWay(extras.dispatches ?? NO_DISPATCHES, run)
+      const text = await renderPrompt(pluginRoot, 'dispatch', {
+        ...common, registering,
+        dispatch_running: running === null ? '' : dispatchRunningLine(running, hpipeCommand(pluginRoot), Date.now()),
+      })
       return text.replace(/\n{3,}/g, '\n\n')
     }
     case 'branch-review': return renderPrompt(pluginRoot, 'branch-review', {

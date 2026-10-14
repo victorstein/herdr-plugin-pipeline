@@ -95,7 +95,8 @@ behaviour; this skill does.
    checkout, `herdr agent start … -- --dangerously-skip-permissions --effort <tier's>`, and hands
    the brief over, claiming the task's bead first; it skips steps already done and stops at the first
    failure. Read its step lines when the completion notice arrives. One dispatch runs per repo at a
-   time: a second is refused, naming the first. The block is the manual fallback — run it exactly as
+   time: a second is refused, naming the first, and a dispatch prompt that arrives while yours runs
+   opens `A dispatch is already running`, so start no other. The block is the manual fallback — run it exactly as
    printed, ending in `hpipe dispatch --task <id> --pane <root pane>`, which submits the brief to the
    agent you started and confirms it landed. `hpipe dispatch --task` only takes a task in `research`
    that is still owed its brief; the `--pane` form takes a task in `research`, but never a pane that

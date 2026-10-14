@@ -1590,7 +1590,12 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
   `hpipe show --task tN` names the workspace and pane within a tick;
 - no line says `did not answer within 30s`: every herdr call but `agent start` runs bounded, in a
   process group of its own, and a healthy herdr answers well inside the bound;
-- `$STATE/dispatch/` is empty once it ends.
+- `$STATE/dispatch/` is empty once it ends;
+- a `Dispatch — run …` prompt that comes while the dispatch is still running (the orchestrator goes
+  idle at the end of its intake turn, mid-bootstrap) opens ``A dispatch is already running: `hpipe
+  dispatch --ready` (pid <n>), at <step> for tN, started <n>m ago. It takes every ready task before it
+  ends, so do not start another.``, and the orchestrator starts no second dispatch. One that comes while
+  `$STATE/dispatch/` holds this run's lock and does not open with that line is a **finding**.
 
 ### 12d. Stops, and re-runs that skip what is done
 

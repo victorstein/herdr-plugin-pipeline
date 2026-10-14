@@ -1,5 +1,7 @@
 # Dispatch — run {{run_id}}
 
+{{dispatch_running}}
+
 Tasks are registered. Your job now is to give each ready task a worktree and an agent, and to keep
 two agents off the same files.
 

@@ -11,6 +11,8 @@ import {
   repoWithWorktree, revParse, siblingLands, tempDir,
 } from './helpers/git-worktree'
 import { forgetDispatchBases } from '../src/lib/dispatch-base'
+import type { DispatchLock } from '../src/lib/dispatch-lock'
+import { hpipeCommand } from '../src/lib/render'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task } from '../src/lib/types'
 
@@ -279,6 +281,31 @@ test('a dispatch still owed work keeps its prompt, but stops asking for registra
     expect(text, what).not.toContain('Still registering?')
     expect(text, what).not.toContain('dispatch --done')
     expect(text, what).not.toMatch(/\n{3,}/)
+  }
+})
+
+// The v2.2.0 smoke run: the prompt arrived while the intake prompt's `dispatch --ready` was still going, and
+// read as an instruction to start one.
+test('a dispatch prompt rendered while this run\'s dispatch is running leads with it; anyone else\'s changes nothing', async () => {
+  const run = enteringDispatch(true, [dispatched(), mkTask({ task_id: 't2', phase: 'research', awaiting_brief: true })])
+  const lock: DispatchLock = {
+    session: run.session, run_id: run.run_id, mode: 'ready', task: 't2', step: 'bootstrap',
+    since: Date.now() - 3 * 60_000 - 1_000, pid: 4242, started_at_ms: 0, bootstrap: null,
+  }
+  const plain = await renderRunPhasePrompt(run, ROOT)
+  const running = await renderRunPhasePrompt(run, ROOT, { dispatches: new Map([[run.repo_key, { live: true, lock }]]) })
+  expect(running).toStartWith(`# Dispatch — run ${run.run_id}\n\nA dispatch is already running: ` +
+    `\`${hpipeCommand(ROOT)} dispatch --ready\` (pid 4242), at bootstrap for t2, started 3m ago. It takes every ready ` +
+    'task before it ends, so do not start another.\n\nTasks are registered.')
+  expect(running).not.toMatch(/\n{3,}/)
+  expect(plain).toStartWith(`# Dispatch — run ${run.run_id}\n\nTasks are registered.`)
+
+  for (const other of [
+    new Map([[run.repo_key, { live: false, lock }]]),
+    new Map([[run.repo_key, { live: true, lock: { ...lock, run_id: 'r-other' } }]]),
+    new Map([[run.repo_key, { live: true, lock: { ...lock, session: 'elsewhere' } }]]),
+  ]) {
+    expect(await renderRunPhasePrompt(run, ROOT, { dispatches: other })).toBe(plain)
   }
 })
 
