@@ -109,9 +109,16 @@ export function batchPrBody(run: Run): string {
   ].join('\n')
 }
 
-/** The squash commit carries the lines itself, so the release reads them even if release-please never finds the PR. */
+/**
+ * The squash commit carries the lines itself, so the release reads them even if
+ * release-please never finds the PR. GitHub adds ` (#n)` to the subject it writes,
+ * never to one given with `--subject`, so it is added here, as every per-task
+ * squash in the default branch's log has it. Measured on a live run.
+ */
 export function squashSubject(run: Run): string {
-  return releaseLines(run)[0]?.title ?? suggestedPrTitle(run)
+  const title = releaseLines(run)[0]?.title ?? suggestedPrTitle(run)
+  const pr = run.batch?.pr ?? null
+  return pr === null ? title : `${title} (#${pr})`
 }
 
 export function squashBody(run: Run): string {

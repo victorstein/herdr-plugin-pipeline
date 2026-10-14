@@ -274,7 +274,8 @@ test('resume queues the brief and phase prompt for a task whose pane went while 
 
   const out = await cmdResume(ctx(), { runId: run.run_id })
   expect(out.text).toContain("t1 has no agent, since its pane went while the run was aborted; its prompt is queued for " +
-    "t1's worker, which is not bound yet — ")
+    "t1's worker, which is not bound yet.\n  To give it one: ")
+  expect(out.text).toEndWith('once herdr detects the agent — send it nothing yourself')
   expect(out.text).not.toContain('Told to carry on')
   const resumed = (await listRuns(dir, 'personal'))[0]!
   const queued = resumed.outbox?.find((e) => e.task_id === 't1')

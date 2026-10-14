@@ -12,8 +12,8 @@
 - **A 5xx from `gh` is GitHub's, not yours:** run the same command again.
 - **Squash, never a merge commit.** release-please reads the PR body's override block only for a
   squash merge; a merge commit makes it read the batch's commits one by one. Leave the block alone.
-- **The squash commit carries the release lines itself:** its subject is the first landed title and
-  its body holds the rest, one per line. So the release reads the same lines even if release-please
+- **The squash commit carries the release lines itself:** its subject is the first landed title, with
+  the PR number as GitHub gives every squash it titles, and its body holds the rest, one per line. So the release reads the same lines even if release-please
   never finds the PR body.
 - **Green is for {{green_head}}.**{{pinned}} If anything is pushed to `{{batch}}` now, the run goes
   back to `ship`, to run `{{hpipe}} batch-check` on the new head before CI, and you are told again once
