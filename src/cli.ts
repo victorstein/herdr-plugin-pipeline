@@ -1271,9 +1271,10 @@ async function dispatchReady(ctx: Ctx, runId: string, deps: DispatchDeps): Promi
     }
     dispatched.push(next.task_id)
   }
+  // Each task's own `dispatched tN` comes first, so with one task the same line was printed twice.
   return ok(dispatched.length === 0
     ? 'nothing to dispatch: no task in this run is waiting for its brief'
-    : `dispatched ${dispatched.join(', ')}`)
+    : `done: dispatched ${dispatched.join(', ')}, and no other task waits for its brief`)
 }
 
 export interface DispatchStepsInput {
@@ -3142,12 +3143,32 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   for (const task of carryingOn) {
     enqueue(run, { to: 'worker', taskId: task.task_id, text: notices.get(task.task_id) as string, kind: 'run-resumed' }, now)
   }
+  const agentless = await reequipLostWorkers(ctx, run)
   await saveRun(ctx.stateDir, run)
   const told = carryingOn.length === 0 ? []
     : [`Told to carry on: ${carryingOn.map((task) => `${task.task_id} (${task.pane_id}, ${task.phase})`).join(', ')}.`]
   const withdrawn = unsent.length === 0 ? []
     : [`Withdrew the stop notice${unsent.length === 1 ? '' : 's'} not yet sent to ${unsent.join(', ')}.`]
-  return ok([`resumed ${run.run_id} at ${back}`, ...told, ...withdrawn].join('\n'))
+  return ok([`resumed ${run.run_id} at ${back}`, ...told, ...withdrawn, ...agentless].join('\n'))
+}
+
+/**
+ * A worker pane lost while the run was aborted leaves its task where it was with
+ * no agent, and the resume said nothing of it: status called it the worker's move
+ * until the unstarted check's grace ran out, and the advice that followed never
+ * handed the new agent its phase prompt. Measured on a live run. So the task gets
+ * what a rewind gives a worker it cannot find: its brief and phase prompt, queued
+ * for whichever agent herdr detects next.
+ */
+async function reequipLostWorkers(ctx: Ctx, run: Run): Promise<string[]> {
+  const lost = run.tasks.filter((task) => task.pane_id === null && task.last_pane_id !== undefined &&
+    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker' && queuedWorkerPrompt(run, task) === null)
+  const lines: string[] = []
+  for (const task of lost) {
+    lines.push(`${task.task_id} has no agent, since its pane went while the run was aborted` +
+      `${await owePhasePrompt(ctx, run, task)}`)
+  }
+  return lines
 }
 
 export const cmdResume = retryingOnStale(resume)

@@ -261,6 +261,27 @@ test('a run aborted in intake leaves intake after its resume, and the resume res
   expect(resumed.tasks[0]?.stall?.last_probe_at).toBeGreaterThanOrEqual(before)
 })
 
+test('resume queues the brief and phase prompt for a task whose pane went while the run was aborted', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  const out = await cmdResume(ctx(), { runId: run.run_id })
+  expect(out.text).toContain("t1 has no agent, since its pane went while the run was aborted; its prompt is queued for " +
+    "t1's worker, which is not bound yet — ")
+  expect(out.text).not.toContain('Told to carry on')
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  const queued = resumed.outbox?.find((e) => e.task_id === 't1')
+  expect(queued?.kind).toBeUndefined()
+  expect(queued?.text).toContain('\n\n---\n\n')
+})
+
 test('an abort that tells one worker says its agent stays open', async () => {
   await liveSupervisor([...SUPERVISOR_CAPABILITIES])
   const run = runWithTasks([{ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }])

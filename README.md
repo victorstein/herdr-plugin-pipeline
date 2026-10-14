@@ -580,7 +580,8 @@ again, which is safe, and `bootstrapped` is ignored, but every hold is dropped, 
 supervisor sends the merge command and probes as before. Confirm or waive every owed check before
 rolling back, or tell the user the hold is gone.
 
-2.2.2 adds the outbox kinds `abort` and `run-resumed` and the supervisor capability `abort-notice`.
+2.2.2 adds the outbox kinds `abort` and `run-resumed`, a run's optional `aborted_escalation_from`, and the
+supervisor capability `abort-notice`.
 An older supervisor drops a finished run's task prompts, so it never delivers `hpipe abort`'s stop
 notices: the abort says so and names the restart, and the notices wait in the outbox for a supervisor
 that delivers them. `hpipe resume` withdraws any still unsent.
@@ -737,7 +738,7 @@ overtake either.
 | A task was rewound to `done` without merging | It does not count as landed. If it is the run's only task, the run escalates instead of finishing — `hpipe rewind <run> done` finishes it |
 | A task needs more (or less) review than its tier | `hpipe tier --task <id> <tier> --why "<reason>"`. Lowering is refused from pipeline panes; run it from your own |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
-| Stop driving a run | `hpipe abort <run>`. It tells every briefed worker still in a phase to stop, keeps their agents and worktrees, and lists what to remove if you will not resume: each task worktree, the unlanded branches and, in a single-PR run, the batch branch. `hpipe status` heads it `[aborted]`. `hpipe status` also lists any stop notice not yet delivered. Undo with `hpipe resume`, which tells the stopped workers to carry on and withdraws a stop notice not yet sent. It refuses from a worker's pane, and while another run holds one of its beads. An aborted run is resumed before it is rewound |
+| Stop driving a run | `hpipe abort <run>`. It tells every briefed worker still in a phase to stop, keeps their agents and worktrees, and lists what to remove if you will not resume: each task worktree, the unlanded branches and, in a single-PR run, the batch branch. `hpipe status` heads it `[aborted]`. `hpipe status` also lists any stop notice not yet delivered. Undo with `hpipe resume`, which tells the stopped workers to carry on and withdraws a stop notice not yet sent. A worker pane lost while the run was aborted fails nothing: the resume queues that task's brief and phase prompt for its next agent and names the commands that start one. It refuses from a worker's pane, and while another run holds one of its beads. An aborted run is resumed before it is rewound |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
 | Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
 | A pane stopped answering (agent exited) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |

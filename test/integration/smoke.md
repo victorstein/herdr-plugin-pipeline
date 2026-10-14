@@ -1378,9 +1378,10 @@ from execute` with the resume command, never `a finished run cannot be re-entere
 
 Abort it again, close one worker's pane (`herdr pane close <pane>`), wait a tick, and resume. **Assert:**
 until the resume, status still heads the run `[aborted]`, that task keeps its phase with no pane and is
-not `failed`, and no stop notice is listed for it; after the resume, status names the step that starts
-its agent again, and nothing else is stranded (a decision it had open is abandoned and the task is
-back where it raised it).
+not `failed`, and no stop notice is listed for it. The resume prints `tN has no agent, since its pane
+went while the run was aborted; its prompt is queued for tN's worker, which is not bound yet — …`;
+following those commands, the new agent gets the brief and the phase prompt on its own, and nothing
+else is stranded (a decision it had open is abandoned and the task is back where it raised it).
 
 Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
 one does not fit, and that is a finding.
