@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.1...v2.2.2) (2026-10-14)
+
+
+### Bug Fixes
+
+* judge a worker's phase only once it has its prompt ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* keep a fresh agent's brief when its phase moves on before the agent takes it ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* list what an aborted run leaves behind, and only what exists ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* make hpipe abort tell live workers to stop, and hpipe resume tell them to carry on ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* name the repo's check in the ship prompt before the batch checkout exists ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* polish the wording of show's base line, hold, the dispatch and intake prompts and the catch-up digest ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+* show an aborted run as aborted, and keep it aborted when a worker pane closes ([b4fdcfb](https://github.com/victorstein/herdr-plugin-pipeline/commit/b4fdcfbeade546edfc09d9d11443737491e79ad1))
+
 ## [2.2.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.0...v2.2.1) (2026-10-14)
 
 
