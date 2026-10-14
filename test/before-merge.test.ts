@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
-  type CheckState, checksIn, checkState, gateHead, heldForTheHuman, mergedWithCheckOwed, nextCheckId, owedAt, waitsOnlyOnTheHuman,
+  checkClause, type CheckState, checksIn, checkState, gateHead, heldForTheHuman, humanIsAsked, mergedWithCheckOwed, nextCheckId,
+  owedAt, waitsOnlyOnTheHuman,
 } from '../src/lib/before-merge'
 import type { TaskPhase } from '../src/lib/types'
 import { CHECKED_HEAD, checkOf, heldTask, NEWER_HEAD, perTaskRun, ruling, singlePrRun } from './helpers/before-merge'
@@ -131,4 +132,43 @@ test('mergedWithCheckOwed names per-task tasks whose merge is recorded with a ch
   ])
   expect(mergedWithCheckOwed(run).map((t) => t.task_id)).toEqual(['t1'])
   expect(mergedWithCheckOwed(singlePrRun([heldTask({ merged_at_ms: 5, before_merge: [checkOf('c1')] })]))).toEqual([])
+})
+
+test('humanIsAsked: per-task at its task\'s merge or once it merged; single-PR only at ship-merge', () => {
+  const at = (phase: TaskPhase, over: Parameters<typeof heldTask>[0] = {}) => {
+    const task = heldTask({ phase, ...over })
+    return humanIsAsked(perTaskRun([task]), task)
+  }
+  expect(at('merge')).toBe(true)
+  expect(at('close', { merged_at_ms: 5 })).toBe(true)
+  expect(at('research')).toBe(false)
+  expect(at('ci')).toBe(false)
+  const task = heldTask({ phase: 'done' })
+  expect(humanIsAsked(singlePrRun([task], 'ship-merge'), task)).toBe(true)
+  expect(humanIsAsked(singlePrRun([task], 'ship-merge'), null)).toBe(true)
+  expect(humanIsAsked(singlePrRun([task], 'ship-ci'), null)).toBe(false)
+})
+
+// The v2.2.0 smoke run: a check recorded at intake read "waiting on the human" while its task was in research.
+test('before its gate, a check says what it holds and when the human is asked', () => {
+  const clauseOf = (run: Parameters<typeof checkState>[0]) => checkClause(run, checksIn(run)[0]!)
+  const early = (over: Parameters<typeof heldTask>[0]) =>
+    perTaskRun([heldTask({ phase: 'research', pr: null, ci_head: undefined, before_merge: [checkOf('c1')], ...over })])
+
+  expect(clauseOf(early({}))).toBe("owed before t1's PR merges; the human is asked at merge")
+  expect(clauseOf(early({ phase: 'ci', pr: 255 }))).toBe('owed before PR #255 merges; the human is asked at merge')
+  expect(clauseOf(early({
+    phase: 'ci', pr: 255, ci_head: { sha: CHECKED_HEAD, seen_at: 1 }, before_merge: [checkOf('c1', [ruling('confirmed', NEWER_HEAD)])],
+  }))).toBe('confirmed on 5e6f7a8b, but the head is now 9e06c261: the human is asked again at merge')
+  expect(clauseOf(early({
+    phase: 'ci', pr: 255, ci_head: { sha: CHECKED_HEAD, seen_at: 1 }, before_merge: [checkOf('c1', [ruling('failed', NEWER_HEAD, 'a ghost')])],
+  }))).toBe('failed on 5e6f7a8b: a ghost; the human checks the next head at merge')
+  expect(clauseOf(early({ phase: 'merge', pr: 255 }))).toBe('waiting on the human')
+
+  const batch = singlePrRun([], 'execute')
+  batch.batch!.pr = null
+  batch.before_merge = [checkOf('c1')]
+  expect(clauseOf(batch)).toBe('owed before the batch PR merges; the human is asked at ship-merge')
+  batch.phase = 'ship-merge'
+  expect(clauseOf(batch)).toBe('waiting on the human')
 })

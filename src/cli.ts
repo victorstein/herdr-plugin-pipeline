@@ -7,8 +7,8 @@ import {
 } from './lib/bd'
 import { claimForDispatch } from './lib/bead-claim'
 import {
-  checkName, findCheck, gateHead, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck, owedAt,
-  owedInRun,
+  checkName, findCheck, gateHead, gateSubject, heldForTheHuman, type HeldCheck, idList, nextCheckId, type OwedCheck,
+  owedAt, owedInRun,
 } from './lib/before-merge'
 import { DISCOVERED_LABEL, discoveryLabel } from './lib/bead-desired'
 import { formatBeadDetail } from './lib/bead-view'
@@ -2348,12 +2348,6 @@ function readsOnce(reads: BeforeMergeReads): BeforeMergeReads {
 
 /** The record whose merge a check on `task` holds: the task's own per-task, the batch (null) single-PR. */
 const gateOf = (run: Run, task: Task | null): Task | null => (modeOf(run) === 'single-pr' ? null : task)
-
-const gateSubject = (run: Run, gate: Task | null): string => {
-  const pr = gate === null ? run.batch?.pr ?? null : gate.pr
-  if (pr !== null) return `PR #${pr}`
-  return gate === null ? 'the batch PR' : `${gate.task_id}'s PR`
-}
 
 type GateMerge = { ok: true; merged: boolean; prHead: string | null } | { ok: false; why: string }
 

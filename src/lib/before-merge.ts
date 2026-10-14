@@ -115,6 +115,24 @@ export function waitsOnlyOnTheHuman(run: Run, task: Task | null): boolean {
 }
 
 /**
+ * Whether the human is asked for this check now: at its gate, or, per-task, once a
+ * merge got past it. A check recorded at intake read "waiting on the human" while its
+ * task was still in research. Measured on a live run.
+ */
+export function humanIsAsked(run: Run, task: Task | null): boolean {
+  if (modeOf(run) === 'single-pr') return run.phase === 'ship-merge'
+  return task !== null && (task.phase === 'merge' || task.merged_at_ms !== null)
+}
+
+/** The PR a check holds: in a single-PR run, every check holds the batch PR. */
+export function gateSubject(run: Run, task: Task | null): string {
+  const gate = modeOf(run) === 'single-pr' ? null : task
+  const pr = gate === null ? run.batch?.pr ?? null : gate.pr
+  if (pr !== null) return `PR #${pr}`
+  return gate === null ? 'the batch PR' : `${gate.task_id}'s PR`
+}
+
+/**
  * An aborted or escalated run is driving nothing, so its merged tasks' beads close as
  * usual and the run's own record keeps what is owed.
  */
@@ -163,8 +181,17 @@ const gateLabel = (run: Run, held: HeldCheck): string =>
 export const fromDecision = (check: BeforeMergeCheck): string =>
   (check.decision === undefined ? '' : ` (from ${check.decision})`)
 
-/** Where a check stands, in the words status, show and the notices share. With `now`, each ruling is dated. */
-export function stateClause(state: CheckState, now?: number): string {
+/** A check's gate while it is still ahead: the PR it holds, and the phase at which the human is asked. */
+interface GateAhead {
+  subject: string
+  gate: 'merge' | 'ship-merge'
+}
+
+/**
+ * Where a check stands, in the words status, show and the notices share. With `now`,
+ * each ruling is dated; with `ahead`, a check the human owes says when they are asked.
+ */
+export function stateClause(state: CheckState, now?: number, ahead?: GateAhead): string {
   const ago = (at: number): string => (now === undefined ? '' : `, ${minutesSince(at, now)}m ago`)
   switch (state.kind) {
     case 'not-needed':
@@ -180,14 +207,28 @@ export function stateClause(state: CheckState, now?: number): string {
         'waiting on a fix'
     case 'waiting-on-the-human': {
       const last = state.last
-      if (last === null) return 'waiting on the human'
+      if (last === null) {
+        return ahead === undefined
+          ? 'waiting on the human'
+          : `owed before ${ahead.subject} merges; the human is asked at ${ahead.gate}`
+      }
       if (last.as === 'confirmed') {
         return `confirmed on ${headName(last.head)}${ago(last.at)}, but the head is now ${headName(state.headNow)}: ` +
-          'waiting on the human'
+          (ahead === undefined ? 'waiting on the human' : `the human is asked again at ${ahead.gate}`)
       }
-      return `failed on ${headName(last.head)}${ago(last.at)}: ${last.note ?? ''}; the human checks the next head`
+      return `failed on ${headName(last.head)}${ago(last.at)}: ${last.note ?? ''}; the human checks the next head` +
+        (ahead === undefined ? '' : ` at ${ahead.gate}`)
     }
   }
+}
+
+/** Where a check stands, as status and show print it: before its gate, nothing waits on the human yet. */
+export function checkClause(run: Run, held: HeldCheck, now?: number): string {
+  const ahead = humanIsAsked(run, held.task) ? undefined : {
+    subject: gateSubject(run, held.task),
+    gate: modeOf(run) === 'single-pr' ? 'ship-merge' as const : 'merge' as const,
+  }
+  return stateClause(checkState(run, held), now, ahead)
 }
 
 /** What the gate prompt says beside an owed check: what has changed since the human last ruled. */

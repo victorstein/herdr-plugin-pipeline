@@ -1463,6 +1463,9 @@ Register t1 with `--tier heavy`, so its PR review runs. Have its worker raise a 
 with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
 
 - The worker's answer prompt says `Before this merges, the human will check:` and names the check.
+- Until t1 reaches `merge`, the run header's `before merge:` line and `hpipe show --task t1` read
+  `c1 … — owed before PR #<n> merges; the human is asked at merge` (`t1's PR` before it has one), never
+  `waiting on the human`, and status has no `waiting on the human:` block.
 - `hpipe confirm --check c1 --by human` while t1 is in `pr-review` is refused: `confirm it once t1
   reaches ci`.
 - At `merge`, the orchestrator's prompt is **Hold — PR #<n> (…) waits on the human before it merges**.
@@ -1487,8 +1490,9 @@ with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
 
 ### 11c. Single-PR
 
-- `hpipe hold --before-merge "<check>"` at intake. When the run reaches `ship-merge`, it is held with
-  the hold prompt, and no probe comes.
+- `hpipe hold --before-merge "<check>"` at intake. Until `ship-merge`, the run header reads `c1 <check> —
+  owed before the batch PR merges; the human is asked at ship-merge` (`PR #<n>` once it is open). When
+  the run reaches `ship-merge`, it is held with the hold prompt, and no probe comes.
 - Confirming during `ship-ci` holds once CI passes on that head: the merge prompt comes, with
   `Before merge: c1 confirmed by the human on <sha8>.`
 - A `BEHIND` batch PR: the hold prompt has `gh pr update-branch` run first, the run goes back through
