@@ -827,7 +827,8 @@ test('a worker owed a usage-limit resume is not called idle with nothing, in sta
 
   const failing = { 'w3:p1': { since: now - 60_000, failures: 2, code: 'agent_not_found' } }
   expect(actionFor(run, task, HP, now, failing))
-    .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — see the ⚠ delivery line below")
+    .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — `bun run /p/src/cli.ts status` says why in its ⚠ " +
+      'delivery line')
 })
 
 test('a worker told to carry on is nobody\'s move until that prompt lands', () => {
@@ -855,7 +856,16 @@ test('a send that stalled and then found a human\'s text is named stuck from the
 test('a phase prompt failing to reach its worker points at the delivery warning — #136', () => {
   const { run, now } = heldSpecPrompt('agent_not_found')
   expect(actionFor(run, run.tasks[0] as Task, HP, now))
-    .toBe('YOUR move: its spec prompt has not reached w3:p1 — see the ⚠ delivery line below')
+    .toBe('YOUR move: its spec prompt has not reached w3:p1 — `bun run /p/src/cli.ts status` says why in its ⚠ delivery line')
+})
+
+test('a prompt herdr refused for a just-started agent is retried, not the orchestrator\'s move, for a minute', () => {
+  const { run, now } = heldSpecPrompt()
+  const starting = { 'w3:p1': { since: now - 5_000, failures: 1, code: 'agent_pane_busy' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, starting))
+    .toBe('nothing for you — its spec prompt is being retried for w3:p1')
+  const stillFailing = { 'w3:p1': { since: now - 61_000, failures: 4, code: 'agent_pane_busy' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, stillFailing)).toStartWith('YOUR move: its spec prompt has not')
 })
 
 test('a phase prompt still in flight is nobody\'s move yet — #136', () => {

@@ -141,12 +141,12 @@ test('abort says when no supervisor will deliver its stop notices', async () => 
   expect((await cmdAbort(ctx(), { runId: none.run_id })).text).toContain('but no supervisor is running to deliver it')
 })
 
-test('a second abort is refused, so resume still knows where the run was', async () => {
+test('a second abort changes nothing, so resume still knows where the run was', async () => {
   const run = abortableRun()
   await saveRun(dir, run)
   await cmdAbort(ctx(), { runId: run.run_id })
   const again = await cmdAbort(ctx(), { runId: run.run_id })
-  expect(again.ok).toBe(false)
+  expect(again.ok).toBe(true)
   expect(again.text).toContain(`${run.run_id} is already aborted, from execute`)
   expect((await listRuns(dir, 'personal'))[0]?.escalated_from).toBe('execute')
 })

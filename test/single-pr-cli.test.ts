@@ -281,6 +281,14 @@ test('aborting a single-PR run names what landed and offers no clean-up for what
   expect(out.ok).toBe(true)
   expect(out.text).toContain('batch/x keeps the landed tasks (t1), whose beads stay closed, and nothing reached main')
   expect(out.text).toContain('the unlanded tasks\' beads are released on the supervisor\'s next tick')
+
+  const allLanded = singlePrRun([
+    { task_id: 't1', phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: a', land_sha: 'L1', at: 1 }] },
+  ])
+  allLanded.phase = 'ship'
+  await saveRun(dir, allLanded)
+  const shipping = await cmdAbort(ctx(), { runId: allLanded.run_id })
+  expect(shipping.text).toContain('nothing reached main. Worktrees and branches are left alone. Undo:')
   expect(out.text).toContain(abortCleanupHead(hpipeFor(ctx().pluginRoot)))
   // Neither the batch checkout nor a local batch branch exists before ship: smoke run 19 was offered both.
   expect(out.text).not.toContain('worktree remove')
@@ -325,7 +333,7 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
 
   // Nothing else prints it once this output is gone, so a second abort does.
   const again = await cmdAbort(ctx(), { runId: run.run_id })
-  expect(again.ok).toBe(false)
+  expect(again.ok).toBe(true)
   expect(again.text.slice(again.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual(expected)
 })
 

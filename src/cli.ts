@@ -3010,9 +3010,10 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   if (!run) return fail(`no such run: ${input.runId}`)
   const hpipe = hpipeCommand(ctx.pluginRoot)
   // A second abort would record `done` as where to resume to. It prints the clean-up
-  // again instead, since nothing else does once the first abort's output is gone.
+  // again instead, since nothing else does once the first abort's output is gone,
+  // and succeeds: the first abort's own clean-up header sends the operator here.
   if (wasAborted(run)) {
-    return fail([`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`,
+    return ok([`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`,
       ...stillOwedLines(run), ...(await abortCleanupLines(run, hpipe))].join('\n'))
   }
   if (runPhaseState(run) === 'terminal') return fail(`${run.run_id} is finished (phase: ${run.phase}); nothing to abort`)
@@ -3100,8 +3101,9 @@ function abortedBatch(run: Run, batch: Batch): string {
     ? `nothing landed on ${batch.branch}`
     : `${batch.branch} keeps the landed tasks (${landed.join(', ')}), whose beads stay closed`
   const pr = batch.pr === null ? '' : ` PR #${batch.pr} is left open.`
-  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone, and the unlanded ` +
-    `tasks' beads are released on the supervisor's next tick.${pr}`
+  const unlanded = run.tasks.some((t) => (t.landed ?? []).length === 0 && !taskPhaseIsTerminal(t.phase))
+  const beads = unlanded ? ", and the unlanded tasks' beads are released on the supervisor's next tick" : ''
+  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone${beads}.${pr}`
 }
 export const cmdAbort = retryingOnStale(abort)
 

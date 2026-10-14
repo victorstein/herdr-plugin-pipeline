@@ -523,8 +523,13 @@ function writeShipFiles(stateDir: string, run: Run): { body: string; squash: str
   return { body, squash }
 }
 
-function checkSentence(batch: Batch): string {
-  const check = repoCheck(existsSync(batch.checkout) ? batch.checkout : '')
+/**
+ * The ship prompt is what has the batch checkout made, so it is read before the
+ * checkout exists: read from nowhere then, it told smoke run 24 the repo declares
+ * no check that `start` had just reported. Measured on a live run.
+ */
+function checkSentence(run: Run, batch: Batch): string {
+  const check = repoCheck(existsSync(batch.checkout) ? batch.checkout : run.repo_root)
   return check.kind === 'none'
     ? `It fetches \`${batch.branch}\` and records the head of the checkout at it, but this repo declares no ` +
       `\`${CHECK_REL}\`: run the tests and the typecheck there yourself first.`
@@ -599,7 +604,7 @@ async function shipPrompt(run: Run, batch: Batch, pluginRoot: string, extras: Ru
     })
   }
   return renderPrompt(pluginRoot, 'ship', {
-    ...vars, checkout_steps: steps, check_sentence: checkSentence(batch), into_conflict_check: intoConflictCheck(batch),
+    ...vars, checkout_steps: steps, check_sentence: checkSentence(run, batch), into_conflict_check: intoConflictCheck(batch),
     ruleset_advice: rulesetAdvice(batch),
     pr_command: batch.pr === null
       ? `gh pr create --base ${shellWord(batch.into)} --head ${shellWord(batch.branch)} ` +

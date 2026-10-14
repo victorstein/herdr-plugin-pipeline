@@ -110,7 +110,7 @@ export type PaneHolds = Readonly<Record<string, PaneHold>>
  * told to carry on. Read as idle with nothing, the first digest after the reset told
  * the orchestrator to act on every worker the supervisor had just resumed.
  */
-function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
+function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds, hpipe: string, now: number): Move | null {
   const phasePrompt = queuedWorkerPrompt(run, task)
   const resume = phasePrompt === null ? queuedResume(run, task) : null
   const entry = phasePrompt ?? resume
@@ -121,21 +121,30 @@ function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move |
     : 'its resume after Claude\'s usage limit'
   const pane = task.pane_id ?? 'its pane'
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
+  // Only `hpipe status` prints the ⚠ lines, and the digest gives this same clause.
   if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
     return {
       waitsOnYou: true,
       clause: `YOUR move: ${what} is held by text in the input box of ${pane} — ` +
-        'submit or clear that text; see the ⚠ stuck input line below',
+        `submit or clear that text; \`${hpipe} status\` shows it under ⚠ stuck input`,
     }
+  }
+  // An agent just started answers busy for a few seconds, and a resumed task's new
+  // agent drew "YOUR move" in that window, 6 s before its prompt landed. Measured on a live run.
+  const retrying = now - (hold?.since ?? entry.queued_at) < DELIVERY_GRACE_MS && entry.attempts < 3
+  if ((hold !== undefined || entry.attempts > 0) && retrying) {
+    return { waitsOnYou: false, clause: `nothing for you — ${what} is being retried for ${pane}` }
   }
   if (hold !== undefined || entry.attempts > 0) {
     return {
       waitsOnYou: true,
-      clause: `YOUR move: ${what} has not reached ${pane} — see the ⚠ delivery line below`,
+      clause: `YOUR move: ${what} has not reached ${pane} — \`${hpipe} status\` says why in its ⚠ delivery line`,
     }
   }
   return { waitsOnYou: false, clause: `nothing for you — ${what} is queued for ${pane}` }
 }
+
+const DELIVERY_GRACE_MS = 60_000
 
 /**
  * A worker Claude's usage limit stopped. The supervisor resumes it at the reset, so
@@ -264,7 +273,7 @@ function moveFor(
     // Ahead of the undelivered prompt, which reads any hold as "YOUR move".
     const paused = pausedByUsageLimit(task, hpipe, holds)
     if (paused) return paused
-    const undelivered = undeliveredWorkerPrompt(run, task, holds)
+    const undelivered = undeliveredWorkerPrompt(run, task, holds, hpipe, now)
     if (undelivered) return undelivered
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
