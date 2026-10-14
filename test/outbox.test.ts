@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import {
-  BRIEF_SEPARATOR, briefAndPrompt, deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume,
+  BRIEF_SEPARATOR, briefAndPrompt, briefQueuedWithPrompt, deliveryWarnings, enqueue, isCurrent, owedByRecipient, pruneOutbox, queuedResume,
   queuedWorkerPrompt, recipientPane, settleOutbox, UNATTEMPTED_WARN_MS,
 } from '../src/lib/outbox'
 import { outboxPending } from '../src/supervisor/courier'
@@ -80,6 +80,43 @@ test('a brief queued again with a prompt replaces one kept on its own', () => {
   pruneOutbox(run)
   enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the plan') }, 9500)
   expect(run.outbox?.map((e) => e.text)).toEqual([`THE BRIEF${BRIEF_SEPARATOR}write the plan`])
+})
+
+test('a brief queued again replaces one still whole in a stale entry, so it is not sent twice', () => {
+  // A rewind runs in the CLI, which never prunes, so the old entry is stale but still whole.
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  task.pane_id = null
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the spec') }, 5000)
+  task.phase = 'plan'
+  task.phase_entered_at = 9000
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the plan') }, 9500)
+  pruneOutbox(run)
+  expect(run.outbox?.map((e) => e.text)).toEqual([`THE BRIEF${BRIEF_SEPARATOR}write the plan`])
+})
+
+test('a brief kept for the next agent is not reported undelivered while there is no agent to give it to', () => {
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  task.pane_id = null
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'sync') }, 5000)
+  task.phase = 'land-queue'
+  task.phase_entered_at = 9000
+  pruneOutbox(run)
+  expect(owedByRecipient(run)).toEqual([])
+  task.pane_id = 'w8:p1'
+  expect(owedByRecipient(run).map((r) => r.label)).toEqual(["t1's worker"])
+})
+
+test('a phase prompt queued without the brief is taken back for a fresh agent, and one with it is kept', () => {
+  const run = mkRun()
+  const task = run.tasks[0] as Task
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec' }, 5000)
+  expect(briefQueuedWithPrompt(run, task)).toBe(false)
+  expect(run.outbox).toEqual([])
+  enqueue(run, { to: 'worker', taskId: 't1', ...briefAndPrompt('THE BRIEF', 'write the spec') }, 5000)
+  expect(briefQueuedWithPrompt(run, task)).toBe(true)
+  expect(run.outbox).toHaveLength(1)
 })
 
 test('a brief kept for a task that has finished is dropped with the rest', () => {

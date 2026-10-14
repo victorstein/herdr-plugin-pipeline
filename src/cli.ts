@@ -48,7 +48,7 @@ import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
 import { queueStops, withdrawStops, workersToCarryOn, workersToStop } from './lib/abort-notice'
-import { briefAndPrompt, enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
+import { briefAndPrompt, briefQueuedWithPrompt, enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
@@ -3129,10 +3129,11 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   // A notice the supervisor is sending at this moment reads as unsent here, so every
   // worker is told to carry on, and the notice's text allows for one never stopped.
   const unsent = withdrawStops(run)
+  const escalation = back === 'escalated' ? escalationBeforeAbort(run) : null
   const now = Date.now()
   run.history.push({ at: now, from: 'done', to: back, why: 'resumed' })
   run.phase = back
-  run.escalated_from = back === 'escalated' ? run.aborted_escalation_from ?? null : null
+  run.escalated_from = escalation
   delete run.aborted_escalation_from
   // `phase_entered_at` stays, since what the phase waits for is read against it:
   // intake leaves only for a task registered after it, and a resume that reset it
@@ -3154,6 +3155,13 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   return ok([`resumed ${run.run_id} at ${back}`, ...told, ...withdrawn, ...agentless].join('\n'))
 }
 
+/** A run aborted by 2.2.1 or earlier recorded no origin, and its history is the only record left. */
+function escalationBeforeAbort(run: Run): RunPhase | null {
+  if (run.aborted_escalation_from !== undefined) return run.aborted_escalation_from
+  const entered = run.history.findLast((entry) => entry.task_id === undefined && entry.to === 'escalated')
+  return (entered?.from as RunPhase | undefined) ?? null
+}
+
 /**
  * A worker pane lost while the run was aborted leaves its task where it was with
  * no agent, and the resume said nothing of it: status called it the worker's move
@@ -3164,9 +3172,12 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
  */
 async function reequipLostWorkers(ctx: Ctx, run: Run): Promise<string[]> {
   const lost = run.tasks.filter((task) => task.pane_id === null && task.last_pane_id !== undefined &&
-    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker' && queuedWorkerPrompt(run, task) === null)
+    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker' && !briefQueuedWithPrompt(run, task))
   const lines: string[] = []
   for (const task of lost) {
+    // The brief carries the briefed phase's instructions, so that phase's next agent
+    // is owed the brief as a dispatch hands it over, exactly as a rewind there leaves it.
+    if (task.phase === taskRow('queued').onClear) task.awaiting_brief = true
     lines.push(`${task.task_id} has no agent, since its pane went while the run was aborted` +
       `${await owePhasePrompt(ctx, run, task)}`)
   }

@@ -910,7 +910,8 @@ async function abortLocalBranchLines(run: Run, repo: string, kept: ReadonlySet<s
   const deletable: string[] = []
   const unpushed: string[] = []
   for (const task of run.tasks) {
-    if (kept.has(task.task_id)) continue
+    // A merged PR's branches are the lines `mergedBranchLines` gives, against the head it merged.
+    if (kept.has(task.task_id) || (run.batch === undefined && hasLanded(task) && task.pr !== null)) continue
     const head = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
     if (head === null) continue
     const counted = await git(run.repo_root, ['rev-list', '--count', head, '--not', '--remotes=origin'])

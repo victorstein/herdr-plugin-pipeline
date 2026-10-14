@@ -64,10 +64,15 @@ export function briefAndPrompt(brief: string, phasePrompt: string): Pick<OutboxI
   return { text: `${brief}${BRIEF_SEPARATOR}${phasePrompt}`, briefChars: brief.length }
 }
 
-/** A brief and prompt queued together replace a brief kept on its own, which would arrive twice. */
+/**
+ * A brief and prompt queued together replace every entry already carrying that
+ * task's brief: a stale one the CLI has not pruned would be carried by the next
+ * prune and arrive as a second brief.
+ */
 export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry {
   if (input.briefChars !== undefined && input.taskId !== null) {
-    run.outbox = (run.outbox ?? []).filter((entry) => !(entry.task_id === input.taskId && isBriefOnly(entry)))
+    run.outbox = (run.outbox ?? [])
+      .filter((entry) => !(entry.task_id === input.taskId && entry.brief_chars !== undefined))
   }
   const entry: OutboxEntry = {
     id: randomUUID().slice(0, 8),
@@ -107,14 +112,27 @@ export function pruneOutbox(run: Run): OutboxEntry[] {
 }
 
 /**
- * The worker has not yet been given what its phase asks, so its idle says nothing
- * about the phase: a resumed task's new agent, idle before its brief arrived, had
- * its predecessor's uncommitted spec draft taken as the finished spec. Measured on
- * a live run.
+ * The worker has not yet been given what its phase asks, or been told it may carry
+ * on after an abort, so its idle says nothing about the phase: a resumed task's new
+ * agent, idle before its brief arrived, had its predecessor's uncommitted spec draft
+ * taken as the finished spec. Measured on a live run. A usage-limit resume is not
+ * counted: the worker already has its phase prompt.
  */
 export function owedItsPrompt(run: Run, task: Task): boolean {
   return (run.outbox ?? []).some((entry) => entry.to === 'worker' && entry.task_id === task.task_id &&
-    entry.kind === undefined && isCurrent(run, entry))
+    (entry.kind === undefined || entry.kind === 'run-resumed') && isCurrent(run, entry))
+}
+
+/**
+ * Whether a fresh agent bound to this task gets its brief with its phase prompt.
+ * A phase prompt queued without one, before the worker's pane went, would reach
+ * the next agent alone, so it is taken back to be queued again with the brief.
+ */
+export function briefQueuedWithPrompt(run: Run, task: Task): boolean {
+  const queued = queuedWorkerPrompt(run, task)
+  if (queued !== null && queued.brief_chars !== undefined) return true
+  if (queued !== null) run.outbox = (run.outbox ?? []).filter((entry) => entry !== queued)
+  return false
 }
 
 /** A brief kept past its phase prompt, which the next prompt queued for the task follows. */
@@ -221,6 +239,8 @@ export function owedByRecipient(run: Run): Recipient[] {
 
   for (const entry of run.outbox ?? []) {
     if (!isCurrent(run, entry)) continue
+    // A kept brief waits for whichever agent is started next, through rows no agent acts in.
+    if (isBriefOnly(entry) && recipientPane(run, entry) === null) continue
     owe(recipientPane(run, entry), entry.to === 'orchestrator' ? null : entry.task_id, {
       kind: 'prompt', since: entry.queued_at, attempts: entry.attempts,
       lastCode: entry.last_code, lastAttemptAt: entry.last_attempt_at,

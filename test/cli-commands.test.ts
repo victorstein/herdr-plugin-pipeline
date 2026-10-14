@@ -282,6 +282,52 @@ test('resume queues the brief and phase prompt for a task whose pane went while 
   expect(queued?.text).toContain('\n\n---\n\n')
 })
 
+test('resume makes a research task whose pane went owed its brief again, so a dispatch hands it over', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'research', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  const out = await cmdResume(ctx(), { runId: run.run_id })
+  expect(out.text).toContain('t1 has no agent, since its pane went while the run was aborted')
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  expect(resumed.tasks[0]?.awaiting_brief).toBe(true)
+})
+
+test('resume re-queues with the brief a phase prompt that was held when the worker\'s pane went', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec, held by stuck input' }, 1)
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  await cmdResume(ctx(), { runId: run.run_id })
+  const queued = (await listRuns(dir, 'personal'))[0]!.outbox?.filter((e) => e.task_id === 't1') ?? []
+  expect(queued).toHaveLength(1)
+  expect(queued[0]?.brief_chars).toBeGreaterThan(0)
+})
+
+test('an escalated run aborted by an earlier release gets its escalation origin back from history', async () => {
+  const run = abortableRun()
+  run.history.push({ at: 1, from: 'ship-ci', to: 'escalated', why: 'a second red' })
+  run.history.push({ at: 2, from: 'escalated', to: 'done', why: 'aborted from escalated' })
+  run.phase = 'done'
+  run.escalated_from = 'escalated'
+  await saveRun(dir, run)
+  await cmdResume(ctx(), { runId: run.run_id })
+  expect((await listRuns(dir, 'personal'))[0]?.escalated_from).toBe('ship-ci')
+})
+
 test('an abort that tells one worker says its agent stays open', async () => {
   await liveSupervisor([...SUPERVISOR_CAPABILITIES])
   const run = runWithTasks([{ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }])

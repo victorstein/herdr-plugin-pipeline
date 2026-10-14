@@ -1381,7 +1381,11 @@ until the resume, status still heads the run `[aborted]`, that task keeps its ph
 not `failed`, and no stop notice is listed for it. The resume prints `tN has no agent, since its pane
 went while the run was aborted; its prompt is queued for tN's worker, which is not bound yet — …`;
 following those commands, the new agent gets the brief and the phase prompt on its own, and nothing
-else is stranded (a decision it had open is abandoned and the task is back where it raised it).
+else is stranded (a decision it had open is abandoned and the task is back where it raised it). Do it
+once with the task in `research` too: there the resume leaves the task owed its brief, and
+`hpipe dispatch --task tN` (or the `--pane` form after a hand-started agent) hands it over. In either
+phase, the task does not move on until the new agent has its prompt: a draft its predecessor left
+uncommitted is not taken as the phase's file.
 
 Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
 one does not fit, and that is a finding.

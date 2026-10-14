@@ -646,8 +646,8 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
     task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker'
   return [`  ℹ ${task.task_id} [${task.phase}] ${task.branch}${pr} — ` +
     `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\`` +
-    (lost ? `; no agent: ${task.last_pane_id} went while the run was aborted, and a resume queues its brief and ` +
-      'phase prompt for the next one' : '')]
+    (lost ? `; no agent: ${task.last_pane_id} went while the run was aborted, and a resume sees that the next one ` +
+      'gets its brief' : '')]
 }
 
 /**

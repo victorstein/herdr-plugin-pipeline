@@ -18,7 +18,7 @@ import {
   advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
   syncOverdue, syncSubmitted,
 } from '../lib/machine'
-import { briefAndPrompt, enqueue, owedItsPrompt, queuedWorkerPrompt } from '../lib/outbox'
+import { briefAndPrompt, briefQueuedWithPrompt, enqueue, owedItsPrompt, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -353,7 +353,7 @@ async function takesTheSlot(run: Run, task: Task, landingFor: LandingFor): Promi
  * agent is started in the worktree.
  */
 async function queueForAFreshAgent(run: Run, task: Task, deps: TaskDeps): Promise<void> {
-  if (queuedWorkerPrompt(run, task) !== null) return
+  if (briefQueuedWithPrompt(run, task)) return
   const phasePrompt = await renderTaskPhasePrompt(run, task, deps, task.phase)
   const brief = await renderWorkerPrompt(deps.pluginRoot, run, task)
   enqueue(run, { to: 'worker', taskId: task.task_id, ...briefAndPrompt(brief, phasePrompt) }, Date.now())
@@ -412,7 +412,10 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       // head has landed already must record it.
       await queueForAFreshAgent(run, task, deps)
     }
-    const actorIdle = pane === null || (row.actor === 'worker' && owedItsPrompt(run, task)) ? false
+    // Only a row judged by what the worker wrote: `implement` reads a push and has its
+    // own guard, and a `sync` holder counted at work would never give up the slot.
+    const judgedByAFile = row.signal === 'artifact' || row.signal === 'verdict'
+    const actorIdle = pane === null || (judgedByAFile && row.actor === 'worker' && owedItsPrompt(run, task)) ? false
       : await deps.liveIdle(pane)
 
     // Phases whose signal comes from the orchestrator must not be evaluated

@@ -708,7 +708,7 @@ test('an aborted run names a task whose agent went while it was aborted', () => 
   run.tasks = [mkTask({ task_id: 't1', phase: 'spec', pane_id: null, last_pane_id: 'w3:p1', branch: 'feat/a' })]
   expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
     `  ℹ t1 [spec] feat/a — \`${HP} show --task t1 --run ${run.run_id}\`; no agent: w3:p1 went while the run was ` +
-    'aborted, and a resume queues its brief and phase prompt for the next one')
+    'aborted, and a resume sees that the next one gets its brief')
 })
 
 test('a queued notice that the run was resumed is named as such, not as a usage-limit resume', () => {
