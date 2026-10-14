@@ -236,6 +236,10 @@ function moveFor(
         `\`${hpipe} answer --task ${task.task_id} --decision ${escalated.id} --answer "<their ruling>" --by human\``)
     }
     if (batch !== undefined && task.phase === 'merge') {
+      if (task.land_sha && landingPushed(run.repo_root, task.land_sha, batch.branch)) {
+        return notYours(`nothing for you — ${sha8(task.land_sha)} is on origin/${batch.branch}; the supervisor ` +
+          'records the landing on its next tick')
+      }
       return yours(`YOUR move: \`${landCommand(run, task.land_sha ?? '<land sha>')}\` — waiting for ` +
         awaitedFor(run, task))
     }
@@ -385,6 +389,18 @@ export function waitsOnYou(
  * digest, its parked-task footer and `hpipe status`, so the three cannot hand an
  * operator different recovery commands for the same task.
  */
+/**
+ * The landing push updates the clone's own `origin/` ref at once, and the supervisor
+ * reads it a tick later: a status taken in between asked again for a push already
+ * made. Measured on a live run. A local read, so it costs no network.
+ */
+function landingPushed(repoRoot: string, landSha: string, branch: string): boolean {
+  const ref = `refs/remotes/origin/${branch}`
+  const read = Bun.spawnSync(['git', '-C', repoRoot, 'merge-base', '--is-ancestor', landSha, ref],
+    { stdout: 'ignore', stderr: 'ignore' })
+  return read.exitCode === 0
+}
+
 export function actionFor(
   run: Run, task: Task, hpipe: string, now: number = Date.now(), holds: PaneHolds = {},
   dispatches: DispatchLocks = NO_DISPATCHES,

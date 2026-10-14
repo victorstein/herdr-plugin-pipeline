@@ -3178,8 +3178,11 @@ async function reequipLostWorkers(ctx: Ctx, run: Run): Promise<string[]> {
     // The brief carries the briefed phase's instructions, so that phase's next agent
     // is owed the brief as a dispatch hands it over, exactly as a rewind there leaves it.
     if (task.phase === taskRow('queued').onClear) task.awaiting_brief = true
-    lines.push(`${task.task_id} has no agent, since its pane went while the run was aborted` +
-      `${await owePhasePrompt(ctx, run, task)}`)
+    // The setup steps run long, and on the same line they buried the reason. Measured on a live run.
+    const note = (await owePhasePrompt(ctx, run, task)).replace(/^; /, '')
+    const cut = note.indexOf(' — ')
+    lines.push(`${task.task_id} has no agent, since its pane went while the run was aborted; ` +
+      (cut === -1 ? note : `${note.slice(0, cut)}.\n  To give it one: ${note.slice(cut + 3)}`))
   }
   return lines
 }

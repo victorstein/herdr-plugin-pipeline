@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { forgetDispatchBases } from '../src/lib/dispatch-base'
 import { newRun, withBatch } from '../src/lib/ledger'
+import { actionFor } from '../src/lib/status'
 import type { Run, Task } from '../src/lib/types'
 import { fetchBatches } from '../src/supervisor/batch-fetch'
 import { advanceTasks } from '../src/supervisor/tasks'
@@ -80,6 +81,15 @@ test('a landing the orchestrator pushed is recorded while it is still mid-turn, 
   await advanceTasks(run, { ...deps(), liveIdle: async () => false })
   expect(run.tasks[0]?.phase).toBe('close')
   expect(run.tasks[0]?.landed?.[0]?.land_sha).toBe(t1)
+})
+
+test('status reads a landing already pushed as done, ahead of the supervisor\'s next tick', async () => {
+  const { clone, t1 } = landingRepo()
+  const run = runIn(clone, [mkTask({ land_sha: t1 })])
+  expect(actionFor(run, run.tasks[0]!, 'hp')).toStartWith('YOUR move: `git -C')
+  git(['push', '-q', 'origin', `${t1}:refs/heads/batch/x`], clone)
+  expect(actionFor(run, run.tasks[0]!, 'hp')).toBe(`nothing for you — ${t1.slice(0, 8)} is on origin/batch/x; the ` +
+    'supervisor records the landing on its next tick')
 })
 
 test('a failing batch fetch is recorded when it starts, and the next good one clears it', async () => {
