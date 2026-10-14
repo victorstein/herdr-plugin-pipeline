@@ -241,8 +241,9 @@ export function dispatchProgress(lock: DispatchLock, task: Task, hpipe: string, 
  */
 export function dispatchRunningLine(lock: DispatchLock, hpipe: string, now: number): string {
   const rest = lock.mode === 'ready'
-    ? 'It takes every ready task before it ends, so do not start another.'
-    : 'Do not start another while it runs.'
+    ? 'It takes every ready task before it ends, so do not start another: read its step lines when its completion ' +
+      'notice arrives.'
+    : 'Do not start another while it runs: read its step lines when its completion notice arrives.'
   return `A dispatch is already running: ${commandOf(lock, hpipe)} (pid ${lock.pid}), ${whereItIs(lock, now)}. ${rest}`
 }
 

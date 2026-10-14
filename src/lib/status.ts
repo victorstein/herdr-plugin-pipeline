@@ -114,7 +114,9 @@ function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move |
   const entry = phasePrompt ?? resume
   if (entry === null) return null
   const what = resume === null ? `its ${task.phase} prompt`
-    : resume.kind === 'carry-on' ? 'its nudge to carry on' : 'its resume after Claude\'s usage limit'
+    : resume.kind === 'carry-on' ? 'its nudge to carry on'
+    : resume.kind === 'run-resumed' ? 'its notice that the run was resumed'
+    : 'its resume after Claude\'s usage limit'
   const pane = task.pane_id ?? 'its pane'
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
   if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
@@ -645,7 +647,7 @@ export function formatStatus(
     lines.push('')
     const passes = counterFor(run, run.phase)
     lines.push(
-      `${run.run_id}  [${run.phase}]${passes > 0 ? ` pass ${passes}` : ''}  ${run.title}`,
+      `${run.run_id}  [${wasAborted(run) ? 'aborted' : run.phase}]${passes > 0 ? ` pass ${passes}` : ''}  ${run.title}`,
     )
     if (run.orchestrator_pane) lines.push(`  orchestrator: ${run.orchestrator_pane}`)
     if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {

@@ -269,7 +269,7 @@ test('a run rewound to ship forgets the PR it found; to ship-ci, the bucket it r
 
 // ——— abort ———
 
-test('aborting a single-PR run names what landed, where it stays, and how to clean up', async () => {
+test('aborting a single-PR run names what landed and offers no clean-up for what was never made', async () => {
   const run = singlePrRun([
     { task_id: 't1', phase: 'done', merged_at_ms: 1, landed: [{ title: 'feat: a', land_sha: 'L1', at: 1 }] },
     { task_id: 't2', phase: 'implement', branch: 't2-branch' },
@@ -279,8 +279,42 @@ test('aborting a single-PR run names what landed, where it stays, and how to cle
   expect(out.ok).toBe(true)
   expect(out.text).toContain('batch/x keeps the landed tasks (t1), whose beads stay closed, and nothing reached main')
   expect(out.text).toContain('the unlanded tasks\' beads are released on the supervisor\'s next tick')
-  expect(out.text).toContain(`worktree remove '/state/checkouts/r1'`)
-  expect(out.text).toContain('branch -D batch/x')
+  expect(out.text).toContain('If you will not resume it, clean up:')
+  // Neither the batch checkout nor a local batch branch exists before ship: smoke run 19 was offered both.
+  expect(out.text).not.toContain('worktree remove')
+  expect(out.text).not.toContain('branch -D')
+})
+
+test('an aborted single-PR run lists each task worktree, the unlanded branches and the protected batch', async () => {
+  const { clone } = cloneOfRemote('main')
+  git(['push', '-q', 'origin', 'HEAD:refs/heads/batch/x'], clone)
+  const clean = join(tempDir('hpipe-wt-'), 'feat-a')
+  const dirty = join(tempDir('hpipe-wt-'), 'feat-b')
+  git(['worktree', 'add', '-q', '-b', 'feat/a', clean, 'HEAD'], clone)
+  git(['worktree', 'add', '-q', '-b', 'feat/b', dirty, 'HEAD'], clone)
+  commitAs(dirty, 'src/b.ts', 'one\n')
+  commitAs(dirty, 'src/b2.ts', 'two\n')
+  git(['push', '-q', 'origin', 'feat/b'], dirty)
+  writeFileSync(join(dirty, 'src', 'wip.ts'), 'unsaved\n')
+  git(['fetch', '-q', 'origin'], clone)
+
+  const run = withBatch(newRun({ session: 'personal', socketPath: '/s', repoKey: clone, repoRoot: clone, title: 'a' }),
+    { ...batchFixture(), ruleset_protected: true })
+  run.phase = 'execute'
+  run.tasks = [
+    mkTask({ task_id: 't1', branch: 'feat/a', workspace_id: 'w3', pane_id: 'w3:p1', checkout_path: clean }),
+    mkTask({ task_id: 't2', branch: 'feat/b', workspace_id: 'w4', pane_id: 'w4:p1', checkout_path: dirty }),
+  ]
+  await saveRun(dir, run)
+  const out = await cmdAbort(ctx(), { runId: run.run_id })
+  const block = out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')
+  expect(block).toEqual([
+    'If you will not resume it, clean up:',
+    `  herdr worktree remove --workspace w3  # t1's checkout ${clean}; closes its agent and keeps feat/a`,
+    `  t2's checkout ${dirty} has uncommitted work (src/wip.ts): review it before \`herdr worktree remove --workspace w4\``,
+    `  feat/b has 2 commits that did not land, up to ${revParse(dirty, 'HEAD').slice(0, 8)}; review before deleting`,
+    '  origin keeps batch/x, which the ruleset on batch/* protects from deletion: leave it',
+  ])
 })
 
 // ——— batch-check ———

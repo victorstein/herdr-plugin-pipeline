@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import {
   batchPrBody, batchPrBodyPath, checkoutSteps, rulesetPattern, sha8, squashBody, squashBodyPath, squashSubject,
   suggestedPrTitle,
@@ -712,22 +712,23 @@ async function mergedBranchLines(run: Run, merged: Task[], repo: string): Promis
   const localKept: string[] = []
   for (const task of merged) {
     const mergedHead = task.ci_head?.sha ?? null
-    const unmerged = (where: string, sha: string) => mergedHead === null
+    const unmerged = async (where: string, sha: string) => mergedHead === null
       ? `  ${where} is at ${sha8(sha)}, and the head PR #${task.pr} merged is not on record; check before deleting`
-      : `  ${where} has commits PR #${task.pr} did not merge: ${sha8(sha)}; review before deleting`
+      : `  ${where} ${await commitsNotOn(run.repo_root, sha, mergedHead, `PR #${task.pr} did not merge`)}; ` +
+        'review before deleting'
     const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
     if (!remote.ok) {
       remoteKept.push(`  ${task.branch} could not be read on origin (${remote.reason}); review it before deleting`)
     } else if (remote.sha !== null) {
       if (remote.sha === mergedHead) remoteDeletable.push(task.branch)
-      else remoteKept.push(unmerged(task.branch, remote.sha))
+      else remoteKept.push(await unmerged(task.branch, remote.sha))
     }
     // A kept worktree still has its branch checked out, and `branch -D` refuses that.
     if (task.checkout_path !== null && existsSync(task.checkout_path)) continue
     const local = await resolveCommit(run.repo_root, `refs/heads/${task.branch}`)
     if (local === null) continue
     if (local === mergedHead) localDeletable.push(task.branch)
-    else localKept.push(unmerged(`local ${task.branch}`, local))
+    else localKept.push(await unmerged(`local ${task.branch}`, local))
   }
   const deleteLine = (command: string, branches: string[]) =>
     (branches.length === 0 ? [] : [`  git -C ${repo} ${command} ${branches.map(shellWord).join(' ')}`])
@@ -754,6 +755,11 @@ async function mergedMainlineLines(run: Run, merged: Task[], repo: string): Prom
  * safe to delete: anything pushed to it after its reviewed head never landed.
  */
 export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
+  return ['Clean up when you are done with it:', ...(await batchCleanup(run, batch))]
+}
+
+async function batchCleanup(run: Run, batch: Batch): Promise<string[]> {
+  const batchRef = `refs/remotes/origin/${batch.branch}`
   const deletable: string[] = []
   const kept: string[] = []
   for (const task of run.tasks) {
@@ -763,24 +769,36 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
       continue
     }
     if (remote.sha === null) continue
-    const landed = await isAncestor(run.repo_root, remote.sha, `refs/remotes/origin/${batch.branch}`)
+    const landed = await isAncestor(run.repo_root, remote.sha, batchRef)
     if (landed === true) {
       deletable.push(task.branch)
     } else if (landed === false) {
-      kept.push(`  ${task.branch} has commits that did not land: ${sha8(remote.sha)}; review before deleting`)
+      kept.push(`  ${task.branch} ${await commitsNotOn(run.repo_root, remote.sha, batchRef, 'that did not land')}; ` +
+        'review before deleting')
     } else {
       kept.push(`  ${task.branch} is at ${sha8(remote.sha)}, which could not be compared with ${batch.branch} here; ` +
         'fetch it and check before deleting')
     }
   }
   const repo = shellQuoted(run.repo_root)
+  const localBatch = await resolveCommit(run.repo_root, `refs/heads/${batch.branch}`)
   return [
-    'Clean up when you are done with it:',
     ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
-    ...await checkoutRemovalLines(batch.checkout, repo),
-    `  git -C ${repo} branch -D ${shellWord(batch.branch)}`,
+    ...await checkoutRemovalLines(run.repo_root, batch.checkout, repo),
+    ...(localBatch === null ? [] : [`  git -C ${repo} branch -D ${shellWord(batch.branch)}`]),
   ]
+}
+
+/**
+ * The tip alone read as the one commit that did not land, and was already stale:
+ * the worker pushed two more after the abort printed it. Measured on a live run.
+ */
+async function commitsNotOn(repoRoot: string, sha: string, base: string, what: string): Promise<string> {
+  const counted = await git(repoRoot, ['rev-list', '--count', `${base}..${sha}`])
+  const count = counted.code === 0 ? Number.parseInt(counted.text.trim(), 10) : Number.NaN
+  const commits = Number.isNaN(count) ? 'commits' : `${count} commit${count === 1 ? '' : 's'}`
+  return `has ${commits} ${what}, up to ${sha8(sha)}`
 }
 
 const nonEmptyLines = (text: string): string[] => text.split('\n').filter((line) => line.length > 0)
@@ -796,10 +814,15 @@ const sample = (paths: readonly string[]): string => `${paths.slice(0, 3).join('
  * work, every initialised submodule at the commit the checkout records, and that
  * commit on one of the submodule's remote branches.
  */
-async function checkoutRemovalLines(checkout: string, repo: string): Promise<string[]> {
+async function checkoutRemovalLines(repoRoot: string, checkout: string, repo: string): Promise<string[]> {
   const remove = `  git -C ${repo} worktree remove`
   const quoted = shellQuoted(checkout)
-  if (!existsSync(checkout)) return [`${remove} ${quoted}`]
+  // The prompts create it only at ship, so a run aborted before then has none.
+  if (!existsSync(checkout)) {
+    return await gitListsWorktree(repoRoot, checkout)
+      ? [`  git -C ${repo} worktree prune  # ${checkout} is gone, but git still lists it`]
+      : []
+  }
   const submodules = await git(checkout, ['submodule', 'status', '--recursive'])
   const initialised = nonEmptyLines(submodules.text).filter((line) => !line.startsWith('-'))
   if (submodules.code === 0 && initialised.length === 0) return [`${remove} ${quoted}`]
@@ -823,6 +846,74 @@ async function checkoutRemovalLines(checkout: string, repo: string): Promise<str
   }
   return [`${remove} ${quoted}`, `  ${checkout} has ${reasons.join('; ')}: review it before adding --force, which ` +
     'its submodules need and which deletes their git data in this checkout']
+}
+
+/** git lists a worktree by its real path, and macOS puts temporary directories behind a symlink. */
+async function gitListsWorktree(repoRoot: string, checkout: string): Promise<boolean> {
+  const listed = await git(repoRoot, ['worktree', 'list', '--porcelain'])
+  if (listed.code !== 0) return false
+  const parent = dirname(checkout)
+  const spellings = [checkout, ...(existsSync(parent) ? [join(realpathSync(parent), basename(checkout))] : [])]
+  return nonEmptyLines(listed.text).some((line) => spellings.some((path) => line === `worktree ${path}`))
+}
+
+/**
+ * What an aborted run leaves, for a human who will not resume it. The abort once
+ * offered to remove a batch checkout and branch that were never created, and said
+ * nothing of the task worktrees and the agents still running in them. Measured on
+ * a live run.
+ */
+export async function abortCleanupLines(run: Run): Promise<string[]> {
+  const repo = shellQuoted(run.repo_root)
+  const lines = [
+    ...(await taskWorktreeLines(run, repo)),
+    ...(run.batch === undefined
+      ? await perTaskAbortLines(run, repo)
+      : [...(await batchCleanup(run, run.batch)), ...(await originBatchLines(run, run.batch, repo))]),
+  ]
+  return lines.length === 0 ? [] : ['If you will not resume it, clean up:', ...lines]
+}
+
+/** herdr's removal closes the workspace's agent and, like git's, keeps the branch. */
+async function taskWorktreeLines(run: Run, repo: string): Promise<string[]> {
+  const lines: string[] = []
+  for (const task of run.tasks) {
+    const checkout = task.checkout_path
+    if (checkout === null || !existsSync(checkout)) continue
+    const removal = task.workspace_id === null
+      ? `git -C ${repo} worktree remove ${shellQuoted(checkout)}`
+      : `herdr worktree remove --workspace ${task.workspace_id}`
+    const uncommitted = await uncommittedPaths(checkout)
+    if (uncommitted === null || uncommitted.length > 0) {
+      const what = uncommitted === null ? 'work git could not read' : `uncommitted work (${sample(uncommitted)})`
+      lines.push(`  ${task.task_id}'s checkout ${checkout} has ${what}: review it before \`${removal}\``)
+      continue
+    }
+    const agent = task.workspace_id === null ? '' : 'closes its agent and '
+    lines.push(`  ${removal}  # ${task.task_id}'s checkout ${checkout}; ${agent}keeps ${task.branch}`)
+  }
+  return lines
+}
+
+/** A merged task's branches are the done notice's; an unmerged one's hold the only copy of its work. */
+async function perTaskAbortLines(run: Run, repo: string): Promise<string[]> {
+  const merged = run.tasks.filter((t) => hasLanded(t) && t.pr !== null)
+  const mainline = await mainlineBranch(run.repo_root)
+  const unmerged: string[] = []
+  for (const task of run.tasks.filter((t) => !merged.includes(t))) {
+    const pr = task.pr === null ? '' : ` (PR #${task.pr}, left open)`
+    const remote = await remoteBranchHeadCooled(run.repo_root, task.branch)
+    if (!remote.ok) {
+      unmerged.push(`  ${task.branch}${pr} could not be read on origin (${remote.reason}); review it before deleting`)
+    } else if (remote.sha !== null) {
+      const notOn = mainline === null ? `is at ${sha8(remote.sha)}`
+        : await commitsNotOn(run.repo_root, remote.sha, `refs/remotes/origin/${mainline}`, `not on ${mainline}`)
+      unmerged.push(`  ${task.branch}${pr} ${notOn}; review before deleting`)
+    } else if (task.pr !== null) {
+      unmerged.push(`  PR #${task.pr} is left open, and origin no longer has ${task.branch}`)
+    }
+  }
+  return [...(await mergedBranchLines(run, merged, repo)), ...unmerged]
 }
 
 /**
@@ -874,8 +965,9 @@ async function localTaskBranchLines(run: Run, batch: Batch, repo: string): Promi
     const landed = await isAncestor(run.repo_root, head, batchRef)
     const local = `  local ${task.branch}`
     if (landed === true) deletable.push(task.branch)
-    else if (landed === false) kept.push(`${local} has commits that did not land: ${sha8(head)}; review before deleting`)
-    else kept.push(`${local} is at ${sha8(head)}, which could not be compared with ${batch.branch}; check before deleting`)
+    else if (landed === false) {
+      kept.push(`${local} ${await commitsNotOn(run.repo_root, head, batchRef, 'that did not land')}; review before deleting`)
+    } else kept.push(`${local} is at ${sha8(head)}, which could not be compared with ${batch.branch}; check before deleting`)
   }
   return [
     ...(deletable.length === 0 ? [] : [`  git -C ${repo} branch -D ${deletable.map(shellWord).join(' ')}`]),

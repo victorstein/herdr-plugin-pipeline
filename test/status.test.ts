@@ -673,6 +673,8 @@ test('an aborted run names how to resume it and keeps its unfinished work visibl
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   expect(text).not.toContain('waiting on you')
   expect(text).not.toContain('ended:')
+  expect(text).toContain(`${run.run_id}  [aborted]  `)
+  expect(text).not.toContain('[done]')
   expect(text).toContain(
     `  aborted from execute: escalated t1 · merge t2 — \`${HP} resume ${run.run_id}\` puts it back`)
   expect(text).toContain(`  ℹ t1 [escalated] fix/a — \`${HP} show --task t1 --run ${run.run_id}\``)

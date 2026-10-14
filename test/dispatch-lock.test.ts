@@ -205,13 +205,13 @@ test('a --ready lock is under way for every task owed its brief, which it takes 
 test('the dispatch prompt\'s running line names the dispatch, where it is, and that a second is not to be started', () => {
   expect(dispatchRunningLine(lockFor({ pid: 4242, mode: 'ready', step: 'bootstrap', since: NOW - 180_000 }), 'hp', NOW))
     .toBe('A dispatch is already running: `hp dispatch --ready` (pid 4242), at bootstrap for t1, started 3m ago. It takes ' +
-      'every ready task before it ends, so do not start another.')
+      'every ready task before it ends, so do not start another: read its step lines when its completion notice arrives.')
   expect(dispatchRunningLine(lockFor({ pid: 4242, mode: 'ready', task: null, step: null }), 'hp', NOW))
     .toBe('A dispatch is already running: `hp dispatch --ready` (pid 4242), between tasks. It takes every ready task ' +
-      'before it ends, so do not start another.')
+      'before it ends, so do not start another: read its step lines when its completion notice arrives.')
   expect(dispatchRunningLine(lockFor({ pid: 4242, step: 'agent', since: NOW - 60_000 }), 'hp', NOW))
     .toBe('A dispatch is already running: `hp dispatch` (pid 4242), at agent for t1, started 1m ago. Do not start ' +
-      'another while it runs.')
+      'another while it runs: read its step lines when its completion notice arrives.')
 })
 
 test('a stale lock, or one of another run or session, is under way for nobody; only a stale one is named', () => {

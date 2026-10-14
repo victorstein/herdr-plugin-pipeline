@@ -68,13 +68,15 @@ export const BEFORE_MERGE_CAPABILITY = 'before-merge'
  * `bootstrapped` record that checkout never had.
  */
 export const DISPATCH_CAPABILITY = 'dispatch'
+/** Delivers `hpipe abort`'s stop notices, which an older supervisor drops with the finished run. */
+export const ABORT_NOTICE_CAPABILITY = 'abort-notice'
 
 /**
  * What this release's supervisor honours, so a newer CLI can warn about or refuse
  * what an older one would undo, without a schema bump.
  */
 export const SUPERVISOR_CAPABILITIES: readonly string[] = [
-  SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY,
+  SHARED_PATHS_CAPABILITY, BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY, ABORT_NOTICE_CAPABILITY,
 ]
 
 /** A supervisor that predates the field drove only the per-task schema. */

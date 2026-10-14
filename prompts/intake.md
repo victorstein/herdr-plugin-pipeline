@@ -96,16 +96,18 @@ and plans its own bead.{{mode_note}}
        {{hpipe}} dispatch --ready
 
    It fetches each task's base again, creates its worktree, runs the bootstrap in it, starts its
-   worker and hands it the brief. End your turn, and read its lines when its completion notice
-   arrives: on `stopped tN at <step>`, fix what it names and run it again. The block is the manual
-   fallback, to run as printed only when the command cannot do it.
+   worker and hands it the brief. Close intake (step 5) before you end your turn, and read its lines
+   when its completion notice arrives: on `stopped tN at <step>`, fix what it names and run it again.
+   The block is the manual fallback, to run as printed only when the command cannot do it.
 
 5. **When the last task is registered, close intake:**
 
        {{hpipe}} dispatch --done
 
    Nothing infers that you are finished. Until you run it the run cannot complete, and the supervisor
-   keeps a finished batch open waiting for a task you were never going to add.
+   keeps a finished batch open waiting for a task you were never going to add. Run it after the
+   dispatch has started: the dispatch prompt it brings then names that dispatch instead of asking for
+   another.
 
 Register every task, start `{{hpipe}} dispatch --ready` in the background, close intake, then end
 your turn.

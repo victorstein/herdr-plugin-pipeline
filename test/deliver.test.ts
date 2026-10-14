@@ -296,7 +296,8 @@ test('a dispatch prompt rendered while this run\'s dispatch is running leads wit
   const running = await renderRunPhasePrompt(run, ROOT, { dispatches: new Map([[run.repo_key, { live: true, lock }]]) })
   expect(running).toStartWith(`# Dispatch — run ${run.run_id}\n\nA dispatch is already running: ` +
     `\`${hpipeCommand(ROOT)} dispatch --ready\` (pid 4242), at bootstrap for t2, started 3m ago. It takes every ready ` +
-    'task before it ends, so do not start another.\n\nTasks are registered.')
+    'task before it ends, so do not start another: read its step lines when its completion notice arrives.' +
+    '\n\nTasks are registered.')
   expect(running).not.toMatch(/\n{3,}/)
   expect(plain).toStartWith(`# Dispatch — run ${run.run_id}\n\nTasks are registered.`)
 

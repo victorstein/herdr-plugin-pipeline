@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { forgetDispatchBases } from '../src/lib/dispatch-base'
 import { newRun, withBatch } from '../src/lib/ledger'
@@ -116,13 +116,33 @@ test('the clean-up deletes only task branches whose head landed, and names the r
   git(['fetch', '-q', 'origin', '+refs/heads/t1-branch:refs/remotes/origin/t1-branch'], clone)
   const lines = await cleanupLines(landedOnly, landedOnly.batch!)
   expect(lines.join('\n')).not.toContain('--delete t1-branch')
-  expect(lines).toContain(`  t1-branch has commits that did not land: ${handoff.slice(0, 8)}; review before deleting`)
+  expect(lines).toContain(`  t1-branch has 1 commit that did not land, up to ${handoff.slice(0, 8)}; review before deleting`)
   expect(lines.join('\n')).not.toContain('t3-branch')
-  expect(lines.at(-1)).toBe(`  git -C '${clone}' branch -D batch/x`)
+  // Neither the batch checkout nor a local batch branch was ever made here.
+  expect(lines.join('\n')).not.toContain('worktree')
+  expect(lines.join('\n')).not.toContain('branch -D')
+  git(['branch', 'batch/x', 'origin/batch/x'], clone)
+  expect((await cleanupLines(landedOnly, landedOnly.batch!)).at(-1)).toBe(`  git -C '${clone}' branch -D batch/x`)
 
   git(['push', '-q', '--force', 'origin', `${t1}:refs/heads/t1-branch`], other)
   expect((await cleanupLines(landedOnly, landedOnly.batch!)).join('\n'))
     .toContain(`git -C '${clone}' push origin --delete t1-branch`)
+})
+
+test('a batch checkout deleted behind git\'s back is pruned, not removed', async () => {
+  const { cleanupLines } = await import('../src/supervisor/deliver')
+  const { clone } = landingRepo()
+  const checkout = join(tempDir('hpipe-checkouts-'), 'r1')
+  git(['worktree', 'add', '-q', '--detach', checkout, 'origin/batch/x'], clone)
+  const run = runIn(clone, [])
+  run.batch = { ...run.batch!, checkout }
+  expect(await cleanupLines(run, run.batch)).toContain(`  git -C '${clone}' worktree remove '${checkout}'`)
+
+  rmSync(checkout, { recursive: true, force: true })
+  expect(await cleanupLines(run, run.batch))
+    .toContain(`  git -C '${clone}' worktree prune  # ${checkout} is gone, but git still lists it`)
+  git(['worktree', 'prune'], clone)
+  expect((await cleanupLines(run, run.batch)).join('\n')).not.toContain('worktree')
 })
 
 /** A batch checkout, as the ship prompt has the orchestrator make it, with a submodule bootstrap initialised. */
@@ -191,7 +211,7 @@ test('a shipped run names what its clean-up leaves: local task branches, the bat
 
   const text = await renderRunPhasePrompt(run, ROOT)
   expect(text).toContain(`  git -C '${clone}' branch -D t1-branch\n`)
-  expect(text).toContain(`  local t3-branch has commits that did not land: ${t3.slice(0, 8)}; review before deleting`)
+  expect(text).toContain(`  local t3-branch has 1 commit that did not land, up to ${t3.slice(0, 8)}; review before deleting`)
   expect(text).toContain(`  git -C '${clone}' pull --ff-only  # main predates PR #51's squash merge`)
   expect(text).toContain(`  origin keeps batch/x, which is harmless; deleting it, \`git -C '${clone}' push origin --delete batch/x\`, ` +
     'needs a bypass if a ruleset protects batch/*')
@@ -248,9 +268,9 @@ test('a per-task run\'s done notice cleans up the branches of merged PRs and the
   expect(text.slice(text.indexOf('Clean up when you are done with it:'))).toBe([
     'Clean up when you are done with it:',
     `  git -C '${clone}' push origin --delete t1-branch`,
-    `  t3-branch has commits PR #56 did not merge: ${t3After.slice(0, 8)}; review before deleting`,
+    `  t3-branch has 1 commit PR #56 did not merge, up to ${t3After.slice(0, 8)}; review before deleting`,
     `  git -C '${clone}' branch -D t1-branch`,
-    `  local t3-branch has commits PR #56 did not merge: ${t3After.slice(0, 8)}; review before deleting`,
+    `  local t3-branch has 1 commit PR #56 did not merge, up to ${t3After.slice(0, 8)}; review before deleting`,
     `  git -C '${clone}' pull --ff-only  # main predates PR #55's merge`,
   ].join('\n'))
 

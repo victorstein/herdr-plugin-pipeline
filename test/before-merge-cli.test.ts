@@ -76,7 +76,7 @@ test('answer --before-merge records each check, from that decision, in the answe
   }, reads())
   expect(out.ok, out.text).toBe(true)
   expect(out.text).toContain('recorded answer to d1 on t1; pending delivery')
-  expect(out.text).toContain("c1 recorded on t1: t1's PR does not merge until the human confirms: no ghost after a page turn")
+  expect(out.text).toContain(`c1 recorded on t1: t1's PR does not merge until the human rules on "no ghost after a page turn"`)
   const after = await saved(run)
   expect(after.revision).toBe(before + 1)
   expect(taskOf(after).before_merge?.map((c) => [c.id, c.check, c.decision, c.recorded_pane])).toEqual([
@@ -103,13 +103,13 @@ test('answer --before-merge refuses an empty check, and records neither the answ
 test('hold records a task check per-task, and a run check single-PR', async () => {
   const perTask = await seeded(perTaskRun([heldTask({ phase: 'pr-review' })]))
   const onTask = await hold(perTask, ['no ghost after a page turn'], 't1')
-  expect(onTask.text).toBe('c1 recorded on t1: PR #255 does not merge until the human confirms: no ghost after a page turn')
+  expect(onTask.text).toBe('c1 recorded on t1: PR #255 does not merge until the human rules on "no ghost after a page turn"')
 
   const batch = await seeded(singlePrRun([heldTask({ phase: 'implement', landed: [] })], 'execute'))
   const onRun = await hold(batch, ['the menu closes on a long press'], null)
-  expect(onRun.text).toBe('c1 recorded: the batch PR does not merge until the human confirms: the menu closes on a long press')
+  expect(onRun.text).toBe('c1 recorded: the batch PR does not merge until the human rules on "the menu closes on a long press"')
   const onBatchTask = await hold(batch, ['no ghost'], 't1')
-  expect(onBatchTask.text).toBe('c2 recorded on t1: the batch PR does not merge until the human confirms: no ghost; ' +
+  expect(onBatchTask.text).toBe('c2 recorded on t1: the batch PR does not merge until the human rules on "no ghost"; ' +
     't1 still lands on batch/x as usual')
   expect((await saved(batch)).before_merge?.map((c) => c.id)).toEqual(['c1'])
 })
