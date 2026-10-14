@@ -54,7 +54,7 @@ interface Fakes {
   created: CallResult<CreatedWorktree>
   panes: Record<string, Listing<PaneInfo>>
   agentPane: string | null
-  started: CallResult<unknown>
+  started: CallResult<unknown> | CallResult<unknown>[]
   statuses: AgentStatus[]
   screens: string[]
   branchCommit: string | null | undefined
@@ -116,6 +116,7 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
   let boundByHook: Partial<Task> = {}
   let statusIndex = 0
   let screenIndex = 0
+  let startIndex = 0
   const next = <T>(list: T[], index: number): T => list[Math.min(index, list.length - 1)] as T
 
   const herdr: DispatchHerdr = {
@@ -141,7 +142,7 @@ function world(taskOver: Partial<Task> = {}, fakeOver: Partial<Fakes> = {}): Wor
     agentStart: async (request: AgentStartRequest) => {
       calls.push(`agent start ${request.name} --kind ${request.kind} --pane ${request.paneId} --timeout ` +
         `${request.timeoutMs} -- ${request.args.join(' ')}`)
-      return fakes.started
+      return Array.isArray(fakes.started) ? next(fakes.started, startIndex++) : fakes.started
     },
     agentStatus: async (pane) => { calls.push(`agent status ${pane}`); return next(fakes.statuses, statusIndex++) },
     paneReadStyled: async (pane) => { calls.push(`pane read ${pane}`); return next(fakes.screens, screenIndex++) },
@@ -482,6 +483,22 @@ test('herdr refusing the start stops with its code and the pane to read', async 
   expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
   expect(w.said.at(-1)).toBe('stopped t1 at agent: herdr agent start answered agent_not_ready — a dialog is open: ' +
     '`herdr pane read w5:p1`; a re-run skips the worktree and the bootstrap, and starts the agent unless one is in the pane')
+})
+
+test('a new pane still starting its shell is given time before the start is called a failure', async () => {
+  const busy = { ok: false as const, code: 'agent_pane_busy', message: 'agent target pane w5:p1 is not an available shell' }
+  const w = world({}, { started: [busy, busy, { ok: true }] })
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(true)
+  expect(w.calls.filter((c) => c.startsWith('agent start'))).toHaveLength(3)
+
+  const never = world({}, { started: [busy] })
+  expect(await dispatchTask(never.run, never.task, never.deps)).toBe(false)
+  expect(never.calls.filter((c) => c.startsWith('agent start'))).toHaveLength(15)
+  expect(never.said.at(-1)).toStartWith('stopped t1 at agent: herdr agent start answered agent_pane_busy')
+
+  const other = world({}, { started: [{ ok: false, code: 'agent_not_ready', message: 'a dialog is open' }, { ok: true }] })
+  expect(await dispatchTask(other.run, other.task, other.deps)).toBe(false)
+  expect(other.calls.filter((c) => c.startsWith('agent start'))).toHaveLength(1)
 })
 
 test('the brief re-reads the ledger, and a task already briefed is not sent another', async () => {

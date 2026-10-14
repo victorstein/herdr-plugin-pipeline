@@ -29,6 +29,13 @@ const BINDING_WAIT_MS = 15_000
 const READY_WAIT_MS = 30_000
 const POLL_MS = 1_000
 
+/**
+ * A pane `worktree create` has just made is still starting its shell, and herdr
+ * refuses an agent there with `agent_pane_busy` until it is ready. Measured on a
+ * live run.
+ */
+const PANE_SHELL_TRIES = 15
+
 export interface DispatchHerdr {
   workspaceListing(): Promise<Listing<WorkspaceInfo>>
   worktreeList(repoRoot: string): Promise<Listing<WorktreeEntry>>
@@ -425,6 +432,12 @@ class TaskDispatch {
       `\`${startAgentCommand(this.task, paneId)}\`, then \`${this.deps.hpipe} dispatch --task ${this.id}\``
   }
 
+  private startIn(paneId: string): Promise<CallResult<unknown>> {
+    return this.deps.herdr.agentStart({
+      name: this.task.bead, kind: 'claude', paneId, timeoutMs: AGENT_START_TIMEOUT_MS, args: workerAgentArgs(this.task),
+    })
+  }
+
   /** Whether this run started the agent: only then does `working` prove nothing about a brief. */
   private async agent(placed: Placed, paneId: string): Promise<boolean> {
     await this.enter('agent')
@@ -446,9 +459,11 @@ class TaskDispatch {
         'that one')
     }
     await this.recheck(placed, paneId)
-    const started = await this.deps.herdr.agentStart({
-      name: this.task.bead, kind: 'claude', paneId, timeoutMs: AGENT_START_TIMEOUT_MS, args: workerAgentArgs(this.task),
-    })
+    let started = await this.startIn(paneId)
+    for (let tries = 1; !started.ok && started.code === 'agent_pane_busy' && tries < PANE_SHELL_TRIES; tries++) {
+      await this.deps.sleep(POLL_MS)
+      started = await this.startIn(paneId)
+    }
     if (!started.ok) {
       const answer = `${started.code ?? 'error'}${started.message ? ` — ${started.message}` : ''}`
       throw new Stop('agent', `herdr agent start answered ${answer}: \`herdr pane read ${paneId}\`; a re-run skips ` +
