@@ -528,6 +528,10 @@ class TaskDispatch {
       return
     }
     await this.awaitEmptyBox(paneId, startedHere ? READY_WAIT_MS : 0)
+    // The wait for an empty box can take half a minute, time enough for an abort.
+    if (await this.reread() && wasAborted(this.run)) {
+      throw new Stop('brief', `run ${this.run.run_id} was aborted; nothing was sent`)
+    }
     const sent = await this.deps.brief(this.run, this.task, paneId)
     if (!sent.ok) throw new Stop('brief', sent.text)
     this.line('brief', sent.text)

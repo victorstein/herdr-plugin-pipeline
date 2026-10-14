@@ -1372,8 +1372,15 @@ holds one back), counts each unlanded branch's commits (`has 3 commits that did 
 <sha>`), and offers no `worktree remove` or `branch -D` for a batch checkout or branch that `ship`
 never made. `hpipe status` heads the run `[aborted]`, not `[done]`, and shows `not shipped: batch/<…>
 holds 1 landed task (t1) that is not on main`; the worker's `hpipe submit` names the run as `aborted
-from execute` with the resume command, never `a finished run cannot be re-entered`. Then `hpipe resume
-<run>`: it says `Told to carry on: t2 (…)`, and the worker gets `# Resumed — <phase>` and carries on.
+from execute` with the resume command, never `a finished run cannot be re-entered`, and its
+`hpipe resume` from its own pane is refused. Then `hpipe resume <run>`: it says `Told to carry on: t2
+(…)`, and the worker gets `# Resumed — <phase>` and carries on.
+
+Abort it again, close one worker's pane (`herdr pane close <pane>`), wait a tick, and resume. **Assert:**
+until the resume, status still heads the run `[aborted]`, that task keeps its phase with no pane and is
+not `failed`, and no stop notice is listed for it; after the resume, status names the step that starts
+its agent again, and nothing else is stranded (a decision it had open is abandoned and the task is
+back where it raised it).
 
 Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
 one does not fit, and that is a finding.

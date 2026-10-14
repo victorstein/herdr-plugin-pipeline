@@ -202,16 +202,73 @@ test('a stop notice lapses with the abort, so nothing sends it once the run is r
   expect(pruneOutbox(aborted).map((e) => e.kind)).toEqual(['abort', 'abort'])
 })
 
-test('an aborted run stays aborted when a worker pane closes, and that task is not failed', () => {
+test('an aborted run stays aborted when a worker pane closes or exits, and that task is not failed', () => {
   const run = abortableRun()
   run.phase = 'done'
   run.escalated_from = 'execute'
   run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
-  applyEvents([run], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
-  expect(run.tasks[0]?.phase).toBe('implement')
-  expect(run.tasks[0]?.pane_id).toBeNull()
+  for (const taskId of ['t1', 't2']) enqueue(run, { to: 'worker', taskId, text: 'stop', kind: 'abort' }, 1)
+  applyEvents([run], [
+    { kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' },
+    { kind: 'pane.exited', session: 'personal', at: 2, pane_id: 'w4:p1' },
+  ], 'personal', new Set())
+  expect(run.tasks.slice(0, 2).map((t) => [t.phase, t.pane_id])).toEqual([['implement', null], ['spec', null]])
+  // Its stop notice would otherwise be the first message of the next agent in that workspace.
+  expect(run.outbox ?? []).toEqual([])
   run.history.push({ at: 3, task_id: 't2', from: 'spec', to: 'failed', why: 'a task-level entry after the abort' })
   expect(wasAborted(run)).toBe(true)
+})
+
+test('a decision whose worker pane goes during an abort is abandoned, so the resume strands nothing', () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1' }])
+  openDecision(run.tasks[0]!, { question: 'which?', recommendation: 'a' })
+  run.tasks[0]!.decision_from = 'spec'
+  run.tasks[0]!.phase = 'blocked-on-decision'
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  applyEvents([run], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  expect(run.tasks[0]?.phase as TaskPhase).toBe('spec')
+  expect(openDecisionFor(run.tasks[0]!)).toBeNull()
+  expect(wasAborted(run)).toBe(true)
+})
+
+test('a stop notice waits while its agent is still owed a brief', () => {
+  const run = abortableRun()
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  enqueue(run, { to: 'worker', taskId: 't3', text: 'stop', kind: 'abort' }, 1)
+  expect(outboxPending(run)).toEqual([])
+  delete run.tasks[2]!.awaiting_brief
+  expect(outboxPending(run).map((p) => p.paneId)).toEqual(['w5:p1'])
+})
+
+test('a run aborted in intake leaves intake after its resume, and the resume restarts every stall clock', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'research', pane_id: 'w3:p1', registered_at: 100 }])
+  run.phase_entered_at = 50
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const before = Date.now()
+  await cmdResume(ctx(), { runId: run.run_id })
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  expect(resumed.phase).toBe('intake')
+  // Reset to the resume, it read every task as registered before intake began.
+  expect(resumed.phase_entered_at).toBe(50)
+  expect(advanceRun(resumed, { actorIdle: true, newestRegisteredAt: 100 } as Parameters<typeof advanceRun>[1])?.phase)
+    .toBe('dispatch')
+  expect(resumed.stall?.last_probe_at).toBeGreaterThanOrEqual(before)
+  expect(resumed.tasks[0]?.stall?.last_probe_at).toBeGreaterThanOrEqual(before)
+})
+
+test('an abort that tells one worker says its agent stays open', async () => {
+  await liveSupervisor([...SUPERVISOR_CAPABILITIES])
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  expect((await cmdAbort(ctx(), { runId: run.run_id })).text)
+    .toContain('Told to stop on the supervisor\'s next tick: t1 (w3:p1, implement). Its agent stays open, so a ' +
+      'resume carries it on.')
 })
 
 test('only the orchestrator or the human resumes a run, never one of its workers', async () => {
@@ -223,6 +280,14 @@ test('only the orchestrator or the human resumes a run, never one of its workers
   expect(refused.text).toBe("w3:p1 is t1's worker pane: a run is resumed by the orchestrator or the human, never by " +
     'its workers. Stop, and end your turn')
   expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w1:p1' })).ok).toBe(true)
+})
+
+test('a human pane that carries a finished task\'s old pane id may resume the run', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  // t4 is done and still names w6:p1; herdr reuses ids.
+  expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w6:p1' })).ok).toBe(true)
 })
 
 test('an aborted run is resumed before it is rewound', async () => {
@@ -248,10 +313,14 @@ test('aborting a finished run is refused; aborting an escalated one resumes it e
   escalated.phase = 'escalated'
   escalated.escalated_from = 'ship-ci'
   await saveRun(dir, escalated)
-  await cmdAbort(ctx(), { runId: escalated.run_id })
-  expect((await cmdResume(ctx(), { runId: escalated.run_id })).text).toStartWith(`resumed ${escalated.run_id} at escalated`)
-  const back = (await listRuns(dir, 'personal')).find((r) => r.run_id === escalated.run_id)!
-  expect(back.escalated_from).toBe('ship-ci')
+  for (const round of [1, 2]) {
+    await cmdAbort(ctx(), { runId: escalated.run_id })
+    expect((await cmdResume(ctx(), { runId: escalated.run_id })).text, `round ${round}`)
+      .toStartWith(`resumed ${escalated.run_id} at escalated`)
+    const back = (await listRuns(dir, 'personal')).find((r) => r.run_id === escalated.run_id)!
+    expect(back.escalated_from, `round ${round}`).toBe('ship-ci')
+    expect(back.aborted_escalation_from).toBeUndefined()
+  }
 })
 
 test('abort tells a worker its dispatch is handing the brief to right now', async () => {

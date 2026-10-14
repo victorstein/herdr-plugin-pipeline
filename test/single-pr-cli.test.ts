@@ -302,19 +302,29 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
     { ...batchFixture(), ruleset_protected: true })
   run.phase = 'execute'
   run.tasks = [
-    mkTask({ task_id: 't1', branch: 'feat/a', workspace_id: 'w3', pane_id: 'w3:p1', checkout_path: clean }),
-    mkTask({ task_id: 't2', branch: 'feat/b', workspace_id: 'w4', pane_id: 'w4:p1', checkout_path: dirty }),
+    mkTask({ task_id: 't1', bead: 'hp-1', branch: 'feat/a', workspace_id: 'w3', pane_id: 'w3:p1', checkout_path: clean }),
+    mkTask({ task_id: 't2', bead: 'hp-2', branch: 'feat/b', workspace_id: 'w4', pane_id: 'w4:p1', checkout_path: dirty }),
   ]
   await saveRun(dir, run)
   const out = await cmdAbort(ctx(), { runId: run.run_id })
   const block = out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')
-  expect(block).toEqual([
+  const expected = [
     'If you will not resume it, clean up:',
     `  herdr worktree remove --workspace w3  # t1's checkout ${clean}; closes its agent and keeps feat/a`,
     `  t2's checkout ${dirty} has uncommitted work (src/wip.ts): review it before \`herdr worktree remove --workspace w4\``,
-    `  feat/b has 2 commits that did not land, up to ${revParse(dirty, 'HEAD').slice(0, 8)}; review before deleting`,
+    `  git -C '${clone}' branch -D feat/a  # origin has every commit on it`,
+    `  feat/b on origin has 2 commits that did not land, up to ${revParse(dirty, 'HEAD').slice(0, 8)}; review before ` +
+      'deleting',
     '  origin keeps batch/x, which the ruleset on batch/* protects from deletion: leave it',
-  ])
+    '  beads hp-1, hp-2 stay open, labelled aborted: a later run adopts them with `hpipe task --bead <id>` rather ' +
+      'than filing new ones, or the user closes them',
+  ]
+  expect(block).toEqual(expected)
+
+  // Nothing else prints it once this output is gone, so a second abort does.
+  const again = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(again.ok).toBe(false)
+  expect(again.text.slice(again.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual(expected)
 })
 
 test('an aborted run keeps the batch that holds a landing, and an unpushed local batch, and names a moved checkout', async () => {
@@ -342,9 +352,12 @@ test('an aborted run keeps the batch that holds a landing, and an unpushed local
   expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
     'If you will not resume it, clean up:',
     `  t2's checkout ${moved} is on other, not feat/b: review it before \`herdr worktree remove --workspace w4\``,
+    `  git -C '${clone}' branch -D t1-branch  # origin has every commit on it`,
     `  git -C '${clone}' push origin --delete t1-branch`,
     `  local batch/x has 1 commit not on origin/batch/x, up to ${repair.slice(0, 8)}; review before deleting`,
     '  origin keeps batch/x, the only copy of what t1 landed: keep it',
+    '  bead hp-1 stays open, labelled aborted: a later run adopts it with `hpipe task --bead <id>` rather than ' +
+      'filing new ones, or the user closes it',
   ])
 })
 
@@ -356,9 +369,17 @@ test('an aborted per-task run lists its worktree and the open PR\'s unmerged bra
   git(['push', '-q', 'origin', 'feat/x'], checkout)
   git(['fetch', '-q', 'origin'], clone)
 
+  // A worker's commit made but never pushed: herdr's removal keeps the branch, and only it holds the commit.
+  git(['branch', 'feat/local', 'main'], clone)
+  git(['checkout', '-q', 'feat/local'], clone)
+  commitAs(clone, 'src/local.ts', 'never pushed\n')
+  const local = revParse(clone, 'HEAD')
+  git(['checkout', '-q', 'main'], clone)
+
   const run = perTaskRun([
-    { task_id: 't1', branch: 'feat/x', phase: 'ci', pr: 12, workspace_id: 'w3', pane_id: 'w3:p1', checkout_path: checkout },
-    { task_id: 't2', branch: 'feat/never-pushed', phase: 'research' },
+    { task_id: 't1', bead: 'hp-1', branch: 'feat/x', phase: 'ci', pr: 12, workspace_id: 'w3', pane_id: 'w3:p1',
+      checkout_path: checkout },
+    { task_id: 't2', bead: 'hp-2', branch: 'feat/local', phase: 'implement' },
   ])
   run.repo_root = clone
   await saveRun(dir, run)
@@ -366,8 +387,13 @@ test('an aborted per-task run lists its worktree and the open PR\'s unmerged bra
   expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
     'If you will not resume it, clean up:',
     `  herdr worktree remove --workspace w3  # t1's checkout ${checkout}; closes its agent and keeps feat/x`,
-    `  feat/x (PR #12, left open) has 1 commit not on main, up to ${revParse(checkout, 'HEAD').slice(0, 8)}; ` +
+    `  git -C '${clone}' branch -D feat/x  # origin has every commit on it`,
+    `  local feat/local has 1 commit no branch on origin has, up to ${local.slice(0, 8)}; push it or review before ` +
+      'deleting',
+    `  feat/x on origin (PR #12, left open) has 1 commit not on main, up to ${revParse(checkout, 'HEAD').slice(0, 8)}; ` +
       'review before deleting',
+    '  beads hp-1, hp-2 stay open, labelled aborted: a later run adopts them with `hpipe task --bead <id>` rather ' +
+      'than filing new ones, or the user closes them',
   ])
 })
 

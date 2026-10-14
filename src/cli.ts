@@ -3008,8 +3008,12 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
   const hpipe = hpipeCommand(ctx.pluginRoot)
-  // A second abort would record `done` as where to resume to.
-  if (wasAborted(run)) return fail(`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`)
+  // A second abort would record `done` as where to resume to. It prints the clean-up
+  // again instead, since nothing else does once the first abort's output is gone.
+  if (wasAborted(run)) {
+    return fail([`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`,
+      ...stillOwedLines(run), ...(await abortCleanupLines(run))].join('\n'))
+  }
   if (runPhaseState(run) === 'terminal') return fail(`${run.run_id} is finished (phase: ${run.phase}); nothing to abort`)
 
   // Record where it was so resume can put it back. Worktrees and branches are untouched.
@@ -3018,6 +3022,7 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const texts = await workerNotices(ctx, run, stopping, 'aborted')
   const now = Date.now()
   run.history.push({ at: now, from: run.phase, to: 'done', why: `aborted from ${run.phase}` })
+  if (run.phase === 'escalated') run.aborted_escalation_from = run.escalated_from
   run.escalated_from = run.phase
   run.phase = 'done'
   const told = queueStops(run, stopping, texts, now)
@@ -3053,7 +3058,9 @@ async function stopNoticeLines(ctx: Ctx, told: readonly Task[], hpipe: string): 
   const who = told.map((task) => `${task.task_id} (${task.pane_id}, ${task.phase})`).join(', ')
   const supervisor = await supervisorState(ctx.stateDir, ctx.session)
   if (supervisor.state === 'live' && honours(supervisor.info, ABORT_NOTICE_CAPABILITY)) {
-    return [`Told to stop on the supervisor's next tick: ${who}. Their agents stay open, so a resume carries them on.`]
+    const stays = told.length === 1 ? 'Its agent stays open, so a resume carries it on'
+      : 'Their agents stay open, so a resume carries them on'
+    return [`Told to stop on the supervisor's next tick: ${who}. ${stays}.`]
   }
   const fix = supervisor.state === 'live'
     ? `the supervisor (pid ${supervisor.info.pid}) predates delivering it: restart it — ${RESTART_SUPERVISOR}`
@@ -3070,8 +3077,8 @@ async function dispatchOf(ctx: Ctx, run: Run): Promise<DispatchLock | null> {
 /** A dispatch re-reads the run before it starts an agent or sends a brief, and stops on an aborted one. */
 function dispatchUnderWayLines(dispatch: DispatchLock | null): string[] {
   if (dispatch === null) return []
-  return [`${holderLine(dispatch, Date.now())}: it starts no agent now, and stops at its next check. A worktree ` +
-    'it created stays; the clean-up below lists it once it is recorded.']
+  return [`${holderLine(dispatch, Date.now())}: it stops at its next check, before it starts an agent or sends a ` +
+    'brief. A worktree it created stays; the clean-up below lists it once it is recorded.']
 }
 
 /** Not a refusal: an abort ends the run's drive, and its record keeps what the human still owes. */
@@ -3101,8 +3108,9 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
   // A worker refused on an aborted run is shown the resume command, and the abort is not its to undo.
+  // Only a pane a task holds now: herdr reuses ids, so a human's pane can carry a finished task's old one.
   const worker = input.callerPane == null ? undefined
-    : run.tasks.find((task) => task.pane_id === input.callerPane || task.last_pane_id === input.callerPane)
+    : run.tasks.find((task) => task.pane_id === input.callerPane && !taskPhaseIsTerminal(task.phase))
   if (worker !== undefined) {
     return fail(`${input.callerPane} is ${worker.task_id}'s worker pane: a run is resumed by the orchestrator or the ` +
       'human, never by its workers. Stop, and end your turn')
@@ -3118,17 +3126,21 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   // A notice the supervisor is sending at this moment reads as unsent here, so every
   // worker is told to carry on, and the notice's text allows for one never stopped.
   const unsent = withdrawStops(run)
-  const escalation = back === 'escalated' ? escalatedFrom(run) : null
   const now = Date.now()
   run.history.push({ at: now, from: 'done', to: back, why: 'resumed' })
   run.phase = back
-  run.escalated_from = escalation
-  run.phase_entered_at = now
+  run.escalated_from = back === 'escalated' ? run.aborted_escalation_from ?? null : null
+  delete run.aborted_escalation_from
+  // `phase_entered_at` stays, since what the phase waits for is read against it:
+  // intake leaves only for a task registered after it, and a resume that reset it
+  // kept a run aborted in intake there for good. Measured on a live run. The stall
+  // clocks, which an abort's idle time would otherwise trip, restart instead.
+  run.stall = freshLadder(run, run, now)
+  for (const task of run.tasks) if (!taskPhaseIsTerminal(task.phase)) task.stall = freshLadder(run, task, now)
   const carryingOn = workersToCarryOn(run)
   const notices = await workerNotices(ctx, run, carryingOn, 'run-resumed')
   for (const task of carryingOn) {
     enqueue(run, { to: 'worker', taskId: task.task_id, text: notices.get(task.task_id) as string, kind: 'run-resumed' }, now)
-    task.stall = freshLadder(run, task, now)
   }
   await saveRun(ctx.stateDir, run)
   const told = carryingOn.length === 0 ? []
@@ -3138,11 +3150,6 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   return ok([`resumed ${run.run_id} at ${back}`, ...told, ...withdrawn].join('\n'))
 }
 
-/** An abort of an escalated run records `escalated` as where it was, over where the escalation came from. */
-function escalatedFrom(run: Run): RunPhase | null {
-  return run.history.findLast((entry) => entry.task_id === undefined && entry.to === 'escalated')?.from as RunPhase ??
-    null
-}
 export const cmdResume = retryingOnStale(resume)
 
 async function forget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {

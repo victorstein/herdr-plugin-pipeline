@@ -23,7 +23,7 @@ import { reviewsSkipped, skipReason } from './review-skip'
 import { describeFiles, sharedStatusLine } from './shared-paths'
 import { effortSummary } from './tier-prompt'
 import type {
-  Batch, MissingArtifact, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
+  Batch, MissingArtifact, OutboxEntry, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
 } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
@@ -590,7 +590,10 @@ function finishedRunSummary(run: Run, hpipe: string, holds: PaneHolds): string[]
 
 /** The abort said the workers would be told; a notice that has not gone is the one thing it still owes. */
 function unsentStops(run: Run, holds: PaneHolds): string[] {
-  return (run.outbox ?? []).filter((entry) => entry.kind === 'abort' && isCurrent(run, entry)).map((entry) => {
+  // One held for a brief owes nothing: no brief goes to an aborted run, so that agent never starts work.
+  const briefed = (entry: OutboxEntry) => run.tasks.find((t) => t.task_id === entry.task_id)?.awaiting_brief !== true
+  const owed = (run.outbox ?? []).filter((entry) => entry.kind === 'abort' && isCurrent(run, entry) && briefed(entry))
+  return owed.map((entry) => {
     const pane = recipientPane(run, entry)
     const notice = `${entry.task_id}'s stop notice`
     if (pane === null) return `  ⚠ ${notice} waits for a pane: ${entry.task_id} has none`

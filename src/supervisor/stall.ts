@@ -177,8 +177,8 @@ export function taskStallCandidates(
 /**
  * The ladder state for this phase entry, or a fresh one. BOTH stamps must
  * match: `at` re-arms on the record's own phase entry, `run_at` on the run's —
- * which is what makes `hpipe resume` re-arm a task's ladder even though
- * `cmdResume` (`src/cli.ts:304-320`) never walks `run.tasks`.
+ * which is what makes a run-level rewind re-arm a task's ladder even though it
+ * never walks `run.tasks`.
  */
 export function stallStateFor(run: Run, record: Run | Task): StallState {
   const s = record.stall

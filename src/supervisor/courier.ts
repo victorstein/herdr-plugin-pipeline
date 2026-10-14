@@ -599,6 +599,8 @@ export function outboxPending(run: Run, footer?: string): PendingPrompt[] {
   return (run.outbox ?? []).flatMap((entry) => {
     if (!isCurrent(run, entry)) return []
     if (finished && entry.task_id !== null && entry.kind !== 'abort') return []
+    // Ahead of the brief a dispatch may still be sending, a stop would be the agent's first message (#105).
+    if (entry.kind === 'abort' && run.tasks.find((t) => t.task_id === entry.task_id)?.awaiting_brief === true) return []
     const paneId = recipientPane(run, entry)
     if (paneId === null) return []
     const isOrchestrator = entry.to === 'orchestrator'

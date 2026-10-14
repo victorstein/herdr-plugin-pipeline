@@ -116,7 +116,7 @@ test('the clean-up deletes only task branches whose head landed, and names the r
   git(['fetch', '-q', 'origin', '+refs/heads/t1-branch:refs/remotes/origin/t1-branch'], clone)
   const lines = await cleanupLines(landedOnly, landedOnly.batch!)
   expect(lines.join('\n')).not.toContain('--delete t1-branch')
-  expect(lines).toContain(`  t1-branch has 1 commit that did not land, up to ${handoff.slice(0, 8)}; review before deleting`)
+  expect(lines).toContain(`  t1-branch on origin has 1 commit that did not land, up to ${handoff.slice(0, 8)}; review before deleting`)
   expect(lines.join('\n')).not.toContain('t3-branch')
   // Neither the batch checkout nor a local batch branch was ever made here.
   expect(lines.join('\n')).not.toContain('worktree')
@@ -268,7 +268,7 @@ test('a per-task run\'s done notice cleans up the branches of merged PRs and the
   expect(text.slice(text.indexOf('Clean up when you are done with it:'))).toBe([
     'Clean up when you are done with it:',
     `  git -C '${clone}' push origin --delete t1-branch`,
-    `  t3-branch has 1 commit PR #56 did not merge, up to ${t3After.slice(0, 8)}; review before deleting`,
+    `  t3-branch on origin has 1 commit PR #56 did not merge, up to ${t3After.slice(0, 8)}; review before deleting`,
     `  git -C '${clone}' branch -D t1-branch`,
     `  local t3-branch has 1 commit PR #56 did not merge, up to ${t3After.slice(0, 8)}; review before deleting`,
     `  git -C '${clone}' pull --ff-only  # main predates PR #55's merge`,

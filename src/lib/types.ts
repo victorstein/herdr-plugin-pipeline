@@ -405,6 +405,11 @@ export interface Run {
   phase: RunPhase
   phase_entered_at: number
   escalated_from: RunPhase | null
+  /**
+   * Set while an escalated run is aborted: the abort records `escalated` in
+   * `escalated_from`, and this keeps where the escalation came from for the resume.
+   */
+  aborted_escalation_from?: RunPhase | null
   orchestrator_pane: string | null
   artifacts: RunArtifacts
   tasks: Task[]
