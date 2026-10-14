@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { openDecisionFor } from './decisions'
+import { wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { type PhaseRow, runRow, taskRow } from './phases'
 import type { OutboxEntry, Run, StallState, Task } from './types'
@@ -9,7 +10,9 @@ function recordOf(run: Run, taskId: string | null): Run | Task | undefined {
   return taskId === null ? run : run.tasks.find((t) => t.task_id === taskId)
 }
 
+/** A stop notice is about the abort, and lapses with it. */
 export function isCurrent(run: Run, entry: OutboxEntry): boolean {
+  if (entry.kind === 'abort' && !wasAborted(run)) return false
   return recordOf(run, entry.task_id)?.phase_entered_at === entry.entered_at
 }
 

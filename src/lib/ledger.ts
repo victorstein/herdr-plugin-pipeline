@@ -301,11 +301,13 @@ export function runPhaseState(run: Run): 'live' | 'terminal' | 'unreadable' {
 
 /**
  * `abort` parks a run in `done` and overloads `escalated_from` with where it
- * was, so neither field alone tells an aborted run from one that finished.
+ * was, so neither field alone tells an aborted run from one that finished. The
+ * last run-level entry, not the last entry: the supervisor still records a
+ * worker pane's loss on an aborted run's tasks.
  */
 export function wasAborted(run: Run): boolean {
   return run.phase === 'done' && run.escalated_from !== null &&
-    run.history.at(-1)?.why?.startsWith('aborted from') === true
+    run.history.findLast((entry) => entry.task_id === undefined)?.why?.startsWith('aborted from') === true
 }
 
 /**

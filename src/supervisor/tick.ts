@@ -1,5 +1,5 @@
 import { abandonDecisions } from '../lib/decisions'
-import { isUnlandedSave, runIsDriven } from '../lib/ledger'
+import { isUnlandedSave, runIsDriven, wasAborted } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { fileHolders } from '../lib/gating'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
@@ -279,6 +279,12 @@ export function workerStillNeeded(run: Run, task: Task): boolean {
 }
 
 function losePane(run: Run, task: Task, wake: WakeLine[]): void {
+  // Nothing drives an aborted run, so its tasks keep their phases for a resume:
+  // the abort's own clean-up closes the panes it lists.
+  if (wasAborted(run)) {
+    releaseWorkerPane(task)
+    return
+  }
   if (!workerStillNeeded(run, task)) {
     // The answer to an open decision is delivered to the worker's pane, so with
     // that pane gone the question is moot and the task goes back to the row the
@@ -505,7 +511,9 @@ export function applyEvents(
     const phaseAtEvent = task.phase
 
     if (event.kind === 'pane.agent_detected') {
-      if (event.released === true) {
+      if (event.released === true && wasAborted(run)) {
+        releaseWorkerPane(task)
+      } else if (event.released === true) {
         // A dead pane can never deliver or answer, so its open question is
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)

@@ -317,6 +317,60 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
   ])
 })
 
+test('an aborted run keeps the batch that holds a landing, and an unpushed local batch, and names a moved checkout', async () => {
+  const { clone } = cloneOfRemote('main')
+  git(['checkout', '-q', '-b', 't1-branch'], clone)
+  commitAs(clone, 'src/t1.ts', 't1\n')
+  git(['push', '-q', 'origin', 't1-branch', 'HEAD:refs/heads/batch/x'], clone)
+  git(['checkout', '-q', '-b', 'batch/x', 'origin/batch/x'], clone)
+  commitAs(clone, 'src/repair.ts', 'a ship repair never pushed\n')
+  const repair = revParse(clone, 'HEAD')
+  git(['checkout', '-q', 'main'], clone)
+  const moved = join(tempDir('hpipe-wt-'), 'feat-b')
+  git(['worktree', 'add', '-q', '-b', 'other', moved, 'main'], clone)
+  git(['fetch', '-q', 'origin'], clone)
+
+  const run = withBatch(newRun({ session: 'personal', socketPath: '/s', repoKey: clone, repoRoot: clone, title: 'a' }),
+    { ...batchFixture(), ruleset_protected: true })
+  run.phase = 'execute'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'done', landed: [{ title: 'feat: t1', land_sha: 'L1', at: 1 }] }),
+    mkTask({ task_id: 't2', branch: 'feat/b', workspace_id: 'w4', pane_id: 'w4:p1', checkout_path: moved }),
+  ]
+  await saveRun(dir, run)
+  const out = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
+    'If you will not resume it, clean up:',
+    `  t2's checkout ${moved} is on other, not feat/b: review it before \`herdr worktree remove --workspace w4\``,
+    `  git -C '${clone}' push origin --delete t1-branch`,
+    `  local batch/x has 1 commit not on origin/batch/x, up to ${repair.slice(0, 8)}; review before deleting`,
+    '  origin keeps batch/x, the only copy of what t1 landed: keep it',
+  ])
+})
+
+test('an aborted per-task run lists its worktree and the open PR\'s unmerged branch', async () => {
+  const { clone } = cloneOfRemote('main')
+  const checkout = join(tempDir('hpipe-wt-'), 'feat-x')
+  git(['worktree', 'add', '-q', '-b', 'feat/x', checkout, 'main'], clone)
+  commitAs(checkout, 'src/x.ts', 'x\n')
+  git(['push', '-q', 'origin', 'feat/x'], checkout)
+  git(['fetch', '-q', 'origin'], clone)
+
+  const run = perTaskRun([
+    { task_id: 't1', branch: 'feat/x', phase: 'ci', pr: 12, workspace_id: 'w3', pane_id: 'w3:p1', checkout_path: checkout },
+    { task_id: 't2', branch: 'feat/never-pushed', phase: 'research' },
+  ])
+  run.repo_root = clone
+  await saveRun(dir, run)
+  const out = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
+    'If you will not resume it, clean up:',
+    `  herdr worktree remove --workspace w3  # t1's checkout ${checkout}; closes its agent and keeps feat/x`,
+    `  feat/x (PR #12, left open) has 1 commit not on main, up to ${revParse(checkout, 'HEAD').slice(0, 8)}; ` +
+      'review before deleting',
+  ])
+})
+
 // ——— batch-check ———
 
 async function shippingRun(check: string | null): Promise<{ run: Run; checkout: string; clone: string; remote: string }> {

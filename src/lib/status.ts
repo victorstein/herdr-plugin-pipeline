@@ -15,7 +15,9 @@ import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
 import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
-import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
+import {
+  deliveryWarnings, isCurrent, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt, recipientPane,
+} from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
 import { describeFiles, sharedStatusLine } from './shared-paths'
@@ -565,7 +567,7 @@ function intakeWarning(run: Run, hpipe: string): string[] {
  * orphan's worktree, which nothing else will remove, and the branch and PR of
  * any task that did not land, which the summary alone would hide.
  */
-function finishedRunSummary(run: Run, hpipe: string): string[] {
+function finishedRunSummary(run: Run, hpipe: string, holds: PaneHolds): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const idsByPhase = new Map<string, string[]>()
   for (const task of byId) {
@@ -580,7 +582,27 @@ function finishedRunSummary(run: Run, hpipe: string): string[] {
   const shipping = run.batch === undefined ? [] : [shippedLine(run, run.batch)]
 
   const owed = owedInRun(run).map((o) => `  ⚠ ended with ${checkName(o)} still owed to the human: ${o.check.check}`)
-  return [...head, ...shipping, ...owed, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+  return [
+    ...head, ...shipping, ...owed, ...unsentStops(run, holds),
+    ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe)),
+  ]
+}
+
+/** The abort said the workers would be told; a notice that has not gone is the one thing it still owes. */
+function unsentStops(run: Run, holds: PaneHolds): string[] {
+  return (run.outbox ?? []).filter((entry) => entry.kind === 'abort' && isCurrent(run, entry)).map((entry) => {
+    const pane = recipientPane(run, entry)
+    const notice = `${entry.task_id}'s stop notice`
+    if (pane === null) return `  ⚠ ${notice} waits for a pane: ${entry.task_id} has none`
+    const hold = holds[pane]
+    if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
+      return `  ⚠ ${notice} is held by text in the input box of ${pane} — submit or clear that text`
+    }
+    if (hold !== undefined || entry.attempts > 0) {
+      return `  ⚠ ${notice} has not reached ${pane}${entry.last_code === undefined ? '' : ` (${entry.last_code})`}`
+    }
+    return `  ${notice} is queued for ${pane}`
+  })
 }
 
 /** A landed task's code reaches the default branch only with the batch PR, so a run that stopped short says so. */
@@ -676,7 +698,7 @@ export function formatStatus(
     }
 
     if (runRow(run.phase).terminal === true) {
-      lines.push(...finishedRunSummary(run, hpipe))
+      lines.push(...finishedRunSummary(run, hpipe, holds))
       continue
     }
     if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now, hpipe))

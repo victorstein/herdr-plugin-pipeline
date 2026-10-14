@@ -781,19 +781,29 @@ async function batchCleanup(run: Run, batch: Batch): Promise<string[]> {
     }
   }
   const repo = shellQuoted(run.repo_root)
-  const localBatch = await resolveCommit(run.repo_root, `refs/heads/${batch.branch}`)
   return [
     ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
     ...await checkoutRemovalLines(run.repo_root, batch.checkout, repo),
-    ...(localBatch === null ? [] : [`  git -C ${repo} branch -D ${shellWord(batch.branch)}`]),
+    ...await localBatchLines(run, batch, batchRef, repo),
   ]
 }
 
-/**
- * The tip alone read as the one commit that did not land, and was already stale:
- * the worker pushed two more after the abort printed it. Measured on a live run.
- */
+/** `branch -D` forces, so only a branch origin already holds: a ship repair committed but never pushed lives only here. */
+async function localBatchLines(run: Run, batch: Batch, batchRef: string, repo: string): Promise<string[]> {
+  const local = await resolveCommit(run.repo_root, `refs/heads/${batch.branch}`)
+  if (local === null) return []
+  const pushed = await isAncestor(run.repo_root, local, batchRef)
+  if (pushed === true) return [`  git -C ${repo} branch -D ${shellWord(batch.branch)}`]
+  if (pushed === false) {
+    return [`  local ${batch.branch} ${await commitsNotOn(run.repo_root, local, batchRef, `not on origin/${batch.branch}`)}; ` +
+      'review before deleting']
+  }
+  return [`  local ${batch.branch} is at ${sha8(local)}, which could not be compared with origin/${batch.branch}; check ` +
+    'before deleting']
+}
+
+/** The tip alone read as the one commit that did not land. Measured on a live run. */
 async function commitsNotOn(repoRoot: string, sha: string, base: string, what: string): Promise<string> {
   const counted = await git(repoRoot, ['rev-list', '--count', `${base}..${sha}`])
   const count = counted.code === 0 ? Number.parseInt(counted.text.trim(), 10) : Number.NaN
@@ -869,9 +879,28 @@ export async function abortCleanupLines(run: Run): Promise<string[]> {
     ...(await taskWorktreeLines(run, repo)),
     ...(run.batch === undefined
       ? await perTaskAbortLines(run, repo)
-      : [...(await batchCleanup(run, run.batch)), ...(await originBatchLines(run, run.batch, repo))]),
+      : [...(await batchCleanup(run, run.batch)), ...(await abortedBatchLines(run, run.batch, repo))]),
   ]
   return lines.length === 0 ? [] : ['If you will not resume it, clean up:', ...lines]
+}
+
+/** Nothing of an aborted run reached the default branch, so the batch on origin is the only copy of every landing. */
+async function abortedBatchLines(run: Run, batch: Batch, repo: string): Promise<string[]> {
+  const onOrigin = await remoteBranchHeadCooled(run.repo_root, batch.branch)
+  if (!onOrigin.ok || onOrigin.sha === null) return []
+  const landed = run.tasks.filter((t) => (t.landed ?? []).length > 0).map((t) => t.task_id)
+  if (landed.length > 0) {
+    return [`  origin keeps ${batch.branch}, the only copy of what ${landed.join(', ')} landed: keep it`]
+  }
+  if (await isAncestor(run.repo_root, onOrigin.sha, `refs/remotes/origin/${batch.into}`) !== true) {
+    return [`  origin keeps ${batch.branch} at ${sha8(onOrigin.sha)}, which holds commits not on ${batch.into}; ` +
+      'review before deleting']
+  }
+  if (batch.ruleset_protected === true) {
+    return [`  origin keeps ${batch.branch}, which the ruleset on ${rulesetPattern(batch.branch)} protects from deletion: leave it`]
+  }
+  return [`  git -C ${repo} push origin --delete ${shellWord(batch.branch)}  # nothing landed on it; a ruleset on ` +
+    `${rulesetPattern(batch.branch)} needs a bypass`]
 }
 
 /** herdr's removal closes the workspace's agent and, like git's, keeps the branch. */
@@ -883,6 +912,13 @@ async function taskWorktreeLines(run: Run, repo: string): Promise<string[]> {
     const removal = task.workspace_id === null
       ? `git -C ${repo} worktree remove ${shellQuoted(checkout)}`
       : `herdr worktree remove --workspace ${task.workspace_id}`
+    const head = await git(checkout, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+    const branch = head.code === 0 ? head.text.trim() : null
+    if (branch !== task.branch) {
+      lines.push(`  ${task.task_id}'s checkout ${checkout} is on ${branch ?? 'no branch'}, not ${task.branch}: review it ` +
+        `before \`${removal}\``)
+      continue
+    }
     const uncommitted = await uncommittedPaths(checkout)
     if (uncommitted === null || uncommitted.length > 0) {
       const what = uncommitted === null ? 'work git could not read' : `uncommitted work (${sample(uncommitted)})`

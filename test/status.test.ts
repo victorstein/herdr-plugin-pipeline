@@ -681,6 +681,33 @@ test('an aborted run names how to resume it and keeps its unfinished work visibl
   expect(text).toContain(`  ℹ t2 [merge] fix/b PR #41 — \`${HP} show --task t2 --run ${run.run_id}\``)
 })
 
+test('an aborted run lists each stop notice not yet delivered, and why it is held', () => {
+  const run = mkRun()
+  run.history.push({ at: 0, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }),
+    mkTask({ task_id: 't2', phase: 'spec', pane_id: 'w4:p1' }),
+    mkTask({ task_id: 't3', phase: 'plan', pane_id: 'w5:p1' }),
+  ]
+  for (const taskId of ['t1', 't2', 't3']) enqueue(run, { to: 'worker', taskId, text: 'stop', kind: 'abort' }, 0)
+  run.outbox![2] = { ...run.outbox![2]!, attempts: 2, last_code: 'agent_pane_busy' }
+  const holds = { 'w4:p1': { since: 0, failures: 1, code: 'stuck_input' } }
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), 0, { holds })
+  expect(text).toContain("  t1's stop notice is queued for w3:p1")
+  expect(text).toContain("  ⚠ t2's stop notice is held by text in the input box of w4:p1 — submit or clear that text")
+  expect(text).toContain("  ⚠ t3's stop notice has not reached w5:p1 (agent_pane_busy)")
+})
+
+test('a queued notice that the run was resumed is named as such, not as a usage-limit resume', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w3:p1', agent_status: 'idle' })]
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'run-resumed' }, 0)
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).toContain('nothing for you — its notice that the run was resumed is queued for w3:p1')
+})
+
 test('a finished run with no tasks prints no ended line', () => {
   const run = mkRun()
   run.phase = 'done'
