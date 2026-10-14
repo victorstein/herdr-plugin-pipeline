@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.2.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.0...v2.2.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* leave a file gate passed straight through out of visited ([de47ab7](https://github.com/victorstein/herdr-plugin-pipeline/commit/de47ab7bf1f78ab1b1d15f5a845defa1de687912))
+* open the dispatch prompt with a dispatch already running ([de47ab7](https://github.com/victorstein/herdr-plugin-pipeline/commit/de47ab7bf1f78ab1b1d15f5a845defa1de687912))
+* say when the human is asked for a before-merge check before its gate ([de47ab7](https://github.com/victorstein/herdr-plugin-pipeline/commit/de47ab7bf1f78ab1b1d15f5a845defa1de687912))
+
 ## [2.2.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.1.1...v2.2.0) (2026-10-14)
 
 
