@@ -439,7 +439,7 @@ test('actionFor answers whose move it is, by rung', () => {
   // #120: inside the bootstrap grace a dispatch is still under way, so it is not
   // flagged; with no worktree yet the steps left start at the worktree.
   expect(at('research', { awaiting_brief: true, pane_id: null }))
-    .toBe('dispatch under way — `hp dispatch --task t1` (run it in the background) runs what is left; by hand, ' +
+    .toBe('not dispatched yet — `hp dispatch --task t1` (run it in the background) runs what is left; by hand, ' +
       "once the repo's bootstrap has run in its checkout, " +
       '`herdr agent start hp-1 --kind claude --pane <root pane> -- --dangerously-skip-permissions --effort high`, ' +
       'then `hp dispatch --task t1 --pane <root pane>`')
@@ -447,7 +447,7 @@ test('actionFor answers whose move it is, by rung', () => {
     awaiting_brief: true as const, pane_id: null, workspace_id: null, checkout_path: null, phase_entered_at: Date.now(),
   }
   expect(at('research', justDispatched))
-    .toStartWith('dispatch under way — `hp dispatch --task t1` (run it in the background) runs every step; by hand, ' +
+    .toStartWith('not dispatched yet — `hp dispatch --task t1` (run it in the background) runs every step; by hand, ' +
       "`herdr worktree create --cwd '/r' --branch feat/x --base <commit>`")
   expect(at('research')).toBe("worker's move: waiting for its research artifact")
   expect(at('plan')).toBe("worker's move: waiting for its plan artifact")

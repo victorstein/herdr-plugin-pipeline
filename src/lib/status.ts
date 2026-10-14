@@ -36,7 +36,7 @@ export interface StatusSupervisor {
 }
 
 const MS_PER_MINUTE = 60_000
-const DISPATCH_UNDER_WAY = 'dispatch under way'
+const NOT_DISPATCHED_YET = 'not dispatched yet'
 
 /** Clamped: a future stamp from clock skew must not print "-1m" at an operator. */
 export function ageMinutes(sinceMs: number, now: number): number {
@@ -252,7 +252,7 @@ function moveFor(
       // above claim every other case — and a dispatch still being carried out is
       // not yet the orchestrator's lapse. Measured on a live run.
       if (unbriefed.paneId === null) {
-        return notYours(`${DISPATCH_UNDER_WAY} — ${remainingDispatchSteps(run, task, hpipe)}`)
+        return notYours(`${NOT_DISPATCHED_YET} — ${remainingDispatchSteps(run, task, hpipe)}`)
       }
       return yours(`YOUR move: its agent in ${unbriefed.paneId} has not been handed the brief — ` +
         briefCommand(task, unbriefed.paneId, hpipe))
@@ -381,8 +381,10 @@ export function actionFor(
 
 /**
  * A move waiting on you is listed under `waiting on you:`; any other clause
- * printed nowhere, so the grace's "dispatch under way" never showed. Measured on
- * a live run. The grace's full recipe is left to `show`: on a line where nothing
+ * printed nowhere, so the grace's clause never showed. Measured on a live run.
+ * The grace says "not dispatched yet", not "under way": a dispatch that runs is
+ * known from its lock, and one that stopped left no lock behind. Measured on a
+ * live run. The grace's full recipe is left to `show`: on a line where nothing
  * is owed yet it only buried the task.
  */
 function taskLineMove(
@@ -390,8 +392,8 @@ function taskLineMove(
 ): string {
   const move = moveFor(run, task, hpipe, now, holds, dispatches)
   if (move.waitsOnYou) return ''
-  if (move.clause.startsWith(DISPATCH_UNDER_WAY)) {
-    return ` — ${DISPATCH_UNDER_WAY} — see \`${hpipe} show --task ${task.task_id}\``
+  if (move.clause.startsWith(NOT_DISPATCHED_YET)) {
+    return ` — ${NOT_DISPATCHED_YET} — see \`${hpipe} show --task ${task.task_id}\``
   }
   return ` — ${move.clause}`
 }

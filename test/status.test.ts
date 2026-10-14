@@ -592,7 +592,7 @@ test('a rewound task awaiting its brief with no worktree is flagged at once, not
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   expect(text).toContain('waiting on you:')
   expect(text).toContain('YOUR move: no worktree and no agent')
-  expect(text).not.toContain('dispatch under way')
+  expect(text).not.toContain('not dispatched yet')
 })
 
 test('a task the gate just opened is not flagged while its dispatch is under way — #94', () => {
@@ -695,7 +695,7 @@ test('a dispatch inside its grace reads as under way on its task line — #135',
   })]
   const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), now)
   const taskLine = text.split('\n').find((line) => line.startsWith('  t1 '))
-  expect(taskLine).toEndWith(`[research 0m] heavy agent:unknown — dispatch under way — see \`${HP} show --task t1\``)
+  expect(taskLine).toEndWith(`[research 0m] heavy agent:unknown — not dispatched yet — see \`${HP} show --task t1\``)
   expect(text).not.toContain('waiting on you:')
 })
 

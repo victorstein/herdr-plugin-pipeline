@@ -201,7 +201,7 @@ by the task's bead id, with no `<name>` left in it: run it verbatim, and `herdr 
 agent under that name. A refusal of the name, or of a second start under it after a rewind, is a
 finding. Until its agent is detected, for up
 to five minutes from the dispatch (or from `worktree create`, once that binds), the task's own line
-in `hpipe status` ends ``… unknown — dispatch under way — see `hpipe show --task <id>` ``, and nothing
+in `hpipe status` ends ``… unknown — not dispatched yet — see `hpipe show --task <id>` ``, and nothing
 is listed under `waiting on you:` (#120, #135). A digest sent in the grace carries the rest of the
 dispatch in full, starting at `worktree create` while the task has no worktree. Every task line that is
 not waiting on you ends with its move clause the same way (`— worker's move: waiting for …`,
