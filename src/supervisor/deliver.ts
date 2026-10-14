@@ -764,6 +764,7 @@ export async function cleanupLines(run: Run, batch: Batch): Promise<string[]> {
 }
 
 async function batchCleanup(run: Run, batch: Batch): Promise<string[]> {
+  const repo = shellQuoted(run.repo_root)
   const batchRef = `refs/remotes/origin/${batch.branch}`
   const deletable: string[] = []
   const kept: string[] = []
@@ -779,13 +780,12 @@ async function batchCleanup(run: Run, batch: Batch): Promise<string[]> {
       deletable.push(task.branch)
     } else if (landed === false) {
       const notLanded = await commitsNotOn(run.repo_root, remote.sha, batchRef, 'that did not land')
-      kept.push(`  ${task.branch} on origin ${notLanded}; review before deleting`)
+      kept.push(`  ${task.branch} on origin ${notLanded}; ${reviewThenDelete(repo, task.branch)}`)
     } else {
       kept.push(`  ${task.branch} is at ${sha8(remote.sha)}, which could not be compared with ${batch.branch} here; ` +
         'fetch it and check before deleting')
     }
   }
-  const repo = shellQuoted(run.repo_root)
   return [
     ...(deletable.length === 0 ? [] : [`  git -C ${repo} push origin --delete ${deletable.map(shellWord).join(' ')}`]),
     ...kept,
@@ -806,6 +806,11 @@ async function localBatchLines(run: Run, batch: Batch, batchRef: string, repo: s
   }
   return [`  local ${batch.branch} is at ${sha8(local)}, which could not be compared with origin/${batch.branch}; check ` +
     'before deleting']
+}
+
+/** A review line with no command left the operator to work out the delete. Measured on a live run. */
+function reviewThenDelete(repo: string, branch: string): string {
+  return `review them, then \`git -C ${repo} push origin --delete ${shellWord(branch)}\``
 }
 
 /** The tip alone read as the one commit that did not land. Measured on a live run. */
@@ -925,8 +930,8 @@ async function abortLocalBranchLines(run: Run, repo: string, kept: ReadonlySet<s
     }
   }
   return [
-    ...(deletable.length === 0 ? [] : [`  git -C ${repo} branch -D ${deletable.map(shellWord).join(' ')}  # origin ` +
-      `has every commit on ${deletable.length === 1 ? 'it' : 'them'}`]),
+    ...(deletable.length === 0 ? [] : [`  git -C ${repo} branch -D ${deletable.map(shellWord).join(' ')}  # no ` +
+      'commit on it is missing from origin']),
     ...unpushed,
   ]
 }
@@ -1008,7 +1013,7 @@ async function perTaskAbortLines(run: Run, repo: string): Promise<string[]> {
     } else if (remote.sha !== null) {
       const notOn = mainline === null ? `is at ${sha8(remote.sha)}`
         : await commitsNotOn(run.repo_root, remote.sha, `refs/remotes/origin/${mainline}`, `not on ${mainline}`)
-      unmerged.push(`  ${task.branch} on origin${pr} ${notOn}; review before deleting`)
+      unmerged.push(`  ${task.branch} on origin${pr} ${notOn}; ${reviewThenDelete(repo, task.branch)}`)
     } else if (task.pr !== null) {
       unmerged.push(`  PR #${task.pr} is left open, and origin no longer has ${task.branch}`)
     }

@@ -115,8 +115,10 @@ test('the clean-up deletes only task branches whose head landed, and names the r
 
   git(['fetch', '-q', 'origin', '+refs/heads/t1-branch:refs/remotes/origin/t1-branch'], clone)
   const lines = await cleanupLines(landedOnly, landedOnly.batch!)
-  expect(lines.join('\n')).not.toContain('--delete t1-branch')
-  expect(lines).toContain(`  t1-branch on origin has 1 commit that did not land, up to ${handoff.slice(0, 8)}; review before deleting`)
+  // Only behind a review: never a line of its own to run as it stands.
+  expect(lines.some((line) => line.trimStart().startsWith('git') && line.includes('--delete t1-branch'))).toBe(false)
+  expect(lines).toContain(`  t1-branch on origin has 1 commit that did not land, up to ${handoff.slice(0, 8)}; review them, then ` +
+    `\`git -C '${clone}' push origin --delete t1-branch\``)
   expect(lines.join('\n')).not.toContain('t3-branch')
   // Neither the batch checkout nor a local batch branch was ever made here.
   expect(lines.join('\n')).not.toContain('worktree')

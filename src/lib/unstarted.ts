@@ -202,9 +202,15 @@ export function dispatchWorkerCommand(run: Run, task: Task, hpipe: string): stri
   const setUp = `${worktree}, then ${startAgent(task)}`
   if (task.phase === taskRow('queued').onClear) {
     const byHand = `${setUp}, then ${briefByPane(task, '<root pane>', hpipe)}`
-    return unbriefedWorker(run, task) === null
-      ? byHand
-      : `${oneCommandDispatch(task, hpipe)} runs every step; by hand, ${byHand}`
+    if (unbriefedWorker(run, task) === null) return byHand
+    // A dispatch will not adopt a checkout no workspace is bound to: closing a
+    // worker's last pane takes its workspace with it, and the one command that was
+    // said to run every step stopped at the worktree. Measured on a live run.
+    if (task.checkout_path !== null) {
+      return `${open} first, to bind its checkout again (skip it if that answers \`worktree_not_found\`), then ` +
+        `${oneCommandDispatch(task, hpipe)} runs the rest; by hand, ${byHand}`
+    }
+    return `${oneCommandDispatch(task, hpipe)} runs every step; by hand, ${byHand}`
   }
   return `${setUp}; ${handoffPastBrief(run, task, hpipe)}`
 }

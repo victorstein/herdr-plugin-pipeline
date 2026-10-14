@@ -322,9 +322,9 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
     abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  herdr worktree remove --workspace w3  # t1's checkout ${clean}; closes its agent and keeps feat/a`,
     `  t2's checkout ${dirty} has uncommitted work (src/wip.ts): review it before \`herdr worktree remove --workspace w4\``,
-    `  git -C '${clone}' branch -D feat/a  # origin has every commit on it`,
-    `  feat/b on origin has 2 commits that did not land, up to ${revParse(dirty, 'HEAD').slice(0, 8)}; review before ` +
-      'deleting',
+    `  git -C '${clone}' branch -D feat/a  # no commit on it is missing from origin`,
+    `  feat/b on origin has 2 commits that did not land, up to ${revParse(dirty, 'HEAD').slice(0, 8)}; review them, ` +
+      `then \`git -C '${clone}' push origin --delete feat/b\``,
     '  origin keeps batch/x, which the ruleset on batch/* protects from deletion: leave it',
     '  beads hp-1, hp-2 stay open, labelled aborted: a later run adopts them with `hpipe task --bead <id>` rather ' +
       'than filing new ones, or the user closes them',
@@ -362,7 +362,7 @@ test('an aborted run keeps the batch that holds a landing, and an unpushed local
   expect(out.text.slice(out.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual([
     abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  t2's checkout ${moved} is on other, not feat/b: review it before \`herdr worktree remove --workspace w4\``,
-    `  git -C '${clone}' branch -D t1-branch  # origin has every commit on it`,
+    `  git -C '${clone}' branch -D t1-branch  # no commit on it is missing from origin`,
     `  git -C '${clone}' push origin --delete t1-branch`,
     `  local batch/x has 1 commit not on origin/batch/x, up to ${repair.slice(0, 8)}; review before deleting`,
     '  origin keeps batch/x, the only copy of what t1 landed: keep it',
@@ -397,11 +397,11 @@ test('an aborted per-task run lists its worktree and the open PR\'s unmerged bra
   expect(out.text.slice(out.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual([
     abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  herdr worktree remove --workspace w3  # t1's checkout ${checkout}; closes its agent and keeps feat/x`,
-    `  git -C '${clone}' branch -D feat/x  # origin has every commit on it`,
+    `  git -C '${clone}' branch -D feat/x  # no commit on it is missing from origin`,
     `  local feat/local has 1 commit no branch on origin has, up to ${local.slice(0, 8)}; push it or review before ` +
       'deleting',
     `  feat/x on origin (PR #12, left open) has 1 commit not on main, up to ${revParse(checkout, 'HEAD').slice(0, 8)}; ` +
-      'review before deleting',
+      `review them, then \`git -C '${clone}' push origin --delete feat/x\``,
     '  beads hp-1, hp-2 stay open, labelled aborted: a later run adopts them with `hpipe task --bead <id>` rather ' +
       'than filing new ones, or the user closes them',
   ])

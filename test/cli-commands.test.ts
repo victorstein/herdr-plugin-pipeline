@@ -283,7 +283,9 @@ test('resume queues the brief and phase prompt for a task whose pane went while 
 })
 
 test('resume makes a research task whose pane went owed its brief again, so a dispatch hands it over', async () => {
-  const run = runWithTasks([{ task_id: 't1', phase: 'research', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'research', pane_id: 'w3:p1', workspace_id: 'w3', checkout_path: '/r/wt/feat-x',
+  }])
   run.repo_root = repoDir
   run.phase = 'execute'
   await saveRun(dir, run)
@@ -295,6 +297,9 @@ test('resume makes a research task whose pane went owed its brief again, so a di
 
   const out = await cmdResume(ctx(), { runId: run.run_id })
   expect(out.text).toContain('t1 has no agent, since its pane went while the run was aborted')
+  // The closed pane took its workspace with it, and a dispatch will not adopt a checkout no workspace is bound to.
+  expect(out.text).toContain(`\`herdr worktree open --cwd '${repoDir}' --branch b\` first, to bind its checkout again ` +
+    `(skip it if that answers \`worktree_not_found\`), then \`${hpipeCommand(ctx().pluginRoot)} dispatch --task t1\``)
   const resumed = (await listRuns(dir, 'personal'))[0]!
   expect(resumed.tasks[0]?.awaiting_brief).toBe(true)
 })
