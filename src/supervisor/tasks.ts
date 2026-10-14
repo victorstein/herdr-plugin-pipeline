@@ -422,8 +422,11 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
     // while it is mid-turn, exactly as run phases are gated. Their signals are
     // GitHub's, so with no orchestrator there is no turn to wait out: a PR merged
     // by hand while it was `/exit`ed sat in `merge` for 10½ minutes until it came
-    // back. Measured on a live run.
-    if (row.actor === 'orchestrator' && !actorIdle && pane !== null && deps.hasLiveAgent(pane)) continue
+    // back. Measured on a live run. A landing is the exception: it is one push of
+    // the reviewed sha, which updates the clone's own `origin/` ref, and a digest
+    // sent mid-turn asked again for a push already made. Measured on a live run.
+    const landing = modeOf(run) === 'single-pr' && task.phase === 'merge'
+    if (row.actor === 'orchestrator' && !actorIdle && !landing && pane !== null && deps.hasLiveAgent(pane)) continue
 
     const worker = row.actor === 'worker' ? pane : null
     const busy = actorIdle && await runsInBackground(deps, worker)

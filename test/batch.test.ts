@@ -174,6 +174,9 @@ test('the squash commit carries every line: the first as its subject, the rest i
   ])
   expect(squashSubject(run)).toBe('fix(reader): close the menu')
   expect(squashBody(run)).toBe("feat(reader)!: don't keep bookmarks\nperf(db): batch the reads\n")
+  // GitHub links its own squash subjects to their PR, never one given with --subject.
+  run.batch!.pr = 301
+  expect(squashSubject(run)).toBe('fix(reader): close the menu (#301)')
 })
 
 test('the suggested PR title takes the strongest type, a breaking mark, and the run title', () => {

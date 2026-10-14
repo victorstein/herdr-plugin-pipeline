@@ -71,6 +71,17 @@ test('the batch branch is fetched alone, so a deleted sibling branch cannot hide
   expect(run.tasks[0]?.landed?.[0]?.land_sha).toBe(t1)
 })
 
+test('a landing the orchestrator pushed is recorded while it is still mid-turn, with no fetch', async () => {
+  const { clone, t1 } = landingRepo()
+  const run = runIn(clone, [mkTask({ land_sha: t1, submission: {
+    kind: 'implement', title: 'feat: t1', head_sha: t1, at: 0, check: 'none',
+  } })])
+  git(['push', '-q', 'origin', `${t1}:refs/heads/batch/x`], clone)
+  await advanceTasks(run, { ...deps(), liveIdle: async () => false })
+  expect(run.tasks[0]?.phase).toBe('close')
+  expect(run.tasks[0]?.landed?.[0]?.land_sha).toBe(t1)
+})
+
 test('a failing batch fetch is recorded when it starts, and the next good one clears it', async () => {
   const { remote, clone, t1 } = landingRepo()
   const run = runIn(clone, [mkTask({ land_sha: t1 })])

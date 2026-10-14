@@ -158,7 +158,7 @@ test('ship-merge renders both commands with every title shell-quoted, and writes
   const run = shipping('ship-merge', { pr: 301 })
   const text = await renderRunPhasePrompt(run, ROOT, { stateDir: dir })
   const squash = join(dir, 'runs', 'personal', 'r1.squash-body.md')
-  expect(text).toContain(`gh pr merge 301 --squash --subject 'fix(reader): don'\\''t re-render the menu' --body-file '${squash}'`)
+  expect(text).toContain(`gh pr merge 301 --squash --subject 'fix(reader): don'\\''t re-render the menu (#301)' --body-file '${squash}'`)
   expect(readFileSync(squash, 'utf8')).toBe('feat(reader): add bookmarks\n')
   expect(existsSync(join(dir, 'runs', 'personal', 'r1.batch-pr.md'))).toBe(true)
   expect(text).not.toContain('{{')
