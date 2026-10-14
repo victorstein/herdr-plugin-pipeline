@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { openDecisionFor } from './decisions'
+import { wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
 import { type PhaseRow, runRow, taskRow } from './phases'
 import type { OutboxEntry, Run, StallState, Task } from './types'
@@ -9,7 +10,9 @@ function recordOf(run: Run, taskId: string | null): Run | Task | undefined {
   return taskId === null ? run : run.tasks.find((t) => t.task_id === taskId)
 }
 
+/** A stop notice is about the abort, and lapses with it. */
 export function isCurrent(run: Run, entry: OutboxEntry): boolean {
+  if (entry.kind === 'abort' && !wasAborted(run)) return false
   return recordOf(run, entry.task_id)?.phase_entered_at === entry.entered_at
 }
 
@@ -32,15 +35,16 @@ export function queuedWorkerPrompt(run: Run, task: Task): OutboxEntry | null {
 
 /**
  * A resume still waiting in the outbox: the supervisor's or `hpipe nudge`'s after a
- * usage limit, or `hpipe nudge` carrying on a worker that stopped with uncommitted work.
+ * usage limit, `hpipe nudge` carrying on a worker that stopped with uncommitted work,
+ * or `hpipe resume` carrying on one an abort stopped.
  */
 export function queuedResume(run: Run, task: Task): OutboxEntry | null {
-  return queuedFor(run, task, 'resume') ?? queuedFor(run, task, 'carry-on')
+  return queuedFor(run, task, 'resume') ?? queuedFor(run, task, 'carry-on') ?? queuedFor(run, task, 'run-resumed')
 }
 
 function queuedFor(run: Run, task: Task, kind: OutboxEntry['kind']): OutboxEntry | null {
   return (run.outbox ?? []).find((entry) => entry.to === 'worker' && entry.task_id === task.task_id &&
-    entry.kind === kind && isCurrent(run, entry)) ?? null
+    entry.kind === kind && isCurrent(run, entry) && !isBriefOnly(entry)) ?? null
 }
 
 export interface OutboxInput {
@@ -49,9 +53,27 @@ export interface OutboxInput {
   text: string
   phaseNote?: string
   kind?: OutboxEntry['kind']
+  briefChars?: number
 }
 
+/** Between a brief and the phase prompt queued behind it for a fresh agent. */
+export const BRIEF_SEPARATOR = '\n\n---\n\n'
+
+/** The one entry a fresh agent is handed: its brief, then the phase prompt. */
+export function briefAndPrompt(brief: string, phasePrompt: string): Pick<OutboxInput, 'text' | 'briefChars'> {
+  return { text: `${brief}${BRIEF_SEPARATOR}${phasePrompt}`, briefChars: brief.length }
+}
+
+/**
+ * A brief and prompt queued together replace every entry already carrying that
+ * task's brief: a stale one the CLI has not pruned would be carried by the next
+ * prune and arrive as a second brief.
+ */
 export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry {
+  if (input.briefChars !== undefined && input.taskId !== null) {
+    run.outbox = (run.outbox ?? [])
+      .filter((entry) => !(entry.task_id === input.taskId && entry.brief_chars !== undefined))
+  }
   const entry: OutboxEntry = {
     id: randomUUID().slice(0, 8),
     to: input.to,
@@ -60,6 +82,7 @@ export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry 
     text: input.text,
     ...(input.kind ? { kind: input.kind } : {}),
     ...(input.phaseNote ? { phase_note: input.phaseNote } : {}),
+    ...(input.briefChars === undefined ? {} : { brief_chars: input.briefChars }),
     queued_at: now,
     attempts: 0,
   }
@@ -67,12 +90,62 @@ export function enqueue(run: Run, input: OutboxInput, now: number): OutboxEntry 
   return entry
 }
 
-/** Drops prompts about a phase their record has since left, and returns them. */
+/**
+ * Drops prompts about a phase their record has since left, and returns them. A
+ * brief queued for a fresh agent is kept, cut to the brief and made current: a
+ * resumed task whose old worker pushed its spec just before the abort moved on
+ * to `spec-review` before its new agent took the entry, and that agent never got
+ * its brief. Measured on a live run.
+ */
 export function pruneOutbox(run: Run): OutboxEntry[] {
   const outbox = run.outbox ?? []
-  const stale = outbox.filter((entry) => !isCurrent(run, entry))
-  if (stale.length > 0) run.outbox = outbox.filter((entry) => isCurrent(run, entry))
+  if (outbox.every((entry) => isCurrent(run, entry))) return []
+  const stale: OutboxEntry[] = []
+  run.outbox = outbox.flatMap((entry) => {
+    if (isCurrent(run, entry)) return [entry]
+    const carried = carriedBrief(run, entry)
+    if (carried !== null) return [carried]
+    stale.push(entry)
+    return []
+  })
   return stale
+}
+
+/**
+ * The worker has not yet been given what its phase asks, or been told it may carry
+ * on after an abort, so its idle says nothing about the phase: a resumed task's new
+ * agent, idle before its brief arrived, had its predecessor's uncommitted spec draft
+ * taken as the finished spec. Measured on a live run. A usage-limit resume is not
+ * counted: the worker already has its phase prompt.
+ */
+export function owedItsPrompt(run: Run, task: Task): boolean {
+  return (run.outbox ?? []).some((entry) => entry.to === 'worker' && entry.task_id === task.task_id &&
+    (entry.kind === undefined || entry.kind === 'run-resumed') && isCurrent(run, entry))
+}
+
+/**
+ * Whether a fresh agent bound to this task gets its brief with its phase prompt.
+ * A phase prompt queued without one, before the worker's pane went, would reach
+ * the next agent alone, so it is taken back to be queued again with the brief.
+ */
+export function briefQueuedWithPrompt(run: Run, task: Task): boolean {
+  const queued = queuedWorkerPrompt(run, task)
+  if (queued !== null && queued.brief_chars !== undefined) return true
+  if (queued !== null) run.outbox = (run.outbox ?? []).filter((entry) => entry !== queued)
+  return false
+}
+
+/** A brief kept past its phase prompt, which the next prompt queued for the task follows. */
+export function isBriefOnly(entry: OutboxEntry): boolean {
+  return entry.brief_chars !== undefined && entry.brief_chars === entry.text.length
+}
+
+function carriedBrief(run: Run, entry: OutboxEntry): OutboxEntry | null {
+  if (entry.brief_chars === undefined || entry.to !== 'worker' || entry.task_id === null) return null
+  const task = run.tasks.find((t) => t.task_id === entry.task_id)
+  if (task === undefined || taskRow(task.phase).terminal === true) return null
+  const brief = entry.text.slice(0, entry.brief_chars)
+  return { ...entry, text: brief, entered_at: task.phase_entered_at, brief_chars: brief.length }
 }
 
 export interface Settlement {
@@ -166,6 +239,8 @@ export function owedByRecipient(run: Run): Recipient[] {
 
   for (const entry of run.outbox ?? []) {
     if (!isCurrent(run, entry)) continue
+    // A kept brief waits for whichever agent is started next, through rows no agent acts in.
+    if (isBriefOnly(entry) && recipientPane(run, entry) === null) continue
     owe(recipientPane(run, entry), entry.to === 'orchestrator' ? null : entry.task_id, {
       kind: 'prompt', since: entry.queued_at, attempts: entry.attempts,
       lastCode: entry.last_code, lastAttemptAt: entry.last_attempt_at,

@@ -346,8 +346,8 @@ back to `execute` — for a bigger one. The batch PR gets one repair; a second r
 even if release-please never finds the PR body.
 
 **Clean-up.** The `done` notice, and `hpipe abort`, print it: `git push origin --delete` for each task
-branch whose head is on the batch, a warning for any branch with commits that did not land, and the
-removal of the batch checkout and the local batch branch.
+branch whose head is on the batch, a warning counting the commits of any branch that did not land, and
+the removal of the batch checkout and the local batch branch, each only once it exists.
 
 ## Review tiers
 
@@ -580,6 +580,13 @@ again, which is safe, and `bootstrapped` is ignored, but every hold is dropped, 
 supervisor sends the merge command and probes as before. Confirm or waive every owed check before
 rolling back, or tell the user the hold is gone.
 
+2.2.2 adds the outbox kinds `abort` and `run-resumed`, an outbox entry's optional `brief_chars`, a run's optional
+`aborted_escalation_from`, and the supervisor capability `abort-notice`. An older supervisor drops a brief whose phase
+prompt went stale before an agent took it, as before.
+An older supervisor drops a finished run's task prompts, so it never delivers `hpipe abort`'s stop
+notices: the abort says so and names the restart, and the notices wait in the outbox for a supervisor
+that delivers them. `hpipe resume` withdraws any still unsent.
+
 Upgrade the `hpipe` on your PATH together with the plugin: an older one reads a v3 ledger without
 complaint and gets it wrong — a v1.7.1 left at `~/.local/bin/hpipe` briefed `issue #undefined` in a
 smoke run. A link to `bin/hpipe` follows the installed plugin by itself; replace anything else there,
@@ -732,7 +739,7 @@ overtake either.
 | A task was rewound to `done` without merging | It does not count as landed. If it is the run's only task, the run escalates instead of finishing — `hpipe rewind <run> done` finishes it |
 | A task needs more (or less) review than its tier | `hpipe tier --task <id> <tier> --why "<reason>"`. Lowering is refused from pipeline panes; run it from your own |
 | A task is stuck behind a failed sibling holding its files | `hpipe release --task <id>` |
-| Stop driving a run | `hpipe abort <run>` (undo with `hpipe resume`, which refuses while another run holds one of its beads) |
+| Stop driving a run | `hpipe abort <run>`. It tells every briefed worker still in a phase to stop, keeps their agents and worktrees, and lists what to remove if you will not resume: each task worktree, the unlanded branches and, in a single-PR run, the batch branch. `hpipe status` heads it `[aborted]`. `hpipe status` also lists any stop notice not yet delivered. Undo with `hpipe resume`, which tells the stopped workers to carry on and withdraws a stop notice not yet sent. A worker pane lost while the run was aborted fails nothing: the resume sees that the task's next agent gets its brief and phase prompt, queued or by `hpipe dispatch` in `research`, and names the commands that start one. It refuses from a worker's pane, and while another run holds one of its beads. An aborted run is resumed before it is rewound |
 | Supervisor dead | `hpipe status`, then the `supervisor` action |
 | Orchestrator pane died or changed id | Run the `claim` action from the pane that should drive it; `hpipe status` flags this |
 | A pane stopped answering (agent exited) | Nothing, to keep the run moving: workers still advance, and prompts owed to that pane are held in the run's outbox and sent once it answers again. `hpipe status` lists what is held. Restart the agent, or `claim` a new orchestrator pane |

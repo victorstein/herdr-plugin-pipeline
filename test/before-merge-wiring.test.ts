@@ -230,7 +230,7 @@ test('single-PR: a run check holds ship-merge, a failure waits on a fix, a new h
   const held = await cmdHold(ctx(), {
     checks: ['the menu closes on a long press'], taskId: null, repoKey: null, runId, callerPane: ORCHESTRATOR,
   }, readsFrom(gh))
-  expect(held.text).toBe('c1 recorded: the batch PR does not merge until the human confirms: the menu closes on a long press')
+  expect(held.text).toBe('c1 recorded: the batch PR does not merge until the human rules on "the menu closes on a long press"')
 
   // the batch has shipped as far as CI: its PR is open on the head batch-check recorded
   const h1 = revParse(clone, 'refs/remotes/origin/batch/menu')

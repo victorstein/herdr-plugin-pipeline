@@ -49,6 +49,18 @@ test('ship writes the PR body beside the run and renders the commands to check a
   expect(text).not.toContain('{{')
 })
 
+test('ship names the repo\'s check before the batch checkout it asks for exists', async () => {
+  const repo = join(dir, 'repo')
+  mkdirSync(join(repo, '.claude'), { recursive: true })
+  writeFileSync(join(repo, '.claude', 'pipeline-check'), '#!/bin/sh\nexit 0\n')
+  chmodSync(join(repo, '.claude', 'pipeline-check'), 0o755)
+  const run = shipping('ship')
+  run.repo_root = repo
+  const text = (await renderRunPhasePrompt(run, ROOT, { stateDir: dir })).replace(/\s+/g, ' ')
+  expect(text).toContain(`runs \`.claude/pipeline-check\` in \`${run.batch!.checkout}\` at that head`)
+  expect(text).not.toContain('declares no')
+})
+
 test('ship repeats the ruleset advice start gave once, for the batch\'s own pattern', async () => {
   // Printed once, above the intake prompt, it was missed. Measured on a live run.
   const text = (await renderRunPhasePrompt(shipping('ship'), ROOT, { stateDir: dir })).replace(/\s+/g, ' ')

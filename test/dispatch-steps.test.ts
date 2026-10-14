@@ -604,6 +604,37 @@ test('a task the ledger unbinds, abandons or briefs during the bootstrap gets no
   }
 })
 
+test('a run aborted during the bootstrap gets no agent, and the stop says it was aborted', async () => {
+  writeBootstrap(checkout)
+  const w = bound()
+  w.deps.runBootstrap = async () => {
+    w.run.history.push({ at: 1, from: w.run.phase, to: 'done', why: `aborted from ${w.run.phase}` })
+    w.run.escalated_from = w.run.phase
+    w.run.phase = 'done'
+    return { code: 0, tail: '' }
+  }
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.said.at(-1)).toBe(`stopped t1 at agent: run ${w.run.run_id} was aborted; nothing was started`)
+  expect(agentStarted(w)).toBe(false)
+})
+
+test('a run aborted while the brief waits for an empty box is sent no brief', async () => {
+  const w = bound({ awaiting_brief: true })
+  const abort = () => {
+    w.run.history.push({ at: 1, from: w.run.phase, to: 'done', why: `aborted from ${w.run.phase}` })
+    w.run.escalated_from = w.run.phase
+    w.run.phase = 'done'
+  }
+  const read = w.deps.herdr.paneReadStyled
+  w.deps.herdr.paneReadStyled = async (pane, lines) => {
+    if (w.run.phase !== 'done') abort()
+    return read(pane, lines)
+  }
+  expect(await dispatchTask(w.run, w.task, w.deps)).toBe(false)
+  expect(w.said.at(-1)).toBe(`stopped t1 at brief: run ${w.run.run_id} was aborted; nothing was sent`)
+  expect(w.calls).not.toContain('brief w5:p1')
+})
+
 test('a pane another task takes during the bootstrap is caught before agent start', async () => {
   const other = newRun({ session: 's', socketPath: '/sock', repoKey: '/other', repoRoot: '/other', title: 'b' })
   other.tasks = [mkTask({ task_id: 't7', pane_id: 'w5:p1', phase: 'implement' })]

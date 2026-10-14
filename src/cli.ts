@@ -47,13 +47,15 @@ import {
 import type { RunQuery, RunReach, RunResolution } from './lib/ledger'
 import { enterRunPhase, enterTaskPhase, forgetDecisionRoundTrip } from './lib/machine'
 import { formatNext, type TriageOutput } from './lib/next'
-import { enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
+import { queueStops, withdrawStops, workersToCarryOn, workersToStop } from './lib/abort-notice'
+import { briefAndPrompt, briefQueuedWithPrompt, enqueue, isCurrent, queuedResume, queuedWorkerPrompt } from './lib/outbox'
 import {
   isTier, LANDING_PHASES, modeName, modeOf, type PhaseRow, rowRunsIn, RUN_ROWS, type RunMode, TASK_ROWS, TIERS, runRow,
   taskRow, tierOf,
 } from './lib/phases'
 import {
-  BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY, drivenSchemas, honours, SHARED_PATHS_CAPABILITY, type SupervisorState,
+  ABORT_NOTICE_CAPABILITY, BEFORE_MERGE_CAPABILITY, DISPATCH_CAPABILITY, drivenSchemas, honours,
+  SHARED_PATHS_CAPABILITY, type SupervisorState,
   supervisorState,
 } from './lib/pidfile'
 import { drain, enqueue as enqueueEvent } from './lib/queue'
@@ -71,7 +73,7 @@ import {
 } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
-import { cleanupLines, renderRunPhasePrompt, reserveRunReview, uncommittedPaths } from './supervisor/deliver'
+import { abortCleanupLines, renderRunPhasePrompt, reserveRunReview, uncommittedPaths } from './supervisor/deliver'
 import { closeReason } from './supervisor/beads-sync'
 import { renderTaskPhasePrompt } from './supervisor/tasks'
 import { checkReleaseTitle, releaseSections } from './lib/release-title'
@@ -121,12 +123,15 @@ function phraseFor(phases: readonly RunPhase[] | null): string {
 
 const runLine = (run: Run): string => `  ${run.run_id} (${run.phase})`
 
+const resumesIt = (hpipe: string, run: Run): string => `\`${hpipe} resume ${run.run_id}\` puts it back`
+
 // The phase on each line is the reason it was excluded, so a run that is merely
 // past this command's phases is not described as finished — and an unreadable
 // one says so, because `(dnoe)` alone reads like an ordinary phase name.
 function excludedLine(run: Run, hpipe: string): string {
   const state = runPhaseState(run)
   if (state === 'unreadable') return `  ${run.run_id} (${run.phase}) — unrecognised phase, in no phase row`
+  if (wasAborted(run)) return `  ${run.run_id} (aborted from ${run.escalated_from}) — ${resumesIt(hpipe, run)}`
   if (state === 'live' && !runIsDriven(run)) {
     return `${runLine(run)} — parked; \`${resumeCommand(hpipe, run)}\` resumes it`
   }
@@ -157,6 +162,10 @@ function resolveFailure(
       return fail(`${result.run.run_id} is in ${result.run.phase}, which is in no phase row — ` +
         `rewind it to a real phase: ${hpipe} rewind ${result.run.run_id} <phase>`)
     case 'terminal':
+      if (wasAborted(result.run)) {
+        return fail(`run ${result.run.run_id} was aborted from ${result.run.escalated_from} and takes nothing until ` +
+          `it is resumed — ${resumesIt(hpipe, result.run)}`)
+      }
       return fail(`run ${result.run.run_id} is finished (phase: ${result.run.phase}) — ` +
         'a finished run cannot be re-entered')
     case 'parked':
@@ -172,11 +181,13 @@ function resolveFailure(
     case 'none': {
       if (result.excluded.length === 0) return fail(`found no ${scope}`)
       // Only worth saying when one of them actually is finished: `excluded` also
-      // holds live runs that are simply past this command's phases.
-      const anyTerminal = result.excluded.some((r) => runPhaseState(r) === 'terminal')
-      const tail = !anyTerminal ? ''
-        : escape === null ? '\n  a finished run cannot be re-entered'
-        : `\n  → ${escape}`
+      // holds live runs that are simply past this command's phases. An aborted
+      // one's own line already says how it is re-entered.
+      const finished = result.excluded.filter((r) => runPhaseState(r) === 'terminal')
+      const tail = finished.length === 0 ? ''
+        : escape !== null ? `\n  → ${escape}`
+        : finished.some((r) => !wasAborted(r)) ? '\n  a finished run cannot be re-entered'
+        : ''
       return fail(`found no ${scope}\n  excluded:\n` +
         result.excluded.map((r) => excludedLine(r, hpipe)).join('\n') + tail)
     }
@@ -922,7 +933,7 @@ export async function cmdShow(ctx: Ctx, input: {
   const detail = formatTaskDetail(run, task)
   if (task.phase === 'done' || taskRow(task.phase).terminal === true) return ok(detail)
   const base = await dispatchBase(run.repo_root, dependencyMerges(task, run.tasks), run.batch?.branch ?? null)
-  const notThisOne = task.checkout_path === null ? '' : `, not the commit ${task.checkout_path} was cut from`
+  const notThisOne = task.checkout_path === null ? '' : `, which may differ from the commit ${task.checkout_path} was cut from`
   return ok(`${detail}\n${baseLine(base)} — the base for a new worktree${notThisOne}`)
 }
 
@@ -1260,9 +1271,10 @@ async function dispatchReady(ctx: Ctx, runId: string, deps: DispatchDeps): Promi
     }
     dispatched.push(next.task_id)
   }
+  // Each task's own `dispatched tN` comes first, so with one task the same line was printed twice.
   return ok(dispatched.length === 0
     ? 'nothing to dispatch: no task in this run is waiting for its brief'
-    : `dispatched ${dispatched.join(', ')}`)
+    : `done: dispatched ${dispatched.join(', ')}, and no other task waits for its brief`)
 }
 
 export interface DispatchStepsInput {
@@ -1453,10 +1465,10 @@ async function owePhasePrompt(
   // No pane means the next agent is a fresh one, and every phase prompt assumes the
   // brief — task id, agent file, `decide`, never main — already arrived. One entry,
   // so the courier hands it both in order the moment the agent is detected.
-  const text = worker && task.pane_id === null
-    ? `${await renderWorkerPrompt(ctx.pluginRoot, run, task)}\n\n---\n\n${phasePrompt}`
-    : phasePrompt
-  enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, text }, Date.now())
+  const queued = worker && task.pane_id === null
+    ? briefAndPrompt(await renderWorkerPrompt(ctx.pluginRoot, run, task), phasePrompt)
+    : { text: phasePrompt }
+  enqueue(run, { to: row.actor, taskId: task?.task_id ?? null, ...queued }, Date.now())
   if (!worker) return '; its prompt is queued for the orchestrator'
   return task.pane_id === null
     ? `; its prompt is queued for ${task.task_id}'s worker, which is not bound yet — ${setUpWorker(task)}`
@@ -1481,6 +1493,11 @@ function rewindReopensShipping(run: Run, input: RewindInput): boolean {
 async function rewind(ctx: Ctx, input: RewindInput, shipped: BatchShipped): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
+  // Its workers were told to stop, and only a resume tells them to carry on.
+  if (wasAborted(run)) {
+    return fail(`${run.run_id} was aborted from ${run.escalated_from}: resume it first ` +
+      `(\`${hpipeCommand(ctx.pluginRoot)} resume ${run.run_id}\`), then rewind it`)
+  }
 
   // The phase is written onto the record unvalidated today, and every later row
   // lookup throws on one that is in no row — including the terminal test below.
@@ -2440,7 +2457,7 @@ function recordChecks(
 }
 
 function recordedLine(run: Run, task: Task | null, check: BeforeMergeCheck): string {
-  const waits = `does not merge until the human confirms: ${check.check}`
+  const waits = `does not merge until the human rules on "${check.check}"`
   if (task === null) return `${check.id} recorded: the batch PR ${waits}`
   if (run.batch !== undefined) {
     return `${check.id} recorded on ${task.task_id}: the batch PR ${waits}; ${task.task_id} still lands on ` +
@@ -2991,21 +3008,79 @@ export async function cmdDrain(ctx: Ctx): Promise<CmdResult> {
 async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
+  const hpipe = hpipeCommand(ctx.pluginRoot)
+  // A second abort would record `done` as where to resume to. It prints the clean-up
+  // again instead, since nothing else does once the first abort's output is gone,
+  // and succeeds: the first abort's own clean-up header sends the operator here.
+  if (wasAborted(run)) {
+    return ok([`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`,
+      ...stillOwedLines(run), ...(await abortCleanupLines(run, hpipe))].join('\n'))
+  }
+  if (runPhaseState(run) === 'terminal') return fail(`${run.run_id} is finished (phase: ${run.phase}); nothing to abort`)
 
   // Record where it was so resume can put it back. Worktrees and branches are untouched.
-  run.history.push({ at: Date.now(), from: run.phase, to: 'done', why: `aborted from ${run.phase}` })
+  const dispatch = await dispatchOf(ctx, run)
+  const stopping = workersToStop(run, dispatch?.step === 'brief' ? dispatch.task : null)
+  const texts = await workerNotices(ctx, run, stopping, 'aborted')
+  const now = Date.now()
+  run.history.push({ at: now, from: run.phase, to: 'done', why: `aborted from ${run.phase}` })
+  if (run.phase === 'escalated') run.aborted_escalation_from = run.escalated_from
   run.escalated_from = run.phase
   run.phase = 'done'
+  const told = queueStops(run, stopping, texts, now)
   await saveRun(ctx.stateDir, run)
-  const undo = `Undo: hpipe resume ${run.run_id}`
-  if (run.batch === undefined) {
-    return ok([`aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the ` +
-      `supervisor's next tick. ${undo}`, ...stillOwedLines(run)].join('\n'))
-  }
+  const undo = `Undo: ${hpipe} resume ${run.run_id}`
+  const head = run.batch === undefined
+    ? `aborted ${run.run_id}; worktrees and branches left alone, and its beads are released on the supervisor's next ` +
+      `tick. ${undo}`
+    : `aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`
   return ok([
-    `aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`, ...stillOwedLines(run),
-    ...(await cleanupLines(run, run.batch)),
+    head, ...(await stopNoticeLines(ctx, told, hpipe)), ...dispatchUnderWayLines(dispatch),
+    ...stillOwedLines(run), ...(await abortCleanupLines(run, hpipe)),
   ].join('\n'))
+}
+
+async function workerNotices(
+  ctx: Ctx, run: Run, tasks: readonly Task[], name: 'aborted' | 'run-resumed',
+): Promise<Map<string, string>> {
+  const texts = new Map<string, string>()
+  for (const task of tasks) {
+    texts.set(task.task_id, await renderPrompt(ctx.pluginRoot, name, {
+      run_id: run.run_id, task_id: task.task_id, branch: task.branch, phase: task.phase,
+    }))
+  }
+  return texts
+}
+
+const RESTART_SUPERVISOR = 'close its `Pipeline supervisor` pane, then ' +
+  '`herdr plugin action invoke supervisor --plugin stein.pipeline`'
+
+async function stopNoticeLines(ctx: Ctx, told: readonly Task[], hpipe: string): Promise<string[]> {
+  if (told.length === 0) return []
+  const who = told.map((task) => `${task.task_id} (${task.pane_id}, ${task.phase})`).join(', ')
+  const supervisor = await supervisorState(ctx.stateDir, ctx.session)
+  if (supervisor.state === 'live' && honours(supervisor.info, ABORT_NOTICE_CAPABILITY)) {
+    const stays = told.length === 1 ? 'Its agent stays open, so a resume carries it on'
+      : 'Their agents stay open, so a resume carries them on'
+    return [`Told to stop on the supervisor's next tick: ${who}. ${stays}.`]
+  }
+  const fix = supervisor.state === 'live'
+    ? `the supervisor (pid ${supervisor.info.pid}) predates delivering it: restart it — ${RESTART_SUPERVISOR}`
+    : 'no supervisor is running to deliver it: `herdr plugin action invoke supervisor --plugin stein.pipeline`'
+  return [`A notice to stop is queued for ${who}, but ${fix}. Until it arrives they keep working, and their ` +
+    `\`${hpipe}\` commands for this run are refused.`]
+}
+
+async function dispatchOf(ctx: Ctx, run: Run): Promise<DispatchLock | null> {
+  const reading = (await readDispatchLocks(ctx.stateDir, [run.repo_key])).get(run.repo_key)
+  return reading === undefined || !reading.live || reading.lock.run_id !== run.run_id ? null : reading.lock
+}
+
+/** A dispatch re-reads the run before it starts an agent or sends a brief, and stops on an aborted one. */
+function dispatchUnderWayLines(dispatch: DispatchLock | null): string[] {
+  if (dispatch === null) return []
+  return [`${holderLine(dispatch, Date.now())}: it stops at its next check, before it starts an agent or sends a ` +
+    'brief. A worktree it created stays; the clean-up below lists it once it is recorded.']
 }
 
 /** Not a refusal: an abort ends the run's drive, and its record keeps what the human still owes. */
@@ -3026,14 +3101,23 @@ function abortedBatch(run: Run, batch: Batch): string {
     ? `nothing landed on ${batch.branch}`
     : `${batch.branch} keeps the landed tasks (${landed.join(', ')}), whose beads stay closed`
   const pr = batch.pr === null ? '' : ` PR #${batch.pr} is left open.`
-  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone, and the unlanded ` +
-    `tasks' beads are released on the supervisor's next tick.${pr}`
+  const unlanded = run.tasks.some((t) => (t.landed ?? []).length === 0 && !taskPhaseIsTerminal(t.phase))
+  const beads = unlanded ? ", and the unlanded tasks' beads are released on the supervisor's next tick" : ''
+  return `${kept}, and nothing reached ${batch.into}. Worktrees and branches are left alone${beads}.${pr}`
 }
 export const cmdAbort = retryingOnStale(abort)
 
-async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
+async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | null }): Promise<CmdResult> {
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
+  // A worker refused on an aborted run is shown the resume command, and the abort is not its to undo.
+  // Only a pane a task holds now: herdr reuses ids, so a human's pane can carry a finished task's old one.
+  const worker = input.callerPane == null ? undefined
+    : run.tasks.find((task) => task.pane_id === input.callerPane && !taskPhaseIsTerminal(task.phase))
+  if (worker !== undefined) {
+    return fail(`${input.callerPane} is ${worker.task_id}'s worker pane: a run is resumed by the orchestrator or the ` +
+      'human, never by its workers. Stop, and end your turn')
+  }
 
   if (!wasAborted(run) || !run.escalated_from) {
     return fail(`${run.run_id} was not aborted — nothing to resume`)
@@ -3042,13 +3126,64 @@ async function resume(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   const back = run.escalated_from
   const taken = await beadsTakenMeanwhile(ctx, run, run.tasks.filter((task) => holdsBead({ phase: back }, task)))
   if (taken !== null) return fail(`${run.run_id} was not resumed:\n${taken}`)
-  run.history.push({ at: Date.now(), from: 'done', to: back, why: 'resumed' })
+  // A notice the supervisor is sending at this moment reads as unsent here, so every
+  // worker is told to carry on, and the notice's text allows for one never stopped.
+  const unsent = withdrawStops(run)
+  const escalation = back === 'escalated' ? escalationBeforeAbort(run) : null
+  const now = Date.now()
+  run.history.push({ at: now, from: 'done', to: back, why: 'resumed' })
   run.phase = back
-  run.escalated_from = null
-  run.phase_entered_at = Date.now()
+  run.escalated_from = escalation
+  delete run.aborted_escalation_from
+  // `phase_entered_at` stays, since what the phase waits for is read against it:
+  // intake leaves only for a task registered after it, and a resume that reset it
+  // kept a run aborted in intake there for good. Measured on a live run. The stall
+  // clocks, which an abort's idle time would otherwise trip, restart instead.
+  run.stall = freshLadder(run, run, now)
+  for (const task of run.tasks) if (!taskPhaseIsTerminal(task.phase)) task.stall = freshLadder(run, task, now)
+  const carryingOn = workersToCarryOn(run)
+  const notices = await workerNotices(ctx, run, carryingOn, 'run-resumed')
+  for (const task of carryingOn) {
+    enqueue(run, { to: 'worker', taskId: task.task_id, text: notices.get(task.task_id) as string, kind: 'run-resumed' }, now)
+  }
+  const agentless = await reequipLostWorkers(ctx, run)
   await saveRun(ctx.stateDir, run)
-  return ok(`resumed ${run.run_id} at ${back}`)
+  const told = carryingOn.length === 0 ? []
+    : [`Told to carry on: ${carryingOn.map((task) => `${task.task_id} (${task.pane_id}, ${task.phase})`).join(', ')}.`]
+  const withdrawn = unsent.length === 0 ? []
+    : [`Withdrew the stop notice${unsent.length === 1 ? '' : 's'} not yet sent to ${unsent.join(', ')}.`]
+  return ok([`resumed ${run.run_id} at ${back}`, ...told, ...withdrawn, ...agentless].join('\n'))
 }
+
+/** A run aborted by 2.2.1 or earlier recorded no origin, and its history is the only record left. */
+function escalationBeforeAbort(run: Run): RunPhase | null {
+  if (run.aborted_escalation_from !== undefined) return run.aborted_escalation_from
+  const entered = run.history.findLast((entry) => entry.task_id === undefined && entry.to === 'escalated')
+  return (entered?.from as RunPhase | undefined) ?? null
+}
+
+/**
+ * A worker pane lost while the run was aborted leaves its task where it was with
+ * no agent, and the resume said nothing of it: status called it the worker's move
+ * until the unstarted check's grace ran out, and the advice that followed never
+ * handed the new agent its phase prompt. Measured on a live run. So the task gets
+ * what a rewind gives a worker it cannot find: its brief and phase prompt, queued
+ * for whichever agent herdr detects next.
+ */
+async function reequipLostWorkers(ctx: Ctx, run: Run): Promise<string[]> {
+  const lost = run.tasks.filter((task) => task.pane_id === null && task.last_pane_id !== undefined &&
+    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker' && !briefQueuedWithPrompt(run, task))
+  const lines: string[] = []
+  for (const task of lost) {
+    // The brief carries the briefed phase's instructions, so that phase's next agent
+    // is owed the brief as a dispatch hands it over, exactly as a rewind there leaves it.
+    if (task.phase === taskRow('queued').onClear) task.awaiting_brief = true
+    lines.push(`${task.task_id} has no agent, since its pane went while the run was aborted` +
+      `${await owePhasePrompt(ctx, run, task)}`)
+  }
+  return lines
+}
+
 export const cmdResume = retryingOnStale(resume)
 
 async function forget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResult> {
@@ -3482,7 +3617,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case 'status': out = await cmdStatus(ctx); break
     case 'drain': out = await cmdDrain(ctx); break
     case 'abort': out = await cmdAbort(ctx, { runId: rest[0] ?? '' }); break
-    case 'resume': out = await cmdResume(ctx, { runId: rest[0] ?? '' }); break
+    case 'resume': out = await cmdResume(ctx, { runId: rest[0] ?? '', callerPane: process.env.HERDR_PANE_ID || null }); break
     case 'forget': out = await cmdForget(ctx, { workspaceId: rest[0] ?? '' }); break
 
     default:

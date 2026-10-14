@@ -9,7 +9,7 @@ import {
   type AgentStartRequest, type CallResult, type CreatedWorktree, HerdrTimeout, type Listing, type PaneInfo,
   paneHasNoAgent, type WorkspaceInfo, type WorktreeEntry,
 } from './herdr'
-import { taskPhaseIsTerminal } from './ledger'
+import { taskPhaseIsTerminal, wasAborted } from './ledger'
 import { isAgentReady } from './machine'
 import { WORKER_EFFORT } from './models'
 import { taskRow, tierOf } from './phases'
@@ -480,6 +480,7 @@ class TaskDispatch {
    */
   private async recheck(placed: Placed, paneId: string): Promise<void> {
     if (!(await this.reread())) throw new Stop('agent', nothingStarted(`${this.id} is gone from the ledger`))
+    if (wasAborted(this.run)) throw new Stop('agent', nothingStarted(`run ${this.run.run_id} was aborted`))
     if (unbriefedWorker(this.run, this.task) === null) {
       throw new Stop('agent', nothingStarted(`${this.id} is now in ${this.task.phase}, no longer owed its brief`))
     }
@@ -508,6 +509,7 @@ class TaskDispatch {
   private async brief(paneId: string, startedHere: boolean): Promise<void> {
     await this.enter('brief')
     if (!(await this.reread())) throw new Stop('brief', `${this.id} is gone from the ledger; nothing was sent`)
+    if (wasAborted(this.run)) throw new Stop('brief', `run ${this.run.run_id} was aborted; nothing was sent`)
     // The supervisor clears the flag on `working`, which an agent this run just
     // started can read before any brief has reached it.
     if (unbriefedWorker(this.run, this.task) === null) {
@@ -526,6 +528,9 @@ class TaskDispatch {
       return
     }
     await this.awaitEmptyBox(paneId, startedHere ? READY_WAIT_MS : 0)
+    // The wait for an empty box can take half a minute, time enough for an abort.
+    if (!(await this.reread())) throw new Stop('brief', `${this.id} is gone from the ledger; nothing was sent`)
+    if (wasAborted(this.run)) throw new Stop('brief', `run ${this.run.run_id} was aborted; nothing was sent`)
     const sent = await this.deps.brief(this.run, this.task, paneId)
     if (!sent.ok) throw new Stop('brief', sent.text)
     this.line('brief', sent.text)

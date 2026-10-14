@@ -125,10 +125,18 @@ export interface OutboxEntry {
   /**
    * `resume`: carry on where Claude's usage limit stopped the worker. `carry-on`:
    * `hpipe nudge` telling a worker that stopped with uncommitted work to finish it.
+   * `abort`: `hpipe abort` telling a worker to stop, the one task prompt a finished
+   * run still delivers. `run-resumed`: `hpipe resume` telling it to carry on.
    * Absent: the phase's own prompt, which a worker that has not read it cannot
    * have answered.
    */
-  kind?: 'resume' | 'carry-on'
+  kind?: 'resume' | 'carry-on' | 'abort' | 'run-resumed'
+  /**
+   * How many leading characters are the worker's brief, queued ahead of the phase
+   * prompt for an agent that has not had it. The brief outlives the phase: when
+   * the task moves on before an agent takes the entry, the brief stays queued.
+   */
+  brief_chars?: number
   /** The digest header's transition, kept so a late delivery still says why it came. */
   phase_note?: string
   queued_at: number
@@ -403,6 +411,11 @@ export interface Run {
   phase: RunPhase
   phase_entered_at: number
   escalated_from: RunPhase | null
+  /**
+   * Set while an escalated run is aborted: the abort records `escalated` in
+   * `escalated_from`, and this keeps where the escalation came from for the resume.
+   */
+  aborted_escalation_from?: RunPhase | null
   orchestrator_pane: string | null
   artifacts: RunArtifacts
   tasks: Task[]

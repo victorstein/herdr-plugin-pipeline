@@ -250,7 +250,7 @@ test('--ready takes every task owed its brief in task id order, and only those',
     owed('t1', { awaiting_brief: undefined, pane_id: 'w7:p1' })])
   const w = wired()
   const result = await cmdDispatchSteps(ctx(), input(null), w.wiring)
-  expect(result).toEqual({ ok: true, text: 'dispatched t2, t10' })
+  expect(result).toEqual({ ok: true, text: 'done: dispatched t2, t10, and no other task waits for its brief' })
   expect(w.calls.filter((c) => c.startsWith('start'))).toEqual(['start hp-2', 'start hp-10'])
 })
 
@@ -276,7 +276,7 @@ test('--ready takes a task that became owed its brief while it ran, before it le
     return { ok: true }
   })
   const result = await cmdDispatchSteps(ctx(), input(null), w.wiring)
-  expect(result).toEqual({ ok: true, text: 'dispatched t1, t2' })
+  expect(result).toEqual({ ok: true, text: 'done: dispatched t1, t2, and no other task waits for its brief' })
   expect(existsSync(dispatchLockPath(dir, run.repo_key))).toBe(false)
 })
 

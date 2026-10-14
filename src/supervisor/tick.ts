@@ -1,5 +1,5 @@
 import { abandonDecisions } from '../lib/decisions'
-import { isUnlandedSave, runIsDriven } from '../lib/ledger'
+import { isUnlandedSave, runIsDriven, wasAborted } from '../lib/ledger'
 import { enterTaskPhase, noteWorkingAfterAnswer } from '../lib/machine'
 import { fileHolders } from '../lib/gating'
 import { modeOf, nextPhase, routeOf, taskRow } from '../lib/phases'
@@ -234,8 +234,10 @@ export function catchUpDigest(
     .sort((a, b) => a.task_id.localeCompare(b.task_id))
     .map((task) => digestLine(run, task, now, hpipe, holds, dispatches))
   return [
-    `catch-up: digests for this run did not reach you, so here is where it stands now ` +
-    `(run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
+    // One undelivered digest is enough to owe this, and "digests … did not reach you"
+    // read as an outage. Measured on a live run.
+    `catch-up: at least one digest for this run did not reach you, and digests are not replayed, so here is where ` +
+    `it stands now (run in ${run.phase} ${ageMinutes(run.phase_entered_at, now)}m):`,
     ...(lines.length === 0 ? ['- no tasks yet'] : lines),
   ].join('\n')
 }
@@ -279,15 +281,14 @@ export function workerStillNeeded(run: Run, task: Task): boolean {
 }
 
 function losePane(run: Run, task: Task, wake: WakeLine[]): void {
+  // Nothing drives an aborted run, so its tasks keep their phases for a resume:
+  // the abort's own clean-up closes the panes it lists.
+  if (wasAborted(run)) {
+    releaseAbortedPane(run, task)
+    return
+  }
   if (!workerStillNeeded(run, task)) {
-    // The answer to an open decision is delivered to the worker's pane, so with
-    // that pane gone the question is moot and the task goes back to the row the
-    // orchestrator was driving rather than waiting on a delivery that cannot happen.
-    if (task.phase === 'blocked-on-decision' && task.decision_from !== null) {
-      abandonDecisions(task)
-      enterTaskPhase(run, task, task.decision_from, 'worker pane gone; its open decision abandoned')
-      task.decision_from = null
-    }
+    abandonPanelessDecision(run, task)
     releaseWorkerPane(task)
     return
   }
@@ -304,6 +305,25 @@ function losePane(run: Run, task: Task, wake: WakeLine[]): void {
     run, task, phaseAtEvent,
     event: `pane exited${handedOver ? '' : singlePr ? ', nothing submitted' : ', no PR'}`,
   })
+}
+
+/**
+ * The answer to an open decision is delivered to the worker's pane, so with that
+ * pane gone the question is moot and the task goes back to the row it was raised
+ * from rather than waiting on a delivery that cannot happen.
+ */
+function abandonPanelessDecision(run: Run, task: Task): void {
+  if (task.phase !== 'blocked-on-decision' || task.decision_from === null) return
+  abandonDecisions(task)
+  enterTaskPhase(run, task, task.decision_from, 'worker pane gone; its open decision abandoned')
+  task.decision_from = null
+}
+
+/** A stop notice still queued would be the first message of the next agent started in that workspace. */
+function releaseAbortedPane(run: Run, task: Task): void {
+  abandonPanelessDecision(run, task)
+  run.outbox = (run.outbox ?? []).filter((entry) => !(entry.kind === 'abort' && entry.task_id === task.task_id))
+  releaseWorkerPane(task)
 }
 
 /**
@@ -505,7 +525,9 @@ export function applyEvents(
     const phaseAtEvent = task.phase
 
     if (event.kind === 'pane.agent_detected') {
-      if (event.released === true) {
+      if (event.released === true && wasAborted(run)) {
+        releaseAbortedPane(run, task)
+      } else if (event.released === true) {
         // A dead pane can never deliver or answer, so its open question is
         // stranded — closing it keeps `hpipe status` and the stall probe honest.
         if (task.phase === 'blocked-on-decision') abandonDecisions(task)

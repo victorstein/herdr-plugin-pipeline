@@ -89,8 +89,8 @@ behaviour; this skill does.
 3. Registration prints either `queued: waiting on …` (when its gate opens the supervisor sends you a
    `Dispatch tN` prompt) or a brief with a `dispatch:` line and a **`dispatch, in order:`** block.
    Register every task, then run **`hpipe dispatch --ready`** with the Bash tool's
-   `run_in_background` and end your turn (`hpipe dispatch --task <id>` for one task, as for a
-   `Dispatch tN` prompt). For each task owed its brief it fetches the base, runs
+   `run_in_background`, close intake (step 4) and end your turn (`hpipe dispatch --task <id>` for one
+   task, as for a `Dispatch tN` prompt). For each task owed its brief it fetches the base, runs
    `herdr worktree create … --base <commit>`, the repo's `.claude/pipeline-bootstrap` in the new
    checkout, `herdr agent start … -- --dangerously-skip-permissions --effort <tier's>`, and hands
    the brief over, claiming the task's bead first; it skips steps already done and stops at the first
@@ -101,8 +101,9 @@ behaviour; this skill does.
    agent you started and confirms it landed. `hpipe dispatch --task` only takes a task in `research`
    that is still owed its brief; the `--pane` form takes a task in `research`, but never a pane that
    already has the brief.
-4. After the last task: `hpipe dispatch --done`. Until then the run can never finish. Registering
-   another task later reopens intake — run `dispatch --done` again afterwards.
+4. After the last task, once the dispatch has started: `hpipe dispatch --done`. Until then the run
+   can never finish. Registering another task later reopens intake — run `dispatch --done` again
+   afterwards.
 
 The supervisor nudges a silent task with a stall probe (by default workers every 45 min, the
 orchestrator every 15; `TASK_STALL_MINUTES` and `STALL_MINUTES` in the plugin's `config.env` change
@@ -164,7 +165,7 @@ escalated: the supervisor holds what it owes the pane and resumes it at the rese
 | A PR merged by hand while a check was owed | The task stays in `merge` (single-PR, the run in `ship-merge`) until the user rules; it can be rewound only back to `merge`, and `close` is refused. Record their ruling with `hpipe confirm`. `--failed` is refused after a merge: record `--waive "failed on device; fixed by <task>"` and register the fix as a new task, held with `hpipe hold --task` |
 | `hold` or `answer --before-merge` refused: the supervisor predates before-merge checks | Restart the supervisor, as after an upgrade, then run it again |
 | `hpipe dispatch --task` or `--ready` refused: the supervisor predates `hpipe dispatch` | Restart the supervisor, as after an upgrade, then run it again; or dispatch by hand with the `dispatch, in order:` block |
-| Stop / restart a whole run | `hpipe abort <run>` / `hpipe resume <run>`. `abort` lists any check still owed to the user |
+| Stop / restart a whole run | `hpipe abort <run>` / `hpipe resume <run>`. `abort` tells the live workers to stop, lists any check still owed to the user, and prints what to clean up if the run will not be resumed; `resume` tells the stopped workers to carry on, and for a task whose pane went meanwhile sees that its next agent gets the brief and names how to start one. Resume an aborted run before you rewind it |
 | Plugin upgraded | Restart the supervisor after upgrading: close the `Pipeline supervisor` pane, then `herdr plugin action invoke supervisor --plugin stein.pipeline` (or restart the session). An old supervisor beside a new CLI routes tasks by the old table |
 | Single-PR: red CI on the batch PR | Three routes, in order: an environmental failure gets an empty commit pushed to the batch, then `hpipe batch-check`; a small defect (a few lines, in files the failure names, nothing the release notes would mention) is fixed by a subagent in the batch checkout, then `hpipe batch-check`; a bigger defect becomes a fix task — `hpipe task …` registers it into the run (it moves the run back to `execute`), then `hpipe dispatch --done`. The batch PR gets **one** repair: a second red escalates the run, and `hpipe rewind <run> ship` gives it another |
 | Single-PR: a branch-review BLOCKER too big to patch on the batch | Register a fix task the same way; registering works in `branch-review` and every ship phase until the PR merges |

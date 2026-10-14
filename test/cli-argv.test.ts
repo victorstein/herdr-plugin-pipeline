@@ -561,8 +561,8 @@ test('each --before-merge is one whole check, commas and a help flag included', 
     '--before-merge', '-h'], { cwd: f.repo, env, stdout: 'pipe', stderr: 'pipe' })
   const out = proc.stdout.toString() + proc.stderr.toString()
   expect(proc.exitCode, out).toBe(0)
-  expect(out).toContain("c1 recorded on t1: t1's PR does not merge until the human confirms: the menu, still, closes")
-  expect(out).toContain("c2 recorded on t1: t1's PR does not merge until the human confirms: -h")
+  expect(out).toContain(`c1 recorded on t1: t1's PR does not merge until the human rules on "the menu, still, closes"`)
+  expect(out).toContain(`c2 recorded on t1: t1's PR does not merge until the human rules on "-h"`)
   expect(out).not.toContain('usage:')
 })
 

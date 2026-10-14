@@ -23,7 +23,7 @@ const ALL = [
   'escalate', 'stall-probe', 'stall-escalate', ...REVIEW_PROMPTS,
   'intake', 'decision', 'answer', 'research', 'implement', 'usage-resume', 'usage-lifted', 'carry-on',
   'sync', 'merge-batch', 'ship', 'ship-ci-red', 'ship-merge', 'handoff-pr', 'handoff-batch',
-  'before-merge', 'check-failed',
+  'before-merge', 'check-failed', 'aborted', 'run-resumed',
 ]
 
 test('every declared prompt file exists', () => {
@@ -1172,6 +1172,6 @@ test('the README and the skill say what hpipe dispatch runs, and that allowing h
   expect(readme).toContain('hpipe dispatch --ready [--run <run-id>]')
   const skill = prose(await Bun.file(join(ROOT, 'skills', 'herdr-pipeline', 'SKILL.md')).text())
   expect(skill).toContain('`hpipe` is the one permission dispatch needs')
-  expect(skill).toContain("run **`hpipe dispatch --ready`** with the Bash tool's `run_in_background` and end your turn")
+  expect(skill).toContain("run **`hpipe dispatch --ready`** with the Bash tool's `run_in_background`, close intake (step 4) and end your turn")
   expect(skill).toContain('| `hpipe dispatch` stopped at `<step>` | Fix what its last line names, then run the same command again')
 })

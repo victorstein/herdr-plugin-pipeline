@@ -15,13 +15,15 @@ import { fileHolders, landingQueue, landingSlotHolder } from './gating'
 import { counterFor, FILES_FREE_ON_ARRIVAL } from './machine'
 import { BATCH_SCHEMA_VERSION, hasLanded, isCurrentSchemaRun, runIsDriven, wasAborted } from './ledger'
 import type { PaneHold } from './delivery-health'
-import { deliveryWarnings, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt } from './outbox'
+import {
+  deliveryWarnings, isCurrent, limitReset, type PaneObservations, queuedResume, queuedWorkerPrompt, recipientPane,
+} from './outbox'
 import { runRow, taskRow, tierOf } from './phases'
 import { reviewsSkipped, skipReason } from './review-skip'
 import { describeFiles, sharedStatusLine } from './shared-paths'
 import { effortSummary } from './tier-prompt'
 import type {
-  Batch, MissingArtifact, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
+  Batch, MissingArtifact, OutboxEntry, Run, SessionKey, Submission, Task, TaskPhase, TierChange, UncommittedWork,
 } from './types'
 import {
   briefCommand, dispatchWorkerCommand, overdueUndispatchedWorker, overdueUnstartedWorker,
@@ -108,30 +110,41 @@ export type PaneHolds = Readonly<Record<string, PaneHold>>
  * told to carry on. Read as idle with nothing, the first digest after the reset told
  * the orchestrator to act on every worker the supervisor had just resumed.
  */
-function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds): Move | null {
+function undeliveredWorkerPrompt(run: Run, task: Task, holds: PaneHolds, hpipe: string, now: number): Move | null {
   const phasePrompt = queuedWorkerPrompt(run, task)
   const resume = phasePrompt === null ? queuedResume(run, task) : null
   const entry = phasePrompt ?? resume
   if (entry === null) return null
   const what = resume === null ? `its ${task.phase} prompt`
-    : resume.kind === 'carry-on' ? 'its nudge to carry on' : 'its resume after Claude\'s usage limit'
+    : resume.kind === 'carry-on' ? 'its nudge to carry on'
+    : resume.kind === 'run-resumed' ? 'its notice that the run was resumed'
+    : 'its resume after Claude\'s usage limit'
   const pane = task.pane_id ?? 'its pane'
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
+  // Only `hpipe status` prints the ⚠ lines, and the digest gives this same clause.
   if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
     return {
       waitsOnYou: true,
       clause: `YOUR move: ${what} is held by text in the input box of ${pane} — ` +
-        'submit or clear that text; see the ⚠ stuck input line below',
+        `submit or clear that text; \`${hpipe} status\` shows it under ⚠ stuck input`,
     }
+  }
+  // An agent just started answers busy for a few seconds, and a resumed task's new
+  // agent drew "YOUR move" in that window, 6 s before its prompt landed. Measured on a live run.
+  const retrying = now - (hold?.since ?? entry.queued_at) < DELIVERY_GRACE_MS && entry.attempts < 3
+  if ((hold !== undefined || entry.attempts > 0) && retrying) {
+    return { waitsOnYou: false, clause: `nothing for you — ${what} is being retried for ${pane}` }
   }
   if (hold !== undefined || entry.attempts > 0) {
     return {
       waitsOnYou: true,
-      clause: `YOUR move: ${what} has not reached ${pane} — see the ⚠ delivery line below`,
+      clause: `YOUR move: ${what} has not reached ${pane} — \`${hpipe} status\` says why in its ⚠ delivery line`,
     }
   }
   return { waitsOnYou: false, clause: `nothing for you — ${what} is queued for ${pane}` }
 }
+
+const DELIVERY_GRACE_MS = 60_000
 
 /**
  * A worker Claude's usage limit stopped. The supervisor resumes it at the reset, so
@@ -260,7 +273,7 @@ function moveFor(
     // Ahead of the undelivered prompt, which reads any hold as "YOUR move".
     const paused = pausedByUsageLimit(task, hpipe, holds)
     if (paused) return paused
-    const undelivered = undeliveredWorkerPrompt(run, task, holds)
+    const undelivered = undeliveredWorkerPrompt(run, task, holds, hpipe, now)
     if (undelivered) return undelivered
     // An idle worker that has stopped short otherwise reads exactly like a busy
     // one, and the orchestrator waits on it until the stall ladder's first rung.
@@ -563,7 +576,7 @@ function intakeWarning(run: Run, hpipe: string): string[] {
  * orphan's worktree, which nothing else will remove, and the branch and PR of
  * any task that did not land, which the summary alone would hide.
  */
-function finishedRunSummary(run: Run, hpipe: string): string[] {
+function finishedRunSummary(run: Run, hpipe: string, holds: PaneHolds): string[] {
   const byId = [...run.tasks].sort((a, b) => a.task_id.localeCompare(b.task_id))
   const idsByPhase = new Map<string, string[]>()
   for (const task of byId) {
@@ -578,7 +591,30 @@ function finishedRunSummary(run: Run, hpipe: string): string[] {
   const shipping = run.batch === undefined ? [] : [shippedLine(run, run.batch)]
 
   const owed = owedInRun(run).map((o) => `  ⚠ ended with ${checkName(o)} still owed to the human: ${o.check.check}`)
-  return [...head, ...shipping, ...owed, ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe))]
+  return [
+    ...head, ...shipping, ...owed, ...unsentStops(run, holds),
+    ...byId.flatMap((task) => finishedTaskNote(run, task, hpipe)),
+  ]
+}
+
+/** The abort said the workers would be told; a notice that has not gone is the one thing it still owes. */
+function unsentStops(run: Run, holds: PaneHolds): string[] {
+  // One held for a brief owes nothing: no brief goes to an aborted run, so that agent never starts work.
+  const briefed = (entry: OutboxEntry) => run.tasks.find((t) => t.task_id === entry.task_id)?.awaiting_brief !== true
+  const owed = (run.outbox ?? []).filter((entry) => entry.kind === 'abort' && isCurrent(run, entry) && briefed(entry))
+  return owed.map((entry) => {
+    const pane = recipientPane(run, entry)
+    const notice = `${entry.task_id}'s stop notice`
+    if (pane === null) return `  ⚠ ${notice} waits for a pane: ${entry.task_id} has none`
+    const hold = holds[pane]
+    if (hold?.code === 'stuck_input' || entry.last_code === 'stuck_input') {
+      return `  ⚠ ${notice} is held by text in the input box of ${pane} — submit or clear that text`
+    }
+    if (hold !== undefined || entry.attempts > 0) {
+      return `  ⚠ ${notice} has not reached ${pane}${entry.last_code === undefined ? '' : ` (${entry.last_code})`}`
+    }
+    return `  ${notice} is queued for ${pane}`
+  })
 }
 
 /** A landed task's code reaches the default branch only with the batch PR, so a run that stopped short says so. */
@@ -605,8 +641,13 @@ function finishedTaskNote(run: Run, task: Task, hpipe: string): string[] {
     return [`  ℹ ${task.task_id} ${how} but left its worktree ${where} — nothing un${how} is in it`]
   }
   const pr = task.pr === null ? '' : ` PR #${task.pr}`
+  // Only `show` said so, and a resume needs it: it hands such a task to the next agent started for it.
+  const lost = wasAborted(run) && task.pane_id === null && task.last_pane_id !== undefined &&
+    task.awaiting_brief !== true && taskRow(task.phase).actor === 'worker'
   return [`  ℹ ${task.task_id} [${task.phase}] ${task.branch}${pr} — ` +
-    `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\``]
+    `\`${hpipe} show --task ${task.task_id} --run ${run.run_id}\`` +
+    (lost ? `; no agent: ${task.last_pane_id} went while the run was aborted, and a resume sees that the next one ` +
+      'gets its brief' : '')]
 }
 
 /**
@@ -645,7 +686,7 @@ export function formatStatus(
     lines.push('')
     const passes = counterFor(run, run.phase)
     lines.push(
-      `${run.run_id}  [${run.phase}]${passes > 0 ? ` pass ${passes}` : ''}  ${run.title}`,
+      `${run.run_id}  [${wasAborted(run) ? 'aborted' : run.phase}]${passes > 0 ? ` pass ${passes}` : ''}  ${run.title}`,
     )
     if (run.orchestrator_pane) lines.push(`  orchestrator: ${run.orchestrator_pane}`)
     if (run.orchestrator_pane && livePanes.size > 0 && !livePanes.has(run.orchestrator_pane)) {
@@ -674,7 +715,7 @@ export function formatStatus(
     }
 
     if (runRow(run.phase).terminal === true) {
-      lines.push(...finishedRunSummary(run, hpipe))
+      lines.push(...finishedRunSummary(run, hpipe, holds))
       continue
     }
     if (run.batch !== undefined) lines.push(...batchHeader(run, run.batch, supervisor, now, hpipe))

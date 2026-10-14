@@ -543,6 +543,24 @@ test('a branch with no commits past the base adopts nothing', async () => {
   expect(run.tasks[0]?.artifacts.research).toBe(designArtifacts().research)
 })
 
+test('a spec on disk does not clear the phase while the worker is still owed its spec prompt', async () => {
+  // A resumed task's new agent sat idle before its brief arrived, beside its predecessor's uncommitted draft.
+  // At the reserved path, so only this rule holds it: adoption already waits on a queued prompt.
+  const artifacts = designArtifacts()
+  const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
+  commitIn(worktree, artifacts.research as string, 'research\n')
+  commitIn(worktree, artifacts.spec as string, 'a draft\n')
+  const run = mkRun([mkTask({ phase: 'spec', phase_entered_at: 0, checkout_path: worktree, artifacts })])
+  for (const kind of [undefined, 'run-resumed'] as const) {
+    const owed = enqueue(run, { to: 'worker', taskId: 't1', text: 'the brief, then write the spec', kind }, 1)
+    await advanceTasks(run, deps())
+    expect(run.tasks[0]?.phase, kind ?? 'phase prompt').toBe('spec')
+    settleOutbox(run, [{ id: owed.id, ok: true }], 2)
+  }
+  await advanceTasks(run, deps())
+  expect(run.tasks[0]?.phase).toBe('spec-review')
+})
+
 test('in spec, the recorded research note is not re-adopted and the spec is', async () => {
   const worktree = repoWithWorktree(['docs/superpowers/plans/old-a.md'])
   commitIn(worktree, 'docs/superpowers/notes/the-research.md', 'research\n')

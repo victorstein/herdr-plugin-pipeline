@@ -16,13 +16,16 @@ import { outboxPending } from '../src/supervisor/courier'
 import { advanceRun } from '../src/lib/machine'
 import { advanceTasks } from '../src/supervisor/tasks'
 import { escalatedUnanswered, openDecision, openDecisionFor } from '../src/lib/decisions'
-import { settleOutbox } from '../src/lib/outbox'
+import { enqueue, pruneOutbox, settleOutbox } from '../src/lib/outbox'
 import { filesClearFor } from '../src/lib/gating'
-import { listRuns, newRun, saveRun, StaleRunError } from '../src/lib/ledger'
+import { listRuns, newRun, saveRun, StaleRunError, wasAborted } from '../src/lib/ledger'
+import { dispatchLockPath } from '../src/lib/dispatch-lock'
+import { applyEvents } from '../src/supervisor/tick'
 import type { AgentStatus, Run, Task, TaskPhase } from '../src/lib/types'
 import type { LimitReading } from '../src/supervisor/usage-limits'
 import { beadTaskFields } from './helpers/bead-fields'
 import { hpipeCommand } from '../src/lib/render'
+import { clearPid, processStartedAtMs, SUPERVISOR_CAPABILITIES, writePid } from '../src/lib/pidfile'
 import { desiredBead } from '../src/lib/bead-desired'
 
 let dir: string
@@ -88,6 +91,335 @@ test('resume undoes an abort back to the phase it was in', async () => {
   await cmdAbort(ctx(), { runId: run.run_id })
   expect((await cmdResume(ctx(), { runId: run.run_id })).ok).toBe(true)
   expect((await listRuns(dir, 'personal'))[0]?.phase).toBe('intake')
+})
+
+async function liveSupervisor(capabilities: string[]): Promise<void> {
+  await writePid(dir, {
+    pid: process.pid, pane_pid: process.ppid, started_at_ms: await processStartedAtMs(process.pid) ?? 0,
+    session: 'personal', socket_path: '/s', pane_id: 'w1:p2', capabilities,
+  })
+}
+
+function abortableRun(): Run {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'implement', pane_id: 'w3:p1', workspace_id: 'w3', phase_entered_at: 5 },
+    { task_id: 't2', phase: 'spec', pane_id: 'w4:p1', workspace_id: 'w4', phase_entered_at: 6 },
+    { task_id: 't3', phase: 'research', pane_id: 'w5:p1', workspace_id: 'w5', awaiting_brief: true },
+    { task_id: 't4', phase: 'done', pane_id: 'w6:p1' },
+    { task_id: 't5', phase: 'queued' },
+  ])
+  run.phase = 'execute'
+  return run
+}
+
+test('abort tells each briefed worker to stop, and a finished run still delivers that notice', async () => {
+  await liveSupervisor([...SUPERVISOR_CAPABILITIES])
+  const run = abortableRun()
+  await saveRun(dir, run)
+  const out = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(out.ok).toBe(true)
+  expect(out.text).toContain('Told to stop on the supervisor\'s next tick: t1 (w3:p1, implement), t2 (w4:p1, spec). ' +
+    'Their agents stay open, so a resume carries them on.')
+
+  const after = (await listRuns(dir, 'personal'))[0]!
+  expect(after.outbox?.map((e) => [e.task_id, e.kind])).toEqual([['t1', 'abort'], ['t2', 'abort']])
+  expect(after.outbox?.[0]?.text).toContain(`Run ${run.run_id} was aborted, so the pipeline no longer drives \`t1\``)
+  expect(outboxPending(after).map((p) => p.paneId)).toEqual(['w3:p1', 'w4:p1'])
+})
+
+test('abort says when no supervisor will deliver its stop notices', async () => {
+  await liveSupervisor(['shared-paths', 'before-merge', 'dispatch'])
+  const old = abortableRun()
+  await saveRun(dir, old)
+  expect((await cmdAbort(ctx(), { runId: old.run_id })).text).toContain(
+    `A notice to stop is queued for t1 (w3:p1, implement), t2 (w4:p1, spec), but the supervisor (pid ${process.pid}) ` +
+    'predates delivering it: restart it')
+
+  clearPid(dir, 'personal')
+  const none = abortableRun()
+  await saveRun(dir, none)
+  expect((await cmdAbort(ctx(), { runId: none.run_id })).text).toContain('but no supervisor is running to deliver it')
+})
+
+test('a second abort changes nothing, so resume still knows where the run was', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const again = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(again.ok).toBe(true)
+  expect(again.text).toContain(`${run.run_id} is already aborted, from execute`)
+  expect((await listRuns(dir, 'personal'))[0]?.escalated_from).toBe('execute')
+})
+
+test('resume tells every stopped worker to carry on, even one whose stop may be on its way, and withdraws the unsent', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  const sentToT1 = aborted.outbox!.find((e) => e.task_id === 't1')!
+  settleOutbox(aborted, [{ id: sentToT1.id, ok: true }], 10)
+  await saveRun(dir, aborted)
+
+  // t2's stop is still in the outbox, which is how a send the supervisor is making right now reads too.
+  const out = await cmdResume(ctx(), { runId: run.run_id })
+  expect(out.text).toBe([
+    `resumed ${run.run_id} at execute`,
+    'Told to carry on: t1 (w3:p1, implement), t2 (w4:p1, spec).',
+    'Withdrew the stop notice not yet sent to t2.',
+  ].join('\n'))
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  expect(resumed.outbox?.map((e) => [e.task_id, e.kind])).toEqual([['t1', 'run-resumed'], ['t2', 'run-resumed']])
+  expect(resumed.outbox?.[0]?.text).toContain('If you stopped for its abort,\ncarry on with `implement`')
+  expect(resumed.outbox?.[0]?.text).toContain('if the stop notice\nnever reached you, carry on as you were')
+})
+
+test('resume tells only workers in a phase they drive, and none whose prompt is already queued', async () => {
+  const run = runWithTasks([
+    { task_id: 't1', phase: 'implement', pane_id: 'w3:p1', phase_entered_at: 5 },
+    { task_id: 't2', phase: 'blocked-on-decision', pane_id: 'w4:p1', decision_from: 'spec' },
+    { task_id: 't3', phase: 'merge', pane_id: 'w5:p1', pr: 7 },
+    { task_id: 't4', phase: 'plan', pane_id: 'w6:p1', phase_entered_at: 9 },
+  ])
+  run.phase = 'execute'
+  enqueue(run, { to: 'worker', taskId: 't4', text: 'the plan prompt' }, 1)
+  await saveRun(dir, run)
+  const aborted = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(aborted.text).toContain('t1 (w3:p1, implement), t2 (w4:p1, blocked-on-decision), t3 (w5:p1, merge), ' +
+    't4 (w6:p1, plan)')
+  expect((await cmdResume(ctx(), { runId: run.run_id })).text).toContain('Told to carry on: t1 (w3:p1, implement).')
+  const after = (await listRuns(dir, 'personal'))[0]!
+  expect(after.outbox?.map((e) => [e.task_id, e.kind ?? 'phase'])).toEqual([['t4', 'phase'], ['t1', 'run-resumed']])
+})
+
+test('a stop notice lapses with the abort, so nothing sends it once the run is resumed', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  aborted.phase = 'execute'
+  aborted.history.push({ at: 99, from: 'done', to: 'execute', why: 'resumed by hand' })
+  expect(outboxPending(aborted)).toEqual([])
+  expect(pruneOutbox(aborted).map((e) => e.kind)).toEqual(['abort', 'abort'])
+})
+
+test('an aborted run stays aborted when a worker pane closes or exits, and that task is not failed', () => {
+  const run = abortableRun()
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  for (const taskId of ['t1', 't2']) enqueue(run, { to: 'worker', taskId, text: 'stop', kind: 'abort' }, 1)
+  applyEvents([run], [
+    { kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' },
+    { kind: 'pane.exited', session: 'personal', at: 2, pane_id: 'w4:p1' },
+  ], 'personal', new Set())
+  expect(run.tasks.slice(0, 2).map((t) => [t.phase, t.pane_id])).toEqual([['implement', null], ['spec', null]])
+  // Its stop notice would otherwise be the first message of the next agent in that workspace.
+  expect(run.outbox ?? []).toEqual([])
+  run.history.push({ at: 3, task_id: 't2', from: 'spec', to: 'failed', why: 'a task-level entry after the abort' })
+  expect(wasAborted(run)).toBe(true)
+})
+
+test('a decision whose worker pane goes during an abort is abandoned, so the resume strands nothing', () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1' }])
+  openDecision(run.tasks[0]!, { question: 'which?', recommendation: 'a' })
+  run.tasks[0]!.decision_from = 'spec'
+  run.tasks[0]!.phase = 'blocked-on-decision'
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  applyEvents([run], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  expect(run.tasks[0]?.phase as TaskPhase).toBe('spec')
+  expect(openDecisionFor(run.tasks[0]!)).toBeNull()
+  expect(wasAborted(run)).toBe(true)
+})
+
+test('a stop notice waits while its agent is still owed a brief', () => {
+  const run = abortableRun()
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  enqueue(run, { to: 'worker', taskId: 't3', text: 'stop', kind: 'abort' }, 1)
+  expect(outboxPending(run)).toEqual([])
+  delete run.tasks[2]!.awaiting_brief
+  expect(outboxPending(run).map((p) => p.paneId)).toEqual(['w5:p1'])
+})
+
+test('a run aborted in intake leaves intake after its resume, and the resume restarts every stall clock', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'research', pane_id: 'w3:p1', registered_at: 100 }])
+  run.phase_entered_at = 50
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const before = Date.now()
+  await cmdResume(ctx(), { runId: run.run_id })
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  expect(resumed.phase).toBe('intake')
+  // Reset to the resume, it read every task as registered before intake began.
+  expect(resumed.phase_entered_at).toBe(50)
+  expect(advanceRun(resumed, { actorIdle: true, newestRegisteredAt: 100 } as Parameters<typeof advanceRun>[1])?.phase)
+    .toBe('dispatch')
+  expect(resumed.stall?.last_probe_at).toBeGreaterThanOrEqual(before)
+  expect(resumed.tasks[0]?.stall?.last_probe_at).toBeGreaterThanOrEqual(before)
+})
+
+test('resume queues the brief and phase prompt for a task whose pane went while the run was aborted', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  const out = await cmdResume(ctx(), { runId: run.run_id })
+  expect(out.text).toContain("t1 has no agent, since its pane went while the run was aborted; its prompt is queued for " +
+    "t1's worker, which is not bound yet — ")
+  expect(out.text).not.toContain('Told to carry on')
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  const queued = resumed.outbox?.find((e) => e.task_id === 't1')
+  expect(queued?.kind).toBeUndefined()
+  expect(queued?.text).toContain('\n\n---\n\n')
+})
+
+test('resume makes a research task whose pane went owed its brief again, so a dispatch hands it over', async () => {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'research', pane_id: 'w3:p1', workspace_id: 'w3', checkout_path: '/r/wt/feat-x',
+  }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  const out = await cmdResume(ctx(), { runId: run.run_id })
+  expect(out.text).toContain('t1 has no agent, since its pane went while the run was aborted')
+  // The closed pane took its workspace with it, and a dispatch will not adopt a checkout no workspace is bound to.
+  expect(out.text).toContain(`\`herdr worktree open --cwd '${repoDir}' --branch b\` first, to bind its checkout again ` +
+    `(skip it if that answers \`worktree_not_found\`), then \`${hpipeCommand(ctx().pluginRoot)} dispatch --task t1\``)
+  const resumed = (await listRuns(dir, 'personal'))[0]!
+  expect(resumed.tasks[0]?.awaiting_brief).toBe(true)
+})
+
+test('resume re-queues with the brief a phase prompt that was held when the worker\'s pane went', async () => {
+  const run = runWithTasks([{ task_id: 't1', phase: 'spec', pane_id: 'w3:p1', workspace_id: 'w3' }])
+  run.repo_root = repoDir
+  run.phase = 'execute'
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'write the spec, held by stuck input' }, 1)
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w3:p1' }], 'personal', new Set())
+  aborted.tasks[0]!.workspace_id = null
+  await saveRun(dir, aborted)
+
+  await cmdResume(ctx(), { runId: run.run_id })
+  const queued = (await listRuns(dir, 'personal'))[0]!.outbox?.filter((e) => e.task_id === 't1') ?? []
+  expect(queued).toHaveLength(1)
+  expect(queued[0]?.brief_chars).toBeGreaterThan(0)
+})
+
+test('an escalated run aborted by an earlier release gets its escalation origin back from history', async () => {
+  const run = abortableRun()
+  run.history.push({ at: 1, from: 'ship-ci', to: 'escalated', why: 'a second red' })
+  run.history.push({ at: 2, from: 'escalated', to: 'done', why: 'aborted from escalated' })
+  run.phase = 'done'
+  run.escalated_from = 'escalated'
+  await saveRun(dir, run)
+  await cmdResume(ctx(), { runId: run.run_id })
+  expect((await listRuns(dir, 'personal'))[0]?.escalated_from).toBe('ship-ci')
+})
+
+test('an abort that tells one worker says its agent stays open', async () => {
+  await liveSupervisor([...SUPERVISOR_CAPABILITIES])
+  const run = runWithTasks([{ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }])
+  run.phase = 'execute'
+  await saveRun(dir, run)
+  expect((await cmdAbort(ctx(), { runId: run.run_id })).text)
+    .toContain('Told to stop on the supervisor\'s next tick: t1 (w3:p1, implement). Its agent stays open, so a ' +
+      'resume carries it on.')
+})
+
+test('only the orchestrator or the human resumes a run, never one of its workers', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const refused = await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w3:p1' })
+  expect(refused.ok).toBe(false)
+  expect(refused.text).toBe("w3:p1 is t1's worker pane: a run is resumed by the orchestrator or the human, never by " +
+    'its workers. Stop, and end your turn')
+  expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w1:p1' })).ok).toBe(true)
+})
+
+test('a human pane that carries a finished task\'s old pane id may resume the run', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  // t4 is done and still names w6:p1; herdr reuses ids.
+  expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w6:p1' })).ok).toBe(true)
+})
+
+test('an aborted run is resumed before it is rewound', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  for (const taskId of [null, 't1']) {
+    const refused = await cmdRewind(ctx(), { runId: run.run_id, phase: taskId === null ? 'execute' : 'spec', taskId })
+    expect(refused.ok).toBe(false)
+    expect(refused.text).toContain(`${run.run_id} was aborted from execute: resume it first`)
+  }
+})
+
+test('aborting a finished run is refused; aborting an escalated one resumes it escalated from where it was', async () => {
+  const finished = abortableRun()
+  finished.phase = 'done'
+  await saveRun(dir, finished)
+  expect((await cmdAbort(ctx(), { runId: finished.run_id })).text)
+    .toBe(`${finished.run_id} is finished (phase: done); nothing to abort`)
+
+  const escalated = abortableRun()
+  escalated.history.push({ at: 1, from: 'ship-ci', to: 'escalated', why: 'a second red' })
+  escalated.phase = 'escalated'
+  escalated.escalated_from = 'ship-ci'
+  await saveRun(dir, escalated)
+  for (const round of [1, 2]) {
+    await cmdAbort(ctx(), { runId: escalated.run_id })
+    expect((await cmdResume(ctx(), { runId: escalated.run_id })).text, `round ${round}`)
+      .toStartWith(`resumed ${escalated.run_id} at escalated`)
+    const back = (await listRuns(dir, 'personal')).find((r) => r.run_id === escalated.run_id)!
+    expect(back.escalated_from, `round ${round}`).toBe('ship-ci')
+    expect(back.aborted_escalation_from).toBeUndefined()
+  }
+})
+
+test('abort tells a worker its dispatch is handing the brief to right now', async () => {
+  await liveSupervisor([...SUPERVISOR_CAPABILITIES])
+  const run = abortableRun()
+  await saveRun(dir, run)
+  mkdirSync(join(dir, 'dispatch'), { recursive: true })
+  writeFileSync(dispatchLockPath(dir, run.repo_key), JSON.stringify({
+    session: 'personal', run_id: run.run_id, mode: 'ready', task: 't3', step: 'brief', since: Date.now(),
+    pid: process.pid, started_at_ms: await processStartedAtMs(process.pid) ?? 0, bootstrap: null,
+  }))
+  const out = await cmdAbort(ctx(), { runId: run.run_id })
+  expect(out.text).toContain('t3 (w5:p1, research)')
+  expect(out.text).toContain('t3 is being dispatched by pid')
+})
+
+test('a command on an aborted run says it was aborted and how it is resumed, not that it is finished', async () => {
+  const run = abortableRun()
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const shown = await cmdShow(ctx(), { taskId: 't1', repoKey: null, runId: null })
+  expect(shown.text).toContain(`  ${run.run_id} (aborted from execute) — \`${hpipeCommand(ctx().pluginRoot)} resume ` +
+    `${run.run_id}\` puts it back`)
+  const released = await cmdRelease(ctx(), { taskId: 't1', repoKey: null, runId: null })
+  expect(released.ok).toBe(false)
+  expect(released.text).not.toContain('a finished run cannot be re-entered')
+  expect(released.text).toContain('(aborted from execute)')
 })
 
 test('resume on a run that was never aborted is refused', async () => {
@@ -1437,7 +1769,7 @@ test('show prints a freshly fetched base for an unfinished task, containing its 
   expect(requested).toHaveLength(1)
 })
 
-test('show\'s base for a task with a worktree says it is not the commit that worktree was cut from', async () => {
+test('show\'s base for a task with a worktree says it may differ from the commit that worktree was cut from', async () => {
   // Smoke run 14 read the batch tip on this line as the commit the worktree started at.
   const run = runWithTasks([{ task_id: 't1', phase: 'implement', checkout_path: '/wt/t1' }])
   run.repo_root = repoDir
@@ -1445,7 +1777,7 @@ test('show\'s base for a task with a worktree says it is not the commit that wor
   const fetchBase = async () => ({ commit: '9e06c26', ref: 'origin/batch/x', fetchError: null })
   const shown = await cmdShow(ctx(), { taskId: 't1', repoKey: 'k', runId: null }, fetchBase)
   expect(shown.text).toEndWith('base: 9e06c26 (origin/batch/x as just fetched) — the base for a new worktree, ' +
-    'not the commit /wt/t1 was cut from')
+    'which may differ from the commit /wt/t1 was cut from')
 })
 
 test('show names a missing task', async () => {

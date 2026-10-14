@@ -1363,9 +1363,29 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 
 ### 9j. Abort
 
-On a second, throwaway single-PR run with one landed task, `hpipe abort <run>`. **Assert:** it names
-the landed task, says its bead stays closed and nothing reached main, and prints the clean-up
-commands; `hpipe status` shows `not shipped: batch/<…> holds 1 landed task (t1) that is not on main`.
+On a second, throwaway single-PR run with one landed task and one still working, `hpipe abort <run>`.
+**Assert:** it names the landed task, says its bead stays closed and nothing reached main, and says
+`Told to stop on the supervisor's next tick: t2 (<pane>, <phase>)`; within a tick the worker gets a
+`# Stop — run <run> was aborted` prompt and stops. Its `If you will not resume it, clean up once its workers have stopped …` block
+names `herdr worktree remove --workspace <w>` for each task worktree (or the uncommitted work that
+holds one back), counts each unlanded branch's commits (`has 3 commits that did not land, up to
+<sha>`), and offers no `worktree remove` or `branch -D` for a batch checkout or branch that `ship`
+never made. `hpipe status` heads the run `[aborted]`, not `[done]`, and shows `not shipped: batch/<…>
+holds 1 landed task (t1) that is not on main`; the worker's `hpipe submit` names the run as `aborted
+from execute` with the resume command, never `a finished run cannot be re-entered`, and its
+`hpipe resume` from its own pane is refused. Then `hpipe resume <run>`: it says `Told to carry on: t2
+(…)`, and the worker gets `# Resumed — <phase>` and carries on.
+
+Abort it again, close one worker's pane (`herdr pane close <pane>`), wait a tick, and resume. **Assert:**
+until the resume, status still heads the run `[aborted]`, that task keeps its phase with no pane and is
+not `failed`, and no stop notice is listed for it. The resume prints `tN has no agent, since its pane
+went while the run was aborted; its prompt is queued for tN's worker, which is not bound yet — …`;
+following those commands, the new agent gets the brief and the phase prompt on its own, and nothing
+else is stranded (a decision it had open is abandoned and the task is back where it raised it). Do it
+once with the task in `research` too: there the resume leaves the task owed its brief, and
+`hpipe dispatch --task tN` (or the `--pane` form after a hand-started agent) hands it over. In either
+phase, the task does not move on until the new agent has its prompt: a draft its predecessor left
+uncommitted is not taken as the phase's file.
 
 Record the time a long check takes inside `submit` (the agent's Bash timeout is 10 minutes): a longer
 one does not fit, and that is a finding.
@@ -1594,7 +1614,8 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
 - a `Dispatch — run …` prompt that comes while the dispatch is still running (the orchestrator goes
   idle at the end of its intake turn, mid-bootstrap) opens ``A dispatch is already running: `hpipe
   dispatch --ready` (pid <n>), at <step> for tN, started <n>m ago. It takes every ready task before it
-  ends, so do not start another.``, and the orchestrator starts no second dispatch. One that comes while
+  ends, so do not start another: read its step lines when its completion notice arrives.``, and the
+  orchestrator starts no second dispatch. One that comes while
   `$STATE/dispatch/` holds this run's lock and does not open with that line is a **finding**.
 
 ### 12d. Stops, and re-runs that skip what is done
@@ -1776,7 +1797,7 @@ from the orchestrator pane.
 | A decision is open and the worker is stopped | `hpipe answer --task <t> --decision <id> --answer "…" --by orchestrator\|human`. If status shows "answered but undelivered" with attempts climbing, a fresh `hpipe answer` re-arms delivery. |
 | A phase burned through `MAX_PASSES` (2) and escalated | Settle the dispute with the human, then `hpipe rewind <run_id> <phase> [--task <id>]`, which clears every pass counter on that record and, for a review phase, prints the fresh verdict path it reserved. |
 | A phase was escalated by the stall ladder | `hpipe status` lists the task under `waiting on you:` as `tN <branch> (<bead>) [escalated Nm] — needs a human: <rewind command> resumes it, <rewind … failed command> abandons it` (a run shows `⚠ run escalated from <phase> … needs a human`). Deal with whatever it was waiting for, then `hpipe rewind <run_id> <phase> [--task <id>]`, which re-arms the ladder from zero. To drop an escalated task instead, `hpipe rewind <run_id> failed --task <id>`: until one of the two is run the run stays in `execute`, the task's dependents stay `queued`, and the run gives up its orchestrator pane to any other run driven from it. |
-| The whole run is wrong and you want out | `hpipe abort <run_id>` — leaves worktrees and branches alone, releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was. |
+| The whole run is wrong and you want out | `hpipe abort <run_id>` — tells the live workers to stop, leaves worktrees and branches alone, lists how to clean them up, and releases the repo for a new `hpipe start`. Undo with `hpipe resume <run_id>`, which puts it back where it was and tells the stopped workers to carry on. |
 | The orchestrator pane died or changed id | `hpipe status` flags it (`⚠ orchestrator pane … is gone`). Run the plugin's `claim` action from the pane that should drive the run. |
 | The supervisor died | `hpipe status` reports `supervisor: none\|stale`. Reopen with `herdr plugin action invoke stein.pipeline.supervisor`. Nothing advances until it is back; no state is lost. |
 | A task is bound to the wrong workspace | `hpipe forget <workspace_id>` clears `workspace_id` and `pane_id` so the binding can be re-made. It does not hand the checkout back: once the task merges, teardown still removes it by path when it is clean, on the task's branch and pushed. Register the task with `--keep-worktree` to keep it. |

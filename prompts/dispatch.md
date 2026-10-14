@@ -5,7 +5,7 @@
 Tasks are registered. Your job now is to give each ready task a worktree and an agent, and to keep
 two agents off the same files.
 
-**When you are told a task is ready**, dispatch it with one command:
+**When you are told a task is ready and no dispatch is running**, dispatch it with one command:
 
     {{hpipe}} dispatch --ready
 

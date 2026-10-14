@@ -533,7 +533,7 @@ test('the run level needs no such guard — neither row is stallable', () => {
   }
 })
 
-test('hpipe resume re-arms a task ladder without cmdResume touching tasks (A30)', () => {
+test('a run-level phase entry re-arms a task ladder without touching tasks (A30)', () => {
   const entered = NOW - 800 * 60_000
   const run = runAt('execute', entered)
   const task = mkTask({ phase: 'implement', phase_entered_at: entered })
@@ -543,7 +543,7 @@ test('hpipe resume re-arms a task ladder without cmdResume touching tasks (A30)'
   }
   expect(taskStallCandidates([run], NOW, 45, 3)[0]?.action).toBe('escalate')
 
-  // cmdResume's exact mutation (src/cli.ts:315-317): run only, tasks untouched.
+  // A run-level rewind's mutation: run only, tasks untouched.
   run.phase = 'execute'
   run.phase_entered_at = NOW
   expect(task.stall!.at).toBe(entered)

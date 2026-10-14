@@ -673,10 +673,50 @@ test('an aborted run names how to resume it and keeps its unfinished work visibl
   const text = formatStatus([run], { state: 'live' }, 'personal', HP)
   expect(text).not.toContain('waiting on you')
   expect(text).not.toContain('ended:')
+  expect(text).toContain(`${run.run_id}  [aborted]  `)
+  expect(text).not.toContain('[done]')
   expect(text).toContain(
     `  aborted from execute: escalated t1 · merge t2 — \`${HP} resume ${run.run_id}\` puts it back`)
   expect(text).toContain(`  ℹ t1 [escalated] fix/a — \`${HP} show --task t1 --run ${run.run_id}\``)
   expect(text).toContain(`  ℹ t2 [merge] fix/b PR #41 — \`${HP} show --task t2 --run ${run.run_id}\``)
+})
+
+test('an aborted run lists each stop notice not yet delivered, and why it is held', () => {
+  const run = mkRun()
+  run.history.push({ at: 0, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.tasks = [
+    mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w3:p1' }),
+    mkTask({ task_id: 't2', phase: 'spec', pane_id: 'w4:p1' }),
+    mkTask({ task_id: 't3', phase: 'plan', pane_id: 'w5:p1' }),
+  ]
+  for (const taskId of ['t1', 't2', 't3']) enqueue(run, { to: 'worker', taskId, text: 'stop', kind: 'abort' }, 0)
+  run.outbox![2] = { ...run.outbox![2]!, attempts: 2, last_code: 'agent_pane_busy' }
+  const holds = { 'w4:p1': { since: 0, failures: 1, code: 'stuck_input' } }
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP, new Set(), 0, { holds })
+  expect(text).toContain("  t1's stop notice is queued for w3:p1")
+  expect(text).toContain("  ⚠ t2's stop notice is held by text in the input box of w4:p1 — submit or clear that text")
+  expect(text).toContain("  ⚠ t3's stop notice has not reached w5:p1 (agent_pane_busy)")
+})
+
+test('an aborted run names a task whose agent went while it was aborted', () => {
+  const run = mkRun()
+  run.history.push({ at: 0, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.phase = 'done'
+  run.escalated_from = 'execute'
+  run.tasks = [mkTask({ task_id: 't1', phase: 'spec', pane_id: null, last_pane_id: 'w3:p1', branch: 'feat/a' })]
+  expect(formatStatus([run], { state: 'live' }, 'personal', HP)).toContain(
+    `  ℹ t1 [spec] feat/a — \`${HP} show --task t1 --run ${run.run_id}\`; no agent: w3:p1 went while the run was ` +
+    'aborted, and a resume sees that the next one gets its brief')
+})
+
+test('a queued notice that the run was resumed is named as such, not as a usage-limit resume', () => {
+  const run = mkRun()
+  run.tasks = [mkTask({ task_id: 't1', phase: 'implement', pane_id: 'w3:p1', agent_status: 'idle' })]
+  enqueue(run, { to: 'worker', taskId: 't1', text: 'carry on', kind: 'run-resumed' }, 0)
+  const text = formatStatus([run], { state: 'live' }, 'personal', HP)
+  expect(text).toContain('nothing for you — its notice that the run was resumed is queued for w3:p1')
 })
 
 test('a finished run with no tasks prints no ended line', () => {
@@ -787,7 +827,8 @@ test('a worker owed a usage-limit resume is not called idle with nothing, in sta
 
   const failing = { 'w3:p1': { since: now - 60_000, failures: 2, code: 'agent_not_found' } }
   expect(actionFor(run, task, HP, now, failing))
-    .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — see the ⚠ delivery line below")
+    .toBe("YOUR move: its resume after Claude's usage limit has not reached w3:p1 — `bun run /p/src/cli.ts status` says why in its ⚠ " +
+      'delivery line')
 })
 
 test('a worker told to carry on is nobody\'s move until that prompt lands', () => {
@@ -815,7 +856,16 @@ test('a send that stalled and then found a human\'s text is named stuck from the
 test('a phase prompt failing to reach its worker points at the delivery warning — #136', () => {
   const { run, now } = heldSpecPrompt('agent_not_found')
   expect(actionFor(run, run.tasks[0] as Task, HP, now))
-    .toBe('YOUR move: its spec prompt has not reached w3:p1 — see the ⚠ delivery line below')
+    .toBe('YOUR move: its spec prompt has not reached w3:p1 — `bun run /p/src/cli.ts status` says why in its ⚠ delivery line')
+})
+
+test('a prompt herdr refused for a just-started agent is retried, not the orchestrator\'s move, for a minute', () => {
+  const { run, now } = heldSpecPrompt()
+  const starting = { 'w3:p1': { since: now - 5_000, failures: 1, code: 'agent_pane_busy' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, starting))
+    .toBe('nothing for you — its spec prompt is being retried for w3:p1')
+  const stillFailing = { 'w3:p1': { since: now - 61_000, failures: 4, code: 'agent_pane_busy' } }
+  expect(actionFor(run, run.tasks[0] as Task, HP, now, stillFailing)).toStartWith('YOUR move: its spec prompt has not')
 })
 
 test('a phase prompt still in flight is nobody\'s move yet — #136', () => {
