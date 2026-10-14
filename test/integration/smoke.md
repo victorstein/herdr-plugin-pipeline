@@ -913,12 +913,14 @@ otherwise removes before you can read them.
    `visited:` line that walks the table above:
 
    ```
-   light     research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   standard  research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
+   light     research → spec → spec-review → plan → implement → pr-review → ci → merge → close → teardown → done
+   standard  research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done
+   heavy     research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done
    ```
 
-   A gate no task held reads `blocked-on-files (passed through)`. A returned review shows as a repeat
+   The files are disjoint, so each task passes its file gate straight through, and `visited:` leaves
+   that gate out; a task that waited there shows `blocked-on-files` before `implement`, and here that is
+   a finding. A returned review shows as a repeat
    (`… → spec-review → spec → spec-review → …`) and a decision as
    `blocked-on-decision` between two entries of the same phase; both are fine. A row the tier skips
    appearing, or one it runs missing, is a finding.
@@ -977,7 +979,7 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    are kept out of it on purpose.
 2. Once `done`, `visited:` includes `plan-review` after `plan`, which the light route skips, and still
    runs one `pr-review`, never the heavy pair:
-   `research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done`.
+   `research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done`.
 3. **`branch-review` is skipped.** One task landed, so the run goes straight from `execute` to `done`:
    the orchestrator never receives a final-review prompt, and the ledger's last run entry reads
    `execute → done` with why `one task merged (PR #<n>); branch-review skipped`:
@@ -1461,6 +1463,9 @@ Register t1 with `--tier heavy`, so its PR review runs. Have its worker raise a 
 with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
 
 - The worker's answer prompt says `Before this merges, the human will check:` and names the check.
+- Until t1 reaches `merge`, the run header's `before merge:` line and `hpipe show --task t1` read
+  `c1 … — owed before PR #<n> merges; the human is asked at merge` (`t1's PR` before it has one), never
+  `waiting on the human`, and status has no `waiting on the human:` block.
 - `hpipe confirm --check c1 --by human` while t1 is in `pr-review` is refused: `confirm it once t1
   reaches ci`.
 - At `merge`, the orchestrator's prompt is **Hold — PR #<n> (…) waits on the human before it merges**.
@@ -1485,8 +1490,9 @@ with `--by orchestrator --before-merge "<what the human checks>"`. **Assert:**
 
 ### 11c. Single-PR
 
-- `hpipe hold --before-merge "<check>"` at intake. When the run reaches `ship-merge`, it is held with
-  the hold prompt, and no probe comes.
+- `hpipe hold --before-merge "<check>"` at intake. Until `ship-merge`, the run header reads `c1 <check> —
+  owed before the batch PR merges; the human is asked at ship-merge` (`PR #<n>` once it is open). When
+  the run reaches `ship-merge`, it is held with the hold prompt, and no probe comes.
 - Confirming during `ship-ci` holds once CI passes on that head: the merge prompt comes, with
   `Before merge: c1 confirmed by the human on <sha8>.`
 - A `BEHIND` batch PR: the hold prompt has `gh pr update-branch` run first, the run goes back through
@@ -1584,7 +1590,12 @@ Register t1, t2 and t3 (disjoint `--files`, no dependencies), then `hpipe dispat
   `hpipe show --task tN` names the workspace and pane within a tick;
 - no line says `did not answer within 30s`: every herdr call but `agent start` runs bounded, in a
   process group of its own, and a healthy herdr answers well inside the bound;
-- `$STATE/dispatch/` is empty once it ends.
+- `$STATE/dispatch/` is empty once it ends;
+- a `Dispatch — run …` prompt that comes while the dispatch is still running (the orchestrator goes
+  idle at the end of its intake turn, mid-bootstrap) opens ``A dispatch is already running: `hpipe
+  dispatch --ready` (pid <n>), at <step> for tN, started <n>m ago. It takes every ready task before it
+  ends, so do not start another.``, and the orchestrator starts no second dispatch. One that comes while
+  `$STATE/dispatch/` holds this run's lock and does not open with that line is a **finding**.
 
 ### 12d. Stops, and re-runs that skip what is done
 

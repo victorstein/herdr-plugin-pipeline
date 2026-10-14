@@ -373,7 +373,7 @@ Mid-run, `hpipe tier --task <id> <tier> --why "<reason>"` changes it. Raising wo
 lowering is refused from the orchestrator's and the workers' panes, so run it from your own. The
 phase the task is in always completes; only the next step follows the new tier, and a raise never goes
 back for a review already skipped (`hpipe rewind` does). `hpipe show --task <id>` prints the tier, its
-log, and every phase the task visited.
+log, and every phase the task visited, leaving out a file gate it passed straight through.
 
 Every task review ranks its findings the same way. Only a **BLOCKER** sends the work back for another
 pass, and a BLOCKER is a defect that would ship or a product or scope decision only the owner can make.
@@ -617,9 +617,12 @@ While a check is owed:
   the user would check; then tell the user once, in a message of its own, what to check and on which
   build; then end its turn.
 - No stall probe comes for it, however long the user takes.
-- `hpipe status` lists it under **waiting on the human:**, and the run header gets a `before merge:`
-  line. `hpipe show --task <id>` prints one `before merge:` line per check. Per-task, the task's bead
-  is `blocked` + `hpipe:awaiting-human`, with the check and each ruling as comments.
+- `hpipe status` lists it under **waiting on the human:** once its gate is reached, and the run header
+  gets a `before merge:` line as soon as it is recorded. Until the gate, that line says when the user
+  is asked, not that anyone waits on them: `owed before PR #12 merges; the human is asked at merge`
+  (single-PR: `at ship-merge`). `hpipe show --task <id>` prints one `before merge:` line per check.
+  Per-task, the task's bead is `blocked` + `hpipe:awaiting-human`, with the check and each ruling as
+  comments.
 
 The user's ruling is recorded with:
 

@@ -40,6 +40,23 @@ test('a held task is the human\'s wait, not yours, and status says so in its own
   expect(text).not.toContain('waiting on you:')
 })
 
+test('before its gate, status and show say when the human is asked, and list nothing under their wait', () => {
+  const run = held({ phase: 'research', pr: null, ci: null, ci_head: undefined })
+  const text = status(run)
+  expect(text).toContain("  before merge: c1 (t1) the reader shows no ghost after a page turn — owed before t1's PR merges; " +
+    'the human is asked at merge · c3 (t1) the menu closes on a long press — confirmed by the human on 9e06c261')
+  expect(text).not.toContain('waiting on the human')
+  expect(formatTaskDetail(run, run.tasks[0]!, NOW)).toContain('before merge: c1 the reader shows no ghost after a page ' +
+    "turn (from d1) — owed before t1's PR merges; the human is asked at merge")
+
+  const batch = singlePrRun([], 'execute')
+  batch.run_id = 'r1'
+  batch.before_merge = [checkOf('c2', [], { check: 'the menu closes' })]
+  expect(status(batch)).toContain('  before merge: c2 the menu closes — owed before PR #301 merges; the human is asked at ' +
+    'ship-merge')
+  expect(status(batch)).not.toContain('waiting on the human')
+})
+
 test('a stale confirmation shows the head it covered and the head there is now', () => {
   const run = held({ before_merge: [checkOf('c1', [ruling('confirmed', NEWER_HEAD)])] })
   expect(status(run)).toContain('on PR #255 at 9e06c261 (confirmed on 5e6f7a8b; the head is now 9e06c261) — once they answer')

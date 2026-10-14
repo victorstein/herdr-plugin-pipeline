@@ -852,18 +852,30 @@ test('visitedPhases lists every phase entered, drops repeats and marks rewinds',
     .toEqual(['research', 'spec', 'blocked-on-decision', 'spec', '↺research', '↺research'])
 })
 
-// Smoke run 14: every task's visited line named blocked-on-files though no task held its files.
-test('visitedPhases marks a file gate the task passed straight through', () => {
+// Smoke run 14: every task's visited line named blocked-on-files though no task held its files. The
+// v2.2.0 smoke run: "(passed through)" on a run's only task still read as if a lock had fired.
+test('visitedPhases leaves out a file gate the task passed straight through', () => {
   const run = mkRun()
   const task = mkTask({ task_id: 't1' })
   run.history = [
-    { at: 1, task_id: 't1', from: 'plan', to: 'blocked-on-files', why: 'actor idle + artifact fresh' },
-    { at: 2, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: FILES_FREE_ON_ARRIVAL },
-    { at: 3, task_id: 't1', from: 'rewind', to: 'blocked-on-files', why: 'manual rewind' },
-    { at: 4, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: 'no overlapping files in flight' },
+    { at: 1, task_id: 't1', from: 'spec-review', to: 'plan', why: 'actor idle + artifact fresh' },
+    { at: 2, task_id: 't1', from: 'plan', to: 'blocked-on-files', why: 'actor idle + artifact fresh' },
+    { at: 3, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: FILES_FREE_ON_ARRIVAL },
+    { at: 4, task_id: 't1', from: 'rewind', to: 'blocked-on-files', why: 'manual rewind' },
+    { at: 5, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: 'no overlapping files in flight' },
   ]
-  expect(visitedPhases(run, task))
-    .toEqual(['blocked-on-files (passed through)', 'implement', '↺blocked-on-files', 'implement'])
+  expect(visitedPhases(run, task)).toEqual(['plan', 'implement', '↺blocked-on-files', 'implement'])
+})
+
+test('visitedPhases keeps a file gate the task waited at', () => {
+  const run = mkRun()
+  const task = mkTask({ task_id: 't1' })
+  run.history = [
+    { at: 1, task_id: 't1', from: 'spec-review', to: 'plan', why: 'actor idle + artifact fresh' },
+    { at: 2, task_id: 't1', from: 'plan', to: 'blocked-on-files', why: 'actor idle + artifact fresh' },
+    { at: 3, task_id: 't1', from: 'blocked-on-files', to: 'implement', why: 'no overlapping files in flight' },
+  ]
+  expect(visitedPhases(run, task)).toEqual(['plan', 'blocked-on-files', 'implement'])
 })
 
 test('hpipe show prints the tier, its log and the phases visited, after the phase', () => {

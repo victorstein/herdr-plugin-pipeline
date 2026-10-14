@@ -320,7 +320,8 @@ async function main(): Promise<void> {
       // on "now". `hpipe` moves up from the stall block below; same call count.
       const tickNow = Date.now()
       const hpipe = hpipeCommand(pluginRoot)
-      // A dispatch under way is no one's lapse, so no line tells anyone to start its agent.
+      // A dispatch under way is no one's lapse, so no line tells anyone to start its agent,
+      // and the dispatch prompt names it instead of reading as a cue to start another.
       const dispatches = await readDispatchLocks(stateDir, runs.map((run) => run.repo_key))
 
       const pending: PendingPrompt[] = []
@@ -354,7 +355,7 @@ async function main(): Promise<void> {
 
           const runGh = ghFor(run.repo_root)
           const { nextPrompt, phaseNote } = await evaluateRun(
-            run, runGh, config, liveIdle, { stateDir }, holdForSubagents,
+            run, runGh, config, liveIdle, { stateDir, dispatches }, holdForSubagents,
           )
 
           const runPhaseBefore = run.phase
@@ -400,7 +401,7 @@ async function main(): Promise<void> {
 
           const enteredRunPhase = run.phase === runPhaseBefore
             ? ''
-            : await promptForRunPhase(run, config, { stateDir })
+            : await promptForRunPhase(run, config, { stateDir, dispatches })
 
           await refreshBadges(run, herdr, pluginId)
           const covered = briefHolds.heldTasks(run)

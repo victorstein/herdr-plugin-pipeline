@@ -221,14 +221,29 @@ export function dispatchUnderWay(locks: DispatchLocks, run: Run, task: Task): Di
   return lock.mode === 'ready' && unbriefedWorker(run, task) !== null ? lock : null
 }
 
+const commandOf = (lock: DispatchLock, hpipe: string): string =>
+  (lock.mode === 'ready' ? `\`${hpipe} dispatch --ready\`` : `\`${hpipe} dispatch\``)
+
+const whereItIs = (lock: DispatchLock, now: number): string => (lock.task === null
+  ? 'between tasks'
+  : `at ${lock.step ?? 'its start'} for ${lock.task}, started ${minutesSince(lock.since, now)}m ago`)
+
 /** "`hpipe dispatch` (pid 4242) is at bootstrap for t1, started 3m ago". */
 export function dispatchProgress(lock: DispatchLock, task: Task, hpipe: string, now: number): string {
-  const command = lock.mode === 'ready' ? `\`${hpipe} dispatch --ready\`` : `\`${hpipe} dispatch\``
-  const at = lock.task === null
-    ? 'between tasks'
-    : `at ${lock.step ?? 'its start'} for ${lock.task}, started ${minutesSince(lock.since, now)}m ago`
   const takes = lock.task === task.task_id ? '' : `; it takes ${task.task_id} before it ends`
-  return `${command} (pid ${lock.pid}) is ${at}${takes}`
+  return `${commandOf(lock, hpipe)} (pid ${lock.pid}) is ${whereItIs(lock, now)}${takes}`
+}
+
+/**
+ * The dispatch prompt's first line while this run's dispatch is still going. Without
+ * it, the prompt that came while intake's `--ready` was still running read as an
+ * instruction to start one. Measured on a live run.
+ */
+export function dispatchRunningLine(lock: DispatchLock, hpipe: string, now: number): string {
+  const rest = lock.mode === 'ready'
+    ? 'It takes every ready task before it ends, so do not start another.'
+    : 'Do not start another while it runs.'
+  return `A dispatch is already running: ${commandOf(lock, hpipe)} (pid ${lock.pid}), ${whereItIs(lock, now)}. ${rest}`
 }
 
 /** What status and the digest say instead of a dispatch step while one is under way. */

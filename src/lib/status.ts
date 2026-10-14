@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import {
-  checkName, checksIn, checkState, fromDecision, gateHead, idList, mergedWithCheckOwed, type OwedCheck, owedAt,
-  owedInRun, stateClause,
+  checkClause, checkName, checksIn, fromDecision, gateHead, humanIsAsked, idList, mergedWithCheckOwed, type OwedCheck,
+  owedAt, owedInRun,
 } from './before-merge'
 import { beadOutOfSync } from './bead-desired'
 import { escalatedUnanswered, openDecisionFor } from './decisions'
@@ -426,17 +426,9 @@ function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds, di
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
 }
 
-/**
- * The checks the human owes at a gate, or past one: a per-task task in `merge`, or
- * merged; a single-PR run in `ship-merge`. Elsewhere nothing waits on them yet, since
- * a ruling is taken only near the gate.
- */
+/** The checks the human owes at a gate, or past one. */
 function humanOwesAtTheGate(run: Run): OwedCheck[] {
-  const waiting = (owed: OwedCheck[]) => owed.filter((o) => o.state.kind === 'waiting-on-the-human')
-  if (run.batch !== undefined) return run.phase === 'ship-merge' ? waiting(owedAt(run, null)) : []
-  return run.tasks
-    .filter((task) => task.phase === 'merge' || task.merged_at_ms !== null)
-    .flatMap((task) => waiting(owedAt(run, task)))
+  return owedInRun(run).filter((o) => o.state.kind === 'waiting-on-the-human' && humanIsAsked(run, o.task))
 }
 
 /**
@@ -482,8 +474,8 @@ function waitingOnTheHuman(run: Run, hpipe: string, now: number): string[] {
 function beforeMergeHeader(run: Run): string[] {
   const checks = checksIn(run)
   if (checks.length === 0) return []
-  return [`  before merge: ${checks.map((held) =>
-    `${checkName(held)} ${held.check.check} — ${stateClause(checkState(run, held))}`).join(' · ')}`]
+  return [`  before merge: ${checks.map((held) => `${checkName(held)} ${held.check.check} — ${checkClause(run, held)}`)
+    .join(' · ')}`]
 }
 
 /**
@@ -801,7 +793,9 @@ function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: 
 }
 
 /**
- * A skipped review shows here by its absence. Tier changes are not read from
+ * A skipped review shows here by its absence, and so does a file gate no tick held
+ * the task at: even marked as passed through, it read as if a lock had fired on a
+ * run's only task. Measured on a live run. Tier changes are not read from
  * `run.history` because they are never written there; see `TierChange`.
  */
 export function visitedPhases(run: Run, task: Task): string[] {
@@ -810,9 +804,7 @@ export function visitedPhases(run: Run, task: Task): string[] {
   for (const entry of run.history) {
     if (entry.task_id !== task.task_id) continue
     const passedTheGate = entry.from === 'blocked-on-files' && entry.why === FILES_FREE_ON_ARRIVAL
-    if (passedTheGate && visited.at(-1) === 'blocked-on-files') {
-      visited[visited.length - 1] = 'blocked-on-files (passed through)'
-    }
+    if (passedTheGate && visited.at(-1) === 'blocked-on-files') visited.pop()
     // A rewind onto the phase the task is already in is still a rewind worth showing.
     if (entry.from !== 'rewind' && entry.to === previous) continue
     previous = entry.to
@@ -920,8 +912,7 @@ const BEFORE_MERGE_LABEL = 'before merge: '
 
 function beforeMergeDetail(run: Run, task: Task, now: number): string[] {
   return (task.before_merge ?? []).map((check, i) => {
-    const state = checkState(run, { check, task })
     const label = i === 0 ? BEFORE_MERGE_LABEL : ' '.repeat(BEFORE_MERGE_LABEL.length)
-    return `${label}${check.id} ${check.check}${fromDecision(check)} — ${stateClause(state, now)}`
+    return `${label}${check.id} ${check.check}${fromDecision(check)} — ${checkClause(run, { check, task }, now)}`
   })
 }
