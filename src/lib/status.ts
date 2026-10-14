@@ -801,7 +801,9 @@ function batchHeader(run: Run, batch: Batch, supervisor: StatusSupervisor, now: 
 }
 
 /**
- * A skipped review shows here by its absence. Tier changes are not read from
+ * A skipped review shows here by its absence, and so does a file gate no tick held
+ * the task at: even marked as passed through, it read as if a lock had fired on a
+ * run's only task. Measured on a live run. Tier changes are not read from
  * `run.history` because they are never written there; see `TierChange`.
  */
 export function visitedPhases(run: Run, task: Task): string[] {
@@ -810,9 +812,7 @@ export function visitedPhases(run: Run, task: Task): string[] {
   for (const entry of run.history) {
     if (entry.task_id !== task.task_id) continue
     const passedTheGate = entry.from === 'blocked-on-files' && entry.why === FILES_FREE_ON_ARRIVAL
-    if (passedTheGate && visited.at(-1) === 'blocked-on-files') {
-      visited[visited.length - 1] = 'blocked-on-files (passed through)'
-    }
+    if (passedTheGate && visited.at(-1) === 'blocked-on-files') visited.pop()
     // A rewind onto the phase the task is already in is still a rewind worth showing.
     if (entry.from !== 'rewind' && entry.to === previous) continue
     previous = entry.to

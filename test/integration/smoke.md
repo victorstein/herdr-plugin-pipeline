@@ -913,12 +913,14 @@ otherwise removes before you can read them.
    `visited:` line that walks the table above:
 
    ```
-   light     research → spec → spec-review → plan → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   standard  research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
-   heavy     research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done
+   light     research → spec → spec-review → plan → implement → pr-review → ci → merge → close → teardown → done
+   standard  research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done
+   heavy     research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done
    ```
 
-   A gate no task held reads `blocked-on-files (passed through)`. A returned review shows as a repeat
+   The files are disjoint, so each task passes its file gate straight through, and `visited:` leaves
+   that gate out; a task that waited there shows `blocked-on-files` before `implement`, and here that is
+   a finding. A returned review shows as a repeat
    (`… → spec-review → spec → spec-review → …`) and a decision as
    `blocked-on-decision` between two entries of the same phase; both are fine. A row the tier skips
    appearing, or one it runs missing, is a finding.
@@ -977,7 +979,7 @@ hpipe tier --task t1 standard --why "smoke: research found it touches a contract
    are kept out of it on purpose.
 2. Once `done`, `visited:` includes `plan-review` after `plan`, which the light route skips, and still
    runs one `pr-review`, never the heavy pair:
-   `research → spec → spec-review → plan → plan-review → blocked-on-files → implement → pr-review → ci → merge → close → teardown → done`.
+   `research → spec → spec-review → plan → plan-review → implement → pr-review → ci → merge → close → teardown → done`.
 3. **`branch-review` is skipped.** One task landed, so the run goes straight from `execute` to `done`:
    the orchestrator never receives a final-review prompt, and the ledger's last run entry reads
    `execute → done` with why `one task merged (PR #<n>); branch-review skipped`:

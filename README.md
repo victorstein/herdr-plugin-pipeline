@@ -373,7 +373,7 @@ Mid-run, `hpipe tier --task <id> <tier> --why "<reason>"` changes it. Raising wo
 lowering is refused from the orchestrator's and the workers' panes, so run it from your own. The
 phase the task is in always completes; only the next step follows the new tier, and a raise never goes
 back for a review already skipped (`hpipe rewind` does). `hpipe show --task <id>` prints the tier, its
-log, and every phase the task visited.
+log, and every phase the task visited, leaving out a file gate it passed straight through.
 
 Every task review ranks its findings the same way. Only a **BLOCKER** sends the work back for another
 pass, and a BLOCKER is a defect that would ship or a product or scope decision only the owner can make.
