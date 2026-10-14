@@ -844,7 +844,7 @@ function submittedLine(sub: Submission, batch: Batch, now: number): string {
   const at = `at ${sha8(sub.head_sha)}, ${ageMinutes(sub.at, now)}m ago`
   if (sub.kind !== 'sync') return `${sub.title} (${sub.kind}, ${at}; ${checked})`
   const merge = sub.merge !== 'clean'
-    ? `not a clean merge of ${batch.branch}, at ${sha8(sub.dirty_at ?? sub.head_sha)}`
+    ? `not a clean merge of ${batch.branch}: ${sha8(sub.dirty_at ?? sub.head_sha)} is not git's own merge`
     : sub.merges === 0 ? `nothing on ${batch.branch} to merge` : `a clean merge of ${batch.branch}`
   return `sync ${at} (${merge}; ${checked})`
 }

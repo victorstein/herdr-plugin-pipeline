@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { answerCheckNote, checkFailedVars, lastFailure, owedAt, taskHoldVars } from '../lib/before-merge'
+import { answerCheckNote, checkFailedVars, lastFailure, owedAt, taskHoldVars, taskRulingsNote } from '../lib/before-merge'
 import { bootstrapLine, repoBootstrap } from '../lib/bootstrap'
 import { DEFAULT_STALL_MINUTES } from '../lib/config'
 import {
@@ -204,7 +204,9 @@ export async function renderTaskPhasePrompt(
       const owed = owedAt(run, task)
       return owed.length > 0
         ? renderPrompt(deps.pluginRoot, 'before-merge', { ...taskHoldVars(run, task, owed), ...heldSharedNote(run, task, hpipe) })
-        : renderPrompt(deps.pluginRoot, 'merge', { ...common, ...mergePromptVars(run, task, hpipe) })
+        : renderPrompt(deps.pluginRoot, 'merge', {
+          ...common, ...mergePromptVars(run, task, hpipe), before_merge: taskRulingsNote(run, task),
+        })
     }
     case 'sync':
       return renderPrompt(deps.pluginRoot, 'sync', { ...common, ...syncPromptVars(run, task, hpipe) })

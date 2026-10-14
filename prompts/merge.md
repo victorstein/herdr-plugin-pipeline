@@ -1,6 +1,6 @@
 # Ready to merge — {{branch}} ({{bead}}), PR #{{pr}}
 
-{{review_count}}{{ci_status}}
+{{review_count}}{{ci_status}}{{before_merge}}
 
 Before merging, check the PR does not conflict with anything merged since it branched — if another
 task touched the same files, rebase this one onto the result and let CI re-run rather than merging on

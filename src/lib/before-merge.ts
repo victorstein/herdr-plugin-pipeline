@@ -295,7 +295,16 @@ export function batchHoldVars(run: Run, batch: Batch, owed: OwedCheck[], hpipe: 
 
 /** `{{before_merge}}` of ship-merge.md: what the human ruled, once nothing is owed. */
 export function rulingsNote(run: Run): string {
-  const rulings = checksIn(run).map((held) => `${checkName(held)} ${stateClause(checkState(run, held))}`)
+  return rulingsOf(run, checksIn(run))
+}
+
+/** `{{before_merge}}` of merge.md: what the human ruled on this task, once nothing is owed. */
+export function taskRulingsNote(run: Run, task: Task): string {
+  return rulingsOf(run, checksIn(run).filter((held) => held.task?.task_id === task.task_id))
+}
+
+function rulingsOf(run: Run, held: HeldCheck[]): string {
+  const rulings = held.map((one) => `${checkName(one)} ${stateClause(checkState(run, one))}`)
   return rulings.length === 0 ? '' : `\n\nBefore merge: ${rulings.join('; ')}.`
 }
 

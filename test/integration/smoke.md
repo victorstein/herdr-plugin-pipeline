@@ -1430,7 +1430,7 @@ run cannot time a push into the one tick between `submit` and the skip.
 If such a task must sync and the merge conflicts, `submit` reports `not a clean merge` and the task goes
 to `pr-review`, its first. **Assert** that review's prompt says `No reviewed head is recorded, so this
 is the change's first review: read the whole diff` and names `git show --remerge-diff <sha>` at the
-sha `submit` printed after `not a clean merge … (at`.
+sha `submit` printed after `not a clean merge of …:`.
 
 **Record:** each task's change size, whether it skipped, and the wall-clock time from `implement` to
 `ci` (or `land-queue`) for a skipping task against a reviewed one.

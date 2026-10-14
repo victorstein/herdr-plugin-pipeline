@@ -1703,8 +1703,8 @@ function submittedLine(task: Task, sub: Submission, batch: Batch): string {
   if (sub.merge === 'clean' && sub.merges === 0) return `${head} — nothing on ${batch.branch} to merge: it lands next`
   return sub.merge === 'clean'
     ? `${head} — a clean merge of ${batch.branch}: it lands next`
-    : `${head} — not a clean merge of ${batch.branch} (at ${sha8(sub.dirty_at ?? sub.head_sha)}): it goes back ` +
-      'through review before it lands'
+    : `${head} — not a clean merge of ${batch.branch}: ${sha8(sub.dirty_at ?? sub.head_sha)} on this branch is ` +
+      "not git's own merge, so it goes back through review before it lands"
 }
 
 /** Everything `submit` verified, kept for the one quick save that records it. */

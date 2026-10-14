@@ -189,7 +189,7 @@ test('show tells a sync submission by its own kind and sha, without the change\'
   })
   const dirty = sync('dirty')
   const detail = formatTaskDetail(singlePr([dirty]), dirty, NOW)
-  expect(detail).toContain('submitted:  sync at 3ad9911f, 33m ago (not a clean merge of batch/x, at 3ad9911f; ' +
+  expect(detail).toContain('submitted:  sync at 3ad9911f, 33m ago (not a clean merge of batch/x: 3ad9911f is not git\'s own merge; ' +
     'check passed)')
   expect(detail).not.toContain('feat(math): remap')
   const clean = sync('clean')

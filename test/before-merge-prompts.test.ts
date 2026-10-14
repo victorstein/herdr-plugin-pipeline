@@ -67,6 +67,15 @@ test('a held task names the merged task that declares its shared path too', asyn
   expect(text).toContain("so the worker redoes its addition on top of t6's and it is reviewed.")
 })
 
+test('the per-task merge prompt says what the human ruled on this task, and nothing for a task with no check', async () => {
+  const confirmed = heldTask({ before_merge: [checkOf('c1', [ruling('confirmed', CHECKED_HEAD)])] })
+  const text = prose(await taskPrompt(perTaskRun([confirmed]), confirmed))
+  expect(text).toContain('gh pr merge 255')
+  expect(text).toContain('Before merge: c1')
+  const none = heldTask({})
+  expect(await taskPrompt(perTaskRun([none]), none)).not.toContain('Before merge:')
+})
+
 test('a stale confirmation is named in the hold, and a confirmation on the gate head renders the merge again', async () => {
   const stale = heldTask({ before_merge: [checkOf('c1', [ruling('confirmed', NEWER_HEAD)])] })
   expect(await taskPrompt(perTaskRun([stale]), stale)).toContain('— confirmed on 5e6f7a8b; the head is now 9e06c261')
