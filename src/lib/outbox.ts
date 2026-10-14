@@ -106,6 +106,17 @@ export function pruneOutbox(run: Run): OutboxEntry[] {
   return stale
 }
 
+/**
+ * The worker has not yet been given what its phase asks, so its idle says nothing
+ * about the phase: a resumed task's new agent, idle before its brief arrived, had
+ * its predecessor's uncommitted spec draft taken as the finished spec. Measured on
+ * a live run.
+ */
+export function owedItsPrompt(run: Run, task: Task): boolean {
+  return (run.outbox ?? []).some((entry) => entry.to === 'worker' && entry.task_id === task.task_id &&
+    entry.kind === undefined && isCurrent(run, entry))
+}
+
 /** A brief kept past its phase prompt, which the next prompt queued for the task follows. */
 export function isBriefOnly(entry: OutboxEntry): boolean {
   return entry.brief_chars !== undefined && entry.brief_chars === entry.text.length

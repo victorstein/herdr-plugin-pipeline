@@ -1366,7 +1366,7 @@ brief and the sync prompt arrive on their own, and nothing has to be sent by han
 On a second, throwaway single-PR run with one landed task and one still working, `hpipe abort <run>`.
 **Assert:** it names the landed task, says its bead stays closed and nothing reached main, and says
 `Told to stop on the supervisor's next tick: t2 (<pane>, <phase>)`; within a tick the worker gets a
-`# Stop — run <run> was aborted` prompt and stops. Its `If you will not resume it, clean up:` block
+`# Stop — run <run> was aborted` prompt and stops. Its `If you will not resume it, clean up once its workers have stopped …` block
 names `herdr worktree remove --workspace <w>` for each task worktree (or the uncommitted work that
 holds one back), counts each unlanded branch's commits (`has 3 commits that did not land, up to
 <sha>`), and offers no `worktree remove` or `branch -D` for a batch checkout or branch that `ship`

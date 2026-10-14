@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { abortCleanupHead } from '../src/supervisor/deliver'
+import { hpipeCommand as hpipeFor } from '../src/lib/render'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -279,7 +281,7 @@ test('aborting a single-PR run names what landed and offers no clean-up for what
   expect(out.ok).toBe(true)
   expect(out.text).toContain('batch/x keeps the landed tasks (t1), whose beads stay closed, and nothing reached main')
   expect(out.text).toContain('the unlanded tasks\' beads are released on the supervisor\'s next tick')
-  expect(out.text).toContain('If you will not resume it, clean up:')
+  expect(out.text).toContain(abortCleanupHead(hpipeFor(ctx().pluginRoot)))
   // Neither the batch checkout nor a local batch branch exists before ship: smoke run 19 was offered both.
   expect(out.text).not.toContain('worktree remove')
   expect(out.text).not.toContain('branch -D')
@@ -307,9 +309,9 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
   ]
   await saveRun(dir, run)
   const out = await cmdAbort(ctx(), { runId: run.run_id })
-  const block = out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')
+  const block = out.text.slice(out.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')
   const expected = [
-    'If you will not resume it, clean up:',
+    abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  herdr worktree remove --workspace w3  # t1's checkout ${clean}; closes its agent and keeps feat/a`,
     `  t2's checkout ${dirty} has uncommitted work (src/wip.ts): review it before \`herdr worktree remove --workspace w4\``,
     `  git -C '${clone}' branch -D feat/a  # origin has every commit on it`,
@@ -324,7 +326,7 @@ test('an aborted single-PR run lists each task worktree, the unlanded branches a
   // Nothing else prints it once this output is gone, so a second abort does.
   const again = await cmdAbort(ctx(), { runId: run.run_id })
   expect(again.ok).toBe(false)
-  expect(again.text.slice(again.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual(expected)
+  expect(again.text.slice(again.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual(expected)
 })
 
 test('an aborted run keeps the batch that holds a landing, and an unpushed local batch, and names a moved checkout', async () => {
@@ -349,8 +351,8 @@ test('an aborted run keeps the batch that holds a landing, and an unpushed local
   ]
   await saveRun(dir, run)
   const out = await cmdAbort(ctx(), { runId: run.run_id })
-  expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
-    'If you will not resume it, clean up:',
+  expect(out.text.slice(out.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual([
+    abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  t2's checkout ${moved} is on other, not feat/b: review it before \`herdr worktree remove --workspace w4\``,
     `  git -C '${clone}' branch -D t1-branch  # origin has every commit on it`,
     `  git -C '${clone}' push origin --delete t1-branch`,
@@ -384,8 +386,8 @@ test('an aborted per-task run lists its worktree and the open PR\'s unmerged bra
   run.repo_root = clone
   await saveRun(dir, run)
   const out = await cmdAbort(ctx(), { runId: run.run_id })
-  expect(out.text.slice(out.text.indexOf('If you will not resume it, clean up:')).split('\n')).toEqual([
-    'If you will not resume it, clean up:',
+  expect(out.text.slice(out.text.indexOf(abortCleanupHead(hpipeFor(ctx().pluginRoot)))).split('\n')).toEqual([
+    abortCleanupHead(hpipeFor(ctx().pluginRoot)),
     `  herdr worktree remove --workspace w3  # t1's checkout ${checkout}; closes its agent and keeps feat/x`,
     `  git -C '${clone}' branch -D feat/x  # origin has every commit on it`,
     `  local feat/local has 1 commit no branch on origin has, up to ${local.slice(0, 8)}; push it or review before ` +

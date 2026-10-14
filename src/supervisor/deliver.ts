@@ -873,7 +873,7 @@ async function gitListsWorktree(repoRoot: string, checkout: string): Promise<boo
  * nothing of the task worktrees and the agents still running in them. Measured on
  * a live run.
  */
-export async function abortCleanupLines(run: Run): Promise<string[]> {
+export async function abortCleanupLines(run: Run, hpipe: string): Promise<string[]> {
   const repo = shellQuoted(run.repo_root)
   const worktrees = await taskWorktreeLines(run, repo)
   const lines = [
@@ -884,8 +884,17 @@ export async function abortCleanupLines(run: Run): Promise<string[]> {
       : [...(await batchCleanup(run, run.batch)), ...(await abortedBatchLines(run, run.batch, repo))]),
     ...releasedBeadLines(run),
   ]
-  return lines.length === 0 ? [] : ['If you will not resume it, clean up:', ...lines]
+  return lines.length === 0 ? [] : [abortCleanupHead(hpipe), ...lines]
 }
+
+/**
+ * Printed as the stop notices are queued, while each worker still finishes the
+ * tool call it is in: a checkout read clean here was dirty by the time herdr was
+ * asked to remove it. Measured on a live run. A second abort reads it afresh.
+ */
+export const abortCleanupHead = (hpipe: string): string =>
+  `If you will not resume it, clean up once its workers have stopped (a second \`${hpipe} abort\` prints this ` +
+  'again, read afresh):'
 
 /**
  * herdr's worktree removal keeps the branch, and a commit a worker made but never

@@ -3013,7 +3013,7 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
   // again instead, since nothing else does once the first abort's output is gone.
   if (wasAborted(run)) {
     return fail([`${run.run_id} is already aborted, from ${run.escalated_from} — ${resumesIt(hpipe, run)}`,
-      ...stillOwedLines(run), ...(await abortCleanupLines(run))].join('\n'))
+      ...stillOwedLines(run), ...(await abortCleanupLines(run, hpipe))].join('\n'))
   }
   if (runPhaseState(run) === 'terminal') return fail(`${run.run_id} is finished (phase: ${run.phase}); nothing to abort`)
 
@@ -3035,7 +3035,7 @@ async function abort(ctx: Ctx, input: { runId: string }): Promise<CmdResult> {
     : `aborted ${run.run_id}; ${abortedBatch(run, run.batch)} ${undo}`
   return ok([
     head, ...(await stopNoticeLines(ctx, told, hpipe)), ...dispatchUnderWayLines(dispatch),
-    ...stillOwedLines(run), ...(await abortCleanupLines(run)),
+    ...stillOwedLines(run), ...(await abortCleanupLines(run, hpipe)),
   ].join('\n'))
 }
 

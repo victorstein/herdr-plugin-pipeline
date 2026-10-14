@@ -18,7 +18,7 @@ import {
   advanceTask, artifactFreshAfter, counterFor, enterTaskPhase, implementReady, type LandingFacts, landsWithoutSync,
   syncOverdue, syncSubmitted,
 } from '../lib/machine'
-import { briefAndPrompt, enqueue, queuedWorkerPrompt } from '../lib/outbox'
+import { briefAndPrompt, enqueue, owedItsPrompt, queuedWorkerPrompt } from '../lib/outbox'
 import { modeOf, nextPhase, producedByActor, routeOf, taskRow } from '../lib/phases'
 import { isFresh, isSettled, parseVerdict, type VerdictResult } from '../lib/predicates'
 import { hpipeCommand, renderPrompt } from '../lib/render'
@@ -412,7 +412,8 @@ export async function advanceTasks(run: Run, deps: TaskDeps): Promise<TaskPrompt
       // head has landed already must record it.
       await queueForAFreshAgent(run, task, deps)
     }
-    const actorIdle = pane === null ? false : await deps.liveIdle(pane)
+    const actorIdle = pane === null || (row.actor === 'worker' && owedItsPrompt(run, task)) ? false
+      : await deps.liveIdle(pane)
 
     // Phases whose signal comes from the orchestrator must not be evaluated
     // while it is mid-turn, exactly as run phases are gated. Their signals are
