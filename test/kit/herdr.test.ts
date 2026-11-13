@@ -21,7 +21,7 @@ test('call sends one NDJSON request and resolves its result', async () => {
     seen.push(req)
     sock.write(JSON.stringify({ id: req.id, result: { type: 'pong' } }) + '\n')
   })
-  expect(await createClient(path).call('ping')).toEqual({ type: 'pong' })
+  expect(await createClient(path).call<{ type: string }>('ping')).toEqual({ type: 'pong' })
   expect(seen[0]).toMatchObject({ method: 'ping', params: {} })
 })
 
