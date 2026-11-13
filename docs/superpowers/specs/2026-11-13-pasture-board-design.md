@@ -25,7 +25,7 @@ the pipeline.
 | Animations | **One scene per working phase**, 12 in all. |
 | Stage | `enter` stages the task's **worker** under the board. **The orchestrator is never moved**; it can only be peeked at (see "Why the orchestrator is not staged"). |
 | Scope | **One board per repo**, as today's bv tab, with the same supervisor lifecycle. |
-| Sharing pasture's engine | **Vendor a copy** into `src/board/kit/` with a sync script. There is no shared package, and the plugin stays installable on its own. |
+| Sharing pasture's engine | **Vendor a copy** into `src/kit/` and `test/kit/` with a sync script. There is no shared package, and the plugin stays installable on its own. |
 
 ## Delivery: four plans, in this order
 
@@ -223,8 +223,12 @@ This is pasture's stage algorithm from the kit:
    `BoardRecord`):
 
    ```
-   staged: { task_id, terminal_id, placeholder_pane_id, home_workspace_id, home_tab_id } | null
+   staged: (Staged & { task_id }) | null
    ```
+
+   `Staged` is the kit's own record: `terminalId`, `paneId`, `homeWorkspaceId`, `homeTabId`,
+   `homeTabLabel`, `placeholderPaneId` and `title`. The kit's `unstage` and `reconcile` read all of
+   them.
 
    A single plugin-wide `state.json` (pasture's model) would let two repo boards overwrite each other.
 2. **`unstageBoard(slug)` in `lib/boards.ts`.** It moves the staged pane back into its placeholder's
@@ -273,53 +277,53 @@ So an orchestrator moved under the board would be judged gone. Its prompts would
 nowhere, or be typed into another Claude the human has open in that workspace. Staging it would need
 rebinding by terminal id and a rewrite of the claim. That is out of scope.
 
-## Vendored kit (`src/board/kit/`)
+## Vendored kit (`src/kit/`, `test/kit/`)
 
-**Plan 1 refactors pasture so the kit is plugin-neutral. Pasture's tests stay green throughout.**
+Plan 1 (herdr-pasture, merged 2026-11-13) made pasture's kit plugin-neutral. Its
+`test/kit/boundary.test.ts` fails if a kit file imports outside the kit or names pasture. What
+shipped:
 
-- **Card identity is a string `id`.** Today it is `terminalId` (`nav.ts`, `render.ts`). Pasture uses
-  the terminal id; the pipeline uses the task id, or `run:<run_id>` for a run card. Queued tasks have
-  no terminal.
-- **`CardView`** is what the renderer draws:
-
-  ```
-  { id, column, title, titleColor, subtitle, badges: Span[], age, ctx, sprite: { scene, accessory, sweat, enteredAt } }
-  ```
-
-  Each plugin maps its own data to `CardView`.
-- **Slots:** `render(view, cols, rows)` takes `header: Span[]` (pasture puts its chip line there) and
-  `keys: string` (the key hints). The `✻ pasture` brand and the key list move out of the kit.
-- **Plugin identity is injected.** The kit's stage takes:
+- **`CardView`**, which is what the renderer draws:
 
   ```
-  { pluginId, placeholderEntrypoint, peekEntrypoint }
+  { id, column, title, subtitle, badge: Span, since, ctx, scene, accessory, enteredAt }
   ```
 
-  `stein.pasture` is no longer hard-coded (`stage.ts:12,82`). The pipeline manifest gains
-  `placeholder` (split) and `peek` (popup) panes.
-- **The stage is pure over a `Staged` value.** The kit's `stageAgent`, `unstage` and `reconcile` take
-  and return `Staged`. Persistence is the caller's: pasture's `store.ts`, or the pipeline's board
-  registry. The kit does not import `store.ts`.
-- **Scene registry.** `sprites.ts` exposes:
-  - `registerScene(name, frames)`
-  - `imageId(name, frame, accessory, sweat)`, keyed by the registry order
-
-  This replaces the fixed `SCENES` index. The pipeline's 12 scenes live in `src/board/scenes.ts`,
-  outside the kit.
-- **The kit is the import closure** of `render.ts`, `stage.ts`, `peek.ts`, `placeholder.ts` and
-  `kitty.ts`:
-
-  | Group | Files |
-  |---|---|
-  | Socket client, types and helpers | `herdr.ts`, `types.ts`, `palette.ts`, `throttle.ts` |
-  | Rendering and graphics | `render.ts`, `nav.ts`, `kitty.ts`, `png.ts`, `sprites.ts` |
-  | Stage | `stage.ts`, `placeholder.ts`, `peek.ts` |
-
-  Pasture's `model.ts`, `store.ts`, `jobs.ts`, `statusline.ts` and `board.ts` stay in pasture. Plan 1
-  checks this list against the real import graph.
-- **Sync.** `scripts/sync-kit.ts` copies pasture's `src/kit/` over this repo's `src/board/kit/` and
+  - `id` is a string. The pipeline uses the task id, or `run:<run_id>` for a run card.
+  - The title is red in Needs you and plain text elsewhere. There is no per-card title colour.
+  - The age is formatted from `since`.
+  - The Clawd sweats from `ctx` 70.
+- **`View` slots:** `header: Span[]` (the first span always shows, the rest only while they fit),
+  `summary`, `keys`, and `titles` for per-column titles, e.g. `{ idle: '○ Idle/queued' }`.
+  - The header drops later spans first, so the pipeline puts `orchestrator gone` early in it.
+- **`Identity`** `{ pluginId, placeholderEntrypoint, peekEntrypoint, stageName }`, passed to
+  `stageAgent(herdr, snap, host, identity, current, terminalId)` and to
+  `openPeek(herdr, identity, { terminalId, title, where })`.
+  - The pipeline manifest gains `placeholder` (split, `src/kit/placeholder.ts`) and `peek` (popup,
+    `src/kit/peek.ts`) panes.
+  - Both panes read their text from env (`KIT_TITLE`/`KIT_STAGE`, `KIT_PEEK_*`).
+- **The stage is pure over `Staged`.** Persistence is the caller's: the pipeline's board registry
+  (see Stage). It adopts a lone stray agent pane under the board and rehomes any others.
+- **Scene registry:** `registerScene(name, frames, draw)` with the exported Clawd primitives
+  (`clawd`, `zee`, `bubble`, `C`, `Rect`, `Look`).
+  - The six built-ins keep their ids.
+  - `imageId` rejects a frame its scene doesn't have.
+  - The pipeline's 12 scenes live in `src/board/scenes.ts`, outside the kit, and are registered
+    before the first draw.
+- **Vendored at the same paths as pasture,** `src/kit/` and `test/kit/`, so the kit's tests run
+  unchanged. Their imports are `../../src/kit/…`.
+- **Sync.** `scripts/sync-kit.ts` copies pasture's `src/kit/` and `test/kit/` over this repo's and
   prints the diff. It never runs automatically.
   - The script is added to the typecheck, which excludes `scripts/` today.
+- **A pasture-side kit task opens plan 3: the frame writer.**
+  - Pasture's `src/board.ts` holds the flicker-free drawing loop:
+    - the full clear only on the first draw and on resize
+    - the `lastText` diff
+    - the sent-image set
+    - `imagePng` over the kit's two image-id ranges
+    - the `CSI 16 t` cell-size probe
+  - It moves into the kit as a small frame writer that both boards call. The pipeline must not copy
+    code that depends on the kit's id encoding.
 
 ## bv removal (plan 3)
 
