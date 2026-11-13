@@ -167,7 +167,7 @@ A run card has no worker, so `enter` on it reports `no worker to stage`.
 |---|---|---|
 | `hjkl` / arrows | move between cards | 3 |
 | `space` | peek at the task's worker | 3 |
-| `shift+space` | peek at the run's orchestrator | 3 |
+| `o` | peek at the run's orchestrator (a raw terminal sends shift+space as a plain space) | 3 |
 | `d` | details popup with `formatTaskDetail` (`hpipe show`'s task block, without the dispatch-base line) | 3 |
 | `x` | clear a Done card | 3 |
 | `enter` | stage the task's worker under the board | 4 |
@@ -179,7 +179,7 @@ A run card has no worker, so `enter` on it reports `no worker to stage`.
 - Peek and details read panes and never move them.
 - Status-line messages:
   - `no worker to stage` for a card with no live worker
-  - `orchestrator is not running` for `shift+space` when the orchestrator pane is gone
+  - `orchestrator is not running` for `o` when the orchestrator pane is gone
 - **Clears** made with `x` are stored per repo in the board registry record, as `cleared: string[]`
   of task ids. They are dropped when the run changes.
 
