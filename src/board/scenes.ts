@@ -1,3 +1,4 @@
+import type { Task, TaskPhase } from '../lib/types'
 import { C, clawd, registerScene, type Eyes, type Look, type Rect, type RGB } from '../kit/sprites'
 import { MOCHA } from '../kit/palette'
 
@@ -105,7 +106,7 @@ const SCENES: Record<string, (R: Rect, f: number, look: Look) => void> = {
     R(20, 15, 1, 7, C.shadow)
     for (const x of [12, 22]) for (const [dy, w] of [[1, 6], [3, 7]] as const) R(x, 15 + dy, w, 1, P.ink)
     // the lens sits off the page so it breaks the silhouette instead of reading as a monocle
-    const [cx, cy] = [[31, 15], [33, 14], [35, 15], [33, 16]][f]!
+    const [cx, cy] = ([[31, 15], [33, 14], [35, 15], [33, 16]] as const)[f]!
     const round = (x: number, y: number, size: number, c: RGB) => {
       R(x + 1, y, size - 2, size, c)
       R(x, y + 1, size, size - 2, c)
@@ -313,3 +314,13 @@ const SCENES: Record<string, (R: Rect, f: number, look: Look) => void> = {
 export const PIPELINE_SCENES = Object.keys(SCENES)
 
 for (const [name, draw] of Object.entries(SCENES)) registerScene(name, 4, draw)
+
+const PHASE_SCENE: Partial<Record<TaskPhase, string>> = {
+  research: 'research', spec: 'spec', 'spec-review': 'spec-review', plan: 'plan', 'plan-review': 'plan-review',
+  implement: 'working', 'pr-review': 'pr-review', 'pr-review-intent': 'pr-review', 'pr-review-quality': 'pr-review',
+  ci: 'ci', 'land-queue': 'land-queue', sync: 'sync', merge: 'merge', close: 'close', teardown: 'close',
+}
+
+export function sceneFor(task: Pick<Task, 'phase' | 'decision_from'>): string {
+  return PHASE_SCENE[task.phase] ?? (task.decision_from ? PHASE_SCENE[task.decision_from] : undefined) ?? 'working'
+}
