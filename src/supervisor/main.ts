@@ -378,7 +378,7 @@ async function main(): Promise<void> {
             closeStagedWorker: async (taskRun, task) => {
               if (task.pane_id === null) return false
               try {
-                return await closeStagedWorker(kit, stateDir, session, beadsSlug(taskRun.repo_key), task.pane_id)
+                return await closeStagedWorker(kit, stateDir, session, beadsSlug(taskRun.repo_key), task.pane_id, task.workspace_id)
               } catch (error) {
                 console.error(`[pipeline] run ${taskRun.run_id}: could not close ${task.task_id}'s staged worker: ${error}`)
                 return false

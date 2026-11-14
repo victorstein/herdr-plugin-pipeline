@@ -8,7 +8,7 @@ import type { Identity } from '../kit/stage'
 import { createThrottle } from '../kit/throttle'
 import type { Snapshot } from '../kit/types'
 import type { BoardUiOptions } from '../board'
-import { readBoards, type StagedWorker } from '../lib/boards'
+import { readBoards, stagedPane as findStagedPane, type StagedWorker } from '../lib/boards'
 import { readDispatchLocks } from '../lib/dispatch-lock'
 import { runIsDriven } from '../lib/ledger'
 import { waitsOnYou } from '../lib/status'
@@ -172,15 +172,15 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     requestRefresh()
   }
 
-  const stagedPane = () => (staged ? snap?.panes.find((p) => p.terminal_id === staged!.terminalId) : undefined)
+  const stagedPaneNow = () => (staged && snap ? findStagedPane(snap, staged) : undefined)
 
   async function focusStage(): Promise<void> {
-    const pane = stagedPane()
+    const pane = stagedPaneNow()
     if (pane) await herdr.call('pane.focus', { pane_id: pane.pane_id })
   }
 
   async function zoomStage(): Promise<void> {
-    const pane = stagedPane()
+    const pane = stagedPaneNow()
     if (pane) await herdr.call('pane.zoom', { pane_id: pane.pane_id, mode: 'toggle' })
   }
 
