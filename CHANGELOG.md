@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.0...v2.3.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **board:** accept SS3 arrow keys and split multi-key input ([#172](https://github.com/victorstein/herdr-plugin-pipeline/issues/172)) ([e47987f](https://github.com/victorstein/herdr-plugin-pipeline/commit/e47987f90ff660099e6f6f0ea5ce224f392a8ee2))
+
 ## [2.3.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.3...v2.3.0) (2026-11-14)
 
 
