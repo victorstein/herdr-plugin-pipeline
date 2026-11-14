@@ -37,6 +37,12 @@ export interface TeardownDeps {
   removeCheckout: (
     repoRoot: string, checkoutPath: string, branch: string, pr: number | null, batchBranch: string | null,
   ) => Promise<CheckoutRemoval>
+  /**
+   * True when the task's worker was staged under a board and is now closed. A
+   * staged worker lives in the pipeline workspace, which removing the worktree
+   * does not touch. Optional: absent, teardown behaves as before staging existed.
+   */
+  closeStagedWorker?: (run: Run, task: Task) => Promise<boolean>
 }
 
 function markTornDown(run: Run, taskId: string, stillHolds: (task: Task) => boolean): void {
@@ -180,6 +186,8 @@ export async function runTeardown(
         enterTaskPhase(run, task, 'done', 'worktree kept by request')
         continue
       }
+
+      if (task.pane_id !== null && await deps.closeStagedWorker?.(run, task)) releaseWorkerPane(task)
 
       const workspaceId = task.workspace_id
       if (workspaceId !== null) {
