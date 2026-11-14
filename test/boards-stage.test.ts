@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBoards, recordStaged, type StagedWorker, unstageBoard, updateBoards } from '../src/lib/boards'
+import { closeStagedWorker, readBoards, recordStaged, type StagedWorker, unstageBoard, updateBoards } from '../src/lib/boards'
 import type { Snapshot } from '../src/kit/types'
 import { fakeHerdr, moved } from './kit/fake-herdr'
 import { agent, snapshot } from './kit/fixtures'
@@ -128,4 +128,38 @@ test('a move herdr refuses leaves the stage recorded', async () => {
   })
   await expect(unstageBoard(herdr, dir, 'personal', SLUG)).rejects.toThrow('zoomed_tab')
   expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toEqual(STAGED)
+})
+
+test('closeStagedWorker leaves a task that is not staged alone', async () => {
+  const { herdr, calls } = fakeHerdr({})
+  expect(await closeStagedWorker(herdr, dir, 'personal', SLUG, 'wP:p2')).toBe(false)
+  await withBoard(STAGED)
+  expect(await closeStagedWorker(herdr, dir, 'personal', SLUG, 'w4:p1')).toBe(false)
+  expect(calls).toEqual([])
+  expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toEqual(STAGED)
+})
+
+test('closeStagedWorker forgets the stage first, then closes the worker and never the placeholder', async () => {
+  await withBoard(STAGED)
+  const stagedAtClose: unknown[] = []
+  const { herdr, calls } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.close': async () => {
+      stagedAtClose.push((await readBoards(dir, 'personal'))[SLUG]?.staged)
+      return { type: 'ok' }
+    },
+  })
+  expect(await closeStagedWorker(herdr, dir, 'personal', SLUG, 'wP:p2')).toBe(true)
+  expect(calls.slice(1)).toEqual([{ method: 'pane.close', params: { pane_id: 'wP:p2' } }])
+  expect(stagedAtClose).toEqual([null])
+})
+
+test('closeStagedWorker with the worker already gone still forgets the stage', async () => {
+  await withBoard(STAGED)
+  const { herdr, methods } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: snapshot([], { workspaces: [GENERAL, BOARD_SPACE] }) }),
+  })
+  expect(await closeStagedWorker(herdr, dir, 'personal', SLUG, 'wP:p2')).toBe(true)
+  expect(methods()).toEqual(['session.snapshot'])
+  expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toBeNull()
 })

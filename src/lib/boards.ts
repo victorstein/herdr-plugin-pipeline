@@ -111,3 +111,26 @@ export async function unstageBoard(herdr: Herdr, stateDir: string, session: stri
   await unstage(herdr, snap, host, current)
   await recordStaged(stateDir, session, slug, null, staged)
 }
+
+/**
+ * Cleared before the close: a live board that sees its staged worker gone
+ * reconciles by closing the placeholder, and the placeholder may be the last
+ * pane of the worktree's workspace, whose loss turns the worktree removal
+ * into the stricter checkout removal. The placeholder is left for the
+ * workspace removal to close.
+ */
+export async function closeStagedWorker(
+  herdr: Herdr, stateDir: string, session: string, slug: string, paneId: string,
+): Promise<boolean> {
+  const staged = await updateBoards(stateDir, session, (boards) => {
+    const board = boards[slug]
+    if (!board?.staged || board.staged.paneId !== paneId) return null
+    const was = board.staged
+    board.staged = null
+    return was
+  })
+  if (staged === null) return false
+  const pane = stagedPane(await readSnapshot(herdr), staged)
+  if (pane) await herdr.call('pane.close', { pane_id: pane.pane_id })
+  return true
+}
