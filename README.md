@@ -485,10 +485,18 @@ Needs-you cards wave.
 | `o` | peek at the run's orchestrator |
 | `d` | the task's details (`hpipe show`'s task block) in a popup |
 | `x` | clear a Done card |
-| `q` or ctrl-c | quit |
+| `enter` | stage the task's worker under the board |
+| `tab` | focus the staged worker |
+| `z` | zoom the staged worker in or out |
+| `q` or ctrl-c | quit, sending a staged worker home |
 
-The board is read-only: it moves no pane and writes nothing to the ledger or the store. Clearing a
-Done card is remembered in the board's own record only.
+The board writes nothing to the ledger. `enter` moves the task's worker pane under the board, which
+keeps the top quarter of the tab, and leaves an **On stage** placeholder in the worker's own tab.
+Staging another card, quitting the board, or the supervisor closing or replacing it sends the worker
+back to its placeholder. The board refuses a worker another board, such as pasture's, has staged
+(`that worker is on another stage`), and never stages the orchestrator. Closing the board's tab by
+hand closes the staged worker with it, and its task fails. The stage and the cleared Done cards are
+remembered in the board's own record only.
 
 **The store's history.** Each store is its own git repo, kept for `bv`, which `hpipe next` runs: after
 every change hpipe commits the export, `.beads/issues.jsonl`, as `hpipe <hpipe@localhost>` — one

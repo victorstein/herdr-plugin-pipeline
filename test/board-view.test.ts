@@ -55,5 +55,5 @@ test('the summary counts cards per column; titles rename Idle; keys list only pl
   }
   expect(summary(board)).toBe('5 tasks · 1 need you · 2 working · 1 done')
   expect(TITLES).toEqual({ idle: '○ Idle/queued' })
-  expect(KEYS).toBe('←↓↑→/hjkl move  space peek  o orchestrator  d details  x clear')
+  expect(KEYS).toBe('hjkl move  enter stage  tab focus  z zoom  space peek  o orch  d details  x clear')
 })

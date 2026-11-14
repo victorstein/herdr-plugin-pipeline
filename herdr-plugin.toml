@@ -107,6 +107,12 @@ height = "60%"
 command = ["bun", "run", "src/kit/peek.ts"]
 
 [[panes]]
+id = "placeholder"
+title = "On stage"
+placement = "split"
+command = ["bun", "run", "src/kit/placeholder.ts"]
+
+[[panes]]
 id = "details"
 title = "Task details"
 placement = "popup"

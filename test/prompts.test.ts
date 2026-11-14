@@ -1175,3 +1175,9 @@ test('the README and the skill say what hpipe dispatch runs, and that allowing h
   expect(skill).toContain("run **`hpipe dispatch --ready`** with the Bash tool's `run_in_background`, close intake (step 4) and end your turn")
   expect(skill).toContain('| `hpipe dispatch` stopped at `<step>` | Fix what its last line names, then run the same command again')
 })
+
+test('the manifest declares the placeholder pane the board stages workers with', async () => {
+  const manifest = await Bun.file(join(ROOT, 'herdr-plugin.toml')).text()
+  expect(manifest).toContain('[[panes]]\nid = "placeholder"\ntitle = "On stage"\nplacement = "split"\ncommand = ["bun", "run", "src/kit/placeholder.ts"]\n')
+  expect(existsSync(join(ROOT, 'src/kit/placeholder.ts'))).toBe(true)
+})
