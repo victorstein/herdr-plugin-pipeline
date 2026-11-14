@@ -11,6 +11,8 @@ export interface BoardRecord {
   pane_id: string | null
   shell_pid: number | null
   opened_at_ms: number
+  /** Done cards the user cleared with `x`; only for the run they were cleared in. */
+  cleared?: { run_id: string; tasks: string[] }
 }
 
 export type BoardRegistry = Record<string, BoardRecord>
