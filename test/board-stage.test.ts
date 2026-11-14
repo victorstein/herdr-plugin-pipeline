@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { boardHost, ELSEWHERE, NO_WORKER, workerFor } from '../src/board/stage'
+import { boardHost, ELSEWHERE, NO_WORKER, syncStage, workerFor } from '../src/board/stage'
 import type { Host, Identity } from '../src/kit/stage'
 import type { Snapshot } from '../src/kit/types'
 import { type BoardRecord, readBoards, type StagedWorker, updateBoards } from '../src/lib/boards'
@@ -104,4 +104,63 @@ test('a worker outside its workspace is on another stage, unless it is under thi
   expect(workerFor(run, snap, HOST, 't1')).toBe(ELSEWHERE)
   expect(workerFor(run, snap, HOST, 't2')).toBe(ELSEWHERE)
   expect(workerFor(run, snap, HOST, 't3')).toMatchObject({ pane_id: 'wP:p3' })
+})
+
+test('syncStage leaves everything alone when the record names another board pane, or there is none', async () => {
+  const { herdr, calls } = fakeHerdr({})
+  expect(await syncStage(herdr, onStage(), HOST, dir, SESSION, SLUG)).toBeNull()
+  await withRecord({ pane_id: 'wP:p9', staged: STAGED })
+  expect(await syncStage(herdr, onStage(), HOST, dir, SESSION, SLUG)).toBeNull()
+  expect(calls).toEqual([])
+  expect((await record())?.staged).toEqual(STAGED)
+})
+
+test("syncStage sends home a stage an earlier board left in this board's record", async () => {
+  await withRecord({ staged: EARLIER_BOARDS_STAGE })
+  const { herdr, methods } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  expect(await syncStage(herdr, onStage(), HOST, dir, SESSION, SLUG)).toBeNull()
+  expect(methods()).toEqual(['session.snapshot', 'pane.move', 'pane.close'])
+  expect((await record())?.staged).toBeNull()
+})
+
+test('syncStage keeps a stage still under the board without a call or a change', async () => {
+  await withRecord({ staged: STAGED })
+  const file = join(dir, `boards.${SESSION}.json`)
+  const inode = statSync(file).ino
+  const { herdr, calls } = fakeHerdr({})
+  expect(await syncStage(herdr, onStage(), HOST, dir, SESSION, SLUG)).toEqual(STAGED)
+  expect(calls).toEqual([])
+  // every write renames a new file over the old one, so an unchanged inode means no write
+  expect(statSync(file).ino).toBe(inode)
+})
+
+test('syncStage drops a stage whose worker is gone and closes its placeholder', async () => {
+  await withRecord({ staged: STAGED })
+  const snap = snapshot([], { workspaces: [GENERAL, BOARD_SPACE] })
+  snap.panes.push(placeholder('w1:p2', 'tph'))
+  const { herdr, calls } = fakeHerdr({ 'pane.close': () => ({ type: 'ok' }) })
+  expect(await syncStage(herdr, snap, HOST, dir, SESSION, SLUG)).toBeNull()
+  expect(calls).toEqual([{ method: 'pane.close', params: { pane_id: 'w1:p2' } }])
+  expect((await record())?.staged).toBeNull()
+})
+
+test('syncStage does not write back a stage the supervisor cleared while it reconciled', async () => {
+  await withRecord({ staged: STAGED })
+  const snap = snapshot([
+    agent({ terminal_id: 't1', pane_id: 'wP:p5', tab_id: 'wP:t1', workspace_id: 'wP' }),
+    agent({ terminal_id: 't9', pane_id: 'wP:p6', tab_id: 'wP:t1', workspace_id: 'wP' }),
+  ], { workspaces: [GENERAL, BOARD_SPACE] })
+  const { herdr, methods } = fakeHerdr({
+    'pane.move': async () => {
+      await updateBoards(dir, SESSION, (boards) => { boards[SLUG]!.staged = null })
+      return moved('wP:p7')
+    },
+  })
+  expect(await syncStage(herdr, snap, HOST, dir, SESSION, SLUG)).toEqual({ ...STAGED, paneId: 'wP:p5' })
+  expect(methods()).toEqual(['pane.move'])
+  expect((await record())?.staged).toBeNull()
 })
