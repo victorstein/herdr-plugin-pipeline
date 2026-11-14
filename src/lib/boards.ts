@@ -67,7 +67,7 @@ export async function updateBoards<T>(
   })
 }
 
-export function sameStage(a: Staged | null | undefined, b: Staged | null | undefined): boolean {
+function sameStage(a: Staged | null | undefined, b: Staged | null | undefined): boolean {
   if (!a || !b) return !a && !b
   return a.paneId === b.paneId && a.terminalId === b.terminalId
 }
