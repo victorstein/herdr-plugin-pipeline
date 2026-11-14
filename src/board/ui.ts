@@ -1,0 +1,196 @@
+import { CELL_QUERY, FrameWriter, takeCellReply } from '../kit/frame'
+import { createClient, readSnapshot, subscribe, type Subscription } from '../kit/herdr'
+import { deleteAllImages } from '../kit/kitty'
+import { COLUMNS, moveCursor, type Column, type Direction } from '../kit/nav'
+import { openPeek } from '../kit/peek'
+import { render, type CardView } from '../kit/render'
+import type { Identity } from '../kit/stage'
+import { createThrottle } from '../kit/throttle'
+import type { Snapshot } from '../kit/types'
+import type { BoardUiOptions } from '../board'
+import { readBoards } from '../lib/boards'
+import { readDispatchLocks } from '../lib/dispatch-lock'
+import { runIsDriven } from '../lib/ledger'
+import { waitsOnYou } from '../lib/status'
+import type { Run } from '../lib/types'
+import { clearedFor, loadHolds, recordCleared, runForSlug } from './data'
+import { buildBoard } from './model'
+import './scenes'
+import { header, KEYS, summary, TITLES } from './view'
+
+export const PIPELINE: Identity = { pluginId: 'stein.pipeline', placeholderEntrypoint: 'placeholder', peekEntrypoint: 'peek', stageName: 'pipeline' }
+
+const EMPTY: Record<Column, CardView[]> = { needs: [], working: [], done: [], idle: [] }
+const LIFECYCLE = [
+  'pane.created', 'pane.closed', 'pane.moved', 'pane.exited', 'pane.updated', 'pane.agent_detected',
+  'tab.closed', 'workspace.closed', 'workspace.focused',
+]
+const NAV: Record<string, Direction> = {
+  h: 'left', l: 'right', j: 'down', k: 'up',
+  '\x1b[D': 'left', '\x1b[C': 'right', '\x1b[B': 'down', '\x1b[A': 'up',
+}
+
+export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise<number> {
+  const herdr = createClient()
+  const writer = new FrameWriter()
+  const out = (s: string) => process.stdout.write(s)
+  let snap: Snapshot | null = null
+  let run: Run | null = null
+  let board = EMPTY
+  let orchestratorLive = true
+  let cursor: string | null = null
+  let message: string | null = null
+  let tick = 0
+
+  const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+  let chain: Promise<void> = Promise.resolve()
+  const serial = (job: () => Promise<void>) => (chain = chain.then(job).catch((e) => { message = errorText(e) }))
+
+  async function refresh(): Promise<void> {
+    const current = await readSnapshot(herdr)
+    snap = current
+    run = await runForSlug(stateDir, session, slug)
+    if (!run) {
+      board = EMPTY
+      return
+    }
+    const found = run
+    const holds = await loadHolds(stateDir, session)
+    const dispatches = await readDispatchLocks(stateDir, [found.repo_key])
+    const livePanes = new Set(current.panes.map((p) => p.pane_id))
+    const ctx = new Map<string, number>()
+    for (const p of current.panes) {
+      const value = Number.parseFloat(p.tokens?.ctx ?? '')
+      if (Number.isFinite(value)) ctx.set(p.pane_id, Math.round(value))
+    }
+    // a finished or aborted run has released its orchestrator, so its absence is not news
+    orchestratorLive = !runIsDriven(found) || (found.orchestrator_pane !== null && livePanes.has(found.orchestrator_pane))
+    board = buildBoard({
+      run: found, holds, livePanes, ctx,
+      orchestratorsMove: (task) => waitsOnYou(found, task, Date.now(), holds, dispatches),
+      cleared: clearedFor(await readBoards(stateDir, session), slug, found.run_id),
+    })
+    ensureSubscription(current)
+  }
+
+  let refreshQueued = false
+  function queueRefresh(): void {
+    if (refreshQueued) return
+    refreshQueued = true
+    void serial(async () => {
+      refreshQueued = false
+      await refresh()
+    }).then(draw)
+  }
+  // herdr emits events in bursts, and each refresh reads the ledger and a snapshot
+  const requestRefresh = createThrottle(queueRefresh, 400)
+
+  let unsubscribe: (() => void) | null = null
+  let subscribedPanes = ''
+  // agent_status_changed subscriptions need a pane id each, and pane ids change on every move
+  function ensureSubscription(current: Snapshot): void {
+    const panes = current.agents.filter((a) => a.agent).map((a) => a.pane_id).sort()
+    const key = panes.join(',')
+    if (unsubscribe && key === subscribedPanes) return
+    unsubscribe?.()
+    subscribedPanes = key
+    const subs: Subscription[] = [...LIFECYCLE.map((type) => ({ type })), ...panes.map((pane_id) => ({ type: 'pane.agent_status_changed', pane_id }))]
+    unsubscribe = subscribe(subs, requestRefresh, () => {
+      unsubscribe = null
+      setTimeout(requestRefresh, 1000)
+    })
+  }
+
+  const cards = () => COLUMNS.flatMap((c) => board[c])
+  const selected = () => cards().find((c) => c.id === cursor) ?? null
+
+  function draw(): void {
+    if (!selected()) cursor = moveCursor(board, null, 'down')
+    const frame = render(
+      { board, cursor, header: header(run, orchestratorLive), summary: summary(board), keys: KEYS, titles: TITLES, message, now: Date.now(), tick, cell: writer.cell },
+      process.stdout.columns ?? 120, process.stdout.rows ?? 40,
+    )
+    const screen = writer.write(frame)
+    if (screen) out(screen)
+  }
+
+  async function peekWorker(card: CardView): Promise<void> {
+    const task = run?.tasks.find((t) => t.task_id === card.id)
+    const pane = task?.pane_id ? snap?.panes.find((p) => p.pane_id === task.pane_id) : undefined
+    if (!task || !pane) {
+      message = 'no worker to peek at'
+      return
+    }
+    await openPeek(herdr, PIPELINE, { terminalId: pane.terminal_id, title: card.title, where: `${run!.title} · ${task.phase}` })
+  }
+
+  async function peekOrchestrator(): Promise<void> {
+    const pane = run?.orchestrator_pane ? snap?.panes.find((p) => p.pane_id === run!.orchestrator_pane) : undefined
+    if (!run || !pane) {
+      message = 'orchestrator is not running'
+      return
+    }
+    await openPeek(herdr, PIPELINE, { terminalId: pane.terminal_id, title: 'orchestrator', where: run.title })
+  }
+
+  async function openDetails(card: CardView): Promise<void> {
+    if (!run || card.id.startsWith('run:')) return
+    await herdr.call('plugin.pane.open', {
+      plugin_id: PIPELINE.pluginId, entrypoint: 'details', placement: 'popup', width: '80%', height: '70%', focus: true,
+      env: { HPIPE_DETAIL_RUN: run.run_id, HPIPE_DETAIL_TASK: card.id },
+    })
+  }
+
+  function quit(): never {
+    out(deleteAllImages() + '\x1b[2J\x1b[?25h')
+    process.exit(0)
+  }
+
+  function onKey(key: string): void {
+    const card = selected()
+    message = null
+    if (key === '\x03' || key === 'q') quit()
+    const direction = NAV[key]
+    if (direction) cursor = moveCursor(board, cursor, direction)
+    else if (key === ' ' && card) void serial(() => peekWorker(card)).then(draw)
+    else if (key === 'o') void serial(peekOrchestrator).then(draw)
+    else if (key === 'd' && card) void serial(() => openDetails(card))
+    else if (key === 'x' && card?.column === 'done' && run) {
+      const runId = run.run_id
+      void serial(() => recordCleared(stateDir, session, slug, runId, card.id)).then(requestRefresh)
+    }
+    draw()
+  }
+
+  // a closed pty must end the process, or a headless board keeps running
+  process.stdin.on('end', quit)
+  process.stdin.on('error', quit)
+  process.stdout.on('error', () => process.exit(0))
+  process.on('SIGHUP', quit)
+  // a dead board leaves the user without one, so errors are shown in the status line instead
+  process.on('uncaughtException', (e) => { message = errorText(e); try { draw() } catch {} })
+  process.on('unhandledRejection', (e) => { message = errorText(e); try { draw() } catch {} })
+
+  process.stdin.setRawMode?.(true)
+  process.stdin.resume()
+  process.stdin.on('data', (data) => {
+    const { rest, cell } = takeCellReply(data.toString())
+    if (cell) writer.setCell(cell)
+    if (rest) onKey(rest)
+    else draw()
+  })
+  process.stdout.on('resize', () => {
+    writer.invalidate()
+    out(CELL_QUERY)
+    draw()
+  })
+  out('\x1b[?25l' + CELL_QUERY)
+  requestRefresh()
+  // the ledger changes without any herdr event
+  setInterval(requestRefresh, 2000)
+  setInterval(() => {
+    tick++
+    draw()
+  }, 250)
+  return new Promise<number>(() => {})
+}

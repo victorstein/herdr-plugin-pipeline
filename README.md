@@ -29,8 +29,8 @@ or, for local development:
 
     herdr plugin link /path/to/herdr-plugin-pipeline
 
-Requires herdr 0.9.0+, bun, gh, and `bd` 1.3.1+ (`brew install beads`); `bv` 0.25.2+ for the board
-and `hpipe next` (see **Beads** below). No build step, and no runtime dependencies — `@types/bun` and
+Requires herdr 0.9.1+, bun, gh, and `bd` 1.3.1+ (`brew install beads`); `bv` 0.25.2+ only for
+`hpipe next` (see **Beads** below). No build step, and no runtime dependencies — `@types/bun` and
 `typescript` are devDependencies for `bun run typecheck` only.
 
 **Claude Code skill.** `skills/herdr-pipeline/SKILL.md` teaches an agent to drive the pipeline:
@@ -52,7 +52,7 @@ at all:
 | Reopen the supervisor | when `status` says it died |
 | Drain pending events | force a queue drain |
 | Set up Beads for this repo | create the repo's Beads store with the default prefix (run from a pane in the repo) |
-| Open board | reopen the repo's `bv` board tab (run from a pane in the repo) |
+| Open board | reopen the repo's board tab, a kanban of its run (run from a pane in the repo) |
 
 A CLI is only needed for the commands that take arguments actions cannot: the recovery commands
 `rewind`, `release`, `abort`, `resume`, `forget` and `close`, and the read-only `bead show` and
@@ -431,10 +431,10 @@ A label of your own that equals a phase name (say `plan`) on an adopted bead bec
 The `phase:<name>` labels earlier builds wrote are removed on the next tick.
 
 **Install** `bd` 1.3.1 or newer — Homebrew core's `beads` formula (`brew install beads`); older
-releases lack the close guards this relies on — and, for the board and `hpipe next`, `bv` 0.25.2 or
-newer (`brew install dicklesworthstone/tap/bv` — read its licence first, below). `BD_BIN` / `BV_BIN`
-point at other binaries. `hpipe start` refuses without a working `bd`; without `bv` the pipeline runs
-and only the board and `hpipe next` are off. `hpipe status` prints a `tools:` line when either is
+releases lack the close guards this relies on — and, for `hpipe next` only, `bv` 0.25.2 or newer
+(`brew install dicklesworthstone/tap/bv` — read its licence first, below). `BD_BIN` / `BV_BIN` point
+at other binaries. `hpipe start` refuses without a working `bd`; without `bv` the pipeline and the
+board run and only `hpipe next` is off. `hpipe status` prints a `tools:` line when either is
 missing or too old.
 
 **Setup** happens on the first `hpipe start` in a repo, or on demand with the **Set up Beads for this
@@ -457,20 +457,48 @@ store**: every claim carries a 5-minute lease that hpipe never renews and nothin
 The supervisor re-claims them on its next pass, but until then they look free.
 
 **The board.** Each repo with a live run in the session gets one `Board: <repo> <hash>` tab in the
-pipeline workspace, running `bv` on the export hpipe writes after every change; press `b` for the
-kanban. The supervisor closes it once the repo has no live run, and a stale `Board: …` tab left by a
-herdr restart is closed and replaced. The **Open board** action reopens it. It is read-only by
-construction. **Never install `br` alongside `bv`**: bv's edit path shells out to `br`, which would
-write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
+pipeline workspace: a kanban of that run's tasks, drawn from the ledger. With no live run it shows
+the last finished run until its Done cards are cleared, and otherwise says `no run in this repo`.
+The supervisor closes it once the repo has no live run, and a stale `Board: …` tab left by a herdr
+restart is closed and replaced. The **Open board** action reopens it. A `bv` board left open from an
+earlier release keeps running until you use **Open board** or its run ends.
 
-**The store's history.** bv's history view reads git, so each store is its own git repo: after every
-change hpipe commits the export, `.beads/issues.jsonl`, as `hpipe <hpipe@localhost>` — one commit per
-CLI write and one per supervisor pass that wrote. Nothing else is tracked (the Dolt data stays out),
-the repo has no remote, and your git config, hooks and signing never apply to it. A store made by an
-earlier release becomes a repo at its next change or the next time its board opens; a board already
-open from before the upgrade keeps showing `History load failed` until you reopen it with **Open
-board**. A commit that fails is logged once and never fails the write. Do not commit to the repo
-yourself, and do not take it for a backup: it holds the export, not the database.
+| Column | Holds |
+|---|---|
+| **Needs you** | what you owe: a before-merge check, an escalation or an unanswered decision, a failed, orphaned or blocked-on-failure task, a worker whose input box has text, or a usage limit whose reset could not be read. A routine merge is the orchestrator's move, not yours, and stays in Working |
+| **Working** | every other active task, whether its worker or the orchestrator acts; the badge reads `orchestrator's move` when the orchestrator owes the next step |
+| **Done** | finished tasks, until you clear them with `x` or the board moves on to a newer run |
+| **Idle/queued** | queued tasks, tasks waiting on files, a dependency or a known usage-limit reset, and workers with no live pane (`no agent`) |
+
+What the run itself owes — an escalated run, a single-PR run's owed checks, or a missing orchestrator
+— is one **run card** pinned to the top of Needs you. A task card shows its bead id and title, the
+worker's context % (when pasture's statusline wrapper reports it), time in phase, the phase, and one
+badge: what it waits on in red, then CI, the PR, a dependency or file wait, or the tier. Each Working
+card's hard-hatted Clawd acts out its phase, one animation per phase; Done cards celebrate and
+Needs-you cards wave.
+
+| Key | Does |
+|---|---|
+| `h` `j` `k` `l` or arrows | move between cards |
+| `space` | peek at the task's worker |
+| `o` | peek at the run's orchestrator |
+| `d` | the task's details (`hpipe show`'s task block) in a popup |
+| `x` | clear a Done card |
+| `q` or ctrl-c | quit |
+
+The board is read-only: it moves no pane and writes nothing to the ledger or the store. Clearing a
+Done card is remembered in the board's own record only.
+
+**The store's history.** Each store is its own git repo, kept for `bv`, which `hpipe next` runs: after
+every change hpipe commits the export, `.beads/issues.jsonl`, as `hpipe <hpipe@localhost>` — one
+commit per CLI write and one per supervisor pass that wrote. Nothing else is tracked (the Dolt data
+stays out), the repo has no remote, and your git config, hooks and signing never apply to it. A store
+made by an earlier release becomes a repo at its next change. A commit that fails is logged once and
+never fails the write. Do not commit to the repo yourself, and do not take it for a backup: it holds
+the export, not the database.
+
+**Never install `br` alongside `bv`**: `hpipe next` runs bv, whose edit path shells out to `br`,
+which would write to the store behind hpipe's back; with no `br` installed that path fails harmlessly.
 
 **bv's licence.** bv is MIT-licensed with a rider. Its
 [LICENSE](https://github.com/Dicklesworthstone/beads_viewer/blob/main/LICENSE) says, among other
@@ -497,7 +525,7 @@ things:
 
 Read the whole licence and judge for yourself whether the rider applies to you — `hpipe next` runs
 `bv` on an agent's behalf — before you install it. This plugin vendors and forks none of bv's code; it
-only runs the binary you install, and everything but the board and `hpipe next` works without it.
+only runs the binary you install, and everything but `hpipe next` works without it.
 
 ## Models
 

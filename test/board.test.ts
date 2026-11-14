@@ -3,10 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openBoardAction, type OpenBoardActionDeps } from '../src/actions/board'
-import { type BoardPaneDeps, runBoardPane } from '../src/board'
-import { beadsDir, beadsExportPath, beadsHome, beadsSlug, writeBeadsProject } from '../src/lib/beads-project'
+import { type BoardPaneDeps, type BoardUiOptions, runBoardPane } from '../src/board'
+import { beadsSlug, writeBeadsProject } from '../src/lib/beads-project'
 import { LockTimeoutError } from '../src/lib/store'
-import { BV_INSTALL_HINT } from '../src/lib/tools'
 import { boardLabel, isRenamedBoardLabel, readBoards, updateBoards } from '../src/lib/boards'
 import type { PaneInfo, PaneOpenOptions } from '../src/lib/herdr'
 import { newRun } from '../src/lib/ledger'
@@ -237,38 +236,29 @@ test('a dead board whose close fails is not replaced this tick', async () => {
   expect(await readBoards(dir, 'personal')).toEqual({ [SLUG]: board })
 })
 
-const ISSUE_LINE = '{"_type":"issue","id":"meter-1","title":"a"}\n'
-
 function paneDeps(over: Partial<BoardPaneDeps> = {}) {
-  const spawned: { argv: string[]; cwd: string; env: Record<string, string | undefined> }[] = []
+  const uiRuns: BoardUiOptions[] = []
   const renamed: string[] = []
   const errors: string[] = []
   const paneDeps: BoardPaneDeps = {
-    env: { HERDR_PLUGIN_STATE_DIR: dir, HPIPE_BEADS_SLUG: SLUG, HERDR_PANE_ID: 'w9:p4', HERDR_SESSION: 'personal', BV_BIN: 'fake-bv' },
+    env: { HERDR_PLUGIN_STATE_DIR: dir, HPIPE_BEADS_SLUG: SLUG, HERDR_PANE_ID: 'w9:p4', HERDR_SESSION: 'personal' },
     parentPid: 4242,
     now: () => 100_000,
-    sleep: async () => {},
-    readExport: async () => ISSUE_LINE,
     renamePane: async (paneId, label) => { renamed.push(`${paneId} ${label}`) },
     updateBoards,
-    which: (bin) => (bin === 'fake-bv' ? '/bin/fake-bv' : null),
-    recordHistory: async () => {},
-    runBv: async (argv, { cwd, env }) => { spawned.push({ argv, cwd, env }); return 0 },
+    runUi: async (options) => { uiRuns.push(options); return 0 },
     error: (message) => { errors.push(message) },
     ...over,
   }
-  return { paneDeps, spawned, renamed, errors }
+  return { paneDeps, uiRuns, renamed, errors }
 }
 
-test('the board pane records its pane and shell, renames itself, and runs bv on the export', async () => {
-  const { paneDeps: d, spawned, renamed } = paneDeps()
+test('the board pane records its pane and shell, renames itself, then runs the board UI for its slug', async () => {
+  const { paneDeps: d, uiRuns, renamed } = paneDeps()
   expect(await runBoardPane(d)).toBe(0)
   expect(await readBoards(dir, 'personal')).toEqual({ [SLUG]: { pane_id: 'w9:p4', shell_pid: 4242, opened_at_ms: 100_000 } })
   expect(renamed).toEqual([`w9:p4 ${boardLabel(SLUG)}`])
-  expect(spawned).toHaveLength(1)
-  expect(spawned[0]?.argv).toEqual(['fake-bv', '--db', beadsExportPath(dir, SLUG)])
-  expect(spawned[0]?.cwd).toBe(beadsHome(dir, SLUG))
-  expect(spawned[0]?.env).toMatchObject({ BEADS_DIR: beadsDir(dir, SLUG), BV_NO_UPDATE_CHECK: '1', BV_NO_GITIGNORE: '1' })
+  expect(uiRuns).toEqual([{ stateDir: dir, session: 'personal', slug: SLUG }])
 })
 
 test('the board pane keeps the opened_at_ms the supervisor recorded', async () => {
@@ -277,109 +267,29 @@ test('the board pane keeps the opened_at_ms the supervisor recorded', async () =
   expect((await readBoards(dir, 'personal'))[SLUG]?.opened_at_ms).toBe(7)
 })
 
-test('a board pane that cannot record itself stays unrenamed and still runs bv', async () => {
-  const { paneDeps: d, spawned, renamed, errors } = paneDeps({
+test('a board pane that cannot record itself stays unrenamed and still runs the UI', async () => {
+  const { paneDeps: d, uiRuns, renamed, errors } = paneDeps({
     updateBoards: async () => { throw new LockTimeoutError('/x/boards.personal.json.lock') },
   })
   expect(await runBoardPane(d)).toBe(0)
   expect(renamed).toEqual([])
-  expect(spawned).toHaveLength(1)
+  expect(uiRuns).toHaveLength(1)
   expect(errors.join('\n')).toContain('could not record itself')
 })
 
-test('a board pane without HERDR_PANE_ID says so and still runs bv', async () => {
+test('a board pane without HERDR_PANE_ID says so and still runs the UI', async () => {
   const base = paneDeps()
-  const { paneDeps: d, spawned, errors } = paneDeps({ env: { ...base.paneDeps.env, HERDR_PANE_ID: undefined } })
+  const { paneDeps: d, uiRuns, errors } = paneDeps({ env: { ...base.paneDeps.env, HERDR_PANE_ID: undefined } })
   expect(await runBoardPane(d)).toBe(0)
-  expect(spawned).toHaveLength(1)
+  expect(uiRuns).toHaveLength(1)
   expect(errors.join('\n')).toContain('HERDR_PANE_ID')
   expect(await readBoards(dir, 'personal')).toEqual({})
 })
 
-test('a board pane with no bv installed exits 1 with the install hint', async () => {
-  const { paneDeps: d, spawned, errors } = paneDeps({ which: () => null })
+test('a board pane missing its slug exits 1 without running the UI', async () => {
+  const { paneDeps: d, uiRuns } = paneDeps({ env: { HERDR_PLUGIN_STATE_DIR: dir } })
   expect(await runBoardPane(d)).toBe(1)
-  expect(spawned).toEqual([])
-  expect(errors.join('\n')).toContain(BV_INSTALL_HINT)
-})
-
-test('a board pane missing its slug exits 1 without running bv', async () => {
-  const { paneDeps: d, spawned } = paneDeps({ env: { HERDR_PLUGIN_STATE_DIR: dir } })
-  expect(await runBoardPane(d)).toBe(1)
-  expect(spawned).toEqual([])
-})
-
-test('the board pane waits while the export is missing or empty, then runs bv once an issue appears', async () => {
-  const exports: (string | null)[] = [null, '', '{"_type":"memory","key":"k"}\n', ISSUE_LINE]
-  const sleeps: number[] = []
-  const { paneDeps: d, spawned, errors } = paneDeps({
-    readExport: async () => (exports.length > 1 ? exports.shift()! : ISSUE_LINE),
-    sleep: async (ms) => { sleeps.push(ms) },
-  })
-  expect(await runBoardPane(d)).toBe(0)
-  expect(sleeps).toEqual([2_000, 2_000])
-  expect(spawned).toHaveLength(1)
-  expect(errors.filter((message) => message.includes('Waiting for the first bead'))).toHaveLength(1)
-})
-
-test('bv quitting at once on an empty export sends the pane back to waiting, then runs bv again', async () => {
-  let exportText = ISSUE_LINE
-  let clock = 100_000
-  let launches = 0
-  let sleeps = 0
-  const { paneDeps: d } = paneDeps({
-    now: () => clock,
-    readExport: async () => exportText,
-    sleep: async () => { sleeps += 1; exportText = ISSUE_LINE },
-    runBv: async () => {
-      launches += 1
-      clock += 300
-      if (launches === 1) exportText = ''
-      return 0
-    },
-  })
-  expect(await runBoardPane(d)).toBe(0)
-  expect(launches).toBe(2)
-  expect(sleeps).toBe(1)
-})
-
-test('the board pane brings the store\'s history up to date before each bv launch', async () => {
-  let clock = 100_000
-  let exportText = ISSUE_LINE
-  const events: string[] = []
-  const { paneDeps: d } = paneDeps({
-    now: () => clock,
-    readExport: async () => exportText,
-    sleep: async () => { exportText = ISSUE_LINE },
-    recordHistory: async (stateDir, slug) => { events.push(`history ${stateDir === dir} ${slug}`) },
-    runBv: async () => {
-      const firstLaunch = !events.includes('bv')
-      events.push('bv')
-      if (firstLaunch) exportText = ''
-      clock += firstLaunch ? 300 : 60_000
-      return 0
-    },
-  })
-  expect(await runBoardPane(d)).toBe(0)
-  expect(events).toEqual([`history true ${SLUG}`, 'bv', `history true ${SLUG}`, 'bv'])
-})
-
-test('a history the board cannot record still lets bv start', async () => {
-  const { paneDeps: d, spawned, errors } = paneDeps({
-    recordHistory: async () => { throw new Error('EACCES: permission denied') },
-  })
-  expect(await runBoardPane(d)).toBe(0)
-  expect(spawned).toHaveLength(1)
-  expect(errors.join('\n')).toContain('EACCES')
-})
-
-test('bv exiting after a long session ends the pane with its exit code', async () => {
-  let clock = 100_000
-  const { paneDeps: d } = paneDeps({
-    now: () => clock,
-    runBv: async () => { clock += 60_000; return 3 },
-  })
-  expect(await runBoardPane(d)).toBe(3)
+  expect(uiRuns).toEqual([])
 })
 
 function actionDeps(herdr: BoardDeps['herdr'], over: Partial<OpenBoardActionDeps> = {}) {
