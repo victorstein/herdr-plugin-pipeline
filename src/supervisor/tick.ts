@@ -505,7 +505,12 @@ export function applyEvents(
         ? null
         : findTask(runs, (t) => t.pane_id === event.previous_pane_id)
       // herdr also sends it for a move within a workspace, which keeps the id.
-      if (found && event.pane_id !== undefined && event.pane_id !== event.previous_pane_id) {
+      if (found && event.pane_id !== undefined && event.previous_pane_id !== undefined &&
+        event.pane_id !== event.previous_pane_id) {
+        const former = found.task.former_pane_ids ?? []
+        if (!former.includes(event.previous_pane_id)) {
+          found.task.former_pane_ids = [...former, event.previous_pane_id]
+        }
         found.task.pane_id = event.pane_id
         changed = true
       }

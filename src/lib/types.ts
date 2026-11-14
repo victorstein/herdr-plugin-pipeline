@@ -271,6 +271,13 @@ export interface Task {
    * `pane_id` is cleared. Optional: ledgers written before #12 lack it.
    */
   last_pane_id?: string
+  /**
+   * The ids this task's live pane had before herdr renamed it on a move. Its agent
+   * keeps the first one in `HERDR_PANE_ID`, so the guards that refuse a worker's
+   * pane match these too. Deleted with the pane, because a dead pane's ids are free
+   * for herdr to give someone else. Optional: ledgers written before herdr-pl-3 lack it.
+   */
+  former_pane_ids?: string[]
   agent_status: AgentStatus
   phase: TaskPhase
   phase_entered_at: number
