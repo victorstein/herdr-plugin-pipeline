@@ -31,32 +31,32 @@ dependencies.
 | Teardown | `src/supervisor/teardown.ts:168-229` | For a `teardown` task: `keep_worktree` → done; else `deps.removeWorktree(workspace_id)` (`:186`), then the checkout fallback `deps.removeCheckout` (`:214`) when the workspace is `gone` or unrecorded. `TeardownDeps` is at `:34-40` (brief: `:33`). `releaseWorkerPane` is imported from `src/lib/unstarted.ts:257-264` (moves `pane_id` to `last_pane_id`, sets `agent_status: 'unknown'`). |
 | Teardown wiring | `src/supervisor/main.ts:373-374` | `removeWorktree`/`removeCheckout` passed inside the `advanceTasks` deps; `TaskDeps extends TeardownDeps` (`src/supervisor/tasks.ts:42`). |
 | Pane rebinding | `src/supervisor/tick.ts:343-384`, `:503-512` | `PaneAbsence.reconcile` remembers each bound pane's terminal id; a bound pane missing from `pane list` whose terminal is listed under another pane id is emitted as `pane.moved` on the **first** miss (`:369-370`), not after two. `applyEvents` then sets `task.pane_id = event.pane_id` (`:509`). Bound = `pane_id` of non-`FINISHED` tasks of every run (`:356-359`). |
-| Kit stage | `src/kit/stage.ts` | `Staged` (`:4-12`), `Host` (`:15-19`), `stageAgent`, `unstage` (`:87-106`), `reconcile`. Vendored by `scripts/sync-kit.ts`, which `rmSync`s and re-copies `src/kit` and `test/kit` from herdr-pasture — edits there are lost. |
+| Kit stage | `src/kit/stage.ts` | `Staged` (`:4-12`), `Host` (`:15-19`), `stageAgent`, `unstage` (`:80-98`), `reconcile`. Vendored by `scripts/sync-kit.ts`, which `rmSync`s and re-copies `src/kit` and `test/kit` from herdr-pasture — edits there are lost. |
 | Kit client | `src/kit/herdr.ts:12-14`, `:32`, `:73-75` | `Herdr` is just `{ call(method, params) }`; `createClient()` talks JSON over `HERDR_SOCKET_PATH`; `readSnapshot` calls `session.snapshot`. Only `src/board/ui.ts:2` uses it in pipeline code today. |
 | `FINISHED`, `runIsDriven` | `src/supervisor/teardown.ts:16-18`, `src/lib/ledger.ts:319-325` | `FINISHED` = terminal task phases. `runIsDriven(run)` = the run phase's row does not set `releasesPane` (`src/lib/phases.ts:149-150`: `escalated` and `done`). |
 
 ## Control flow that matters
 
-**Kit `unstage(herdr, snap, host, staged)`** (`src/kit/stage.ts:87-106`):
+**Kit `unstage(herdr, snap, host, staged)`** (`src/kit/stage.ts:80-98`):
 
-1. Finds the worker **only** by `paneOfTerminal(snap, staged.terminalId)` (`:88`).
+1. Finds the worker **only** by `paneOfTerminal(snap, staged.terminalId)` (`:81`).
 2. If not found, or not in `host.tabId`, it closes the placeholder (if it is an agent-less pane with
-   `placeholderPaneId`) and returns (`:90-93`). This is the brief's gotcha: after a herdr restart the
+   `placeholderPaneId`) and returns (`:83-86`). This is the brief's gotcha: after a herdr restart the
    terminal id is new, the lookup fails, and the worker's home spot is destroyed while the worker
-   stays under the board. `keepStaged` (`:136-145`) shows the kit's own fallback — terminal id, then
-   pane id ("After a herdr restart terminal ids change but pane ids survive", `:139`) — which
+   stays under the board. `keepStaged` (`:158-167`) shows the kit's own fallback — terminal id, then
+   pane id ("After a herdr restart terminal ids change but pane ids survive", `:161`) — which
    `unstage` lacks. Remapping `{ ...staged, terminalId, paneId }` from the snapshot before the call
-   makes `:88` hit.
+   makes `:81` hit.
 3. Un-zooms, then `pane.move`s the worker into the placeholder's tab split right of it and closes the
-   placeholder (`:96-98`); with no placeholder it moves the worker to a new tab in the home workspace
-   if that still exists, else to a new tab in the board's workspace (`:99-104`). It never throws on a
-   missing pane, but `move` throws `StageError` on `changed: false` (`:41-45`) and the socket client
+   placeholder (`:88-90`); with no placeholder it moves the worker to a new tab in the home workspace
+   if that still exists, else to a new tab in the board's workspace (`:91-96`). It never throws on a
+   missing pane, but `move` throws `StageError` on `changed: false` (`:40-44`) and the socket client
    throws `HerdrError` — so `unstageBoard` can reject, which is why the brief has callers log and go on.
-4. The `host.tabId` check (`:89`) means `unstageBoard` needs the board's **tab** as it was when staged:
+4. The `host.tabId` check (`:83`) means `unstageBoard` needs the board's **tab** as it was when staged:
    hence storing `host` in the record. If the board pane is gone, `host.tabId` still names the tab
    the worker sits in, as long as that tab survived.
 
-**Pane id across a move.** `stageAgent` records the id `pane.move` returns (`:132`, `:139`), i.e.
+**Pane id across a move.** `stageAgent` records the id `pane.move` returns (`:134`, `:139-147`), i.e.
 the worker's id under the board. `tick.ts:337-339` records, measured live, that a cross-workspace
 move renames the pane (`w3:p2` → `w5:p2`) and keeps the terminal id. So once the supervisor has seen
 the move, `task.pane_id === staged.paneId`; the brief's teardown match relies on that.
@@ -66,7 +66,7 @@ pipeline workspace. The staged worker is a pane in that workspace (the board's t
 neither `Pipeline supervisor` nor `Board`, and is not a recorded board pane — so it is closed, the
 supervisor sees its bound pane missing twice and fails the task through `losePane`. The placeholder
 lives in the worktree workspace (opened as a split of the worker before the move,
-`stage.ts:119-127`), which `clearStrayPanes` never lists; keeping `placeholderPaneId` is therefore
+`stage.ts:122-130`), which `clearStrayPanes` never lists; keeping `placeholderPaneId` is therefore
 harmless defence, not a fix for an observed close.
 
 **Teardown today, with a worker staged.** `removeWorktree` closes only panes inside the worktree
