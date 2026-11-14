@@ -75,10 +75,15 @@ a check the human owes (`lib/status.ts:376-383`).
 
 The column for a task is decided by the first rule that matches:
 
+0. **Finished run:** when the run's phase is `done`, every task not `done` goes to **Idle/queued**:
+   red with its phase for a `TERMINAL_BAD` phase, otherwise `aborted` (for an aborted run) or the
+   phase name. Nobody can act on a finished run, so nothing in it is "Needs you".
 1. **Needs you**, when any of these holds:
-   - `heldForTheHuman(run, task)`: a before-merge check is owed (`lib/before-merge.ts:139`)
-   - `task.phase === 'escalated'`
-   - `escalatedUnanswered(task) !== null` (`lib/decisions.ts:53`)
+   - a before-merge check is owed and only the human can move it: the run is driven, the human is
+     asked, and `waitsOnlyOnTheHuman(run, task)` holds (`lib/before-merge.ts`). The badge is the
+     first check waiting on the human.
+   - `task.phase === 'escalated'`, while the phase still holds the bead (`phaseHoldsBead`)
+   - `escalatedUnanswered(task) !== null` (`lib/decisions.ts:53`), also gated by `phaseHoldsBead`
    - the phase is in `TERMINAL_BAD` (`lib/gating.ts:15`): failed, orphaned or blocked-on-failure
    - the worker pane's delivery hold is `stuck_input`
    - the worker pane's delivery hold is `usage_limit` with `until == null`, meaning the reset could
@@ -90,7 +95,8 @@ The column for a task is decided by the first rule that matches:
 2. **Done:** phase `done`. The card stays until the user clears it with `x`, or until the board moves
    on to a newer run.
 3. **Idle/queued:**
-   - `queued`, `blocked-on-files`, an unmet `depends_on`, or a `usage_limit` hold with a known reset
+   - `queued` (an unmet `depends_on` is reported only here), `blocked-on-files`, or a
+     `usage_limit` hold with a known reset
    - any worker phase whose `pane_id` is null or names no live pane, with the badge `no agent`
 4. **Working:** every other phase, whether the worker or the orchestrator acts.
    - When the orchestrator acts and `waitsOnYou` is true, the badge reads `orchestrator's move`.
@@ -99,8 +105,9 @@ The column for a task is decided by the first rule that matches:
 pinned to the top of Needs you, with its own clause:
 
 - run phase `escalated`
-- a single-PR run's owed checks (`owedInRun(run)` when `modeOf(run) === 'single-pr'`)
-- the orchestrator pane missing from the snapshot (`orchestrator is not running`)
+- a single-PR run's owed checks (`humanOwesAtTheGate(run)` when `modeOf(run) === 'single-pr'`)
+- the orchestrator pane missing from the snapshot (`orchestrator is not running`), only while the
+  run is driven (`runIsDriven`)
 
 A run card has no worker, so `enter` on it reports `no worker to stage`.
 
@@ -115,15 +122,19 @@ A run card has no worker, so `enter` on it reports `no worker to stage`.
 - **Row 2:** the phase label, plus one badge on the right. The badge is the first of these that
   applies:
   1. In Needs you, **what it waits on**, in red:
-     - `awaitedFor(run, task)` for a decision
+     - `answer decision <id>` for an open decision
      - the owed check's text for a before-merge check
      - `input box has text` for `stuck_input`
      - `usage limit` for an unreadable reset
      - the phase name for a terminal-bad phase
-  2. `ci ●` (running), `ci ✗` (failed) or `ci ✓` (passed), when CI applies.
-  3. `PR #N`, when a PR exists.
-  4. `deps: <bead>` when waiting on a dependency, or `files: <path>` for `blocked-on-files`.
-  5. `no agent` or `orchestrator's move` (see Columns).
+  2. In Idle/queued, why it waits: `deps: <bead>` (queued with an unmet dependency), `files: <bead>`
+     for `blocked-on-files` (the bead holding the files, or `held`), the reset time for a usage
+     limit, or `no agent`.
+  3. In Working, `orchestrator's move` when the orchestrator acts and `waitsOnYou` is true. It
+     outranks CI and PR, since it says who moves next. It is skipped for a single-PR run's landing
+     phases, where `waitsOnYou` runs a synchronous `git merge-base` too slow for every poll.
+  4. `ci ●` (running), `ci ✗` (failed) or `ci ✓` (passed), when CI applies.
+  5. `PR #N`, when a PR exists.
   6. Otherwise the tier (`light`, `standard` or `heavy`).
 - Every pipeline Clawd wears the **hard hat**.
 - **No background-shell badge.** The pipeline's background detection
