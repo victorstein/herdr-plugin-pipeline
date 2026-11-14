@@ -8,7 +8,7 @@ import type { Identity } from '../kit/stage'
 import { createThrottle } from '../kit/throttle'
 import type { Snapshot } from '../kit/types'
 import type { BoardUiOptions } from '../board'
-import { readBoards } from '../lib/boards'
+import { readBoards, type StagedWorker } from '../lib/boards'
 import { readDispatchLocks } from '../lib/dispatch-lock'
 import { runIsDriven } from '../lib/ledger'
 import { waitsOnYou } from '../lib/status'
@@ -16,6 +16,7 @@ import type { Run } from '../lib/types'
 import { clearedFor, loadHolds, recordCleared, runForSlug } from './data'
 import { NAV, splitKeys } from './keys'
 import { buildBoard } from './model'
+import { boardHost, stageCard, syncStage, unstageOwn, workerFor } from './stage'
 import './scenes'
 import { header, KEYS, summary, TITLES } from './view'
 
@@ -38,6 +39,8 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   let cursor: string | null = null
   let message: string | null = null
   let tick = 0
+  let staged: StagedWorker | null = null
+  let quitting = false
 
   const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))
   let chain: Promise<void> = Promise.resolve()
@@ -48,11 +51,13 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     snap = current
     ensureSubscription(current)
     run = await runForSlug(stateDir, session, slug)
-    if (!run) {
-      board = EMPTY
-      return
-    }
-    const found = run
+    board = run ? await buildFor(run, current) : EMPTY
+    const host = boardHost(current, process.env.HERDR_PANE_ID)
+    // last, so a reconcile that throws leaves the board rebuilt and only the status line shows it
+    if (host) staged = await syncStage(herdr, current, host, stateDir, session, slug)
+  }
+
+  async function buildFor(found: Run, current: Snapshot): Promise<Record<Column, CardView[]>> {
     const holds = await loadHolds(stateDir, session)
     const dispatches = await readDispatchLocks(stateDir, [found.repo_key])
     const livePanes = new Set(current.panes.map((p) => p.pane_id))
@@ -63,7 +68,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     }
     // a finished or aborted run has released its orchestrator, so its absence is not news
     orchestratorLive = !runIsDriven(found) || (found.orchestrator_pane !== null && livePanes.has(found.orchestrator_pane))
-    board = buildBoard({
+    return buildBoard({
       run: found, holds, livePanes, ctx,
       orchestratorsMove: (task) => waitsOnYou(found, task, Date.now(), holds, dispatches),
       cleared: clearedFor(await readBoards(stateDir, session), slug, found.run_id),
@@ -150,20 +155,63 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     })
   }
 
-  function quit(): never {
-    out(deleteAllImages() + '\x1b[2J\x1b[?25h')
-    process.exit(0)
+  async function stageWorker(card: CardView): Promise<void> {
+    const host = snap ? boardHost(snap, process.env.HERDR_PANE_ID) : null
+    if (!snap || !host) {
+      message = 'this board does not know its pane'
+      return
+    }
+    const worker = workerFor(run, snap, host, card.id)
+    if (typeof worker === 'string') {
+      message = worker
+      return
+    }
+    staged = await stageCard(herdr, host, PIPELINE, stateDir, session, slug, worker.terminal_id)
+    // the move renamed the worker's pane, and a tab or z queued behind this stage must find it
+    snap = await readSnapshot(herdr)
+    requestRefresh()
+  }
+
+  const stagedPane = () => (staged ? snap?.panes.find((p) => p.terminal_id === staged!.terminalId) : undefined)
+
+  async function focusStage(): Promise<void> {
+    const pane = stagedPane()
+    if (pane) await herdr.call('pane.focus', { pane_id: pane.pane_id })
+  }
+
+  async function zoomStage(): Promise<void> {
+    const pane = stagedPane()
+    if (pane) await herdr.call('pane.zoom', { pane_id: pane.pane_id, mode: 'toggle' })
+  }
+
+  // on serial, so it waits for a stage already in flight instead of leaving a worker staged with no record
+  function quit(): void {
+    if (quitting) return
+    quitting = true
+    void serial(() => unstageOwn(herdr, stateDir, session, slug, process.env.HERDR_PANE_ID).catch(() => {}))
+      .finally(() => {
+        try {
+          out(deleteAllImages() + '\x1b[2J\x1b[?25h')
+        } finally {
+          process.exit(0)
+        }
+      })
   }
 
   function onKey(key: string): void {
+    if (quitting) return
     const card = selected()
     message = null
-    if (key === '\x03' || key === 'q') quit()
+    if (key === '\x03' || key === 'q') return quit()
     const direction = NAV[key]
     if (direction) cursor = moveCursor(board, cursor, direction)
     else if (key === ' ' && card) void serial(() => peekWorker(card)).then(draw)
     else if (key === 'o') void serial(peekOrchestrator).then(draw)
     else if (key === 'd' && card) void serial(() => openDetails(card)).then(draw)
+    // herdr 0.9.1 forwards Enter as \n; a raw terminal sends \r
+    else if ((key === '\r' || key === '\n') && card) void serial(() => stageWorker(card)).then(draw)
+    else if (key === '\t') void serial(focusStage).then(draw)
+    else if (key === 'z') void serial(zoomStage).then(draw)
     else if (key === 'x' && card?.column === 'done' && run) {
       const runId = run.run_id
       void serial(async () => {
@@ -177,7 +225,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   // a closed pty must end the process, or a headless board keeps running
   process.stdin.on('end', quit)
   process.stdin.on('error', quit)
-  process.stdout.on('error', () => process.exit(0))
+  process.stdout.on('error', quit)
   process.on('SIGHUP', quit)
   // a dead board leaves the user without one, so errors are shown in the status line instead
   process.on('uncaughtException', (e) => { message = errorText(e); try { draw() } catch {} })
