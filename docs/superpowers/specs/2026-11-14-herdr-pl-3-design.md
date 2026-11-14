@@ -136,8 +136,9 @@ environment still says `w3:p2`, and every id the pane has had is covered.
   is free to name someone else.
 - **A6. Matching a move stays on `pane_id`.** `tick.ts:506` keeps finding the task by
   `t.pane_id === previous_pane_id`. A `pane.moved` whose `previous_pane_id` is only a former id is a
-  stale or duplicate event (see `tick.test.ts:1213`, herdr's event applied first), and it must not
-  rebind anything.
+  stale or duplicate event, and it must not rebind anything. `tick.test.ts:1213-1224` feeds exactly
+  that: herdr's `pane.moved` and then the reconcile's own copy of the same move. The second one finds
+  no task, so it appends nothing either.
 - **A7. No duplicates; order is the order of moves.** An append that finds the id already present
   is skipped. Nothing reads the order. It is kept only because it is the natural log.
 - **A8. The helper lives in `src/lib/unstarted.ts`.** That file already owns task-pane bookkeeping
