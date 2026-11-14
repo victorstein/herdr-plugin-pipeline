@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.2...v2.4.0) (2026-11-14)
+
+
+### Features
+
+* record a board's staged worker and undo the stage before closes, restarts and teardown ([#175](https://github.com/victorstein/herdr-plugin-pipeline/issues/175)) ([cad73da](https://github.com/victorstein/herdr-plugin-pipeline/commit/cad73da074ba22f0890af2a5a21082ad871c6523))
+
 ## [2.3.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.1...v2.3.2) (2026-11-14)
 
 
