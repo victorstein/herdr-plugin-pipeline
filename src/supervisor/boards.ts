@@ -71,8 +71,8 @@ async function isLive(board: BoardRecord, listed: ReadonlySet<string>, deps: Boa
 
 /**
  * Exactly one live board per repo with a live run in this session, and none for
- * any other. A pane renamed `Board: …` that no record names is a ghost — herdr
- * restores panes under new ids after a restart — and is closed.
+ * any other. A pane renamed `Board: …` that no record names is a ghost, and is
+ * closed.
  */
 export async function syncBoards(runs: readonly Run[], deps: BoardDeps): Promise<void> {
   const wanted = new Set<string>()

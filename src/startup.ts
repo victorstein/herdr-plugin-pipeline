@@ -153,8 +153,7 @@ export function strayKeepSet(boards: BoardRegistry, runs: readonly Run[]): Set<s
  * the workspace, so clearing it at creation time deletes the very workspace the
  * supervisor was about to open into. A board is spared if it is recorded, or still
  * labelled plain `Board` because it has only just opened; the supervisor's first
- * tick may open one before this runs. A renamed board no record names is a ghost
- * a herdr restart brought back under a new id.
+ * tick may open one before this runs. A renamed board no record names is a ghost.
  */
 export async function clearStrayPanes(
   herdr: Herdr, workspaceId: string, keep: ReadonlySet<string> = new Set(),
