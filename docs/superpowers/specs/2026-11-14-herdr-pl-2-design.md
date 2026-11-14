@@ -104,10 +104,31 @@ export interface BoardRecord {
 
 ## Control flow
 
-### `recordStaged(stateDir, session, slug, staged: StagedWorker | null): Promise<boolean>`
+### `recordStaged(stateDir, session, slug, staged: StagedWorker | null, expected?: StagedWorker | null): Promise<boolean>`
 
-`updateBoards`; if `boards[slug]` is absent return `false`; else set `boards[slug].staged = staged`,
-return `true`. Not called in this task (the board-keys task calls it).
+`updateBoards`; if `boards[slug]` is absent return `false`. If `expected` is given and
+`!sameStage(boards[slug].staged ?? null, expected)`, return `false` and write nothing. Otherwise set
+`boards[slug].staged = staged` and return `true`. Not called in this task (the board-keys task calls
+it). `sameStage(a, b)`: both null, or both set with equal `paneId` and `terminalId`.
+
+- **A22 — compare-and-set for the board (review 0, MAJOR 1).** `expected` is how the board writes a
+  reconcile result back only over the stage it read; see "Contract for the board-keys task".
+
+### Contract for the board-keys task (review 0, MAJOR 1)
+
+The board will run the kit's `reconcile`, which closes the placeholder whenever the staged pane is no
+longer under the board (`stage.ts:158-166`). Teardown is the one path where the supervisor acts on a
+stage while its board is live, so the two must agree on ordering:
+
+- On every refresh the board reads `staged` from the registry **after** its snapshot (`ui.ts` already
+  reads the snapshot at `:50` before the registry at `:72`), and reconciles that, never an
+  in-memory copy.
+- It writes a reconcile result back with `recordStaged(…, result, read)`, so a stage the supervisor
+  cleared meanwhile is not written back.
+- The supervisor clears before it closes (`closeStagedWorker` below). Together: a board whose
+  snapshot no longer shows the worker has necessarily read `staged: null`, and closes nothing.
+
+This task records the contract and provides `expected`; the board-keys task implements its side.
 
 ### Finding the staged pane (shared by both lib functions)
 
@@ -118,8 +139,13 @@ const stagedPane = (snap: Snapshot, staged: Staged) =>
 ```
 
 - **A5 — terminal id first, then pane id.** Mirrors the kit's own `keepStaged` (`stage.ts:160-162`):
-  a move keeps the terminal id and renumbers the pane; a herdr restart keeps the pane id and changes
-  the terminal id (`tick.ts:337-341`, measured live).
+  a move keeps the terminal id and renumbers the pane (`tick.ts:337-339`, measured live); a herdr
+  restart is said to keep the pane id and change the terminal id (`tick.ts:339-341`, `stage.ts:161`).
+  **Unmeasured, and contradicted in the repo** (review 0, MAJOR 2): `src/startup.ts:135-136` and
+  `src/supervisor/boards.ts:72-73` say a restart brings panes back under new ids. The plan's live
+  check (Testing strategy) measures it and the answer is written here before the PR. If pane ids do
+  not survive, the restart remap and A15 do not hold and the implementer stops and raises it with
+  `hpipe decide`.
 
 ### `unstageBoard(herdr, stateDir, session, slug): Promise<void>`
 
@@ -128,14 +154,14 @@ const stagedPane = (snap: Snapshot, staged: Staged) =>
 3. Remap: `pane = stagedPane(snap, staged)`; `current = pane ? { ...staged, terminalId: pane.terminal_id, paneId: pane.pane_id } : staged`.
    Without it, the kit's `unstage` looks the worker up by terminal id only (`stage.ts:81`); after a
    restart it misses, closes the placeholder and gives up (`:83-86`), and the worker's home spot is lost.
-4. Host: `boardPane = snap.panes.find((p) => p.pane_id === staged.host.boardPaneId)`;
-   `host = boardPane ? { ...staged.host, tabId: boardPane.tab_id } : staged.host`.
-   - **A6 — the board's current tab wins when the board pane is listed.** The kit refuses to move a
-     worker that is not in `host.tabId` (`stage.ts:83`). Pane ids survive a restart; that tab ids do
-     is not measured anywhere in this repo or the memory note on `pane.move`. Reading the tab from
-     the board pane removes the dependence when the board is still there; when it is gone, the
-     stored tab is the only evidence. If the reviewer prefers the stored value always (it is what
-     the kit's `keepStaged` trusts, `stage.ts:163`), this step is one line to drop.
+4. Host: `host = pane?.workspace_id === staged.host.workspaceId ? { ...staged.host, tabId: pane.tab_id } : staged.host`.
+   - **A6 — any worker found in the board's workspace goes home (review 0, MINOR 2).** The kit
+     refuses to move a worker that is not in `host.tabId` (`stage.ts:83`): it closes the placeholder
+     and leaves the worker where it is. The pipeline workspace is never a worker's home, so a worker
+     found there — under the board, in another tab the user moved it to, or in a tab whose id changed
+     across a restart — is treated as staged in its own tab. This removes any dependence on tab ids
+     surviving a restart. A worker found elsewhere keeps the stored host, and the kit only closes
+     the placeholder (the worker is already somewhere real).
 5. `await unstage(herdr, snap, host, current)` (kit, `stage.ts:80-98`): moves the worker next to its
    placeholder and closes it; no placeholder → new tab in the home workspace or, if that is gone,
    the board's workspace; worker not under the board → closes the placeholder only.
@@ -152,11 +178,17 @@ const stagedPane = (snap: Snapshot, staged: Staged) =>
 
 ### `closeStagedWorker(herdr, stateDir, session, slug, paneId): Promise<boolean>`
 
-1. `staged = boards[slug]?.staged`. If falsy or `staged.paneId !== paneId`, return `false` — no
-   socket call.
+1. Under `updateBoards`: `staged = boards[slug]?.staged`. If falsy or `staged.paneId !== paneId`,
+   return `false` — nothing written, no socket call. Otherwise set `staged` to `null` in the same
+   locked change.
 2. `snap = await readSnapshot(herdr)`; `pane = stagedPane(snap, staged)`; if found,
-   `await herdr.call('pane.close', { pane_id: pane.pane_id })`.
-3. Compare-and-clear `staged` as in `unstageBoard` step 6. Return `true`.
+   `await herdr.call('pane.close', { pane_id: pane.pane_id })`. Return `true`.
+
+- **A23 — clear first, then close (review 0, MAJOR 1).** Closing first left the record saying
+  "staged" after the worker was gone, so a live board's reconcile would close the placeholder and
+  take the worktree workspace with it (A9). Cleared first, a board following the contract above sees
+  `staged: null` by the time the worker disappears. If `pane.close` then throws, the worker is left
+  alive and unstaged — the problem today, no worse.
 
 - **A9 — never close the placeholder.** It may be the last pane in the worktree's workspace; herdr
   destroys a workspace with its last pane (`src/startup.ts:130-132`), `worktreeRemovalFrom` would
@@ -213,22 +245,25 @@ export function strayKeepSet(boards: BoardRegistry, runs: readonly Run[]): Set<s
 Union of:
 - `recordedBoardPanes(boards)` (today's set, `src/lib/boards.ts:42-44`);
 - every non-null `staged.paneId` and `staged.placeholderPaneId`;
-- `task.pane_id` of every task with `!FINISHED.has(task.phase)` in a run with `runIsDriven(run)`
-  (`teardown.ts:16-18`, `src/lib/ledger.ts:319-325`).
+- `task.pane_id` of every task with `!FINISHED.has(task.phase)`, in every run (`teardown.ts:16-18`) —
+  the same set `PaneAbsence` binds (`tick.ts:356-359`).
 
 `main` (`startup.ts:211`) passes
 `strayKeepSet(await readBoards(stateDir, session), (await listRuns(stateDir, session)).filter(isCurrentSchemaRun))`,
 the read `main.ts:492-494` does (without `REPOS_ALLOW`: keeping more panes is the safe direction).
 `clearStrayPanes` itself is unchanged.
 
-- **A15 — bound panes are kept, not just staged ones.** After a restart, pane ids survive
-  (`tick.ts:339-340`), so a worker whose stage record was lost (A8) is still kept by its task binding.
+- **A15 — bound panes are kept, not just staged ones.** If pane ids survive a restart
+  (`tick.ts:339-340`; unmeasured, see A5), a worker whose stage record was lost (A8) is still kept by its task binding.
 - **A16 — the placeholder entry is defence only.** `clearStrayPanes` lists the pipeline workspace
   (`startup.ts:141`) and the placeholder lives in the worktree workspace (`stage.ts:122-130`), so
   today it is never a candidate. Kept because the brief asks for it and it costs one set entry.
-- **A17 — `escalated` runs are not driven** (`src/lib/phases.ts:148-149`), so their tasks' bound panes are not
-  kept unless staged. Matches the brief. A worker staged from an escalated run is still kept by A16's
-  `staged.paneId`.
+- **A17 — no `runIsDriven` filter; departs from the brief (review 0, MINOR 3).** The brief keeps
+  only driven runs' panes, which drops `escalated` runs (`src/lib/phases.ts:148-149`). But
+  `PaneAbsence` binds every non-`FINISHED` task (`tick.ts:356-359`), and an escalated run waits for a
+  human `rewind`: a staged worker whose record was lost (A8) would be closed on restart and its task
+  failed through `losePane` (`tick.ts:290-303`). Keeping more panes is the safe direction; a kept
+  pane that should not have been costs one stray pane in the pipeline workspace.
 
 ### Teardown (`src/supervisor/teardown.ts:168-229`)
 
@@ -276,8 +311,8 @@ closeStagedWorker: async (run, task) => {
 | `syncBoards` wiring (`main.ts:513`) | `unstageBoard` rejects | `unstage: (slug) => unstageBoard(kit, …).catch((e) => console.error(...))`: logged, the close/replace goes ahead (A8). |
 | "Open board" `import.meta.main` | same | same `.catch`, `console.error`. |
 | `syncBoards` itself | — | Awaits `deps.unstage`; the dep's contract is that it does not reject. A rejecting dep would still be caught by `eachIsolated` (`main.ts:106-117`, called at `:495`) and only skip that tick's board upkeep. |
-| Teardown wiring | `closeStagedWorker` throws | Logged, returns `false`; teardown proceeds as today and the worker survives under the board (the problem today, no worse). |
-| `recordStaged` | no record | Returns `false`, writes nothing (as `recordCleared`). |
+| Teardown wiring | `closeStagedWorker` throws | Logged, returns `false`; teardown proceeds as today. If the throw came after the clear (A23), `staged` is already `null` and the worker survives under the board unstaged — the problem today, no worse. |
+| `recordStaged` | no record, or `expected` differs | Returns `false`, writes nothing (as `recordCleared`). |
 | Socket client | herdr not answering | `HerdrError('timeout')` after 10 s (`src/kit/herdr.ts:32-41`) → as above. |
 
 ## Testing strategy
@@ -286,40 +321,77 @@ TDD, failing test first for each item.
 
 **`test/boards-stage.test.ts`** (new; temp dir as `test/board-data.test.ts:10-12`; fake kit `Herdr`
 from `test/kit/fake-herdr.ts` — imported, not edited; snapshots shaped as in `test/kit/stage.test.ts`):
-- `recordStaged`: writes onto an existing record, returns `false` and writes nothing with none.
+- `recordStaged`: writes onto an existing record, returns `false` and writes nothing with none; with
+  `expected`, writes only when the record's stage equals it (A22).
 - `unstageBoard`: no record → no calls; record without `staged` → no calls; staged worker under the
   board with a placeholder → `pane.move` to the placeholder's tab split right of it, then
   `pane.close` of the placeholder, and `staged` becomes `null`; **restart**: the snapshot shows the
   worker with a new terminal id and the same pane id → it is still moved home (`pane.move` called with
   that pane id), not just a placeholder close; a stage replaced between read and clear is not wiped
-  (A7); a throwing `pane.move` leaves `staged` set (A8).
-- `closeStagedWorker`: no stage, or a stage of another pane → `false`, no calls; matching stage →
-  `pane.close` of the worker only (never the placeholder), `staged` → `null`, `true`; worker already
-  gone → no close, `staged` → `null`, `true`.
+  (A7); a throwing `pane.move` leaves `staged` set (A8); a worker found in the board's workspace but
+  in another tab is still moved home, not left there with its placeholder closed (A6).
+- `closeStagedWorker`: no stage, or a stage of another pane → `false`, no calls, record untouched;
+  matching stage → `pane.close` of the worker only (never the placeholder), `true`, and the fake's
+  `pane.close` handler asserts the record already reads `staged: null` (A23); worker already gone →
+  no close, `staged` → `null`, `true`.
 
-**`test/board.test.ts`** — `deps()` (`:51-56`) and `actionDeps()` (`:310-320`) gain a recording
-`unstage` that pushes `unstage <slug>` into the same `calls` log, so order is asserted:
+**`test/board.test.ts`** — `deps()` (`:51-56`) and `actionDeps()` (`:310-320`) get a no-op `unstage`
+default; the ordering tests pass a recording one through `over`
+(``{ unstage: async (s) => { calls.push(`unstage ${s}`) } }``), so it lands in the same `calls` log
+as the fake herdr's closes and opens (review 0, MINOR 4):
 - `syncBoards` calls `unstage` before closing a finished run's board, and before closing and
   reopening a dead board; it calls it for a staged board whose pane is not listed; it does not call
   it for a record without `staged`.
 - "Open board" calls `unstage` before closing the recorded board.
 - `openBoard` given an `expected` record with `staged` writes a record without it.
 
-**`test/startup.test.ts`** — `strayKeepSet`: keeps a driven run's bound worker pane, the recorded
-board pane, `staged.paneId` and `staged.placeholderPaneId`; drops a finished task's pane and a bound
-pane of an `escalated` run.
+**`test/startup.test.ts`** — `strayKeepSet`: keeps a bound worker pane of a driven run and of an
+`escalated` run (A17), the recorded board pane, `staged.paneId` and `staged.placeholderPaneId`;
+drops a finished task's pane.
 
-**`test/teardown.test.ts`** — with `removingBy` (`:36-39`) plus `closeStagedWorker`:
-- a staged task: `closeStagedWorker` is called before `removeWorktree` (shared call log), and the
-  task's `pane_id` is released (`last_pane_id` set, `agent_status: 'unknown'`);
-- `closeStagedWorker` returning `false` leaves `pane_id` as it was;
-- no `closeStagedWorker` dep: behaves exactly as today (an existing test already covers this path);
+**`test/teardown.test.ts`** — with `removingBy` (`:36-39`) plus `closeStagedWorker`. The release is
+asserted from **inside the `removeWorktree` fake**, because `markTornDown` releases the pane after a
+`removed` anyway (`teardown.ts:42-58`) and the end state cannot tell the two apart (review 0,
+MINOR 1):
+- a staged task: `closeStagedWorker` is called before `removeWorktree` (shared call log), and when
+  `removeWorktree` runs the task's `pane_id` is already `null` with `last_pane_id` the old id;
+- `closeStagedWorker` returning `false`: `pane_id` is still bound when `removeWorktree` runs;
+- no `closeStagedWorker` dep: behaves exactly as today (the existing tests);
 - `keep_worktree`: not called.
 
 `bunx tsc --noEmit` and `bun test` green.
 
-**Live verification.** Nothing stages a pane until the board-keys task lands (research finding 5), so
-these paths cannot be exercised in a real herdr session from this branch alone. The plan for that
-task should add a runbook step to `test/integration/smoke.md`: stage a worker, restart herdr, confirm
-it survives and the board's "Open board" moves it home; merge a staged task and confirm the worker
-closes and the worktree removal reports `removed`, not `gone`.
+**Live verification (this task, review 0, MAJOR 2).** A stage can be built by hand on herdr 0.9.1,
+so this task verifies itself rather than waiting for the board-keys task. In a **scratch** herdr
+session (its own `HERDR_SOCKET_PATH`, a temp state dir — never the live pipeline session):
+1. Open a board stand-in pane and a "worker" pane in another workspace. `herdr pane split <worker>
+   --direction right` makes an agent-less placeholder (what `placeholderOf` accepts,
+   `stage.ts:49-52`); `herdr pane move <worker> --tab <board tab> --target-pane <board> --split down`
+   stages it. Write the `staged` record with `recordStaged`.
+2. Run `unstageBoard` from a `bun -e` one-liner; confirm the worker is back next to its placeholder
+   and the placeholder is closed.
+3. Restage. `herdr session stop` and re-attach. Record which of pane ids, tab ids and terminal ids
+   survived — this is the measurement A5 and A15 wait on.
+4. Run `strayKeepSet` + `clearStrayPanes` on the board's workspace; confirm the staged worker
+   survives. Then run `unstageBoard` again, exercising the restart remap.
+
+The measured answer goes into A5 before the PR. The comment that turns out wrong (`tick.ts:339-341`
+or `startup.ts:135-136` / `supervisor/boards.ts:72-73`) is fixed if it is in a file this task
+touches, else filed with `hpipe discover`. The board-keys task keeps the teardown runbook step (merge
+a staged task with the board live; the removal reports `removed`, not `gone`).
+
+## Changes from review 0
+
+`docs/superpowers/reviews/herdr-pl-2-spec-review-0.md` (CLEAR, 2 MAJOR, 4 MINOR), all accepted:
+
+- **MAJOR 1** — a live board's reconcile could close the placeholder after teardown closed the worker.
+  `closeStagedWorker` now clears before it closes (A23); `recordStaged` gains `expected` (A22); a
+  "Contract for the board-keys task" section fixes the board's side. The review's alternative (close
+  after `removeWorktree`) was not taken: it departs from brief item 5, and clear-first closes the gap.
+- **MAJOR 2** — live verification was deferred on a false premise, and the restart premise is
+  contradicted in the repo. A5/A15 now say unmeasured; this task runs the scratch-session check above.
+- **MINOR 1** — teardown tests assert inside the `removeWorktree` fake.
+- **MINOR 2** — A6 rewritten: a worker found in the board's workspace is moved home from its own tab.
+- **MINOR 3** — A17: the keep set covers every non-`FINISHED` task, as `PaneAbsence` does; departs
+  from the brief's `runIsDriven` filter, flagged inline.
+- **MINOR 4** — test helpers get a no-op `unstage`; ordering tests pass a recording one via `over`.
