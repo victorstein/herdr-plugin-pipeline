@@ -211,7 +211,7 @@ export function strayKeepSet(boards: BoardRegistry, runs: readonly Run[]): Set<s
 ```
 
 Union of:
-- `recordedBoardPanes(boards)` (today's set, `boards.ts:42-44`);
+- `recordedBoardPanes(boards)` (today's set, `src/lib/boards.ts:42-44`);
 - every non-null `staged.paneId` and `staged.placeholderPaneId`;
 - `task.pane_id` of every task with `!FINISHED.has(task.phase)` in a run with `runIsDriven(run)`
   (`teardown.ts:16-18`, `src/lib/ledger.ts:319-325`).
