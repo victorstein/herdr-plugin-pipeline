@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.3...v2.3.0) (2026-11-14)
+
+
+### Features
+
+* pasture's kanban board in place of bv ([#170](https://github.com/victorstein/herdr-plugin-pipeline/issues/170)) ([47fb5bb](https://github.com/victorstein/herdr-plugin-pipeline/commit/47fb5bbd3838ed4670120ecea2d5844e07eda2ea))
+
 ## [2.2.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.2.2...v2.2.3) (2026-10-14)
 
 
