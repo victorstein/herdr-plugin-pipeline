@@ -838,10 +838,11 @@ with
 
 ```ts
 import { BOARD_PANE_TITLE, type BoardRegistry, readBoards, recordedBoardPanes } from './lib/boards'
-import { isCurrentSchemaRun, listRuns } from './lib/ledger'
+import { isCurrentSchemaRun, listRuns, taskPhaseIsTerminal } from './lib/ledger'
 import type { Run } from './lib/types'
-import { FINISHED } from './supervisor/teardown'
 ```
+
+(`taskPhaseIsTerminal` is the same test as the supervisor's `FINISHED` set — both read `TASK_ROWS`' `terminal` flag — without loading a supervisor module into the startup hook.)
 
 Add directly above `export async function clearStrayPanes(`:
 
@@ -860,7 +861,7 @@ export function strayKeepSet(boards: BoardRegistry, runs: readonly Run[]): Set<s
     if (board.staged.placeholderPaneId !== null) keep.add(board.staged.placeholderPaneId)
   }
   for (const task of runs.flatMap((run) => run.tasks)) {
-    if (task.pane_id !== null && !FINISHED.has(task.phase)) keep.add(task.pane_id)
+    if (task.pane_id !== null && !taskPhaseIsTerminal(task.phase)) keep.add(task.pane_id)
   }
   return keep
 }
@@ -882,7 +883,7 @@ with
 - [ ] **Step 4: Run and typecheck**
 
 Run: `bun test test/startup.test.ts && bunx tsc --noEmit`
-Expected: all pass; tsc prints nothing. If tsc reports an import cycle problem from `./supervisor/teardown` (it should not: `teardown.ts` imports only from `../lib/`), stop and report it rather than moving `FINISHED`.
+Expected: all pass; tsc prints nothing.
 
 - [ ] **Step 5: Commit**
 
@@ -1224,6 +1225,23 @@ diff $HPL2_STATE/before.txt $HPL2_STATE/after.txt
 
 Record, in words: did the panes come back at all; did pane ids survive; did tab ids survive; did terminal ids change.
 
+Then measure pane-id reuse (plan review 0, MINOR 1: `stagedPane` falls back to the pane id, and `unstageBoard` acts on whatever it finds anywhere in the board's workspace, so a reused id could make it move another board, another worker or the supervisor):
+
+```bash
+HERDR_SOCKET_PATH=$S herdr pane split $BOARD --direction right --no-focus
+HERDR_SOCKET_PATH=$S bun $HPL2_STATE/live.ts panes
+```
+
+Note the new pane's id `P1`, then:
+
+```bash
+HERDR_SOCKET_PATH=$S herdr pane close $P1
+HERDR_SOCKET_PATH=$S herdr pane split $BOARD --direction right --no-focus
+HERDR_SOCKET_PATH=$S bun $HPL2_STATE/live.ts panes
+```
+
+Record whether the second new pane got `P1`'s number again, then close it (`herdr pane close <its id>`) so `WB` holds only the board and the worker for Step 7.
+
 - [ ] **Step 7: Startup clear, then unstage after the restart**
 
 ```bash
@@ -1237,7 +1255,8 @@ Expected if pane ids survive: `closed: []` (the board pane is recorded, the work
 - [ ] **Step 8: Write the result into the spec, and act on it**
 
 Edit A5 in `docs/superpowers/specs/2026-11-14-herdr-pl-2-design.md`: replace "Unmeasured, and contradicted in the repo" with what Step 6 measured (herdr 0.9.1, date, ids that survived). Then:
-- **Pane ids survived:** the comments at `src/startup.ts:135-136` and `src/supervisor/boards.ts:72-73` are wrong; fix their wording in this branch (both files are this task's). Commit `docs: …`.
+- **Pane ids survived:** the comments at `src/startup.ts:135-136` and `src/supervisor/boards.ts:72-73` are wrong; fix their wording in this branch (both files are this task's). Also make this branch's own new comments match exactly what was measured: the `stagedPane` comment and the `unstageBoard` doc in `src/lib/boards.ts`, and the `strayKeepSet` doc in `src/startup.ts`. Commit `docs: …`.
+- **Pane numbers are reused** (Step 6's second measurement): do not open the PR. Run `hpipe decide --task t2` recommending that the pane-id fallback only accept a pane that is not a recorded board pane and not the supervisor, or only apply when the terminal id is known to have changed. If numbers are never reused, write that next to the A5 measurement.
 - **Pane ids did not survive:** do not open the PR. Run `hpipe decide --task t2` with the measurement and a recommendation (the restart remap and A15 do not hold; `tick.ts:339-341` and the kit are wrong too).
 - **Panes did not come back at all:** a staged worker cannot outlive a restart either way; record it in A5, and `hpipe discover` the kit comment.
 
