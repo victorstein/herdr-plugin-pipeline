@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.4.0...v2.5.0) (2026-11-14)
+
+
+### Features
+
+* **board:** enter stages a worker, tab focuses it, z zooms it ([#178](https://github.com/victorstein/herdr-plugin-pipeline/issues/178)) ([24deab2](https://github.com/victorstein/herdr-plugin-pipeline/commit/24deab296a9db508d64a613a598491a40e50bd72))
+
 ## [2.4.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.2...v2.4.0) (2026-11-14)
 
 
