@@ -68,8 +68,8 @@ import { effortSummary, reviewEfforts } from './lib/tier-prompt'
 import { isLowering, pipelinePanes, registrationTier } from './lib/tiers'
 import { bdProblem, bvProblem, checkBd, checkBv, checkTools, type Tools, toolsLine } from './lib/tools'
 import {
-  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, shellQuoted, startWorkerCommand,
-  unbriefedWorker,
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, freshLadder, holdsPane, shellQuoted,
+  startWorkerCommand, unbriefedWorker,
 } from './lib/unstarted'
 import { ARTIFACT_ROOT, reserveVerdict } from './lib/verdict-path'
 import { renderWorkerPrompt } from './lib/worker-prompt'
@@ -3111,11 +3111,13 @@ async function resume(ctx: Ctx, input: { runId: string; callerPane?: string | nu
   const run = await runById(ctx.stateDir, ctx.session, input.runId)
   if (!run) return fail(`no such run: ${input.runId}`)
   // A worker refused on an aborted run is shown the resume command, and the abort is not its to undo.
-  // Only a pane a task holds now: herdr reuses ids, so a human's pane can carry a finished task's old one.
-  const worker = input.callerPane == null ? undefined
-    : run.tasks.find((task) => task.pane_id === input.callerPane && !taskPhaseIsTerminal(task.phase))
+  // Only a pane a task holds now, by its current id or one a move renamed: herdr reuses ids, so a
+  // human's pane can carry a finished task's old one, or a dead pane's `last_pane_id`.
+  const caller = input.callerPane ?? null
+  const worker = caller === null ? undefined
+    : run.tasks.find((task) => holdsPane(task, caller) && !taskPhaseIsTerminal(task.phase))
   if (worker !== undefined) {
-    return fail(`${input.callerPane} is ${worker.task_id}'s worker pane: a run is resumed by the orchestrator or the ` +
+    return fail(`${caller} is ${worker.task_id}'s worker pane: a run is resumed by the orchestrator or the ` +
       'human, never by its workers. Stop, and end your turn')
   }
 

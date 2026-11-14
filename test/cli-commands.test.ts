@@ -363,6 +363,43 @@ test('a human pane that carries a finished task\'s old pane id may resume the ru
   expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w6:p1' })).ok).toBe(true)
 })
 
+test('a moved worker is refused a resume from the id its pane had before the move, as from its current one — herdr-pl-3', async () => {
+  const run = abortableRun()
+  run.tasks[0]!.pane_id = 'w8:p1'
+  run.tasks[0]!.former_pane_ids = ['w3:p1']
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const fromCurrent = await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w8:p1' })
+  const fromFormer = await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w3:p1' })
+  expect(fromCurrent.ok).toBe(false)
+  expect(fromFormer.ok).toBe(false)
+  expect(fromFormer.text).toBe("w3:p1 is t1's worker pane: a run is resumed by the orchestrator or the human, never by " +
+    'its workers. Stop, and end your turn')
+  expect(fromFormer.text).toBe(fromCurrent.text.replace('w8:p1', 'w3:p1'))
+})
+
+test('a finished task\'s former pane id does not refuse a resume — herdr-pl-3', async () => {
+  const run = abortableRun()
+  run.tasks[3]!.former_pane_ids = ['w9:p1']
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w9:p1' })).ok).toBe(true)
+})
+
+test('once a moved worker\'s pane is gone, its former id no longer refuses the human\'s resume — herdr-pl-3', async () => {
+  const run = abortableRun()
+  run.tasks[0]!.pane_id = 'w8:p1'
+  run.tasks[0]!.former_pane_ids = ['w3:p1']
+  await saveRun(dir, run)
+  await cmdAbort(ctx(), { runId: run.run_id })
+  const aborted = (await listRuns(dir, 'personal'))[0]!
+  applyEvents([aborted], [{ kind: 'pane.closed', session: 'personal', at: 2, pane_id: 'w8:p1' }], 'personal', new Set())
+  expect(aborted.tasks[0]?.pane_id).toBeNull()
+  expect(aborted.tasks[0]?.former_pane_ids).toBeUndefined()
+  await saveRun(dir, aborted)
+  expect((await cmdResume(ctx(), { runId: run.run_id, callerPane: 'w3:p1' })).ok).toBe(true)
+})
+
 test('an aborted run is resumed before it is rewound', async () => {
   const run = abortableRun()
   await saveRun(dir, run)
