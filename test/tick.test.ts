@@ -1123,6 +1123,7 @@ test('a pane.moved that keeps the id changes nothing — #86', () => {
     kind: 'pane.moved', session: 'personal', at: 1, pane_id: 'w3:p2', previous_pane_id: 'w3:p2',
   }], 'personal', new Set())
   expect(changed).toBe(false)
+  expect(run.tasks[0]?.former_pane_ids).toBeUndefined()
 })
 
 test('the worker is needed exactly while some reachable row is the worker\'s — #86', () => {
@@ -1143,6 +1144,31 @@ test('pane.moved rebinds the task to the pane\'s new id and fails nothing — #8
   expect(changed).toBe(true)
   expect(run.tasks[0]?.pane_id).toBe('w5:p2')
   expect(run.tasks[0]?.phase).toBe('research')
+})
+
+test('pane.moved keeps the id the pane had before, once per id — herdr-pl-3', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w3:p2' })])
+  applyEvents([run], [{
+    kind: 'pane.moved', session: 'personal', at: 1, pane_id: 'w5:p2', previous_pane_id: 'w3:p2',
+  }], 'personal', new Set())
+  expect(run.tasks[0]?.pane_id).toBe('w5:p2')
+  expect(run.tasks[0]?.former_pane_ids).toEqual(['w3:p2'])
+
+  applyEvents([run], [{
+    kind: 'pane.moved', session: 'personal', at: 2, pane_id: 'w6:p1', previous_pane_id: 'w5:p2',
+  }], 'personal', new Set())
+  expect(run.tasks[0]?.pane_id).toBe('w6:p1')
+  expect(run.tasks[0]?.former_pane_ids).toEqual(['w3:p2', 'w5:p2'])
+})
+
+test('a pane moved back to an id it had before is not listed twice — herdr-pl-3', () => {
+  const run = mkRun([mkTask({ phase: 'research', pane_id: 'w5:p2', former_pane_ids: ['w3:p2'] })])
+  applyEvents([run], [
+    { kind: 'pane.moved', session: 'personal', at: 1, pane_id: 'w3:p2', previous_pane_id: 'w5:p2' },
+    { kind: 'pane.moved', session: 'personal', at: 2, pane_id: 'w5:p2', previous_pane_id: 'w3:p2' },
+  ], 'personal', new Set())
+  expect(run.tasks[0]?.pane_id).toBe('w5:p2')
+  expect(run.tasks[0]?.former_pane_ids).toEqual(['w3:p2', 'w5:p2'])
 })
 
 const listed = (...panes: [string, string?][]): PaneInfo[] =>
@@ -1221,6 +1247,7 @@ test('a moved pane still rebinds when herdr\'s own pane.moved was applied first 
   applyEvents([run], [drained, ...absence.reconcile([run], afterMove, 'personal', 2)], 'personal', new Set())
   expect(run.tasks[0]?.pane_id).toBe('w5:p2')
   expect(run.tasks[0]?.phase).toBe('research')
+  expect(run.tasks[0]?.former_pane_ids).toEqual(['w3:p2'])
 })
 
 const workspaces = (...ids: string[]): WorkspaceInfo[] =>

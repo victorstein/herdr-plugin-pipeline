@@ -184,6 +184,39 @@ test('a pane a finished task or an undriven run still records is no worker\'s: h
   expect(ruled.ok, ruled.text).toBe(true)
 })
 
+test('a moved worker is refused hold and confirm from the id its pane had before the move, as from its current one — herdr-pl-3', async () => {
+  const run = await seeded(perTaskRun([
+    heldTask({ pane_id: 'w5:p2', former_pane_ids: ['w3:p2'], before_merge: [checkOf('c1')] }),
+  ]))
+  const heldFromCurrent = await hold(run, ['no ghost'], 't1', reads(), 'w5:p2')
+  const heldFromFormer = await hold(run, ['no ghost'], 't1', reads(), 'w3:p2')
+  expect(heldFromCurrent.ok).toBe(false)
+  expect(heldFromFormer.ok).toBe(false)
+  expect(heldFromFormer.text).toContain("w3:p2 is t1's worker pane")
+  expect(heldFromFormer.text).toBe(heldFromCurrent.text.replace('w5:p2', 'w3:p2'))
+
+  const ruledFromCurrent = await confirm(run, 'c1', { pane: 'w5:p2' })
+  const ruledFromFormer = await confirm(run, 'c1', { pane: 'w3:p2' })
+  expect(ruledFromCurrent.ok).toBe(false)
+  expect(ruledFromFormer.ok).toBe(false)
+  expect(ruledFromFormer.text).toContain("w3:p2 is t1's worker pane")
+  expect(ruledFromFormer.text).toBe(ruledFromCurrent.text.replace('w5:p2', 'w3:p2'))
+
+  const after = taskOf(await saved(run))
+  expect(after.before_merge?.map((c) => c.id)).toEqual(['c1'])
+  expect(after.before_merge?.[0]?.resolutions).toEqual([])
+})
+
+test('a finished task\'s former pane id is no worker\'s — herdr-pl-3', async () => {
+  const finished = heldTask({
+    task_id: 't2', branch: 'feat/old', bead: 'hp-2', phase: 'done', merged_at_ms: 1,
+    pane_id: null, former_pane_ids: ['w3:p2'],
+  })
+  const run = await seeded(perTaskRun([heldTask(), finished]))
+  const held = await hold(run, ['no ghost'], 't1', reads(), 'w3:p2')
+  expect(held.ok, held.text).toBe(true)
+})
+
 test('a supervisor that honours before-merge checks lets hold through', async () => {
   const run = await seeded(perTaskRun([heldTask({ phase: 'ci' })]))
   const out = await hold(run, ['no ghost'], 't1', reads({

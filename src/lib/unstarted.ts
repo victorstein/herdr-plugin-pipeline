@@ -234,6 +234,7 @@ export function remainingDispatchSteps(run: Run, task: Task, hpipe: string): str
 export function bindWorkerPane(run: Run, task: Task, paneId: string, now: number): boolean {
   if (task.pane_id === paneId) return false
   task.pane_id = paneId
+  delete task.former_pane_ids
   // Any other row's ladder probes the orchestrator, whose silence a new worker
   // pane does not change.
   if (taskRow(task.phase).actor !== 'worker') return true
@@ -257,10 +258,19 @@ export function freshLadder(run: Run, record: Run | Task, now: number): StallSta
 export function releaseWorkerPane(task: Task): void {
   if (task.pane_id !== null) task.last_pane_id = task.pane_id
   task.pane_id = null
+  delete task.former_pane_ids
   // Nothing reports a status for a pane that is gone, so the last one would be
   // shown for good: t3 read `working` for 50 minutes after its pane was closed.
   // Measured on a live run.
   task.agent_status = 'unknown'
+}
+
+/**
+ * Whether `pane` is the task's pane, by its current id or one it had before a
+ * move. A moved worker's `HERDR_PANE_ID` still carries the old id.
+ */
+export function holdsPane(task: Task, pane: string): boolean {
+  return task.pane_id === pane || (task.former_pane_ids?.includes(pane) ?? false)
 }
 
 /**

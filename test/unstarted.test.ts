@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test'
 import { newRun } from '../src/lib/ledger'
 import type { Run, Task, TaskPhase } from '../src/lib/types'
 import {
-  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, overdueUnstartedWorker, remainingDispatchSteps,
-  startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
+  bindWorkerPane, briefCommand, dispatchSequence, dispatchWorkerCommand, holdsPane, overdueUnstartedWorker,
+  releaseWorkerPane, remainingDispatchSteps, startWorkerCommand, UNSTARTED_GRACE_MS, unstartedWorker,
 } from '../src/lib/unstarted'
 import { beadTaskFields } from './helpers/bead-fields'
 
@@ -191,6 +191,31 @@ test('binding a pane re-arms the ladder from now; rebinding the same pane change
                                last_probe_at: NOW, probes: 0, undelivered: 0, holds: 0 })
   expect(bindWorkerPane(run, task, 'w23:p1', NOW + 1)).toBe(false)
   expect(task.stall?.last_probe_at).toBe(NOW)
+})
+
+test('a task holds its current pane and the ids that pane had before a move, and no other — herdr-pl-3', () => {
+  const task = mkTask({ pane_id: 'w5:p2', former_pane_ids: ['w3:p2'], last_pane_id: 'w2:p1' })
+  expect(holdsPane(task, 'w5:p2')).toBe(true)
+  expect(holdsPane(task, 'w3:p2')).toBe(true)
+  expect(holdsPane(task, 'w2:p1')).toBe(false)
+  expect(holdsPane(mkTask({ pane_id: 'w5:p2' }), 'w3:p2')).toBe(false)
+})
+
+test('a released pane takes its former ids with it — herdr-pl-3', () => {
+  const task = mkTask({ pane_id: 'w5:p2', former_pane_ids: ['w3:p2'] })
+  releaseWorkerPane(task)
+  expect(task.pane_id).toBeNull()
+  expect(task.last_pane_id).toBe('w5:p2')
+  expect(task.former_pane_ids).toBeUndefined()
+})
+
+test('binding a different pane drops the former ids; rebinding the same pane keeps them — herdr-pl-3', () => {
+  const run = mkRun()
+  const task = mkTask({ pane_id: 'w5:p2', former_pane_ids: ['w3:p2'] })
+  expect(bindWorkerPane(run, task, 'w5:p2', NOW)).toBe(false)
+  expect(task.former_pane_ids).toEqual(['w3:p2'])
+  expect(bindWorkerPane(run, task, 'w9:p1', NOW)).toBe(true)
+  expect(task.former_pane_ids).toBeUndefined()
 })
 
 test('on the briefed phase with the brief owed, every advice leads with the one command, the manual steps after it', () => {
