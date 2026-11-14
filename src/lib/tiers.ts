@@ -59,10 +59,10 @@ export function isLowering(from: Tier, to: Tier): boolean {
 }
 
 /**
- * Every pane the pipeline put an agent in. A guard, not authentication: a pane
- * herdr renamed on a move, or an orchestrator rebound by `claim`, still carries
- * an id this set no longer holds. The prompts forbid lowering; this only stops an
- * agent that ignores them from its own pane.
+ * Every pane the pipeline put an agent in, including the ids a moved pane had
+ * before herdr renamed it. A guard, not authentication: an orchestrator rebound
+ * by `claim` still carries an id this set no longer holds. The prompts forbid
+ * lowering; this only stops an agent that ignores them from its own pane.
  */
 export function pipelinePanes(run: Run): Set<string> {
   const panes = new Set<string>()
@@ -70,6 +70,7 @@ export function pipelinePanes(run: Run): Set<string> {
   for (const task of run.tasks) {
     if (task.pane_id !== null) panes.add(task.pane_id)
     if (task.last_pane_id !== undefined) panes.add(task.last_pane_id)
+    for (const pane of task.former_pane_ids ?? []) panes.add(pane)
   }
   return panes
 }

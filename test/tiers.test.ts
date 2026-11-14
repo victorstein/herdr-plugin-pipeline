@@ -51,7 +51,7 @@ test('lowering is any move toward light', () => {
   expect(isLowering('standard', 'standard')).toBe(false)
 })
 
-test('the pipeline panes are the orchestrator and every task pane, live or last', () => {
+test('the pipeline panes are the orchestrator and every task pane, live, last or former', () => {
   const run = newRun({ session: 'p', socketPath: '/s', repoKey: 'k', repoRoot: '/r', title: 'a' })
   run.orchestrator_pane = 'w1:p1'
   const task = (over: Partial<Task>): Task => ({
@@ -67,6 +67,7 @@ test('the pipeline panes are the orchestrator and every task pane, live or last'
   run.tasks = [
     task({ task_id: 't1', pane_id: 'w7:p1' }),
     task({ task_id: 't2', pane_id: null, last_pane_id: 'w3:p1' }),
+    task({ task_id: 't3', pane_id: 'w5:p2', former_pane_ids: ['w3:p2', 'w4:p2'] }),
   ]
-  expect([...pipelinePanes(run)].sort()).toEqual(['w1:p1', 'w3:p1', 'w7:p1'])
+  expect([...pipelinePanes(run)].sort()).toEqual(['w1:p1', 'w3:p1', 'w3:p2', 'w4:p2', 'w5:p2', 'w7:p1'])
 })
