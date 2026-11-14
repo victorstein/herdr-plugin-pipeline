@@ -123,8 +123,15 @@ TDD, failing test first. New `test/board-keys.test.ts`, modelled on `test/board-
 
 `runBoardUi` has no unit test today (only `src/board.ts:34` calls it, behind an injected `runUi`),
 and this change does not add a harness for it. The one-line wiring is checked by reading the diff
-and by a live check: open the board in a herdr 0.9.1 pane, run
-`herdr pane send-keys <pane> down down right`, and see the cursor move three times.
+and by a live check on a herdr 0.9.1 board whose cursor starts on a column with at least three
+cards, beside a non-empty column to its right (the cursor stops at a column's end and skips empty
+columns, `src/kit/nav.ts:31`, `:34-39`):
+1. `herdr pane send-keys <pane> down` — the cursor moves down one card (a single SS3 arrow);
+2. `herdr pane send-keys <pane> down right` in one call — it moves down once more, then right
+   (several keys in one chunk).
+
+Review pass 0 (MINOR 1): the earlier "send `down down right`, see three moves" check depended on the
+board's layout and never sent a lone arrow; replaced with the two steps above.
 
 Gate: `bunx tsc --noEmit` and `bun test` green.
 
