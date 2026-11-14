@@ -2,7 +2,10 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readBoards, recordStaged, type StagedWorker, updateBoards } from '../src/lib/boards'
+import { readBoards, recordStaged, type StagedWorker, unstageBoard, updateBoards } from '../src/lib/boards'
+import type { Snapshot } from '../src/kit/types'
+import { fakeHerdr, moved } from './kit/fake-herdr'
+import { agent, snapshot } from './kit/fixtures'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'boards-stage-')) })
@@ -20,6 +23,25 @@ const STAGED: StagedWorker = {
 const withBoard = (staged?: StagedWorker | null) =>
   updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { ...BOARD, ...(staged !== undefined && { staged }) } })
 
+const GENERAL = { workspace_id: 'w1', label: 'General', active_tab_id: 'w1:t1' }
+const BOARD_SPACE = { workspace_id: 'wP', label: 'pipeline', active_tab_id: 'wP:t1' }
+const PLACEHOLDER = { pane_id: 'w1:p2', tab_id: 'w1:t1', workspace_id: 'w1', terminal_id: 'tph', agent: null, agent_status: 'unknown' as const }
+
+/** The worker under the board in the pipeline workspace, its placeholder at home. */
+function onStage(worker: { terminal_id?: string; tab_id?: string } = {}): Snapshot {
+  const snap = snapshot(
+    [agent({ terminal_id: worker.terminal_id ?? 't1', pane_id: 'wP:p2', tab_id: worker.tab_id ?? 'wP:t1', workspace_id: 'wP' })],
+    { workspaces: [GENERAL, BOARD_SPACE] },
+  )
+  snap.panes.push(PLACEHOLDER)
+  return snap
+}
+
+const HOME_MOVE = {
+  method: 'pane.move',
+  params: { pane_id: 'wP:p2', destination: { type: 'tab', tab_id: 'w1:t1', target_pane_id: 'w1:p2', split: 'right' }, focus: false },
+}
+
 test('recordStaged writes onto an existing record, and nowhere without one', async () => {
   expect(await recordStaged(dir, 'personal', SLUG, STAGED)).toBe(false)
   expect(await readBoards(dir, 'personal')).toEqual({})
@@ -36,5 +58,74 @@ test('recordStaged with an expected stage writes only over that stage', async ()
   expect(await recordStaged(dir, 'personal', SLUG, null, STAGED)).toBe(true)
   expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toBeNull()
   expect(await recordStaged(dir, 'personal', SLUG, STAGED, null)).toBe(true)
+  expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toEqual(STAGED)
+})
+
+test('unstageBoard does nothing without a record or a stage', async () => {
+  const { herdr, calls } = fakeHerdr({})
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  await withBoard()
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  await withBoard(null)
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  expect(calls).toEqual([])
+})
+
+test('unstageBoard moves the worker back next to its placeholder, closes it, and forgets the stage', async () => {
+  await withBoard(STAGED)
+  const { herdr, calls } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  expect(calls.slice(1)).toEqual([HOME_MOVE, { method: 'pane.close', params: { pane_id: 'w1:p2' } }])
+  expect((await readBoards(dir, 'personal'))[SLUG]).toEqual({ ...BOARD, staged: null })
+})
+
+test('after a herdr restart the worker is found by its pane id and still goes home', async () => {
+  await withBoard(STAGED)
+  const { herdr, calls } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage({ terminal_id: 't-new' }) }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  expect(calls.slice(1)).toEqual([HOME_MOVE, { method: 'pane.close', params: { pane_id: 'w1:p2' } }])
+})
+
+test("a worker moved to another tab of the board's workspace still goes home", async () => {
+  await withBoard(STAGED)
+  const { herdr, calls } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage({ tab_id: 'wP:t2' }) }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  expect(calls.slice(1)).toEqual([HOME_MOVE, { method: 'pane.close', params: { pane_id: 'w1:p2' } }])
+})
+
+test('a stage recorded while unstaging is not wiped', async () => {
+  await withBoard(STAGED)
+  const next = { ...STAGED, terminalId: 't2', paneId: 'wP:p5' }
+  const { herdr } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': async () => {
+      await recordStaged(dir, 'personal', SLUG, next)
+      return { type: 'ok' }
+    },
+  })
+  await unstageBoard(herdr, dir, 'personal', SLUG)
+  expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toEqual(next)
+})
+
+test('a move herdr refuses leaves the stage recorded', async () => {
+  await withBoard(STAGED)
+  const { herdr } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.move': () => moved('wP:p2', false, 'zoomed_tab'),
+  })
+  await expect(unstageBoard(herdr, dir, 'personal', SLUG)).rejects.toThrow('zoomed_tab')
   expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toEqual(STAGED)
 })

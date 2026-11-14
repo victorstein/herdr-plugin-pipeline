@@ -1,6 +1,8 @@
 import { join } from 'node:path'
 import { readJson, withFileLock, writeJson } from './store'
-import type { Host, Staged } from '../kit/stage'
+import { readSnapshot, type Herdr } from '../kit/herdr'
+import { type Host, type Staged, unstage } from '../kit/stage'
+import type { Snapshot } from '../kit/types'
 
 /**
  * `pane_id: null` is a board the supervisor has asked herdr for and not yet
@@ -86,4 +88,26 @@ export async function recordStaged(
     board.staged = staged
     return true
   })
+}
+
+// A move keeps the terminal id and renumbers the pane; a herdr restart keeps the pane id and changes the terminal id.
+const stagedPane = (snap: Snapshot, staged: Staged) =>
+  snap.panes.find((p) => p.terminal_id === staged.terminalId) ?? snap.panes.find((p) => p.pane_id === staged.paneId)
+
+/**
+ * The kit's `unstage` finds the worker by terminal id only, and when it misses
+ * — as it does after a herdr restart — it closes the placeholder and gives up,
+ * losing the worker's home spot. So the worker is found here and handed over
+ * under the ids it has now. The pipeline workspace is never a worker's home,
+ * so a worker found anywhere in it goes home from whichever tab it is in.
+ */
+export async function unstageBoard(herdr: Herdr, stateDir: string, session: string, slug: string): Promise<void> {
+  const staged = (await readBoards(stateDir, session))[slug]?.staged
+  if (!staged) return
+  const snap = await readSnapshot(herdr)
+  const pane = stagedPane(snap, staged)
+  const current = pane ? { ...staged, terminalId: pane.terminal_id, paneId: pane.pane_id } : staged
+  const host = pane?.workspace_id === staged.host.workspaceId ? { ...staged.host, tabId: pane.tab_id } : staged.host
+  await unstage(herdr, snap, host, current)
+  await recordStaged(stateDir, session, slug, null, staged)
 }
