@@ -28,6 +28,14 @@ test('the board shows its repo\'s unfinished run, else its newest finished one, 
   expect(await runForSlug(dir, 'personal', beadsSlug('/code/none'))).toBeNull()
 })
 
+test('a run of an older schema is skipped, since the board\'s row lookups would throw on it', async () => {
+  const old = run('/code/a', 'old schema', 'execute', 9)
+  old.schema_version = 1
+  await saveRun(dir, old)
+  await saveRun(dir, run('/code/a', 'current', 'execute', 3))
+  expect((await runForSlug(dir, 'personal', beadsSlug('/code/a')))?.title).toBe('current')
+})
+
 test('a parked escalated run still counts as unfinished', async () => {
   await saveRun(dir, run('/code/a', 'newer done', 'done', 5))
   await saveRun(dir, run('/code/a', 'parked', 'escalated', 3))

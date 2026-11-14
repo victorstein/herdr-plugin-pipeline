@@ -72,10 +72,10 @@ async function commitExport(home: string, env: Record<string, string | undefined
 
 /**
  * Commits the store's export to the store's own git repo, making the repo on
- * first use, so bv's history view has commits to read: with none, its `git log`
+ * first use, so the bv that `hpipe next` runs has a history to read: with none, its `git log`
  * fails. The repo must not exist before `bd init` runs, which inside one commits
  * its own files as the user and sets `beads.role`. Never throws: the history
- * only serves the board, and no bd write or tick may fail for it.
+ * only serves `hpipe next`, and no bd write or tick may fail for it.
  */
 export async function recordBeadsHistory(
   stateDir: string, slug: string, message: string, options: HistoryOptions = {},
@@ -95,7 +95,7 @@ export async function recordBeadsHistory(
   if (lastLogged.get(home) !== failure) {
     const log = options.log ?? console.error
     log(`[pipeline] beads ${slug}: history not recorded (${failure}); ` +
-      'the board\'s history view lags until a later change records it')
+      '`hpipe next` sees a stale history until a later change records it')
   }
   lastLogged.set(home, failure)
 }

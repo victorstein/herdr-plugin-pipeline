@@ -46,8 +46,8 @@ Each plan ships working software on its own. Plan 3 can be released before plan 
     "Open board" action, and the startup sparing.
   - `src/board.ts` stops launching bv and runs the new board instead.
 - A repo has at most one unfinished run (`runForRepo`, `lib/ledger.ts`), so the board shows that run.
-  When there is none, it shows the last finished run until its Done cards are cleared, and otherwise
-  shows an empty board saying `no run in this repo`.
+  When there is none, it shows the newest finished run until the supervisor closes the board, and
+  otherwise shows an empty board saying `no run in this repo`.
 - **Header (row 1):** run title · run phase · mode (per-task / single PR) · batch PR and CI · landing
   slot holder and queue length · `orchestrator ✓`, or `orchestrator gone` in red.
 - **Columns** are tinted as in pasture:
@@ -191,8 +191,8 @@ A run card has no worker, so `enter` on it reports `no worker to stage`.
 - Status-line messages:
   - `no worker to stage` for a card with no live worker
   - `orchestrator is not running` for `o` when the orchestrator pane is gone
-- **Clears** made with `x` are stored per repo in the board registry record, as `cleared: string[]`
-  of task ids. They are dropped when the run changes.
+- **Clears** made with `x` are stored per repo in the board registry record, as `cleared: { run_id,
+  tasks }`. They are dropped when the run changes.
 
 ## Data
 
@@ -214,7 +214,7 @@ A run card has no worker, so `enter` on it reports `no worker to stage`.
   - herdr events (agent status, pane lifecycle) through the kit's socket subscription, throttled to
     one refresh every 400 ms at most
   - plus a **2 s poll**, because the ledger changes without any herdr event
-  - The poll reads only this repo's run, plus one snapshot. There is no `ps` call.
+  - The poll reads only this repo's run, plus one snapshot. Its only `ps` is the supervisor liveness check that reading the pane holds needs.
 
 ## Stage (plan 4)
 
