@@ -2,6 +2,7 @@ import { COLUMNS, type Column } from '../kit/nav'
 import { MOCHA } from '../kit/palette'
 import type { CardView, Span } from '../kit/render'
 import { landingQueue, landingSlotHolder } from '../lib/gating'
+import { runIsDriven } from '../lib/ledger'
 import { modeName, modeOf } from '../lib/phases'
 import type { Run } from '../lib/types'
 
@@ -13,7 +14,8 @@ const CI_GLYPH: Partial<Record<string, string>> = { pending: '●', fail: '✗',
 export function header(run: Run | null, orchestratorLive: boolean): Span[] {
   if (!run) return [{ text: 'no run in this repo', color: MOCHA.overlay1 }]
   const spans: Span[] = [{ text: run.title, color: MOCHA.lavender, bold: true }]
-  if (!orchestratorLive) spans.push({ text: 'orchestrator gone', color: MOCHA.red, bold: true })
+  const driven = runIsDriven(run)
+  if (driven && !orchestratorLive) spans.push({ text: 'orchestrator gone', color: MOCHA.red, bold: true })
   spans.push({ text: run.phase, color: MOCHA.blue }, { text: modeName(modeOf(run)), color: MOCHA.overlay1 })
   if (run.batch?.pr) spans.push({ text: `PR #${run.batch.pr}${run.batch.ci && CI_GLYPH[run.batch.ci] ? ` ci ${CI_GLYPH[run.batch.ci]}` : ''}`, color: MOCHA.overlay1 })
   const holder = landingSlotHolder(run.tasks)
@@ -21,7 +23,7 @@ export function header(run: Run | null, orchestratorLive: boolean): Span[] {
     const waiting = landingQueue(run.tasks).length
     spans.push({ text: `landing ${holder.bead}${waiting ? ` +${waiting}` : ''}`, color: MOCHA.peach })
   }
-  if (orchestratorLive) spans.push({ text: 'orchestrator ✓', color: MOCHA.green })
+  if (driven && orchestratorLive) spans.push({ text: 'orchestrator ✓', color: MOCHA.green })
   return spans
 }
 

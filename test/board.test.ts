@@ -201,6 +201,14 @@ test('a tick that read a board the action has since replaced does not open a sec
   expect(await readBoards(dir, 'personal')).toEqual({ [SLUG]: replaced })
 })
 
+test('openBoard keeps the clears of the board it replaces', async () => {
+  const old = { pane_id: 'w9:p4', shell_pid: 321, opened_at_ms: 1, cleared: { run_id: 'r1', tasks: ['t1'] } }
+  await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = old })
+  const { herdr } = fakeHerdr([], {}, 'w9:p7')
+  expect(await openBoard(SLUG, deps(herdr), old)).toBe(true)
+  expect((await readBoards(dir, 'personal'))[SLUG]?.cleared).toEqual({ run_id: 'r1', tasks: ['t1'] })
+})
+
 test('a renamed board no record names is a ghost and is closed; a just-opened plain Board is not', async () => {
   await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: 'w9:p4', shell_pid: 321, opened_at_ms: 1 } })
   const { herdr, calls } = fakeHerdr([
@@ -265,6 +273,13 @@ test('the board pane keeps the opened_at_ms the supervisor recorded', async () =
   await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: 'w9:p4', shell_pid: null, opened_at_ms: 7 } })
   await runBoardPane(paneDeps().paneDeps)
   expect((await readBoards(dir, 'personal'))[SLUG]?.opened_at_ms).toBe(7)
+})
+
+test('the board pane keeps the clears already recorded', async () => {
+  const cleared = { run_id: 'r1', tasks: ['t1'] }
+  await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: null, shell_pid: null, opened_at_ms: 7, cleared } })
+  await runBoardPane(paneDeps().paneDeps)
+  expect((await readBoards(dir, 'personal'))[SLUG]?.cleared).toEqual(cleared)
 })
 
 test('a board pane that cannot record itself stays unrenamed and still runs the UI', async () => {

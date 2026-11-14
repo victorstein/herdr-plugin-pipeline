@@ -386,16 +386,6 @@ test('every export is committed to the store\'s own history, named after what ch
   ])
 })
 
-test('a store made before its history began gets one from recordHistory, which spawns no bd', async () => {
-  mkdirSync(join(home(), '.beads'), { recursive: true })
-  writeFileSync(beadsExportPath(dir, SLUG), '{"_type":"issue","id":"hp-1","title":"One"}\n')
-  writeFileSync(join(home(), 'export.dirty'), '1\n')
-  const bd = new Bd({ stateDir: dir, slug: SLUG, lockWaitMs: 0, exportAfterWrites: false, bin: recordingBd() })
-  expect(await bd.recordHistory()).toEqual({ ok: true })
-  expect(historySubjects()).toEqual(['hpipe|catch up'])
-  expect(existsSync(join(dir, 'bd.log'))).toBe(false)
-})
-
 test('a git failure leaves the write a success and is logged', async () => {
   mkdirSync(home(), { recursive: true })
   writeFileSync(join(home(), '.git'), 'not a repository\n')

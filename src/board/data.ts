@@ -24,11 +24,13 @@ export function clearedFor(boards: BoardRegistry, slug: string, runId: string): 
   return new Set(cleared?.run_id === runId ? cleared.tasks : [])
 }
 
-export async function recordCleared(stateDir: string, session: SessionKey, slug: string, runId: string, taskId: string): Promise<void> {
-  await updateBoards(stateDir, session, (boards) => {
+/** False when no record names this board yet, so there is nowhere to keep the clear. */
+export async function recordCleared(stateDir: string, session: SessionKey, slug: string, runId: string, taskId: string): Promise<boolean> {
+  return updateBoards(stateDir, session, (boards) => {
     const board = boards[slug]
-    if (!board) return
+    if (!board) return false
     const tasks = board.cleared?.run_id === runId ? board.cleared.tasks : []
     if (!tasks.includes(taskId)) board.cleared = { run_id: runId, tasks: [...tasks, taskId] }
+    return true
   })
 }

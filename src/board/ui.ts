@@ -49,6 +49,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   async function refresh(): Promise<void> {
     const current = await readSnapshot(herdr)
     snap = current
+    ensureSubscription(current)
     run = await runForSlug(stateDir, session, slug)
     if (!run) {
       board = EMPTY
@@ -70,7 +71,6 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
       orchestratorsMove: (task) => waitsOnYou(found, task, Date.now(), holds, dispatches),
       cleared: clearedFor(await readBoards(stateDir, session), slug, found.run_id),
     })
-    ensureSubscription(current)
   }
 
   let refreshQueued = false
@@ -80,6 +80,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     void serial(async () => {
       refreshQueued = false
       await refresh()
+      message = null
     }).then(draw)
   }
   // herdr emits events in bursts, and each refresh reads the ledger and a snapshot
@@ -99,6 +100,13 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
       unsubscribe = null
       setTimeout(requestRefresh, 1000)
     })
+  }
+
+  function visible(): boolean {
+    const self = snap?.panes.find((p) => p.pane_id === process.env.HERDR_PANE_ID)
+    if (!process.env.HERDR_PANE_ID || !snap || !self) return true
+    const workspace = snap.workspaces.find((w) => w.workspace_id === self.workspace_id)
+    return snap.focused_workspace_id === self.workspace_id && workspace?.active_tab_id === self.tab_id
   }
 
   const cards = () => COLUMNS.flatMap((c) => board[c])
@@ -134,7 +142,11 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   }
 
   async function openDetails(card: CardView): Promise<void> {
-    if (!run || card.id.startsWith('run:')) return
+    if (!run) return
+    if (card.id.startsWith('run:')) {
+      message = 'no details for the run'
+      return
+    }
     await herdr.call('plugin.pane.open', {
       plugin_id: PIPELINE.pluginId, entrypoint: 'details', placement: 'popup', width: '80%', height: '70%', focus: true,
       env: { HPIPE_DETAIL_RUN: run.run_id, HPIPE_DETAIL_TASK: card.id },
@@ -154,10 +166,13 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
     if (direction) cursor = moveCursor(board, cursor, direction)
     else if (key === ' ' && card) void serial(() => peekWorker(card)).then(draw)
     else if (key === 'o') void serial(peekOrchestrator).then(draw)
-    else if (key === 'd' && card) void serial(() => openDetails(card))
+    else if (key === 'd' && card) void serial(() => openDetails(card)).then(draw)
     else if (key === 'x' && card?.column === 'done' && run) {
       const runId = run.run_id
-      void serial(() => recordCleared(stateDir, session, slug, runId, card.id)).then(requestRefresh)
+      void serial(async () => {
+        if (await recordCleared(stateDir, session, slug, runId, card.id)) requestRefresh()
+        else message = 'this board is not recorded yet'
+      }).then(draw)
     }
     draw()
   }
@@ -189,6 +204,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   // the ledger changes without any herdr event
   setInterval(requestRefresh, 2000)
   setInterval(() => {
+    if (!visible()) return
     tick++
     draw()
   }, 250)

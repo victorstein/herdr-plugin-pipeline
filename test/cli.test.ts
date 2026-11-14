@@ -354,12 +354,12 @@ test('a refused setup opens no run and passes its reason through', async () => {
   expect(await liveRun()).toBeNull()
 })
 
-test('start goes ahead without bv, saying the board and hpipe next are off', async () => {
+test('start goes ahead without bv, saying hpipe next is off', async () => {
   const out = await cmdStart(ctx(), { ...startInput, repoRoot: repoDir }, startBeads({
     tools: async () => ({ ...READY_TOOLS, bv: { state: 'missing', detail: 'ENOENT' } }),
   }))
   expect(out.ok).toBe(true)
   expect(out.text).toContain('tools: bv did not run (ENOENT) — brew install dicklesworthstone/tap/bv')
-  expect(out.text).toContain('the board and `hpipe next` stay off')
+  expect(out.text).toContain('— `hpipe next` stays off until it is fixed')
   expect((await liveRun())?.title).toBe('a')
 })

@@ -457,11 +457,12 @@ store**: every claim carries a 5-minute lease that hpipe never renews and nothin
 The supervisor re-claims them on its next pass, but until then they look free.
 
 **The board.** Each repo with a live run in the session gets one `Board: <repo> <hash>` tab in the
-pipeline workspace: a kanban of that run's tasks, drawn from the ledger. With no live run it shows
-the last finished run until its Done cards are cleared, and otherwise says `no run in this repo`.
-The supervisor closes it once the repo has no live run, and a stale `Board: …` tab left by a herdr
-restart is closed and replaced. The **Open board** action reopens it. A `bv` board left open from an
-earlier release keeps running until you use **Open board** or its run ends.
+pipeline workspace: a kanban of that run's tasks, drawn from the ledger. A board opened while the
+repo has no live run shows the repo's last run until the supervisor closes it, and says `no run in
+this repo` only when the repo has none. The supervisor closes a board once its repo has no live run,
+and a stale `Board: …` tab left by a herdr restart is closed and replaced. The **Open board** action
+reopens it. A `bv` board left open from an earlier release keeps running until you use **Open
+board** or its run ends.
 
 | Column | Holds |
 |---|---|

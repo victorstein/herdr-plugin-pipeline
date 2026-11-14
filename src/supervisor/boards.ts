@@ -27,7 +27,7 @@ export interface BoardDeps {
 export async function openBoard(
   slug: string, deps: Omit<BoardDeps, 'hasStore'>, expected: BoardRecord | undefined,
 ): Promise<boolean> {
-  const placeholder: BoardRecord = { pane_id: null, shell_pid: null, opened_at_ms: deps.now() }
+  const placeholder: BoardRecord = { pane_id: null, shell_pid: null, opened_at_ms: deps.now(), ...(expected?.cleared && { cleared: expected.cleared }) }
   const claimed = await updateBoards(deps.stateDir, deps.session, (boards) => {
     if (!sameBoard(boards[slug], expected)) return false
     boards[slug] = placeholder
@@ -35,8 +35,7 @@ export async function openBoard(
   })
   if (!claimed) return false
 
-  // No --cwd: the pane command runs `src/board.ts` relative to the plugin root, and
-  // board.ts gives bv the store as its own cwd.
+  // No --cwd: the pane command runs `src/board.ts` relative to the plugin root.
   const opened = await deps.herdr.pluginPaneOpen(deps.pluginId, 'board', deps.workspaceId, {
     env: { HPIPE_BEADS_SLUG: slug },
   })

@@ -37,7 +37,8 @@ test('a parked escalated run still counts as unfinished', async () => {
 test('cleared Done cards are kept per board and forgotten when the run changes', async () => {
   const slug = beadsSlug('/code/a')
   await updateBoards(dir, 'personal', (b) => { b[slug] = { pane_id: 'w9:p4', shell_pid: 1, opened_at_ms: 1 } })
-  await recordCleared(dir, 'personal', slug, 'r1', 't1')
+  expect(await recordCleared(dir, 'personal', beadsSlug('/code/unrecorded'), 'r1', 't1')).toBe(false)
+  expect(await recordCleared(dir, 'personal', slug, 'r1', 't1')).toBe(true)
   await recordCleared(dir, 'personal', slug, 'r1', 't2')
   expect([...clearedFor(await readBoards(dir, 'personal'), slug, 'r1')]).toEqual(['t1', 't2'])
   expect([...clearedFor(await readBoards(dir, 'personal'), slug, 'r2')]).toEqual([])

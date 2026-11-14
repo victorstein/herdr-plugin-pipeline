@@ -31,6 +31,16 @@ test('a single-PR run shows its batch PR and CI', () => {
   expect(texts).toContain('PR #12 ci ●')
 })
 
+test('a run no longer driven claims no orchestrator either way', () => {
+  const run = perTask()
+  run.phase = 'done'
+  for (const live of [true, false]) {
+    const texts = header(run, live).map((s) => s.text)
+    expect(texts).not.toContain('orchestrator ✓')
+    expect(texts).not.toContain('orchestrator gone')
+  }
+})
+
 test('no run says so', () => {
   expect(header(null, true).map((s) => s.text)).toEqual(['no run in this repo'])
 })
