@@ -3198,6 +3198,7 @@ async function forget(ctx: Ctx, input: { workspaceId: string }): Promise<CmdResu
 
   task.workspace_id = null
   task.pane_id = null
+  delete task.former_pane_ids
   await saveRun(ctx.stateDir, run)
   return ok(`unbound ${input.workspaceId} from ${task.task_id}`)
 }

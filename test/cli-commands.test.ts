@@ -483,6 +483,17 @@ test('forget unbinds a workspace from its task', async () => {
   expect((await listRuns(dir, 'personal'))[0]?.tasks[0]?.workspace_id).toBeNull()
 })
 
+test('forget drops a moved pane\'s former ids with the pane — herdr-pl-3', async () => {
+  const run = runWithTasks([{
+    task_id: 't1', phase: 'implement', workspace_id: 'w7', pane_id: 'w5:p2', former_pane_ids: ['w7:p1'],
+  }])
+  await saveRun(dir, run)
+  expect((await cmdForget(ctx(), { workspaceId: 'w7' })).ok).toBe(true)
+  const task = (await listRuns(dir, 'personal'))[0]?.tasks[0]
+  expect(task?.pane_id).toBeNull()
+  expect(task?.former_pane_ids).toBeUndefined()
+})
+
 test('release drops a terminal task files reservation', async () => {
   const run = runWithTasks([
     { task_id: 't1', phase: 'failed', files: ['a/'] },
