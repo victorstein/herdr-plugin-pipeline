@@ -163,3 +163,11 @@ test('closeStagedWorker with the worker already gone still forgets the stage', a
   expect(methods()).toEqual(['session.snapshot'])
   expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toBeNull()
 })
+
+test('closeStagedWorker finds a worker staged before the supervisor followed the move, by its home workspace', async () => {
+  await withBoard(STAGED)
+  const { herdr, calls } = fakeHerdr({ 'session.snapshot': () => ({ snapshot: onStage() }), 'pane.close': () => ({ type: 'ok' }) })
+  expect(await closeStagedWorker(herdr, dir, 'personal', SLUG, 'w1:p1', 'w1')).toBe(true)
+  expect(calls.slice(1)).toEqual([{ method: 'pane.close', params: { pane_id: 'wP:p2' } }])
+  expect((await readBoards(dir, 'personal'))[SLUG]?.staged).toBeNull()
+})

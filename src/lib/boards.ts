@@ -91,7 +91,7 @@ export async function recordStaged(
 }
 
 // A move keeps the terminal id and renumbers the pane; a herdr restart keeps the pane id and changes the terminal id.
-const stagedPane = (snap: Snapshot, staged: Staged) =>
+export const stagedPane = (snap: Snapshot, staged: Staged) =>
   snap.panes.find((p) => p.terminal_id === staged.terminalId) ?? snap.panes.find((p) => p.pane_id === staged.paneId)
 
 /**
@@ -120,11 +120,12 @@ export async function unstageBoard(herdr: Herdr, stateDir: string, session: stri
  * workspace removal to close.
  */
 export async function closeStagedWorker(
-  herdr: Herdr, stateDir: string, session: string, slug: string, paneId: string,
+  herdr: Herdr, stateDir: string, session: string, slug: string, paneId: string, homeWorkspaceId: string | null = null,
 ): Promise<boolean> {
   const staged = await updateBoards(stateDir, session, (boards) => {
     const board = boards[slug]
-    if (!board?.staged || board.staged.paneId !== paneId) return null
+    // a worker staged a tick before the supervisor followed the move still names its old pane, but not its old home
+    if (!board?.staged || (board.staged.paneId !== paneId && board.staged.homeWorkspaceId !== homeWorkspaceId)) return null
     const was = board.staged
     board.staged = null
     return was
