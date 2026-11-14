@@ -1,11 +1,13 @@
-import type { Herdr } from '../kit/herdr'
-import { reconcile, type Host } from '../kit/stage'
+import { readSnapshot, type Herdr } from '../kit/herdr'
+import { reconcile, stageAgent, StageError, unstage, type Host, type Identity } from '../kit/stage'
 import type { PaneInfo, Snapshot } from '../kit/types'
-import { readBoards, recordStaged, type StagedWorker, unstageBoard } from '../lib/boards'
+import { readBoards, recordStaged, type StagedWorker, unstageBoard, updateBoards } from '../lib/boards'
 import type { Run } from '../lib/types'
 
 export const NO_WORKER = 'no worker to stage'
 export const ELSEWHERE = 'that worker is on another stage'
+const NOT_RECORDED = 'this board is not recorded yet'
+const REPLACED = 'this board has been replaced'
 
 export function boardHost(snap: Snapshot, boardPaneId: string | undefined): Host | null {
   const pane = boardPaneId === undefined ? undefined : snap.panes.find((p) => p.pane_id === boardPaneId)
@@ -41,5 +43,34 @@ export async function syncStage(
   const kept = await reconcile(herdr, snap, host, recorded)
   const next = kept ? { ...kept, host } : null
   if (JSON.stringify(next) !== JSON.stringify(recorded)) await recordStaged(stateDir, session, slug, next, recorded)
+  return next
+}
+
+/** Throws StageError with a status-line message. */
+export async function stageCard(
+  herdr: Herdr, host: Host, identity: Identity, stateDir: string, session: string, slug: string, terminalId: string,
+): Promise<StagedWorker> {
+  const record = (await readBoards(stateDir, session))[slug]
+  if (!record) throw new StageError(NOT_RECORDED)
+  if (record.pane_id !== host.boardPaneId) throw new StageError(REPLACED)
+  let current = record.staged ?? null
+  if (current && current.host.boardPaneId !== host.boardPaneId) {
+    await unstageBoard(herdr, stateDir, session, slug)
+    current = null
+  }
+  const staged = await stageAgent(herdr, await readSnapshot(herdr), host, identity, current, terminalId)
+  const next: StagedWorker = { ...staged, host }
+  // recordStaged only checks that a record exists, and a replacement record would take a stale board's stage
+  const recorded = await updateBoards(stateDir, session, (boards) => {
+    const board = boards[slug]
+    if (!board || board.pane_id !== host.boardPaneId) return false
+    board.staged = next
+    return true
+  })
+  if (!recorded) {
+    // a stage no record names is invisible to every close path, and a later reconcile would lose its placeholder
+    await unstage(herdr, await readSnapshot(herdr), host, next)
+    throw new StageError(REPLACED)
+  }
   return next
 }

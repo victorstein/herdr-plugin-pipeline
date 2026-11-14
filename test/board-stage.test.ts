@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { boardHost, ELSEWHERE, NO_WORKER, syncStage, workerFor } from '../src/board/stage'
+import { boardHost, ELSEWHERE, NO_WORKER, stageCard, syncStage, workerFor } from '../src/board/stage'
 import type { Host, Identity } from '../src/kit/stage'
 import type { Snapshot } from '../src/kit/types'
 import { type BoardRecord, readBoards, type StagedWorker, updateBoards } from '../src/lib/boards'
@@ -163,4 +163,86 @@ test('syncStage does not write back a stage the supervisor cleared while it reco
   expect(await syncStage(herdr, snap, HOST, dir, SESSION, SLUG)).toEqual({ ...STAGED, paneId: 'wP:p5' })
   expect(methods()).toEqual(['pane.move'])
   expect((await record())?.staged).toBeNull()
+})
+
+const STAGE_MOVE = (paneId: string) => ({
+  method: 'pane.move',
+  params: { pane_id: paneId, destination: { type: 'tab', tab_id: 'wP:t1', target_pane_id: 'wP:p1', split: 'down', ratio: 0.25 }, focus: false },
+})
+
+test('stageCard puts the worker under the board at 25/75 and records it with the host', async () => {
+  await withRecord()
+  const { herdr, calls } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: docsAtHome() }),
+    'plugin.pane.open': () => opened('w1:p6'),
+    'pane.move': () => moved('wP:p4'),
+  })
+  expect(await stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).toEqual(DOCS_STAGED)
+  expect(calls.slice(1)).toEqual([
+    {
+      method: 'plugin.pane.open',
+      params: { plugin_id: 'stein.example', entrypoint: 'placeholder', placement: 'split', target_pane_id: 'w1:p5', direction: 'right', focus: false, env: { KIT_TITLE: 'Docs', KIT_STAGE: 'example' } },
+    },
+    STAGE_MOVE('w1:p5'),
+  ])
+  expect((await record())?.staged).toEqual(DOCS_STAGED)
+})
+
+const restager = (views: Snapshot[]) => fakeHerdr({
+  'session.snapshot': () => ({ snapshot: views.shift() ?? docsAtHome() }),
+  'pane.move': (p) => moved(p.pane_id === 'wP:p2' ? 'w1:p3' : 'wP:p4'),
+  'pane.close': () => ({ type: 'ok' }),
+  'plugin.pane.open': () => opened('w1:p6'),
+})
+
+test('stageCard sends the staged worker home before staging the next', async () => {
+  await withRecord({ staged: STAGED })
+  const { herdr, calls, methods } = restager([bothWorkers(), docsAtHome()])
+  expect(await stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).toEqual(DOCS_STAGED)
+  expect(methods()).toEqual(['session.snapshot', 'pane.move', 'pane.close', 'session.snapshot', 'plugin.pane.open', 'pane.move'])
+  expect(calls[1]?.params.pane_id).toBe('wP:p2')
+  expect(calls[5]).toEqual(STAGE_MOVE('w1:p5'))
+  expect((await record())?.staged).toEqual(DOCS_STAGED)
+})
+
+test('stageCard first sends home a stage an earlier board left in the record', async () => {
+  await withRecord({ staged: EARLIER_BOARDS_STAGE })
+  const { herdr, calls, methods } = restager([bothWorkers(), docsAtHome()])
+  expect(await stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).toEqual(DOCS_STAGED)
+  expect(methods()).toEqual(['session.snapshot', 'pane.move', 'pane.close', 'session.snapshot', 'plugin.pane.open', 'pane.move'])
+  expect(calls[1]?.params.pane_id).toBe('wP:p2')
+  expect((await record())?.staged).toEqual(DOCS_STAGED)
+})
+
+test('stageCard refuses before anything moves when this board has no record or has been replaced', async () => {
+  const { herdr, calls } = fakeHerdr({})
+  await expect(stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).rejects.toThrow('this board is not recorded yet')
+  await withRecord({ pane_id: 'wP:p9' })
+  await expect(stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).rejects.toThrow('this board has been replaced')
+  expect(calls).toEqual([])
+})
+
+test('stageCard undoes a stage whose board was replaced while the worker moved', async () => {
+  await withRecord()
+  const onDocsStage = snapshot([agent({ terminal_id: 't2', pane_id: 'wP:p4', tab_id: 'wP:t1', workspace_id: 'wP' })], { workspaces: [GENERAL, BOARD_SPACE] })
+  onDocsStage.panes.push(placeholder('w1:p6', 'tph2'))
+  const views = [docsAtHome(), onDocsStage]
+  const { herdr, calls, methods } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: views.shift() }),
+    'plugin.pane.open': () => opened('w1:p6'),
+    'pane.move': async (p) => {
+      if (p.pane_id !== 'w1:p5') return moved('w1:p7')
+      await updateBoards(dir, SESSION, (boards) => { boards[SLUG] = { ...BOARD, pane_id: 'wP:p9' } })
+      return moved('wP:p4')
+    },
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  await expect(stageCard(herdr, HOST, IDENTITY, dir, SESSION, SLUG, 't2')).rejects.toThrow('this board has been replaced')
+  expect(methods()).toEqual(['session.snapshot', 'plugin.pane.open', 'pane.move', 'session.snapshot', 'pane.move', 'pane.close'])
+  expect(calls[4]).toEqual({
+    method: 'pane.move',
+    params: { pane_id: 'wP:p4', destination: { type: 'tab', tab_id: 'w1:t1', target_pane_id: 'w1:p6', split: 'right' }, focus: false },
+  })
+  expect(calls[5]).toEqual({ method: 'pane.close', params: { pane_id: 'w1:p6' } })
+  expect((await record())?.staged).toBeUndefined()
 })
