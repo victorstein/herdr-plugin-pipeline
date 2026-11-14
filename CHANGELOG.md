@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.1...v2.3.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* pane guards follow moved worker panes ([#174](https://github.com/victorstein/herdr-plugin-pipeline/issues/174)) ([2282a73](https://github.com/victorstein/herdr-plugin-pipeline/commit/2282a732415409402a65e9d93ffad79740f282ab))
+
 ## [2.3.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.3.0...v2.3.1) (2026-11-14)
 
 
