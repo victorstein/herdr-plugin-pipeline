@@ -2396,7 +2396,7 @@ async function paneRefusal(ctx: Ctx, pane: string | null, why: string): Promise<
   if (pane === null) return 'run it from a pane of this herdr session: HERDR_PANE_ID is unset'
   for (const run of await listRuns(ctx.stateDir, ctx.session)) {
     if (!runIsDriven(run)) continue
-    const worker = run.tasks.find((t) => t.pane_id === pane && !taskPhaseIsTerminal(t.phase))
+    const worker = run.tasks.find((t) => holdsPane(t, pane) && !taskPhaseIsTerminal(t.phase))
     if (worker) return `${pane} is ${worker.task_id}'s worker pane in ${run.run_id}: ${why}`
   }
   return null
