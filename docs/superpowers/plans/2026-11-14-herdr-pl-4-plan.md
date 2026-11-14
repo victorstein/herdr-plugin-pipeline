@@ -23,7 +23,7 @@ and the quit. The kit (`src/kit/stage.ts`) and `src/lib/boards.ts` are used as t
   the code. The code below already has the only comments it needs.
 - Commit after every task with the message given. Never push.
 - Tasks 1–8 are for the implementing subagent. **Task 9 is for the worker only** (it needs a scratch
-  herdr session and possibly a decision).
+  herdr session).
 
 FILES: src/board/stage.ts, test/board-stage.test.ts, src/board/ui.ts
 FILES: src/board/view.ts, test/board-view.test.ts
@@ -39,7 +39,7 @@ Spec "`src/board/stage.ts`", A6, A17.
 
 ```ts
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { boardHost, ELSEWHERE, NO_WORKER, workerFor } from '../src/board/stage'
@@ -223,10 +223,13 @@ test("syncStage sends home a stage an earlier board left in this board's record"
 
 test('syncStage keeps a stage still under the board without a call or a change', async () => {
   await withRecord({ staged: STAGED })
+  const file = join(dir, `boards.${SESSION}.json`)
+  const inode = statSync(file).ino
   const { herdr, calls } = fakeHerdr({})
   expect(await syncStage(herdr, onStage(), HOST, dir, SESSION, SLUG)).toEqual(STAGED)
   expect(calls).toEqual([])
-  expect((await record())?.staged).toEqual(STAGED)
+  // every write renames a new file over the old one, so an unchanged inode means no write
+  expect(statSync(file).ino).toBe(inode)
 })
 
 test('syncStage drops a stage whose worker is gone and closes its placeholder', async () => {
@@ -885,19 +888,32 @@ remembered in the board's own record only.
 
 ### Task 9: Live check in a scratch herdr session (worker only, not the subagent)
 
-Spec "Live check". **Never point any of this at the live `default` or `herdr-plugin` session.**
-herdr's plugin registry is global and serves the installed `stein.pipeline` 2.2.3, so this drives
-this branch's functions directly; the placeholder comes from the linked `stein.pasture` plugin,
-whose `placeholder` pane runs the same `src/kit/placeholder.ts`.
+Spec "Live check", reworked by plan review 0 (MAJOR 1). **Never point any of this at the live
+`default` or `herdr-plugin` session.** herdr's plugin registry is global and serves the installed
+`stein.pipeline` 2.2.3, whose manifest has no `placeholder` pane. So this runs **this branch's board
+UI itself** (`runBoardUi`) in a scratch pane, with `PIPELINE.pluginId` pointed at the linked
+`stein.pasture` plugin, whose `placeholder` pane runs the identical `src/kit/placeholder.ts`
+(`stageName` still reads `pipeline`). No `herdr plugin link` is needed, so the spec's planned
+`hpipe decide` about linking is dropped. Close paths the board does not own (reopen bookkeeping,
+teardown) are driven through this branch's `lib/boards.ts` from a helper script.
 
-The spec asked for the binding to be checked "by running this branch's rebind". The rebind is
-`tick.ts` code this task does not change and that is unit-tested; what the live session can show is
-its input — the moved pane's new id with the same terminal id (`src/supervisor/tick.ts:337-370`).
-Record that, and record the substitution in the PR.
+What this covers that no unit test does (`ui.ts` wiring, Task 7): `\n` as enter, `enter tab` in one
+chunk focusing the moved pane (A19), `z` toggling, quit through `serial` on `q` and on SIGHUP, the
+reconcile in the no-run branch (A3), and a replaced board acting on nothing (A12).
 
-- [ ] **Step 1: Start the scratch session**
+No supervisor runs here, so nothing rebinds `task.pane_id` after a move. The helper's `rebind`
+command does what the supervisor's `pane.moved` handling does (`src/supervisor/tick.ts:503-515`);
+the live session shows its input — the moved pane keeps its terminal id under a new pane id. Record
+that substitution in the PR.
+
+Every shell call is a fresh shell, so all state lives in `/tmp/hpl4-live/env`, and **every command
+block below starts with** `. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"`, which aborts the
+block when `S` is empty instead of letting a bare `herdr` call reach the live session.
+
+- [ ] **Step 1: Start the scratch session and write the env file**
 
 ```bash
+mkdir -p /tmp/hpl4-live/state
 tmux new-session -d -s hpl4 -x 220 -y 60 'herdr --session hpl4-scratch'
 herdr session list
 ```
@@ -905,73 +921,76 @@ herdr session list
 Re-run `herdr session list` until `hpl4-scratch` reads `running`. Then:
 
 ```bash
-export S=$(herdr session list | awk '$1=="hpl4-scratch"{print $4}')
-export HPL4_STATE=$(mktemp -d)
-echo "$S"
+S=$(herdr session list | awk '$1=="hpl4-scratch"{print $4}')
+case "$S" in */sessions/hpl4-scratch/herdr.sock) ;; *) echo "bad socket: $S"; exit 1 ;; esac
+cat > /tmp/hpl4-live/env <<ENV
+export S=$S
+export HERDR_SOCKET_PATH=$S
+export HPL4_STATE=/tmp/hpl4-live/state
+L() { bun /tmp/hpl4-live/live.ts "\$@"; }
+ENV
+cat /tmp/hpl4-live/env
 ```
 
-Expected: `S` ends in `/sessions/hpl4-scratch/herdr.sock`.
+The env file exports `HERDR_SOCKET_PATH`, so every `herdr` and `bun` call after sourcing it talks to
+the scratch session.
 
 - [ ] **Step 2: Guard — the CLI really talks to the scratch session**
 
 ```bash
-herdr workspace list > $HPL4_STATE/live-ws.txt
-HERDR_SOCKET_PATH=$S herdr workspace list > $HPL4_STATE/scratch-ws.txt
-diff -q $HPL4_STATE/live-ws.txt $HPL4_STATE/scratch-ws.txt
+env -u HERDR_SOCKET_PATH herdr workspace list > /tmp/hpl4-live/live-ws.txt
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr workspace list > /tmp/hpl4-live/scratch-ws.txt
+diff -q /tmp/hpl4-live/live-ws.txt /tmp/hpl4-live/scratch-ws.txt
 ```
 
 Expected: the files differ. **If they are identical, stop.**
 
-- [ ] **Step 3: Write the helper script (outside the repo).** Create `$HPL4_STATE/live.ts`:
+- [ ] **Step 3: Write the helper and the board wrapper (outside the repo).** Create
+  `/tmp/hpl4-live/live.ts`:
 
 ```ts
 const repo = '/Volumes/stein/.herdr/worktrees/herdr-plugin-pipeline/feat-board-staging'
-const { createClient, readSnapshot } = await import(`${repo}/src/kit/herdr.ts`)
+const { readSnapshot, createClient } = await import(`${repo}/src/kit/herdr.ts`)
 const { closeStagedWorker, readBoards, updateBoards } = await import(`${repo}/src/lib/boards.ts`)
-const { boardHost, stageCard, syncStage, unstageOwn } = await import(`${repo}/src/board/stage.ts`)
+const { beadsSlug } = await import(`${repo}/src/lib/beads-project.ts`)
+const { listRuns, newRun, saveRun } = await import(`${repo}/src/lib/ledger.ts`)
+const { heldTask } = await import(`${repo}/test/helpers/before-merge.ts`)
 
-const IDENTITY = { pluginId: 'stein.pasture', placeholderEntrypoint: 'placeholder', peekEntrypoint: 'peek', stageName: 'pipeline' }
-const stateDir = process.env.HPL4_STATE!
+const stateDir = '/tmp/hpl4-live/state'
 const session = 'scratch'
-const slug = 'scratch-abc123'
+const REPO = '/tmp/hpl4-live/repo'
+const slug = beadsSlug(REPO)
 const kit = createClient()
 const [cmd, ...args] = process.argv.slice(2)
-const hostOf = async (boardPaneId: string) => {
-  const snap = await readSnapshot(kit)
-  return { snap, host: boardHost(snap, boardPaneId)! }
-}
-const stagedPane = async () => {
-  const staged = (await readBoards(stateDir, session))[slug]?.staged
-  return staged ? (await readSnapshot(kit)).panes.find((p: { terminal_id: string }) => p.terminal_id === staged.terminalId) : undefined
-}
 
 if (cmd === 'panes') {
   const snap = await readSnapshot(kit)
   for (const p of snap.panes) console.log(`${p.pane_id}\ttab=${p.tab_id}\tws=${p.workspace_id}\tterm=${p.terminal_id}\tagent=${p.agent ?? '-'}`)
   for (const t of snap.tabs) console.log(`tab ${t.tab_id}\tws=${t.workspace_id}\t${t.label}`)
+  for (const w of snap.workspaces) console.log(`workspace ${w.workspace_id}\t${w.label}`)
   for (const l of snap.layouts) console.log(`layout ${l.tab_id}\tzoomed=${l.zoomed}\tfocused=${l.focused_pane_id}`)
   console.log(`focused pane ${snap.focused_pane_id}`)
+} else if (cmd === 'run') {
+  const [w1, wh1, w2, wh2] = args
+  const run = newRun({ session, socketPath: process.env.HERDR_SOCKET_PATH!, repoKey: REPO, repoRoot: REPO, title: 'hpl4 live' })
+  run.phase = 'execute'
+  run.tasks = [
+    heldTask({ task_id: 't1', bead: 'hpl4-1', branch: 'feat/one', workspace_id: wh1, pane_id: w1, phase: 'implement', phase_entered_at: Date.now(), pr: null, ci: null }),
+    heldTask({ task_id: 't2', bead: 'hpl4-2', branch: 'feat/two', workspace_id: wh2, pane_id: w2, phase: 'implement', phase_entered_at: Date.now() - 60_000, pr: null, ci: null }),
+  ]
+  await saveRun(stateDir, run)
+  console.log('run', run.run_id)
+} else if (cmd === 'rebind') {
+  const [taskId, paneId] = args
+  const run = (await listRuns(stateDir, session))[0]
+  const task = run.tasks.find((t: { task_id: string }) => t.task_id === taskId)
+  task.pane_id = paneId
+  await saveRun(stateDir, run)
+  console.log('rebound', taskId, paneId)
 } else if (cmd === 'record') {
   await updateBoards(stateDir, session, (boards) => { boards[slug] = { ...boards[slug], pane_id: args[0]!, shell_pid: 0, opened_at_ms: Date.now() } })
   console.log('recorded', args[0])
-} else if (cmd === 'stage') {
-  const { snap, host } = await hostOf(args[0]!)
-  const worker = snap.panes.find((p: { pane_id: string }) => p.pane_id === args[1])!
-  console.log(JSON.stringify(await stageCard(kit, host, IDENTITY, stateDir, session, slug, worker.terminal_id), null, 2))
-} else if (cmd === 'sync') {
-  const { snap, host } = await hostOf(args[0]!)
-  console.log(JSON.stringify(await syncStage(kit, snap, host, stateDir, session, slug), null, 2))
-} else if (cmd === 'focus') {
-  const pane = await stagedPane()
-  if (pane) await kit.call('pane.focus', { pane_id: pane.pane_id })
-  console.log('focused', pane?.pane_id)
-} else if (cmd === 'zoom') {
-  const pane = await stagedPane()
-  if (pane) await kit.call('pane.zoom', { pane_id: pane.pane_id, mode: 'toggle' })
-  console.log('zoomed', pane?.pane_id)
-} else if (cmd === 'quit') {
-  await unstageOwn(kit, stateDir, session, slug, args[0])
-  console.log('quit')
 } else if (cmd === 'close') {
   console.log('closed', await closeStagedWorker(kit, stateDir, session, slug, args[0]!))
 } else if (cmd === 'show') {
@@ -979,124 +998,221 @@ if (cmd === 'panes') {
 }
 ```
 
-All later `bun` calls run as `HERDR_SOCKET_PATH=$S bun $HPL4_STATE/live.ts <cmd>`. Define it once in
-the shell that runs the steps (a function, because aliases do not expand in a non-interactive shell):
+  and `/tmp/hpl4-live/board.ts`:
 
-```bash
-L() { HERDR_SOCKET_PATH=$S bun $HPL4_STATE/live.ts "$@"; }
+```ts
+const repo = '/Volumes/stein/.herdr/worktrees/herdr-plugin-pipeline/feat-board-staging'
+const { PIPELINE, runBoardUi } = await import(`${repo}/src/board/ui.ts`)
+const { beadsSlug } = await import(`${repo}/src/lib/beads-project.ts`)
+// the installed stein.pipeline manifest has no placeholder pane; pasture's runs the same kit placeholder
+PIPELINE.pluginId = 'stein.pasture'
+await runBoardUi({ stateDir: '/tmp/hpl4-live/state', session: 'scratch', slug: beadsSlug('/tmp/hpl4-live/repo') })
 ```
 
-In steps 9 and 10, `W1NOW`/`W2NOW` are the worker's current pane id and `W1STAGED` its pane id under
-the board, read from the preceding `L panes`.
-
-- [ ] **Step 4: Two homes and a board**
+- [ ] **Step 4: Two homes, a board pane, a run, a record**
 
 ```bash
-HERDR_SOCKET_PATH=$S herdr workspace create --label hpl4-home1 --no-focus
-HERDR_SOCKET_PATH=$S herdr workspace create --label hpl4-home2 --no-focus
-HERDR_SOCKET_PATH=$S herdr workspace create --label hpl4-board --no-focus
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr workspace create --label hpl4-home1 --no-focus
+herdr workspace create --label hpl4-home2 --no-focus
+herdr workspace create --label hpl4-board --no-focus
 L panes
 ```
 
-Note `W1` (hpl4-home1's one pane), `W2` (hpl4-home2's), `BOARD` (hpl4-board's), and the workspace ids `WH1` (hpl4-home1) and `WB` (hpl4-board); export each (`export W1=w2:p1` …). Then `L record $BOARD`.
-
-- [ ] **Step 5: Stage W1 (spec live step 1)**
+From the output, append to the env file the pane ids `W1` (hpl4-home1's one pane), `W2`
+(hpl4-home2's), `BOARD` (hpl4-board's) and the workspace ids `WH1`, `WH2`, `WB`, e.g.
+`echo 'export W1=w2:p1' >> /tmp/hpl4-live/env`. Then:
 
 ```bash
-L stage $BOARD $W1
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+L run $W1 $WH1 $W2 $WH2
+L record $BOARD
+herdr pane run $BOARD "bun /tmp/hpl4-live/board.ts"
+herdr workspace focus $WB
+herdr pane read $BOARD
+```
+
+Expected: the board shows `hpl4 live`, a run card (`orchestrator is not running`) in Needs you, and
+`hpl4-1` above `hpl4-2` in Working.
+
+- [ ] **Step 5: Enter on the run card**
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane send-keys $BOARD enter
+herdr pane read $BOARD | tail -3
+```
+
+Expected: the status line reads `no worker to stage`; `L panes` shows nothing moved. (If the cursor
+is not on the run card, move it there with `h`/`k` first, confirming with `pane read`.)
+
+- [ ] **Step 6: `enter tab` in one call stages W1 and focuses it (A19)**
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane send-keys $BOARD l
+herdr pane read $BOARD | tail -3
+herdr pane send-keys $BOARD enter tab
 L panes
 L show
+herdr pane read $BOARD | tail -3
 tmux capture-pane -p -t hpl4 | head -60
 ```
 
-Expected: W1's terminal is in `BOARD`'s tab under a new pane id (same `term=`: the rebind's input);
-a pane with `agent=-` sits in hpl4-home1's tab and reads "is on the pipeline stage"; `staged` in the
-record names W1's terminal and `host.boardPaneId` = `BOARD`. Switch the scratch session to the board
-workspace (`HERDR_SOCKET_PATH=$S herdr workspace focus $WB`) and capture again: the board
-pane holds about the top quarter, W1 the rest.
+Make sure the cursor is on `hpl4-1` before `enter tab` (move with `hjkl`, check with `pane read`).
+Expected: W1's terminal is now in `BOARD`'s tab under a new pane id (same `term=`); a pane with
+`agent=-` in hpl4-home1's tab reads "is on the pipeline stage"; `focused pane` is W1's new id; the
+record's `staged.host.boardPaneId` is `$BOARD`; the status line shows no `pane_not_found`; the
+capture shows the board in about the top quarter, W1 below. Append `W1STAGED=<W1's new id>` to the
+env file and run `L rebind t1 $W1STAGED`.
 
-- [ ] **Step 6: Focus and zoom**
+- [ ] **Step 7: `z` zooms and unzooms**
 
 ```bash
-L focus; L panes | grep 'focused pane'
-L zoom; L panes | grep layout
-L zoom; L panes | grep layout
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane send-keys $BOARD z; sleep 1; L panes | grep layout
+herdr pane send-keys $BOARD z; sleep 1; L panes | grep layout
 ```
 
-Expected: the focused pane is W1's new id; the board tab's layout reads `zoomed=true`, then
-`zoomed=false`.
+Expected: the board tab's layout reads `zoomed=true`, then `zoomed=false`.
 
-- [ ] **Step 7: Stage W2 — W1 goes home first**
+- [ ] **Step 8: Staging W2 sends W1 home first**
+
+Move the cursor to `hpl4-2` (`hjkl`, check with `pane read`), then:
 
 ```bash
-L stage $BOARD $W2
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane send-keys $BOARD enter
+sleep 1
+L panes
+L show
+```
+
+Expected: W1's terminal is back in hpl4-home1's tab and its placeholder is gone; W2 is under the
+board with a placeholder in hpl4-home2; `staged.terminalId` is W2's. Append `W2STAGED`, run
+`L rebind t2 $W2STAGED` and `L rebind t1 <W1's id now>`.
+
+- [ ] **Step 9: `q` sends the worker home**
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane send-keys $BOARD q
+sleep 2
+L panes
+L show
+```
+
+Expected: the board process has exited (the pane is back at its shell); W2 is home, its placeholder is
+gone; `staged` is `null`. Run `L rebind t2 <W2's id now>`.
+
+- [ ] **Step 10: A reopened board sends an earlier stage home; the replaced board acts on nothing
+  (spec live step 3, A11, A12)**
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane run $BOARD "bun /tmp/hpl4-live/board.ts"
+```
+
+Stage W1 again from this board (cursor on `hpl4-1`, `send-keys $BOARD enter`), check with `L show`,
+then open a second board in a split of the board tab:
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane split $BOARD --direction right --no-focus
 L panes
 ```
 
-Expected: W1's terminal is back in hpl4-home1's tab and its placeholder is gone; W2 is under the board;
-a placeholder sits in hpl4-home2. `L sync $BOARD` prints the same stage and moves nothing.
-
-- [ ] **Step 8: Reopen the board — the worker goes home (spec live step 3)**
+Append `BOARD2=<the new pane in BOARD's tab>`, then:
 
 ```bash
-HERDR_SOCKET_PATH=$S herdr pane split $BOARD --direction right --no-focus
-L panes
-```
-
-Note the new pane `BOARD2` (in the board tab, the new board). Then:
-
-```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
 L record $BOARD2
-L sync $BOARD
-L sync $BOARD2
+herdr pane run $BOARD2 "bun /tmp/hpl4-live/board.ts"
+sleep 3
+L panes
+L show
+herdr pane send-keys $BOARD q
+sleep 2
+L show
+```
+
+Expected: once the second board starts, W1 is back in hpl4-home1, its placeholder is gone, and
+`staged` is `null` (the new board's first refresh undid the old board's stage). `q` on the old board
+changes nothing (its record names `BOARD2`). Rebind t1 to W1's current id.
+
+- [ ] **Step 11: SIGHUP — closing the board pane sends the worker home**
+
+Stage W2 from `BOARD2` (cursor on `hpl4-2`, `send-keys $BOARD2 enter`), check with `L show`, then:
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+herdr pane close $BOARD2
+sleep 2
 L panes
 L show
 ```
 
-Expected: `sync $BOARD` prints `null` and moves nothing (a replaced board acts on nothing);
-`sync $BOARD2` prints `null`, W2 is back in hpl4-home2's tab, its placeholder is gone, and `staged` is
-`null`. `L quit $BOARD` afterwards changes nothing.
+Expected: W2 is back in hpl4-home2, its placeholder gone, `staged` `null`. Rebind t2.
 
-- [ ] **Step 9: Teardown while staged (spec live step 4)**
+- [ ] **Step 12: The no-run branch still reconciles (A3)**
 
 ```bash
-L stage $BOARD2 $W1NOW
-L panes
-L close $W1STAGED
-HERDR_SOCKET_PATH=$S herdr workspace close $WH1
-L panes
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+L record $BOARD
+herdr pane run $BOARD "bun /tmp/hpl4-live/board.ts"
 ```
 
-Expected: `closed true`; no pane with W1's terminal is left anywhere, and nothing of hpl4-home1 is
-left (its placeholder went with the workspace).
-
-- [ ] **Step 10: Quit sends the worker home**
+Stage W1 (cursor on `hpl4-1`, `send-keys $BOARD enter`), note `W1STAGED` and the placeholder id from
+`L panes`, then remove the run and move the worker out from under the board by hand:
 
 ```bash
-L stage $BOARD2 $W2NOW
-L quit $BOARD2
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+rm /tmp/hpl4-live/state/runs/scratch/*.json
+herdr pane move $W1STAGED --workspace $WH1 --new-tab --no-focus
+sleep 3
+herdr pane read $BOARD | head -3
 L panes
 L show
 ```
 
-Expected: W2 back in hpl4-home2, placeholder gone, `staged` `null`.
+Expected: the board reads `no run in this repo`; its reconcile closed the placeholder in hpl4-home1
+and set `staged` to `null`. Quit the board with `q`.
 
-- [ ] **Step 11: Tear the scratch session down**
+- [ ] **Step 13: Teardown while staged (spec live step 4)**
+
+Recreate the run (`L run <W1 now> $WH1 <W2 now> $WH2`), restart the board in `BOARD`, stage W2 from it,
+note `W2STAGED`, then:
+
+```bash
+. /tmp/hpl4-live/env; : "${S:?scratch socket unset}"
+L close $W2STAGED
+herdr workspace close $WH2
+sleep 2
+L panes
+```
+
+Expected: `closed true`; no pane with W2's terminal is left anywhere, and nothing of hpl4-home2 is left
+(its placeholder went with the workspace).
+
+- [ ] **Step 14: Tear the scratch session down**
 
 ```bash
 herdr session stop hpl4-scratch
 tmux kill-session -t hpl4
-rm -rf $HPL4_STATE
+rm -rf /tmp/hpl4-live
 ```
 
-- [ ] **Step 12: The board's own keys.** `enter`/`tab`/`z` through `ui.ts` need the `stein.pipeline`
-  manifest with `placeholder` registered, which is global. Raise it as the last action of the turn:
-
-```bash
-hpipe decide --task t4 \
-  --question "The board's enter/tab/z keys can only be checked live with this branch's manifest registered, and herdr's plugin registry is global: a 'herdr plugin link' of this worktree would also swap the plugin under the live herdr-plugin session driving this run. The branch functions they call passed the scratch-session harness (steps 5-10). Link briefly, or check the keys after release?" \
-  --recommend "Check the keys after release: the keys only wire the harness-verified functions to stdin, the \\n/\\r split is unit-tested, and a link swaps the supervisor's plugin mid-run (.claude/agents/plugin-dev.md 'The self-hosting hazard'). Note the post-release check in the PR body."
-```
-
-Record every observation from steps 5–10, and any difference from "Expected", for the PR body. A
+Record every observation from steps 5–13, and any difference from "Expected", for the PR body. A
 difference is a finding, not a test to bend.
+
+---
+
+## Changes after plan review 0
+
+Review: `docs/superpowers/reviews/herdr-pl-4-plan-review-0.md` (CLEAR, 1 MAJOR, 2 MINOR — all applied).
+
+| Finding | Change |
+|---|---|
+| MAJOR 1 — Task 9's `hpipe decide` claimed the keys only wire harness-verified functions, steering the owner to skip the one check of `ui.ts` | Task 9 now runs this branch's `runBoardUi` in a scratch pane with `PIPELINE.pluginId` pointed at the linked pasture plugin's identical placeholder, and sends real keys: `\n` enter on the run card, `enter tab` in one chunk (A19), `z` twice, staging a second card, `q`, a reopened board and the replaced board's `q` (A11, A12), SIGHUP by closing the pane, and the no-run reconcile (A3). No link is needed, so the spec's planned `hpipe decide` is dropped |
+| MINOR 1 — the "no change, no write" test could not see a write | Task 2's test asserts the registry file's inode is unchanged (`writeJson` renames a new file over it, `src/lib/store.ts:24-26`); Task 1's `node:fs` import gains `statSync` |
+| MINOR 2 — the harness kept the scratch socket in shell variables a fresh shell drops | All state lives in `/tmp/hpl4-live/env`, which exports `HERDR_SOCKET_PATH`; every block sources it and aborts on an empty `S` |
