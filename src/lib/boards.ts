@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { readJson, withFileLock, writeJson } from './store'
+import type { Host, Staged } from '../kit/stage'
 
 /**
  * `pane_id: null` is a board the supervisor has asked herdr for and not yet
@@ -13,7 +14,11 @@ export interface BoardRecord {
   opened_at_ms: number
   /** Done cards the user cleared with `x`; only for the run they were cleared in. */
   cleared?: { run_id: string; tasks: string[] }
+  staged?: StagedWorker | null
 }
+
+/** The host is kept so the stage can still be undone once the board pane that made it is gone. */
+export type StagedWorker = Staged & { host: Host }
 
 export type BoardRegistry = Record<string, BoardRecord>
 
@@ -57,5 +62,28 @@ export async function updateBoards<T>(
     const outcome = change(boards)
     await writeJson(path, boards)
     return outcome
+  })
+}
+
+export function sameStage(a: Staged | null | undefined, b: Staged | null | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return a.paneId === b.paneId && a.terminalId === b.terminalId
+}
+
+/**
+ * False when no record names this board, or when `expected` is given and the
+ * recorded stage is no longer it: the board writes a reconcile result back
+ * only over the stage it read, so a stage the supervisor cleared meanwhile is
+ * not resurrected.
+ */
+export async function recordStaged(
+  stateDir: string, session: string, slug: string, staged: StagedWorker | null, expected?: StagedWorker | null,
+): Promise<boolean> {
+  return updateBoards(stateDir, session, (boards) => {
+    const board = boards[slug]
+    if (!board) return false
+    if (expected !== undefined && !sameStage(board.staged, expected)) return false
+    board.staged = staged
+    return true
   })
 }
