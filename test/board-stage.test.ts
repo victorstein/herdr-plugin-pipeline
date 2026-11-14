@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { boardHost, ELSEWHERE, NO_WORKER, stageCard, syncStage, workerFor } from '../src/board/stage'
+import { boardHost, ELSEWHERE, NO_WORKER, stageCard, syncStage, unstageOwn, workerFor } from '../src/board/stage'
 import type { Host, Identity } from '../src/kit/stage'
 import type { Snapshot } from '../src/kit/types'
 import { type BoardRecord, readBoards, type StagedWorker, updateBoards } from '../src/lib/boards'
@@ -245,4 +245,29 @@ test('stageCard undoes a stage whose board was replaced while the worker moved',
   })
   expect(calls[5]).toEqual({ method: 'pane.close', params: { pane_id: 'w1:p6' } })
   expect((await record())?.staged).toBeUndefined()
+})
+
+test('unstageOwn leaves alone a stage another board made, a replaced record, and a board with no pane', async () => {
+  const { herdr, calls } = fakeHerdr({})
+  await unstageOwn(herdr, dir, SESSION, SLUG, 'wP:p1')
+  await withRecord({ staged: EARLIER_BOARDS_STAGE })
+  await unstageOwn(herdr, dir, SESSION, SLUG, 'wP:p1')
+  await withRecord({ pane_id: 'wP:p9', staged: STAGED })
+  await unstageOwn(herdr, dir, SESSION, SLUG, 'wP:p1')
+  await withRecord({ staged: STAGED })
+  await unstageOwn(herdr, dir, SESSION, SLUG, undefined)
+  expect(calls).toEqual([])
+  expect((await record())?.staged).toEqual(STAGED)
+})
+
+test("unstageOwn sends this board's worker home and forgets the stage", async () => {
+  await withRecord({ staged: STAGED })
+  const { herdr, methods } = fakeHerdr({
+    'session.snapshot': () => ({ snapshot: onStage() }),
+    'pane.move': () => moved('w1:p3'),
+    'pane.close': () => ({ type: 'ok' }),
+  })
+  await unstageOwn(herdr, dir, SESSION, SLUG, 'wP:p1')
+  expect(methods()).toEqual(['session.snapshot', 'pane.move', 'pane.close'])
+  expect((await record())?.staged).toBeNull()
 })

@@ -74,3 +74,10 @@ export async function stageCard(
   }
   return next
 }
+
+/** A board replaced by a newer one quits after it, and must not send the newer board's worker home. */
+export async function unstageOwn(herdr: Herdr, stateDir: string, session: string, slug: string, boardPaneId: string | undefined): Promise<void> {
+  const record = (await readBoards(stateDir, session))[slug]
+  if (!boardPaneId || !record || record.pane_id !== boardPaneId || record.staged?.host.boardPaneId !== boardPaneId) return
+  await unstageBoard(herdr, stateDir, session, slug)
+}
