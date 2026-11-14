@@ -318,3 +318,51 @@ test('a single-PR teardown hands the fallback its batch branch', async () => {
   })
   expect(asked).toEqual([['/r', checkout, 'feat/x', null, 'batch/x']])
 })
+
+// Asserted from inside removeWorktree: markTornDown releases the pane after a
+// `removed` anyway, so the end state cannot tell the two releases apart.
+test('a staged worker is closed and released before its worktree is removed', async () => {
+  const run = mkRun([mkTask({})])
+  const seen: string[] = []
+  await runTeardown([run], {
+    ...removingBy(async () => {
+      seen.push(`remove pane=${run.tasks[0]?.pane_id} last=${run.tasks[0]?.last_pane_id}`)
+      return 'removed' as const
+    }),
+    closeStagedWorker: async (_run, task) => {
+      seen.push(`close ${task.pane_id}`)
+      return true
+    },
+  })
+  expect(seen).toEqual(['close w7:p1', 'remove pane=null last=w7:p1'])
+  expect(run.tasks[0]?.phase).toBe('done')
+})
+
+test('a task that is not staged keeps its pane bound through the removal', async () => {
+  const run = mkRun([mkTask({})])
+  const seen: string[] = []
+  await runTeardown([run], {
+    ...removingBy(async () => {
+      seen.push(`remove pane=${run.tasks[0]?.pane_id}`)
+      return 'removed' as const
+    }),
+    closeStagedWorker: async (_run, task) => {
+      seen.push(`close ${task.pane_id}`)
+      return false
+    },
+  })
+  expect(seen).toEqual(['close w7:p1', 'remove pane=w7:p1'])
+})
+
+test('a task without a pane, or kept by request, is never offered for closing', async () => {
+  const offered: string[] = []
+  const run = mkRun([mkTask({ task_id: 't1', pane_id: null }), mkTask({ task_id: 't2', keep_worktree: true })])
+  await runTeardown([run], {
+    ...removingBy(async () => 'removed' as const),
+    closeStagedWorker: async (_run: Run, task: Task) => {
+      offered.push(task.task_id)
+      return true
+    },
+  })
+  expect(offered).toEqual([])
+})

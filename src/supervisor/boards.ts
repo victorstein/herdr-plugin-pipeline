@@ -14,6 +14,8 @@ export interface BoardDeps {
   now: () => number
   hasStore: (slug: string) => Promise<boolean>
   herdr: Pick<Herdr, 'paneList' | 'paneShellPid' | 'paneClose' | 'pluginPaneOpen'>
+  /** Moves the slug's staged worker home. Must not reject: a failure is logged and the close goes ahead. */
+  unstage: (slug: string) => Promise<void>
 }
 
 /**
@@ -25,7 +27,7 @@ export interface BoardDeps {
  * unrecorded renamed board reads as a ghost.
  */
 export async function openBoard(
-  slug: string, deps: Omit<BoardDeps, 'hasStore'>, expected: BoardRecord | undefined,
+  slug: string, deps: Omit<BoardDeps, 'hasStore' | 'unstage'>, expected: BoardRecord | undefined,
 ): Promise<boolean> {
   const placeholder: BoardRecord = { pane_id: null, shell_pid: null, opened_at_ms: deps.now(), ...(expected?.cleared && { cleared: expected.cleared }) }
   const claimed = await updateBoards(deps.stateDir, deps.session, (boards) => {
@@ -69,8 +71,8 @@ async function isLive(board: BoardRecord, listed: ReadonlySet<string>, deps: Boa
 
 /**
  * Exactly one live board per repo with a live run in this session, and none for
- * any other. A pane renamed `Board: …` that no record names is a ghost — herdr
- * restores panes under new ids after a restart — and is closed.
+ * any other. A pane renamed `Board: …` that no record names is a ghost, and is
+ * closed.
  */
 export async function syncBoards(runs: readonly Run[], deps: BoardDeps): Promise<void> {
   const wanted = new Set<string>()
@@ -91,8 +93,12 @@ export async function syncBoards(runs: readonly Run[], deps: BoardDeps): Promise
     if (isRenamedBoardLabel(pane.label) && !recordedPanes.has(pane.pane_id)) await deps.herdr.paneClose(pane.pane_id)
   }
 
+  // Each unstage comes before the listed-pane guard: a board whose pane is gone
+  // is not closed, but its record is deleted or replaced all the same, and the
+  // stage would go with it.
   for (const [slug, board] of Object.entries(recorded)) {
     if (wanted.has(slug)) continue
+    if (board.staged) await deps.unstage(slug)
     if (board.pane_id !== null && listed.has(board.pane_id) && !(await deps.herdr.paneClose(board.pane_id)).ok) continue
     await updateBoards(deps.stateDir, deps.session, (boards) => {
       if (sameBoard(boards[slug], board)) delete boards[slug]
@@ -101,6 +107,7 @@ export async function syncBoards(runs: readonly Run[], deps: BoardDeps): Promise
   for (const slug of wanted) {
     const board = recorded[slug]
     if (board !== undefined && await isLive(board, listed, deps)) continue
+    if (board?.staged) await deps.unstage(slug)
     if (board?.pane_id != null && listed.has(board.pane_id) && !(await deps.herdr.paneClose(board.pane_id)).ok) continue
     await openBoard(slug, deps, board)
   }

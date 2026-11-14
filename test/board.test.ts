@@ -6,7 +6,7 @@ import { openBoardAction, type OpenBoardActionDeps } from '../src/actions/board'
 import { type BoardPaneDeps, type BoardUiOptions, runBoardPane } from '../src/board'
 import { beadsSlug, writeBeadsProject } from '../src/lib/beads-project'
 import { LockTimeoutError } from '../src/lib/store'
-import { boardLabel, isRenamedBoardLabel, readBoards, updateBoards } from '../src/lib/boards'
+import { boardLabel, isRenamedBoardLabel, readBoards, type StagedWorker, updateBoards } from '../src/lib/boards'
 import type { PaneInfo, PaneOpenOptions } from '../src/lib/herdr'
 import { newRun } from '../src/lib/ledger'
 import type { Run } from '../src/lib/types'
@@ -51,13 +51,25 @@ function fakeHerdr(
 function deps(herdr: BoardDeps['herdr'], over: Partial<BoardDeps> = {}): BoardDeps {
   return {
     stateDir: dir, session: 'personal', pluginId: 'stein.pipeline', workspaceId: 'w9',
-    now: () => 100_000, hasStore: async () => true, herdr, ...over,
+    now: () => 100_000, hasStore: async () => true, herdr, unstage: async () => {}, ...over,
   }
 }
 
 const OPEN = (): string => `open stein.pipeline board w9 undefined {"HPIPE_BEADS_SLUG":"${SLUG}"}`
 const SUPERVISOR_PANE: PaneInfo = { pane_id: 'w9:p1', label: 'Pipeline supervisor' }
 const BOARD_PANE: PaneInfo = { pane_id: 'w9:p4', label: boardLabel(SLUG) }
+
+const STAGED: StagedWorker = {
+  terminalId: 't1', paneId: 'w9:p6', homeWorkspaceId: 'w1', homeTabId: 'w1:t1',
+  homeTabLabel: 'feat-x', placeholderPaneId: 'w1:p2', title: 'feat-x',
+  host: { workspaceId: 'w9', tabId: 'w9:t2', boardPaneId: 'w9:p4' },
+}
+
+/** Logs into the fake herdr's `calls`, so an unstage is ordered against the closes and opens. */
+const recordingUnstage = (calls: string[]) => ({ unstage: async (slug: string) => { calls.push(`unstage ${slug}`) } })
+
+const stagedBoard = () =>
+  updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: 'w9:p4', shell_pid: 321, opened_at_ms: 1, staged: STAGED } })
 
 test('a repo with a live run and no board gets one, recorded as booting before it is opened', async () => {
   const { herdr, calls } = fakeHerdr([])
@@ -312,7 +324,7 @@ function actionDeps(herdr: BoardDeps['herdr'], over: Partial<OpenBoardActionDeps
   const errors: string[] = []
   const actionDeps: OpenBoardActionDeps = {
     stateDir: dir, session: 'personal', pluginId: 'stein.pipeline', repoKey: REPO,
-    workspaceId: async () => 'w9', now: () => 100_000, herdr,
+    workspaceId: async () => 'w9', now: () => 100_000, herdr, unstage: async () => {},
     log: (message) => { logs.push(message) }, error: (message) => { errors.push(message) },
     ...over,
   }
@@ -341,4 +353,54 @@ test('"Open board" refuses outside a repo, without a store, or without a workspa
   await withStore()
   expect(await openBoardAction(actionDeps(herdr, { workspaceId: async () => null }).actionDeps)).toBe(1)
   expect(calls).toEqual([])
+})
+
+test("a finished run's staged board is unstaged before it is closed", async () => {
+  await stagedBoard()
+  const { herdr, calls } = fakeHerdr([BOARD_PANE], { 'w9:p4': 321 })
+  await syncBoards([runIn('done')], deps(herdr, recordingUnstage(calls)))
+  expect(calls).toEqual([`unstage ${SLUG}`, 'close w9:p4'])
+})
+
+test('a dead staged board is unstaged before it is closed and replaced', async () => {
+  await stagedBoard()
+  const { herdr, calls } = fakeHerdr([BOARD_PANE], { 'w9:p4': 999 })
+  await syncBoards([runIn('execute')], deps(herdr, recordingUnstage(calls)))
+  expect(calls).toEqual([`unstage ${SLUG}`, 'close w9:p4', OPEN()])
+})
+
+test('a staged board whose pane is gone is still unstaged before it is replaced', async () => {
+  await stagedBoard()
+  const { herdr, calls } = fakeHerdr([])
+  await syncBoards([runIn('execute')], deps(herdr, recordingUnstage(calls)))
+  expect(calls).toEqual([`unstage ${SLUG}`, OPEN()])
+})
+
+test('a live staged board is not unstaged, and a board with nothing staged is closed without one', async () => {
+  await stagedBoard()
+  const live = fakeHerdr([BOARD_PANE], { 'w9:p4': 321 })
+  await syncBoards([runIn('execute')], deps(live.herdr, recordingUnstage(live.calls)))
+  expect(live.calls).toEqual([])
+
+  await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = { pane_id: 'w9:p4', shell_pid: 321, opened_at_ms: 1 } })
+  const plain = fakeHerdr([BOARD_PANE], { 'w9:p4': 321 })
+  await syncBoards([runIn('done')], deps(plain.herdr, recordingUnstage(plain.calls)))
+  expect(plain.calls).toEqual(['close w9:p4'])
+})
+
+test('openBoard never carries a stage onto the board it opens', async () => {
+  const old = { pane_id: 'w9:p4', shell_pid: 321, opened_at_ms: 1, staged: STAGED }
+  await updateBoards(dir, 'personal', (boards) => { boards[SLUG] = old })
+  const { herdr } = fakeHerdr([], {}, 'w9:p7')
+  expect(await openBoard(SLUG, deps(herdr), old)).toBe(true)
+  expect((await readBoards(dir, 'personal'))[SLUG]).toEqual({ pane_id: 'w9:p7', shell_pid: null, opened_at_ms: 100_000 })
+})
+
+test('"Open board" unstages the recorded board before closing it', async () => {
+  await withStore()
+  await stagedBoard()
+  const { herdr, calls } = fakeHerdr([BOARD_PANE], {}, 'w9:p7')
+  const { actionDeps: d } = actionDeps(herdr, recordingUnstage(calls))
+  expect(await openBoardAction(d)).toBe(0)
+  expect(calls).toEqual([`unstage ${SLUG}`, 'close w9:p4', OPEN()])
 })

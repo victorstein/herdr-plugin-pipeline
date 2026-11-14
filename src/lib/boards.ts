@@ -1,5 +1,8 @@
 import { join } from 'node:path'
 import { readJson, withFileLock, writeJson } from './store'
+import { readSnapshot, type Herdr } from '../kit/herdr'
+import { type Host, type Staged, unstage } from '../kit/stage'
+import type { Snapshot } from '../kit/types'
 
 /**
  * `pane_id: null` is a board the supervisor has asked herdr for and not yet
@@ -13,7 +16,11 @@ export interface BoardRecord {
   opened_at_ms: number
   /** Done cards the user cleared with `x`; only for the run they were cleared in. */
   cleared?: { run_id: string; tasks: string[] }
+  staged?: StagedWorker | null
 }
+
+/** The host is kept so the stage can still be undone once the board pane that made it is gone. */
+export type StagedWorker = Staged & { host: Host }
 
 export type BoardRegistry = Record<string, BoardRecord>
 
@@ -58,4 +65,72 @@ export async function updateBoards<T>(
     await writeJson(path, boards)
     return outcome
   })
+}
+
+function sameStage(a: Staged | null | undefined, b: Staged | null | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return a.paneId === b.paneId && a.terminalId === b.terminalId
+}
+
+/**
+ * False when no record names this board, or when `expected` is given and the
+ * recorded stage is no longer it: the board writes a reconcile result back
+ * only over the stage it read, so a stage the supervisor cleared meanwhile is
+ * not resurrected.
+ */
+export async function recordStaged(
+  stateDir: string, session: string, slug: string, staged: StagedWorker | null, expected?: StagedWorker | null,
+): Promise<boolean> {
+  return updateBoards(stateDir, session, (boards) => {
+    const board = boards[slug]
+    if (!board) return false
+    if (expected !== undefined && !sameStage(board.staged, expected)) return false
+    board.staged = staged
+    return true
+  })
+}
+
+// A move keeps the terminal id and renumbers the pane; a herdr restart keeps the pane id and changes the terminal id.
+const stagedPane = (snap: Snapshot, staged: Staged) =>
+  snap.panes.find((p) => p.terminal_id === staged.terminalId) ?? snap.panes.find((p) => p.pane_id === staged.paneId)
+
+/**
+ * The kit's `unstage` finds the worker by terminal id only, and when it misses
+ * — as it does after a herdr restart — it closes the placeholder and gives up,
+ * losing the worker's home spot. So the worker is found here and handed over
+ * under the ids it has now. The pipeline workspace is never a worker's home,
+ * so a worker found anywhere in it goes home from whichever tab it is in.
+ */
+export async function unstageBoard(herdr: Herdr, stateDir: string, session: string, slug: string): Promise<void> {
+  const staged = (await readBoards(stateDir, session))[slug]?.staged
+  if (!staged) return
+  const snap = await readSnapshot(herdr)
+  const pane = stagedPane(snap, staged)
+  const current = pane ? { ...staged, terminalId: pane.terminal_id, paneId: pane.pane_id } : staged
+  const host = pane?.workspace_id === staged.host.workspaceId ? { ...staged.host, tabId: pane.tab_id } : staged.host
+  await unstage(herdr, snap, host, current)
+  await recordStaged(stateDir, session, slug, null, staged)
+}
+
+/**
+ * Cleared before the close: a live board that sees its staged worker gone
+ * reconciles by closing the placeholder, and the placeholder may be the last
+ * pane of the worktree's workspace, whose loss turns the worktree removal
+ * into the stricter checkout removal. The placeholder is left for the
+ * workspace removal to close.
+ */
+export async function closeStagedWorker(
+  herdr: Herdr, stateDir: string, session: string, slug: string, paneId: string,
+): Promise<boolean> {
+  const staged = await updateBoards(stateDir, session, (boards) => {
+    const board = boards[slug]
+    if (!board?.staged || board.staged.paneId !== paneId) return null
+    const was = board.staged
+    board.staged = null
+    return was
+  })
+  if (staged === null) return false
+  const pane = stagedPane(await readSnapshot(herdr), staged)
+  if (pane) await herdr.call('pane.close', { pane_id: pane.pane_id })
+  return true
 }

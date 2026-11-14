@@ -1,6 +1,8 @@
 import { join } from 'node:path'
 import { Bd } from '../lib/bd'
-import { readBeadsProject } from '../lib/beads-project'
+import { beadsSlug, readBeadsProject } from '../lib/beads-project'
+import { closeStagedWorker, unstageBoard } from '../lib/boards'
+import { createClient } from '../kit/herdr'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { readDispatchLocks } from '../lib/dispatch-lock'
@@ -173,6 +175,7 @@ async function main(): Promise<void> {
   const beadLockContention = new Map<string, LockContention>()
   const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
+  const kit = createClient()
   const claimed = await claimSupervisor(stateDir, herdr, supervisorSelf({
     pid: process.pid,
     panePid: process.ppid,
@@ -372,6 +375,15 @@ async function main(): Promise<void> {
             verdictFor: (r, t) => freshVerdict(r, t, config.FILE_SETTLE_MS),
             removeWorktree: async (ws) => worktreeRemovalFrom(await herdr.worktreeRemove(ws)),
             removeCheckout: removeCheckoutWithGit,
+            closeStagedWorker: async (taskRun, task) => {
+              if (task.pane_id === null) return false
+              try {
+                return await closeStagedWorker(kit, stateDir, session, beadsSlug(taskRun.repo_key), task.pane_id)
+              } catch (error) {
+                console.error(`[pipeline] run ${taskRun.run_id}: could not close ${task.task_id}'s staged worker: ${error}`)
+                return false
+              }
+            },
             ciDetail: async (pr) => (pr === null ? '' : runGh.prChecksDetail(pr)),
             ambiguityLog,
             effects,
@@ -514,6 +526,8 @@ async function main(): Promise<void> {
             stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
             hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
             herdr,
+            unstage: (slug) => unstageBoard(kit, stateDir, session, slug)
+              .catch((error) => console.error(`[pipeline] could not unstage the board for ${slug}: ${error}`)),
           })
         }],
       ])

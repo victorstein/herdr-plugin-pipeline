@@ -6,7 +6,10 @@ import { makeFakeBin } from './helpers/fake-bin'
 import { Herdr } from '../src/lib/herdr'
 import {
   clearStrayPanes, ensureWorkspace, keepCrashTail, linkHpipe, reapGhostPanes, reapSupervisorSiblings, startToolsCheck,
+  strayKeepSet,
 } from '../src/startup'
+import { newRun } from '../src/lib/ledger'
+import type { Run, Task } from '../src/lib/types'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'startup-')) })
@@ -161,4 +164,30 @@ test('a tools check that rejects settles as null, so it never surfaces as an unh
 test('a tools check that resolves passes its result through', async () => {
   const tools = { bd: { state: 'ok' as const, version: '1.3.1' }, bv: { state: 'ok' as const, version: '0.25.2' } }
   expect(await startToolsCheck(async () => tools)).toEqual(tools)
+})
+
+const runWith = (phase: Run['phase'], tasks: Pick<Task, 'phase' | 'pane_id'>[]): Run => {
+  const run = newRun({ session: 'personal', socketPath: '/s', repoKey: '/code/meter', repoRoot: '/code/meter', title: 'a' })
+  run.phase = phase
+  run.tasks = tasks as Task[]
+  return run
+}
+
+test("strayKeepSet keeps board panes, the staged worker and its placeholder, and every unfinished task's pane", () => {
+  const staged = {
+    terminalId: 't1', paneId: 'w3:p6', homeWorkspaceId: 'w1', homeTabId: 'w1:t1',
+    homeTabLabel: 'feat-x', placeholderPaneId: 'w1:p2', title: 'feat-x',
+    host: { workspaceId: 'w3', tabId: 'w3:t2', boardPaneId: 'w3:p3' },
+  }
+  const keep = strayKeepSet(
+    {
+      'meter-abc123': { pane_id: 'w3:p3', shell_pid: 1, opened_at_ms: 1, staged },
+      'other-def456': { pane_id: null, shell_pid: null, opened_at_ms: 1, staged: null },
+    },
+    [
+      runWith('execute', [{ phase: 'implement', pane_id: 'w4:p1' }, { phase: 'done', pane_id: 'w5:p1' }, { phase: 'implement', pane_id: null }]),
+      runWith('escalated', [{ phase: 'escalated', pane_id: 'w6:p1' }]),
+    ],
+  )
+  expect([...keep].sort()).toEqual(['w1:p2', 'w3:p3', 'w3:p6', 'w4:p1', 'w6:p1'])
 })

@@ -1,12 +1,14 @@
 import { chmodSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { BOARD_PANE_TITLE, readBoards, recordedBoardPanes } from './lib/boards'
+import { BOARD_PANE_TITLE, type BoardRegistry, readBoards, recordedBoardPanes } from './lib/boards'
 import { loadConfig } from './lib/config'
 import { Herdr } from './lib/herdr'
+import { isCurrentSchemaRun, listRuns, taskPhaseIsTerminal } from './lib/ledger'
 import { readPid } from './lib/pidfile'
 import { gcStaleTmp } from './lib/queue'
 import { sessionKey } from './lib/session'
 import { checkTools, toolsLine, type Tools } from './lib/tools'
+import type { Run } from './lib/types'
 
 export const SUPERVISOR_LABEL = 'Pipeline supervisor'
 const ONE_HOUR_MS = 60 * 60 * 1000
@@ -127,13 +129,31 @@ export async function keepCrashTail(herdr: Herdr, logPath: string, paneId: strin
 }
 
 /**
+ * A worker staged under a board sits in the pipeline workspace, so without this
+ * a herdr restart closed it as a stray and failed its task. Every unfinished
+ * task's pane is kept, as `PaneAbsence` binds them, so a worker whose stage
+ * record was lost is kept too; a pane kept needlessly costs one stray pane.
+ */
+export function strayKeepSet(boards: BoardRegistry, runs: readonly Run[]): Set<string> {
+  const keep = recordedBoardPanes(boards)
+  for (const board of Object.values(boards)) {
+    if (!board.staged) continue
+    keep.add(board.staged.paneId)
+    if (board.staged.placeholderPaneId !== null) keep.add(board.staged.placeholderPaneId)
+  }
+  for (const task of runs.flatMap((run) => run.tasks)) {
+    if (task.pane_id !== null && !taskPhaseIsTerminal(task.phase)) keep.add(task.pane_id)
+  }
+  return keep
+}
+
+/**
  * Clears the shell pane `workspace create` opens alongside the supervisor. It must
  * run AFTER the supervisor pane exists: closing a workspace's last pane destroys
  * the workspace, so clearing it at creation time deletes the very workspace the
  * supervisor was about to open into. A board is spared if it is recorded, or still
  * labelled plain `Board` because it has only just opened; the supervisor's first
- * tick may open one before this runs. A renamed board no record names is a ghost
- * a herdr restart brought back under a new id.
+ * tick may open one before this runs. A renamed board no record names is a ghost.
  */
 export async function clearStrayPanes(
   herdr: Herdr, workspaceId: string, keep: ReadonlySet<string> = new Set(),
@@ -208,7 +228,8 @@ async function main(): Promise<void> {
       return
     }
 
-    const strays = await clearStrayPanes(herdr, workspaceId, recordedBoardPanes(await readBoards(stateDir, session)))
+    const runs = (await listRuns(stateDir, session)).filter(isCurrentSchemaRun)
+    const strays = await clearStrayPanes(herdr, workspaceId, strayKeepSet(await readBoards(stateDir, session), runs))
     if (strays.length > 0) console.log(`[pipeline] closed stray panes: ${strays.join(', ')}`)
   } finally {
     const tools = await toolsChecked
