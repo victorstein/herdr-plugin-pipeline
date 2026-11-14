@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.5.0...v2.5.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **board:** teardown finds a worker staged before the move was followed ([#180](https://github.com/victorstein/herdr-plugin-pipeline/issues/180)) ([d249b6f](https://github.com/victorstein/herdr-plugin-pipeline/commit/d249b6f2b20ce7d9203f083d99dd6dfc2db90cc0))
+
 ## [2.5.0](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.4.0...v2.5.0) (2026-11-14)
 
 
