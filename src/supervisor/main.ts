@@ -1,6 +1,8 @@
 import { join } from 'node:path'
 import { Bd } from '../lib/bd'
 import { readBeadsProject } from '../lib/beads-project'
+import { unstageBoard } from '../lib/boards'
+import { createClient } from '../kit/herdr'
 import { loadConfig } from '../lib/config'
 import { baseLine, freshDispatchBase } from '../lib/dispatch-base'
 import { readDispatchLocks } from '../lib/dispatch-lock'
@@ -173,6 +175,7 @@ async function main(): Promise<void> {
   const beadLockContention = new Map<string, LockContention>()
   const beadSyncCursor = { index: 0 }
   const herdr = new Herdr()
+  const kit = createClient()
   const claimed = await claimSupervisor(stateDir, herdr, supervisorSelf({
     pid: process.pid,
     panePid: process.ppid,
@@ -514,6 +517,8 @@ async function main(): Promise<void> {
             stateDir, session, pluginId, workspaceId: pipelineWorkspace, now: Date.now,
             hasStore: async (slug) => (await readBeadsProject(stateDir, slug)) !== null,
             herdr,
+            unstage: (slug) => unstageBoard(kit, stateDir, session, slug)
+              .catch((error) => console.error(`[pipeline] could not unstage the board for ${slug}: ${error}`)),
           })
         }],
       ])
