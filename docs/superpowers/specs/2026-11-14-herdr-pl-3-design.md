@@ -88,6 +88,20 @@ It sits beside `bindWorkerPane` and `releaseWorkerPane`. `cli.ts` already import
   renamed on a move", which is no longer a gap. The orchestrator rebound by `claim` stays a known
   gap.
 
+### 5. The list goes with the pane (review 0, M1)
+
+`former_pane_ids` describes the pane the task holds now, so every path that unbinds or replaces that
+pane deletes the field:
+
+- `releaseWorkerPane` (`src/lib/unstarted.ts:257-262`). Every supervisor release goes through it:
+  abort (`tick.ts:303`, `:326`), worker no longer needed (`tick.ts:292`), agent released
+  (`tick.ts:535`), and teardown (`src/supervisor/teardown.ts:57`).
+- `forget` (`src/cli.ts:3192-3200`), which sets `pane_id = null` itself.
+- `bindWorkerPane` (`unstarted.ts:234-242`), when it binds a *different* pane (after its
+  `pane_id === paneId` early return). Its callers are `pane.agent_detected` (`tick.ts:540`) and the
+  brief hand-over (`cli.ts:1400`). A move never goes through it, because `tick.ts:508-509` assigns
+  `pane_id` directly, so a move's history is never wiped by its own rebind.
+
 ## Data and control flow
 
 ```
@@ -114,26 +128,29 @@ environment still says `w3:p2`, and every id the pane has had is covered.
   holding the field ignores it. An older supervisor that rewrites the task keeps it, because the
   store writes and reads the whole object as JSON (`src/lib/store.ts:20`, `:204`), so nothing is
   lost either way.
-- **A2. Kept for the life of the task, never cleared.** `former_pane_ids` is not cleared by
-  `releaseWorkerPane`, `bindWorkerPane`, a rewind, or a phase change. That mirrors `last_pane_id`,
-  which is never cleared either. The reuse risk (A4) is bounded by the guards' phase filter, not by
-  pruning the list.
+- **A2. Kept exactly as long as the moved pane is the task's pane.** *(Changed in review 0, M1. It
+  was "never cleared", which contradicted A4 and A5.)* `former_pane_ids` is deleted wherever the
+  task's pane is released or replaced (Architecture §5). It survives a phase change, a rewind that
+  keeps the pane, and further moves. Unlike `last_pane_id`, it does not outlive its pane, because
+  its ids are used to *refuse* callers, and a dead pane's id is free to name someone else.
 - **A3. Same wording, caller's id.** The refusal names the id the caller passed (`w3:p2`), not the
   task's current one. The acceptance asks for "the same wording as from its current one", and the
-  caller's id is the one the caller recognises. Neither message template changes.
-- **A4. Reuse risk accepted, bounded as today.** The repo disagrees with itself on whether herdr
-  reuses ids. `8f3c4cc` says pane ids "are not reused". `cli.ts:2391-2393`, `cli.ts:3114` and
-  `test/before-merge-cli.test.ts:164` say workspace ids are. If they are, a stale former id could
-  later name a human's or the orchestrator's pane. `paneRefusal` and `resume` match only
-  non-terminal tasks in the runs they already scan (`cli.ts:2398-2399`, `:3116`), so the window is
-  the task's own life. That is the same window `pane_id` has, and inside it the worker that held the
-  id is still running. `pipelinePanes` has no phase filter, so a stale former id refuses only a
-  *lowering*, and only within that one run. `last_pane_id` already carries this exposure
-  (`tiers.ts:72`). This design does not settle the reuse question live.
+  caller's id is the one the caller recognises. Neither message template changes. *Known limit
+  (review 0, m1):* `find` returns the first matching task. If herdr reused a moved-away id for
+  another worker's live pane, the message could name the earlier task instead of the caller's own.
+  The refusal itself is still correct, so this is accepted rather than fixed with a two-pass match.
+- **A4. Reuse risk bounded by the pane's life.** *(Rationale changed in review 0, M1.)* herdr reuses
+  workspace ids, measured on a live run (`src/supervisor/teardown.ts:48-53`). `8f3c4cc` says pane
+  ids are not reused, and this design does not settle that live. If they are, a former id could
+  later name a human's or the orchestrator's pane. Because the list is deleted with the pane (A2),
+  a former id is only ever held while the worker that had it is still running in the moved pane.
+  `paneRefusal` and `resume` also match only non-terminal tasks (`cli.ts:2398-2399`, `:3116`).
+  `pipelinePanes` has no phase filter, but it too sees only live panes' former ids, and it refuses
+  only a *lowering*. `last_pane_id` there already carries a wider exposure (`tiers.ts:72`).
 - **A5. Former ids only for a live pane, not for a dead one.** `resume` and `paneRefusal` keep
   ignoring `last_pane_id`, as `cli.ts:3114` deliberately does. A former id belongs to a pane that is
-  still alive and still holds the worker. `last_pane_id` belongs to a pane that is gone, so its id
-  is free to name someone else.
+  still alive and still holds the worker, and A2 makes that true by deleting the list with the pane.
+  `last_pane_id` belongs to a pane that is gone, so its id is free to name someone else.
 - **A6. Matching a move stays on `pane_id`.** `tick.ts:506` keeps finding the task by
   `t.pane_id === previous_pane_id`. A `pane.moved` whose `previous_pane_id` is only a former id is a
   stale or duplicate event, and it must not rebind anything. `tick.test.ts:1213-1224` feeds exactly
@@ -178,6 +195,25 @@ Test-first, in the existing files. Each test fails before the code change.
   file name, made so the test sits with its fixtures.
 - A finished task's former id does not refuse `resume` or `hold`. This guards A4's bound. It extends
   the "finished task" case at `before-merge-cli.test.ts:164`.
+- Clearing (A2, review 0 M1):
+  - `releaseWorkerPane` on a task with `former_pane_ids` leaves the field undefined. This test goes
+    in the file that already covers `releaseWorkerPane` or `unstarted.ts`.
+  - `bindWorkerPane` to a different pane deletes the field, and binding the same pane keeps it.
+  - `forget` deletes the field (`cli-commands.test.ts`).
+  - An aborted run whose moved worker's pane was released: `resume` from that worker's former id
+    succeeds (`cli-commands.test.ts`, beside `:347-364`). This is the human-blocked case M1 names.
+
+## Changes from review 0
+
+Verdict CLEAR (`docs/superpowers/reviews/herdr-pl-3-spec-review-0.md`).
+
+- **M1, accepted.** "Never cleared" contradicted A4 and A5: an abort, a not-needed worker, a release
+  or `forget` leaves the task non-terminal with its pane gone, and a stale former id could then
+  refuse the human's `resume`. Added Architecture §5, which deletes the list in
+  `releaseWorkerPane`, `forget` and a changing `bindWorkerPane`. Rewrote A2 and A4, tightened A5,
+  and added the clearing tests.
+- **m1, accepted as a known limit** in A3: the message may name the wrong task in a reuse collision,
+  and the refusal is still right.
 - `bunx tsc --noEmit` and `bun test` green.
 
 **Against a real herdr session** (plugin-dev guide, "Where the behaviour is actually proven"): this
