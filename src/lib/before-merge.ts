@@ -146,6 +146,11 @@ export function owedInRun(run: Run): OwedCheck[] {
   return run.tasks.flatMap((task) => owedAt(run, task))
 }
 
+/** The checks the human owes at a gate, or past one. */
+export function humanOwesAtTheGate(run: Run): OwedCheck[] {
+  return owedInRun(run).filter((o) => o.state.kind === 'waiting-on-the-human' && humanIsAsked(run, o.task))
+}
+
 /** What keeps a per-task run's `execute` from finishing, whatever route took a merged task past its gate. */
 export function mergedWithCheckOwed(run: Run): Task[] {
   if (modeOf(run) !== 'per-task') return []

@@ -1,12 +1,13 @@
 import type { Column } from '../kit/nav'
 import { MOCHA } from '../kit/palette'
 import type { CardView, Span } from '../kit/render'
-import { heldForTheHuman, owedAt, owedInRun } from '../lib/before-merge'
+import { humanIsAsked, humanOwesAtTheGate, owedAt, waitsOnlyOnTheHuman } from '../lib/before-merge'
 import { escalatedUnanswered } from '../lib/decisions'
 import type { PaneHold } from '../lib/delivery-health'
 import { fileHolders, TERMINAL_BAD } from '../lib/gating'
-import { runIsDriven } from '../lib/ledger'
-import { modeOf, taskRow, tierOf } from '../lib/phases'
+import { phaseHoldsBead } from '../lib/held'
+import { runIsDriven, wasAborted } from '../lib/ledger'
+import { LANDING_PHASES, modeOf, taskRow, tierOf } from '../lib/phases'
 import type { Run, Task } from '../lib/types'
 import { sceneFor } from './scenes'
 
@@ -31,10 +32,14 @@ const COLUMN_SCENE: Record<Exclude<Column, 'working'>, string> = { needs: 'block
 
 /** What the human owes on this task: the hpipe:awaiting-human label's rules, plus failures and the holds only a human clears. */
 export function humanOwes(run: Run, task: Task, holds: Record<string, PaneHold>): string | null {
-  if (heldForTheHuman(run, task)) return owedAt(run, task)[0]?.check.check ?? 'a check before merge'
-  if (task.phase === 'escalated') return 'escalated'
-  const open = escalatedUnanswered(task)
-  if (open) return `answer decision ${open.id}`
+  if (runIsDriven(run) && humanIsAsked(run, task) && waitsOnlyOnTheHuman(run, task)) {
+    return owedAt(run, task).find((o) => o.state.kind === 'waiting-on-the-human')!.check.check
+  }
+  if (phaseHoldsBead(run.phase, task.phase)) {
+    if (task.phase === 'escalated') return 'escalated'
+    const open = escalatedUnanswered(task)
+    if (open) return `answer decision ${open.id}`
+  }
   if (TERMINAL_BAD.has(task.phase)) return task.phase
   const hold = task.pane_id === null ? undefined : holds[task.pane_id]
   if (hold?.code === 'stuck_input') return 'input box has text'
@@ -44,7 +49,7 @@ export function humanOwes(run: Run, task: Task, holds: Record<string, PaneHold>)
 
 export function runOwes(run: Run, livePanes: ReadonlySet<string>): string | null {
   if (run.phase === 'escalated') return 'run escalated'
-  const owed = modeOf(run) === 'single-pr' ? owedInRun(run)[0] : undefined
+  const owed = modeOf(run) === 'single-pr' ? humanOwesAtTheGate(run)[0] : undefined
   if (owed) return owed.check.check
   if (runIsDriven(run) && (run.orchestrator_pane === null || !livePanes.has(run.orchestrator_pane))) return 'orchestrator is not running'
   return null
@@ -52,6 +57,10 @@ export function runOwes(run: Run, livePanes: ReadonlySet<string>): string | null
 
 function placed(input: BoardInput, task: Task): { column: Column; badge: Span } {
   const { run, holds, livePanes } = input
+  if (run.phase === 'done' && task.phase !== 'done') {
+    if (TERMINAL_BAD.has(task.phase)) return { column: 'idle', badge: red(task.phase) }
+    return { column: 'idle', badge: quiet(wasAborted(run) ? 'aborted' : task.phase) }
+  }
   const owes = humanOwes(run, task, holds)
   if (owes) return { column: 'needs', badge: red(owes) }
   const progress = CI[task.ci ?? ''] ?? (task.pr !== null ? quiet(`PR #${task.pr}`) : null)
@@ -63,8 +72,10 @@ function placed(input: BoardInput, task: Task): { column: Column; badge: Span } 
   if (task.phase === 'blocked-on-files') return { column: 'idle', badge: quiet(`files: ${fileHolders(run, task)[0]?.bead ?? 'held'}`) }
   const actor = taskRow(task.phase).actor
   if (actor === 'worker' && (task.pane_id === null || !livePanes.has(task.pane_id))) return { column: 'idle', badge: quiet('no agent') }
-  const move = actor === 'orchestrator' && input.orchestratorsMove(task) ? quiet("orchestrator's move") : null
-  return { column: 'working', badge: progress ?? move ?? quiet(tierOf(task)) }
+  // waitsOnYou runs a synchronous `git merge-base` for a single-PR landing, too slow for every poll.
+  const asks = actor === 'orchestrator' && !(modeOf(run) === 'single-pr' && LANDING_PHASES.has(task.phase))
+  const move = asks && input.orchestratorsMove(task) ? quiet("orchestrator's move") : null
+  return { column: 'working', badge: move ?? progress ?? quiet(tierOf(task)) }
 }
 
 export function buildBoard(input: BoardInput): Record<Column, CardView[]> {

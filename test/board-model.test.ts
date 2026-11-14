@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test'
 import { buildBoard, humanOwes, runOwes, type BoardInput } from '../src/board/model'
 import { sceneFor } from '../src/board/scenes'
+import { MOCHA } from '../src/kit/palette'
 import type { PaneHold } from '../src/lib/delivery-health'
 import type { Decision, Run, Task, TaskPhase } from '../src/lib/types'
-import { checkOf, heldTask, perTaskRun, singlePrRun } from './helpers/before-merge'
+import { CHECKED_HEAD, checkOf, heldTask, perTaskRun, ruling, singlePrRun } from './helpers/before-merge'
 
 const task = (over: Partial<Task> = {}): Task => heldTask({ ci: null, pr: null, ...over })
 
@@ -28,19 +29,62 @@ const escalatedDecision = (id: string): Decision => ({
   answered_at: null, prompted_at: 1, escalated_at: 2, orchestrator_recommendation: 'o',
 })
 
-test('a routine per-task merge is Working, and reads the orchestrator\'s move when it is', () => {
-  const run = perTaskRun([task()])
-  expect(only(buildBoard(input(run))).column).toBe('working')
-  const card = only(buildBoard(input(run, { orchestratorsMove: () => true })))
+test('a routine per-task merge is Working, and the orchestrator\'s move outranks its CI and PR', () => {
+  const run = perTaskRun([heldTask({ ci: 'pass', pr: 255 })])
+  const waiting = only(buildBoard(input(run)))
+  expect(waiting.column).toBe('working')
+  expect(waiting.badge.text).toBe('ci ✓')
+  const moving = only(buildBoard(input(run, { orchestratorsMove: () => true })))
+  expect(moving.column).toBe('working')
+  expect(moving.badge.text).toBe("orchestrator's move")
+})
+
+test('a single-PR landing never asks whose move it is', () => {
+  let asked = false
+  const run = singlePrRun([task({ phase: 'merge' })], 'execute')
+  const card = only(buildBoard(input(run, { orchestratorsMove: () => (asked = true) })))
+  expect(asked).toBe(false)
   expect(card.column).toBe('working')
-  expect(card.badge.text).toBe("orchestrator's move")
 })
 
 test('a merge held for a before-merge check is in Needs you, badged with the check', () => {
-  const run = perTaskRun([heldTask({ before_merge: [checkOf('c1')] })])
+  const run = perTaskRun([heldTask({ before_merge: [checkOf('c1', [], { check: 'the dial turns smoothly' })] })])
   const card = only(buildBoard(input(run)))
   expect(card.column).toBe('needs')
-  expect(card.badge.text).toBe('the reader shows no ghost after a page turn')
+  expect(card.badge.text).toBe('the dial turns smoothly')
+})
+
+test('a merge whose check failed waits on a fix, not on the human', () => {
+  const failed = checkOf('c1', [ruling('failed', CHECKED_HEAD, 'ghost')], { check: 'the dial turns smoothly' })
+  const run = perTaskRun([heldTask({ before_merge: [failed] })])
+  expect(only(buildBoard(input(run))).column).toBe('working')
+})
+
+test('a task merged past its gate with a check still owed is in Needs you', () => {
+  const owed = checkOf('c1', [], { check: 'the dial turns smoothly' })
+  const run = perTaskRun([heldTask({ phase: 'done', merged_at_ms: 5, before_merge: [owed] })])
+  const card = only(buildBoard(input(run)))
+  expect(card.column).toBe('needs')
+  expect(card.badge.text).toBe('the dial turns smoothly')
+})
+
+test('a finished run\'s unfinished tasks are Idle: aborted, or named by their phase', () => {
+  const run = perTaskRun([
+    task({ phase: 'ci', phase_entered_at: 3 }),
+    task({ task_id: 't2', phase: 'escalated', pane_id: 'w8:p1', phase_entered_at: 2 }),
+    task({ task_id: 't3', phase: 'failed', pane_id: 'w9:p1', phase_entered_at: 1 }),
+  ])
+  run.history.push({ at: 1, from: 'execute', to: 'done', why: 'aborted from execute' })
+  run.escalated_from = 'execute'
+  run.phase = 'done'
+  const board = buildBoard(input(run))
+  expect(board.needs).toEqual([])
+  expect(board.idle.map((c) => [c.id, c.badge.text, c.badge.color])).toEqual([
+    ['t1', 'aborted', MOCHA.overlay0], ['t2', 'aborted', MOCHA.overlay0], ['t3', 'failed', MOCHA.red],
+  ])
+
+  run.escalated_from = null
+  expect(buildBoard(input(run)).idle.map((c) => c.badge.text)).toEqual(['ci', 'escalated', 'failed'])
 })
 
 test('an escalated task is in Needs you', () => {
@@ -158,6 +202,11 @@ test('run cards lead Needs you for what the run owes', () => {
   single.before_merge = [checkOf('c1', [], { check: 'the batch boots on device' })]
   expect(runOwes(single, new Set(['w1:p1']))).toBe('the batch boots on device')
 
+  const notYetAsked = singlePrRun([], 'execute')
+  notYetAsked.before_merge = [checkOf('c1', [], { check: 'the batch boots on device' })]
+  expect(runOwes(notYetAsked, new Set(['w1:p1']))).toBeNull()
+  expect(buildBoard(input(notYetAsked)).needs).toEqual([])
+
   const orphan = perTaskRun([])
   orphan.orchestrator_pane = null
   expect(runOwes(orphan, new Set())).toBe('orchestrator is not running')
@@ -167,9 +216,12 @@ test('run cards lead Needs you for what the run owes', () => {
 
   const run = perTaskRun([task({ phase: 'failed' })])
   run.orchestrator_pane = null
+  run.phase_entered_at = 7
   const board = buildBoard(input(run))
   expect(board.needs.map((c) => [c.id, c.badge.text])).toEqual([[`run:${run.run_id}`, 'orchestrator is not running'], ['t1', 'failed']])
-  expect(board.needs[0]).toMatchObject({ column: 'needs', scene: 'blocked', accessory: 'hardhat', ctx: null })
+  expect(board.needs[0]).toMatchObject({
+    column: 'needs', title: 'a', subtitle: 'run · execute', since: 7, scene: 'blocked', accessory: 'hardhat', ctx: null, enteredAt: null,
+  })
 })
 
 test('each column is newest-first, with the run card always first in Needs you', () => {
