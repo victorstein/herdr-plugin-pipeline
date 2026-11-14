@@ -140,12 +140,25 @@ const stagedPane = (snap: Snapshot, staged: Staged) =>
 
 - **A5 — terminal id first, then pane id.** Mirrors the kit's own `keepStaged` (`stage.ts:160-162`):
   a move keeps the terminal id and renumbers the pane (`tick.ts:337-339`, measured live); a herdr
-  restart is said to keep the pane id and change the terminal id (`tick.ts:339-341`, `stage.ts:161`).
-  **Unmeasured, and contradicted in the repo** (review 0, MAJOR 2): `src/startup.ts:135-136` and
-  `src/supervisor/boards.ts:72-73` say a restart brings panes back under new ids. The plan's live
-  check (Testing strategy) measures it and the answer is written here before the PR. If pane ids do
-  not survive, the restart remap and A15 do not hold and the implementer stops and raises it with
-  `hpipe decide`.
+  restart keeps the pane id and changes the terminal id (`tick.ts:339-341`, `stage.ts:161`).
+  **Measured live on herdr 0.9.1, 2026-11-13** (scratch session `hpl2-scratch`, `herdr session stop`
+  and re-attach, twice):
+  - Plain shell panes and plugin panes (pasture's `placeholder`, label `On stage` kept) came back
+    with the **same pane ids and tab ids**; **every terminal id changed**.
+  - The pipeline supervisor came back under a new id (`w2:p2` → `w2:p3`, new tab) because the
+    plugin's startup reaps and reopens its own pane, not because herdr renumbers.
+  - **Pane numbers are never reused** within a workspace, across a restart too: with `p2`–`p5`
+    closed, the next new pane in that workspace was `p7`. Plan review 0's pane-reuse concern does not
+    arise. **Workspace numbers are reused after a restart** (closed `w6`/`w7`, the next workspace
+    was `w6`), as the comment above `unbindGoneWorkspace` in `teardown.ts` says; a stale `staged.paneId` could only collide if the
+    pipeline workspace itself were closed and recreated.
+  - End to end, with the branch's code: hand-built stage → `unstageBoard` moved the worker next to
+    its placeholder and closed it; restaged → restart → `strayKeepSet` + `clearStrayPanes` closed
+    nothing → `unstageBoard` found the worker by pane id (new terminal id) and moved it home, with a
+    plain-split placeholder and again with a real plugin-pane placeholder.
+
+  The comments that said otherwise (`src/startup.ts` above `clearStrayPanes`,
+  `src/supervisor/boards.ts` above `syncBoards`) were corrected in this branch.
 
 ### `unstageBoard(herdr, stateDir, session, slug): Promise<void>`
 
@@ -253,8 +266,8 @@ Union of:
 the read `main.ts:492-494` does (without `REPOS_ALLOW`: keeping more panes is the safe direction).
 `clearStrayPanes` itself is unchanged.
 
-- **A15 — bound panes are kept, not just staged ones.** If pane ids survive a restart
-  (`tick.ts:339-340`; unmeasured, see A5), a worker whose stage record was lost (A8) is still kept by its task binding.
+- **A15 — bound panes are kept, not just staged ones.** Pane ids survive a restart
+  (`tick.ts:339-340`; measured, see A5), so a worker whose stage record was lost (A8) is still kept by its task binding.
 - **A16 — the placeholder entry is defence only.** `clearStrayPanes` lists the pipeline workspace
   (`startup.ts:141`) and the placeholder lives in the worktree workspace (`stage.ts:122-130`), so
   today it is never a candidate. Kept because the brief asks for it and it costs one set entry.
