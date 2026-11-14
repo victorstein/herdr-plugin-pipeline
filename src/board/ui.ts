@@ -1,7 +1,7 @@
 import { CELL_QUERY, FrameWriter, takeCellReply } from '../kit/frame'
 import { createClient, readSnapshot, subscribe, type Subscription } from '../kit/herdr'
 import { deleteAllImages } from '../kit/kitty'
-import { COLUMNS, moveCursor, type Column, type Direction } from '../kit/nav'
+import { COLUMNS, moveCursor, type Column } from '../kit/nav'
 import { openPeek } from '../kit/peek'
 import { render, type CardView } from '../kit/render'
 import type { Identity } from '../kit/stage'
@@ -14,6 +14,7 @@ import { runIsDriven } from '../lib/ledger'
 import { waitsOnYou } from '../lib/status'
 import type { Run } from '../lib/types'
 import { clearedFor, loadHolds, recordCleared, runForSlug } from './data'
+import { NAV, splitKeys } from './keys'
 import { buildBoard } from './model'
 import './scenes'
 import { header, KEYS, summary, TITLES } from './view'
@@ -25,10 +26,6 @@ const LIFECYCLE = [
   'pane.created', 'pane.closed', 'pane.moved', 'pane.exited', 'pane.updated', 'pane.agent_detected',
   'tab.closed', 'workspace.closed', 'workspace.focused',
 ]
-const NAV: Record<string, Direction> = {
-  h: 'left', l: 'right', j: 'down', k: 'up',
-  '\x1b[D': 'left', '\x1b[C': 'right', '\x1b[B': 'down', '\x1b[A': 'up',
-}
 
 export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise<number> {
   const herdr = createClient()
@@ -191,7 +188,7 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
   process.stdin.on('data', (data) => {
     const { rest, cell } = takeCellReply(data.toString())
     if (cell) writer.setCell(cell)
-    if (rest) onKey(rest)
+    if (rest) for (const key of splitKeys(rest)) onKey(key)
     else draw()
   })
   process.stdout.on('resize', () => {
