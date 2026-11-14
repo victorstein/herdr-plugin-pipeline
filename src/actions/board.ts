@@ -1,5 +1,6 @@
 import { beadsSlug, readBeadsProject } from '../lib/beads-project'
-import { readBoards } from '../lib/boards'
+import { createClient } from '../kit/herdr'
+import { readBoards, unstageBoard } from '../lib/boards'
 import { loadConfig } from '../lib/config'
 import { Herdr } from '../lib/herdr'
 import { actionRepoContext } from '../lib/repo'
@@ -15,6 +16,8 @@ export interface OpenBoardActionDeps {
   workspaceId: () => Promise<string | null>
   now: () => number
   herdr: BoardDeps['herdr']
+  /** As `BoardDeps.unstage`: must not reject. */
+  unstage: BoardDeps['unstage']
   log: (message: string) => void
   error: (message: string) => void
 }
@@ -37,6 +40,7 @@ export async function openBoardAction(deps: OpenBoardActionDeps): Promise<number
   }
 
   const recorded = (await readBoards(deps.stateDir, deps.session))[slug]
+  if (recorded?.staged) await deps.unstage(slug)
   if (recorded?.pane_id) await deps.herdr.paneClose(recorded.pane_id)
   const opened = await openBoard(slug, {
     stateDir: deps.stateDir, session: deps.session, pluginId: deps.pluginId, workspaceId, now: deps.now, herdr: deps.herdr,
@@ -64,6 +68,8 @@ if (import.meta.main) {
       ensureWorkspace(herdr, stateDir, session, (await loadConfig(configDir)).PIPELINE_WORKSPACE_LABEL),
     now: Date.now,
     herdr,
+    unstage: (slug) => unstageBoard(createClient(), stateDir, session, slug)
+      .catch((error) => console.error(`[pipeline] could not unstage the board for ${slug}: ${error}`)),
     log: console.log,
     error: console.error,
   }))

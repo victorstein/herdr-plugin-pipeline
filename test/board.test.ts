@@ -324,7 +324,7 @@ function actionDeps(herdr: BoardDeps['herdr'], over: Partial<OpenBoardActionDeps
   const errors: string[] = []
   const actionDeps: OpenBoardActionDeps = {
     stateDir: dir, session: 'personal', pluginId: 'stein.pipeline', repoKey: REPO,
-    workspaceId: async () => 'w9', now: () => 100_000, herdr,
+    workspaceId: async () => 'w9', now: () => 100_000, herdr, unstage: async () => {},
     log: (message) => { logs.push(message) }, error: (message) => { errors.push(message) },
     ...over,
   }
@@ -394,4 +394,13 @@ test('openBoard never carries a stage onto the board it opens', async () => {
   const { herdr } = fakeHerdr([], {}, 'w9:p7')
   expect(await openBoard(SLUG, deps(herdr), old)).toBe(true)
   expect((await readBoards(dir, 'personal'))[SLUG]).toEqual({ pane_id: 'w9:p7', shell_pid: null, opened_at_ms: 100_000 })
+})
+
+test('"Open board" unstages the recorded board before closing it', async () => {
+  await withStore()
+  await stagedBoard()
+  const { herdr, calls } = fakeHerdr([BOARD_PANE], {}, 'w9:p7')
+  const { actionDeps: d } = actionDeps(herdr, recordingUnstage(calls))
+  expect(await openBoardAction(d)).toBe(0)
+  expect(calls).toEqual([`unstage ${SLUG}`, 'close w9:p4', OPEN()])
 })
