@@ -27,7 +27,10 @@ export function workerFor(run: Run | null, snap: Snapshot, host: Host, cardId: s
 /**
  * `snap` must be the one the caller read before this reads the record: teardown clears the record
  * and then closes the worker, so an older snapshot can never show the worker gone while the record
- * still holds it.
+ * still holds it. The reverse can happen: an unstage or a teardown that clears the record between
+ * the two reads leaves the departed worker in `snap`, and reconcile adopts it as the one stray under
+ * the board. That adoption holds no placeholder and heals on the next refresh, once the worker is no
+ * longer under the board; nothing here may act on an adopted stage before then.
  */
 export async function syncStage(
   herdr: Herdr, snap: Snapshot, host: Host, stateDir: string, session: string, slug: string,
