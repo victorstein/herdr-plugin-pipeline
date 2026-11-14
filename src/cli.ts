@@ -412,7 +412,7 @@ export async function cmdStart(ctx: Ctx, input: {
   })
   const preface = [
     ...setupLines(setup, ctx.stateDir),
-    ...(bvBroken === null ? [] : [`tools: ${bvBroken} — the board and \`hpipe next\` stay off until it is fixed`]),
+    ...(bvBroken === null ? [] : [`tools: ${bvBroken} — \`hpipe next\` stays off until it is fixed`]),
     ...(plan === null ? [] : batchLines(plan, input.repoRoot, protectedAlready)),
     ...sharedLines,
   ]

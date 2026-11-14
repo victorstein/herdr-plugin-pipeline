@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { awaitedFor } from './awaiting'
 import {
-  checkClause, checkName, checksIn, fromDecision, gateHead, humanIsAsked, idList, mergedWithCheckOwed, type OwedCheck,
+  checkClause, checkName, checksIn, fromDecision, gateHead, humanOwesAtTheGate, idList, mergedWithCheckOwed, type OwedCheck,
   owedAt, owedInRun,
 } from './before-merge'
 import { beadOutOfSync } from './bead-desired'
@@ -453,11 +453,6 @@ function waitingOnYou(run: Run, hpipe: string, now: number, holds: PaneHolds, di
     return [`    ${task.task_id} ${task.branch} (${task.bead}) [${task.phase} ${age}m] — ${move.clause}`]
   })]
   return lines.length === 0 ? [] : ['  waiting on you:', ...lines]
-}
-
-/** The checks the human owes at a gate, or past one. */
-function humanOwesAtTheGate(run: Run): OwedCheck[] {
-  return owedInRun(run).filter((o) => o.state.kind === 'waiting-on-the-human' && humanIsAsked(run, o.task))
 }
 
 /**

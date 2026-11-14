@@ -1,7 +1,7 @@
 id = "stein.pipeline"
 name = "Pipeline"
 version = "2.2.3"
-min_herdr_version = "0.9.0"
+min_herdr_version = "0.9.1"
 description = "Drives the superpowers pipeline across herdr worktrees"
 platforms = ["macos", "linux"]
 
@@ -97,3 +97,19 @@ id = "board"
 title = "Board"
 placement = "tab"
 command = ["sh", "-c", "bun run src/board.ts; exec \"${SHELL:-/bin/sh}\""]
+
+[[panes]]
+id = "peek"
+title = "Peek"
+placement = "popup"
+width = "70%"
+height = "60%"
+command = ["bun", "run", "src/kit/peek.ts"]
+
+[[panes]]
+id = "details"
+title = "Task details"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["bun", "run", "src/board/details.ts"]

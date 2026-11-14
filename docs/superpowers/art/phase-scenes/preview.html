@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline phase scenes</title>
+<style>
+  :root {
+    --base: #1e1e2e; --mantle: #181825; --surface0: #313244; --surface1: #45475a;
+    --text: #cdd6f4; --sub: #a6adc8; --muted: #7f849c; --lavender: #b4befe; --blue: #89b4fa;
+    --green: #a6e3a1; --red: #f38ba8; --peach: #fab387; --working: #272a3e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--base); color: var(--text); font: 15px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
+  header { padding: 20px 16px 8px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; color: var(--lavender); }
+  header p { margin: 4px 0; color: var(--sub); font-size: 13px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+  button { background: var(--surface0); color: var(--text); border: 1px solid var(--surface1); border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 13px; }
+  button[aria-pressed="true"] { border-color: var(--lavender); color: var(--lavender); }
+  main { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 14px; padding: 12px 16px 40px; max-width: 1100px; margin: 0 auto; }
+  .scene { min-width: 0; background: var(--mantle); border: 1px solid var(--surface0); border-radius: 14px; padding: 14px; }
+  .scene h2 { margin: 0; font-size: 16px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .scene h2 small { color: var(--muted); font-size: 12px; font-weight: normal; }
+  .scene p { margin: 4px 0 10px; color: var(--sub); font-size: 13px; }
+  .stage { background: var(--working); border-radius: 10px; display: grid; place-items: center; padding: 10px; }
+  img { image-rendering: pixelated; display: block; }
+  .big { width: 100%; max-width: 320px; height: auto; }
+  .card { margin-top: 10px; background: var(--working); border-radius: 10px; padding: 10px; }
+  .glass { display: flex; gap: 8px; align-items: center; border-radius: 9px; padding: 6px 8px;
+           background: linear-gradient(rgba(205,214,244,.11), rgba(205,214,244,.06)); border: 1px solid rgba(205,214,244,.2); }
+  .glass img { width: 60px; height: 36px; flex: none; }
+  .lines { min-width: 0; flex: 1; font-size: 12px; }
+  .row { display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
+  .row b { overflow: hidden; text-overflow: ellipsis; }
+  .row span { color: var(--muted); }
+  .row .sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .strip { display: none; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
+  .strip img { width: 100%; height: auto; border-radius: 4px; background: var(--working); }
+  .strip figcaption { color: var(--muted); font-size: 11px; text-align: center; }
+  body.strips .strip { display: grid; }
+  .label { font-size: 11px; color: var(--muted); margin: 10px 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pipeline board · phase scenes</h1>
+  <p>Proposal for plan 2. Every Clawd wears the hard hat. Each scene is 4 frames at 40×24 art pixels, playing at the board's 4 fps.</p>
+  <p>Big view on top; underneath, the scene at real size on a Working card, as the board would show it.</p>
+  <div class="controls">
+    <button id="play" aria-pressed="true">Pause</button>
+    <button id="strips" aria-pressed="false">Show frames</button>
+  </div>
+</header>
+<main id="grid"></main>
+<script>
+  const PHASES = [
+    ['research', 'Reading a big book through a magnifying glass', 'hp-41 auth audit', 'heavy'],
+    ['spec', 'Writing on a scroll with a quill', 'hp-42 rsvp export', 'standard'],
+    ['spec-review', 'Glasses on, reading the scroll; ✓ / ✗ pop up', 'hp-42 rsvp export', 'standard'],
+    ['plan', 'Pinning cards and arrows on a corkboard', 'hp-43 billing sync', 'heavy'],
+    ['plan-review', 'Glasses on, ticking a clipboard checklist', 'hp-43 billing sync', 'heavy'],
+    ['implement', 'Typing on a laptop (pasture’s scene)', 'hp-44 fix login redirect', 'light'],
+    ['pr-review', 'Glasses on, scanning red and green diff lines', 'hp-44 fix login redirect', 'PR #312'],
+    ['ci', 'Watching a progress bar fill, gears turning', 'hp-45 tag mapping', 'ci ●'],
+    ['land-queue', 'Waiting in line holding the box', 'hp-45 tag mapping', 'PR #318'],
+    ['sync', 'Two arrows circling over the box', 'hp-46 schedule svc', 'PR #320'],
+    ['merge', 'Sliding the box onto a conveyor where lanes join', 'hp-46 schedule svc', 'PR #320'],
+    ['close', 'Taping the box shut, then a ✓', 'hp-47 docs refresh', 'PR #322'],
+  ]
+  const grid = document.getElementById('grid')
+  const animated = []
+  for (const [name, what, title, badge] of PHASES) {
+    const el = document.createElement('section')
+    el.className = 'scene'
+    el.innerHTML = `
+      <h2>${name}<small>4 frames</small></h2>
+      <p>${what}</p>
+      <div class="stage"><img class="big anim" width="320" height="192" alt="${name} scene" src="frames/${name}-0.png"></div>
+      <div class="label">real size on a card</div>
+      <div class="card"><div class="glass">
+        <img class="anim" width="60" height="36" alt="" src="frames/${name}-0.png">
+        <div class="lines">
+          <div class="row"><b>${title}</b><span>2m</span></div>
+          <div class="row"><span class="sub">${name}</span><span>${badge}</span></div>
+        </div>
+      </div></div>
+      <div class="strip">${[0, 1, 2, 3].map((f) => `<figure style="margin:0"><img width="160" height="96" alt="${name} frame ${f}" src="frames/${name}-${f}.png"><figcaption>frame ${f}</figcaption></figure>`).join('')}</div>`
+    grid.append(el)
+    for (const img of el.querySelectorAll('.anim')) animated.push([img, name])
+  }
+  for (const [name] of PHASES) for (let f = 0; f < 4; f++) new Image().src = `frames/${name}-${f}.png`
+  let frame = 0
+  let playing = true
+  setInterval(() => {
+    if (!playing) return
+    frame = (frame + 1) % 4
+    for (const [img, name] of animated) img.src = `frames/${name}-${frame}.png`
+  }, 250)
+  const play = document.getElementById('play')
+  play.onclick = () => { playing = !playing; play.textContent = playing ? 'Pause' : 'Play'; play.setAttribute('aria-pressed', String(playing)) }
+  const strips = document.getElementById('strips')
+  strips.onclick = () => { const on = document.body.classList.toggle('strips'); strips.setAttribute('aria-pressed', String(on)) }
+</script>
+</body>
+</html>

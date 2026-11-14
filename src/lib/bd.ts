@@ -290,17 +290,6 @@ export class Bd {
     return this.#hold(async () => (existsSync(this.#dirtyPath) ? this.#export('refresh') : DONE))
   }
 
-  /**
-   * For a reader that writes nothing, such as the board: commits an export the
-   * history lacks, which starts the history of a store made before it had one.
-   */
-  async recordHistory(): Promise<Done | BdFailure> {
-    return this.#hold(async () => {
-      await recordBeadsHistory(this.#options.stateDir, this.#options.slug, 'catch up')
-      return DONE
-    })
-  }
-
   /** No spawn and no lock: bd writes the export through an atomic rename (`cmd/bd/export.go`, `atomicfile`). */
   readExport(): ExportedBead[] {
     let text: string

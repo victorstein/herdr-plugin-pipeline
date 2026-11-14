@@ -7,7 +7,7 @@ import { bvBin } from './tools'
 export const BV_TIMEOUT_MS = 30_000
 
 /** `--db <file>` keeps bv on hpipe's export and off Dolt; the two flags keep it off the network and the repo. */
-export function bvSpawnEnv(stateDir: string, slug: string): Record<string, string | undefined> {
+function bvSpawnEnv(stateDir: string, slug: string): Record<string, string | undefined> {
   return { ...beadsSpawnEnv(stateDir, slug), BV_NO_UPDATE_CHECK: '1', BV_NO_GITIGNORE: '1' }
 }
 
