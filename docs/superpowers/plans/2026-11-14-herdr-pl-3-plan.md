@@ -341,8 +341,10 @@ test('once a moved worker\'s pane is gone, its former id no longer refuses the h
 `tasks[3]`. `listRuns`, `applyEvents` and `saveRun` are already imported in this file.
 
 Run `bun test test/cli-commands.test.ts`. Expect the first new test to fail, because `fromFormer.ok`
-is `true`. The other two pass: the second guards the phase filter, and the third passes because
-Task 2 already clears the list on release.
+is `true`. The other two pass. The second guards the phase filter. The third's `resume` would
+succeed even without Task 2, because `resume` still matches on `pane_id` alone until Step 4.2 and
+that `pane_id` is now null. Its `toBeUndefined()` assertion is what depends on Task 2. After Step
+4.2, the whole test is the guard that a released pane's former id no longer refuses the human.
 
 ### Step 4.2: implement (`src/cli.ts`)
 
@@ -539,8 +541,10 @@ Run `bunx tsc --noEmit`. Expect no output and exit 0.
 
 Run `bun test`. Expect 0 failures. If a test outside the files above fails, read its assertion
 and decide whether this change caused it. A test that builds a `Task` and compares it whole with
-`toEqual` is the likely kind. If this change caused it, fix it inside this plan's files and declare
-any new file in your report. If it is unrelated, report it with its output and do not fix it here.
+`toEqual` is the likely kind. If this change caused it and the failing test is in one of the files on
+this plan's `FILES:` lines, fix it there. If it is in any other file, stop and report it with its
+output, without editing that file: it is outside this task's file lock, and the orchestrator raises
+it with `hpipe decide`. If it is unrelated, report it with its output and do not fix it here.
 Never use `git stash`, because the stash is shared with other worktrees.
 
 ### Step 7.2
