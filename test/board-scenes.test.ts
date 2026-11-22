@@ -27,7 +27,7 @@ test('the 11 new scenes are registered with 4 frames each', () => {
   }
 })
 
-const HAT = [0xf9, 0xe2, 0xaf]
+const HAT = [0xfc, 0xc4, 0x19]
 
 test('every loop frame shows the hard hat', () => {
   for (const name of PIPELINE_SCENES) {

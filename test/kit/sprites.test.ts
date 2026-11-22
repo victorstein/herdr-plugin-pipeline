@@ -62,7 +62,7 @@ test('blocked Clawd has open eyes where the logo puts them', () => {
 test('working Clawd sits behind a laptop low enough for a hat', () => {
   const px = drawFrame('working', 0, 'hardhat', false)
   expect(pixel(px, 14, 15)).toBe('#6c7086')
-  expect(pixel(px, 12, 3)).toBe('#f9e2af')
+  expect(pixel(px, 16, 3)).toBe('#fcc419')
 })
 
 describe('accessories are bold blocks on the blocked Clawd (body at 6,9)', () => {
@@ -92,9 +92,11 @@ describe('accessories are bold blocks on the blocked Clawd (body at 6,9)', () =>
     expect(at('bow', 22, 7)).toBe('#f5c2e7')
     expect(at('bow', 24, 7)).toBe('#d68fbf')
   })
-  test('hard hat: yellow dome with a peach stripe', () => {
-    expect(at('hardhat', 12, 4)).toBe('#f9e2af')
-    expect(at('hardhat', 17, 5)).toBe('#fab387')
+  test('hard hat: safety-yellow dome and ridge, a brim past the head, a shadow under it', () => {
+    expect(at('hardhat', 14, 5)).toBe('#fcc419')
+    expect(at('hardhat', 17, 5)).toBe('#e0a800')
+    expect(at('hardhat', 4, 8)).toBe('#e0a800')
+    expect(at('hardhat', 10, 9)).toBe('#b0533a')
   })
   test('none leaves the space above the head empty', () => {
     expect(at('none', 11, 6)).toBe('#000000')
