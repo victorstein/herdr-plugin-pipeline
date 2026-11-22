@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.3](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.5.2...v2.5.3) (2026-11-22)
+
+
+### Bug Fixes
+
+* **board:** enter on the staged worker sends it home ([#184](https://github.com/victorstein/herdr-plugin-pipeline/issues/184)) ([1b108bc](https://github.com/victorstein/herdr-plugin-pipeline/commit/1b108bc74aff77b98f083ef30a8aac820ea98840))
+
 ## [2.5.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.5.1...v2.5.2) (2026-11-22)
 
 
