@@ -7,7 +7,7 @@ import { modeName, modeOf } from '../lib/phases'
 import type { Run } from '../lib/types'
 
 // the status line cuts the keys from the right, so the stage keys come right after move
-export const KEYS = 'hjkl move  enter stage  tab focus  z zoom  space peek  o orch  d details  x clear'
+export const KEYS = 'hjkl move  enter stage/unstage  tab focus  z zoom  space peek  o orch  d details  x clear'
 export const TITLES: Partial<Record<Column, string>> = { idle: '○ Idle/queued' }
 const CI_GLYPH: Partial<Record<string, string>> = { pending: '●', fail: '✗', pass: '✓' }
 

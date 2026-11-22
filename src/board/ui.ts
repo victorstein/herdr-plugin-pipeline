@@ -166,7 +166,10 @@ export function runBoardUi({ stateDir, session, slug }: BoardUiOptions): Promise
       message = worker
       return
     }
-    staged = await stageCard(herdr, host, PIPELINE, stateDir, session, slug, worker.terminal_id)
+    if (staged?.terminalId === worker.terminal_id) {
+      await unstageOwn(herdr, stateDir, session, slug, host.boardPaneId)
+      staged = null
+    } else staged = await stageCard(herdr, host, PIPELINE, stateDir, session, slug, worker.terminal_id)
     // the move renamed the worker's pane, and a tab or z queued behind this stage must find it
     snap = await readSnapshot(herdr)
     requestRefresh()
