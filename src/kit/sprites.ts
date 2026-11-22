@@ -60,7 +60,22 @@ const BEANIE = [
 const BEANIE_TOP = -8
 const BEANIE_INK: Record<string, RGB> = { n: C.teal, q: C.teal, o: C.tealDark, r: C.tealDark, s: C.yellow, p: C.yellow }
 
-export type Rect = (x: number, y: number, w: number, h: number, c: RGB) => void
+// The brim overhangs the head by 2px a side and shades its top row: without both it reads as hair.
+const HARDHAT = [
+  '.........yyyyrryyyy.........',
+  '.......hhyyyyrryyyyyy.......',
+  '.....hhyyyyyyrryyyyyyyy.....',
+  '....hyyyyyyyyrryyyyyyyyy....',
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  '..dddddddddddddddddddddddd..',
+]
+const HARDHAT_TOP = -5
+const HARDHAT_LEFT = -2
+const HARDHAT_INK: Record<string, RGB> = {
+  y: hex('#fcc419'), h: hex('#ffe98a'), r: hex('#e0a800'), b: hex('#e0a800'), d: C.dark,
+}
+
+export type Rect =(x: number, y: number, w: number, h: number, c: RGB) => void
 export type Eyes = 'open' | 'down' | 'closed' | 'happy'
 export type Arms = 'stub' | 'rest' | 'wave1' | 'wave2' | 'up'
 export interface Look {
@@ -104,10 +119,10 @@ function accessory(R: Rect, ox: number, oy: number, eyes: Eyes, kind: Accessory)
     R(ox + 18, oy - 2, 2, 2, C.pinkDark)
   }
   if (kind === 'hardhat') {
-    R(ox + 4, oy - 5, 16, 2, C.yellow)
-    R(ox + 2, oy - 3, 20, 2, C.yellow)
-    R(ox, oy - 1, 24, 1, C.yellowDark)
-    R(ox + 11, oy - 5, 2, 4, C.peach)
+    HARDHAT.forEach((row, dy) => [...row].forEach((ink, dx) => {
+      const c = HARDHAT_INK[ink]
+      if (c) R(ox + HARDHAT_LEFT + dx, oy + HARDHAT_TOP + dy, 1, 1, c)
+    }))
   }
 }
 
