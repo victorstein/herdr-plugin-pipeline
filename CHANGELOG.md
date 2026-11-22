@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.2](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.5.1...v2.5.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* pasture cards show each worker's phase, and a hard hat that reads as one ([#182](https://github.com/victorstein/herdr-plugin-pipeline/issues/182)) ([947dfa4](https://github.com/victorstein/herdr-plugin-pipeline/commit/947dfa494901dfd76e5990addd773a96487c9cf2))
+
 ## [2.5.1](https://github.com/victorstein/herdr-plugin-pipeline/compare/v2.5.0...v2.5.1) (2026-11-14)
 
 
